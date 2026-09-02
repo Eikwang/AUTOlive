@@ -1,0 +1,14 @@
+# 批次4：RVC 缺失包
+# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch4_rvc.txt
+Cython
+flask-cors
+FreeSimpleGUI
+gin-config
+local-attention
+noisereduce
+resampy
+torchfcpe
+uc-micro-py
+matplotlib-inline
+# PySimpleGUI 不装（已转付费授权，代码实际 import FreeSimpleGUI）
+# torch-directml 不装（NVIDIA 机器，条件导入）

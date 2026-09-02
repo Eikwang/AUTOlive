@@ -1,0 +1,15 @@
+faiss-cpu==1.14.3
+fastapi==0.139.2
+llvmlite==0.48.0
+numba==0.66.0
+numpy==2.4.6
+onnxruntime-gpu==1.22.0
+opencv-contrib-python==5.0.0.93
+opencv-python==4.11.0.86
+opencv-python-headless==5.0.0.93
+protobuf==7.35.1
+pydantic==2.13.4
+scipy==1.17.1
+torch==2.11.0+cu128
+transformers==5.14.1
+onnxruntime==1.22.0

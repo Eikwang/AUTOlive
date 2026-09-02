@@ -1,0 +1,47 @@
+# 统一环境冒烟报告
+时间：2026-09-02 22:33:31 ｜ 解释器：D:\AI\EDTalk\runtime312\python.exe
+结果：42/43 PASS
+
+- [PASS] 基线版本快照 — numpy=2.4.6 torch=2.11.0+cu128 protobuf=7.35.1 pydantic=2.13.4 transformers=5.14.1
+- [PASS] 基线漂移检测(constraints) — 无漂移
+- [PASS] cv2 状态 — cv2=5.0.0
+- [PASS] opencv 变体共存 — opencv-python=4.11.0.86 opencv-contrib-python=5.0.0.93 opencv-python-headless=5.0.0.93
+- [PASS] protobuf pb2 反序列化 — dy_pb2 round-trip OK (Against.timestamp)
+- [PASS] fairseq(本地wheel ABI) — fairseq=0.12.3.1
+- [PASS] pyworld(本地wheel ABI) — pyworld 最小调用 OK (f0 帧数 21)
+- [PASS] gradio — 6.26.0
+- [PASS] tensorboardX — 2.6.5
+- [PASS] einops — 0.8.2
+- [PASS] ffmpy
+- [PASS] ffmpeg_python — 9.0.0
+- [PASS] torchcrepe
+- [PASS] sentencepiece — 0.2.2
+- [PASS] ctranslate2 — 4.8.2
+- [PASS] faster_whisper — 1.2.1
+- [PASS] funasr — 1.4.12
+- [PASS] pytorch_lightning — 2.6.5
+- [PASS] transformers(已基线) — 5.14.1
+- [PASS] whisper(openai) — 20250625
+- [FAIL] pyopenjtalk — ModuleNotFoundError: No module named 'pyopenjtalk'
+- [PASS] opencc — 1.4.2
+- [PASS] cn2an — 0.5.24
+- [PASS] pypinyin(已基线) — 0.55.0
+- [PASS] FreeSimpleGUI — 5.1.0
+- [PASS] noisereduce
+- [PASS] local_attention
+- [PASS] torchfcpe
+- [PASS] resampy — 0.4.3
+- [PASS] yt_dlp
+- [PASS] pedalboard — 0.9.24
+- [PASS] typed_ffmpeg — 9.0.0
+- [PASS] audio_separator
+- [PASS] nicegui(基线3.16) — 3.16.0
+- [PASS] mitmproxy
+- [PASS] playwright(浏览器另行 install)
+- [PASS] edge_tts — 7.2.8
+- [PASS] pydantic_settings(已基线) — 2.14.2
+- [PASS] loguru(已基线) — 0.7.3
+- [PASS] websocket — 1.9.2
+- [PASS] watchdog
+- [PASS] json5 — 0.15.0
+- [PASS] editdistance

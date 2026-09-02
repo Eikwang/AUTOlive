@@ -1,0 +1,32 @@
+# 批次3：GPT-SoVITS 缺失包
+# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch3_gptsovits.txt
+pytorch-lightning
+torchmetrics
+lightning-utilities
+peft
+einx
+x-transformers
+kaldiio
+openai-whisper
+g2p-en
+g2pk2
+pyopenjtalk
+jieba-fast
+opencc
+cn2an
+ToJyutping
+jamo
+eunjeon
+ko-pron
+split-lang
+wordsegment
+inflect
+budoux
+pesq
+auraloss
+nnAudio
+jaconv
+distance
+pyqt5
+# pynini 单独装：pip install pynini --only-binary :all:（失败则记入 API 差异清单，禁 conda install）
+# gruut 未装：仅死代码引用（AR/text_processing/phonemizer.py 无调用方）

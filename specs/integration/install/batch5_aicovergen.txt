@@ -1,0 +1,8 @@
+# 批次5：AICoverGen 缺失包
+# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch5_aicovergen.txt
+yt-dlp
+typed-ffmpeg
+sox
+pedalboard
+audio-separator[gpu]
+# rich / pandas 已在基线（传递依赖）

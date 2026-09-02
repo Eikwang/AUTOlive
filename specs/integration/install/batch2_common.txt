@@ -1,0 +1,21 @@
+# 批次2：多项目公共缺失包（gradio 默认=最新稳定版，D1 裁决）
+# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch2_common.txt
+gradio
+gradio-client
+einops
+tensorboardX
+ffmpy
+ffmpeg-python
+torchcrepe
+editdistance
+watchdog
+websocket-client
+json5
+ipython
+mitmproxy
+rotary-embedding-torch
+sentencepiece
+ctranslate2
+faster-whisper
+funasr
+pytorch-wpe

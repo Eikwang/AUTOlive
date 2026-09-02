@@ -1,0 +1,3 @@
+db2bc8853d6cbf3bdb665a47f2f7bf8b6ce24fbc0a8e67c39aba20f03e55be66 *AICoverGen/dependencies/wheels/fairseq-0.12.3.1-cp312-cp312-win_amd64.whl
+da7d3e25d67cdd606ae8a2c739e48f2f342adaa9b128ac3b1ae133a201b7cac7 *AICoverGen/dependencies/wheels/diffq-0.2.4-cp312-cp312-win_amd64.whl
+547b35dbc3c2f6e2a5c4e444a70efda060bf7eee32a515b86643e880756e37c7 *AICoverGen/dependencies/wheels/pyworld-0.3.4-cp312-cp312-win_amd64.whl
