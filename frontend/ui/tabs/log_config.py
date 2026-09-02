@@ -2,6 +2,9 @@
 """
 日志标签页模块
 从 common_config.py 拆分而来
+
+布局规范：
+- 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
@@ -27,7 +30,8 @@ def create_log_tab(
         with ui.card().style(card_css):
             ui.label('日志')
             with ui.grid(columns=3):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "captions", "enable")).style(switch_internal_css), ("captions", "enable"))
-                _auto_save(ui.select(label='弹幕日志类型', options={'问答': '问答', '问题': '问题', '回答': '回答', '不记录': '不记录'}, value=get_nested_value(config, "comment_log_type")), ("comment_log_type",))
-                _auto_save(ui.input(label='字幕日志路径', value=get_nested_value(config, "captions", "file_path"), placeholder='字幕日志存储路径').style("width:200px;"), ("captions", "file_path"))
-                _auto_save(ui.input(label='原文字幕日志路径', value=get_nested_value(config, "captions", "raw_file_path"), placeholder='原文字幕日志存储路径').style("width:200px;"), ("captions", "raw_file_path"))
+                with ui.column().style("width:100%;"):
+                    _auto_save(ui.switch('启用', value=get_nested_value(config, "captions", "enable")).style(switch_internal_css), ("captions", "enable"))
+                    _auto_save(ui.select(label='弹幕日志类型', options={'问答': '问答', '问题': '问题', '回答': '回答', '不记录': '不记录'}, value=get_nested_value(config, "comment_log_type")).style("width:100%;"), ("comment_log_type",))
+                    _auto_save(ui.input(label='字幕日志路径', value=get_nested_value(config, "captions", "file_path"), placeholder='字幕日志存储路径').style("width:100%;"), ("captions", "file_path"))
+                    _auto_save(ui.input(label='原文字幕日志路径', value=get_nested_value(config, "captions", "raw_file_path"), placeholder='原文字幕日志存储路径').style("width:100%;"), ("captions", "raw_file_path"))

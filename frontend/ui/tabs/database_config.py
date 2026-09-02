@@ -2,6 +2,10 @@
 """
 数据库设置标签页模块
 从 common_config.py 拆分而来
+
+布局规范：
+- 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
+- 同类开关可堆叠在一个列单元中
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
@@ -27,7 +31,8 @@ def create_database_tab(
         with ui.card().style(card_css):
             ui.label('数据库')
             with ui.grid(columns=3):
-                _auto_save(ui.switch('弹幕日志', value=get_nested_value(config, "database", "comment_enable")).style(switch_internal_css), ("database", "comment_enable"))
-                _auto_save(ui.switch('入场日志', value=get_nested_value(config, "database", "entrance_enable")).style(switch_internal_css), ("database", "entrance_enable"))
-                _auto_save(ui.switch('礼物日志', value=get_nested_value(config, "database", "gift_enable")).style(switch_internal_css), ("database", "gift_enable"))
-                _auto_save(ui.input(label='数据库路径', value=get_nested_value(config, "database", "path"), placeholder='数据库文件存储路径').style("width:200px;"), ("database", "path"))
+                with ui.column().style("width:100%;"):
+                    _auto_save(ui.switch('弹幕日志', value=get_nested_value(config, "database", "comment_enable")).style(switch_internal_css), ("database", "comment_enable"))
+                    _auto_save(ui.switch('入场日志', value=get_nested_value(config, "database", "entrance_enable")).style(switch_internal_css), ("database", "entrance_enable"))
+                    _auto_save(ui.switch('礼物日志', value=get_nested_value(config, "database", "gift_enable")).style(switch_internal_css), ("database", "gift_enable"))
+                _auto_save(ui.input(label='数据库路径', value=get_nested_value(config, "database", "path"), placeholder='数据库文件存储路径').style("width:100%;"), ("database", "path"))
