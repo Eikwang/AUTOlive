@@ -24,6 +24,7 @@ FONT_SIZE_PAGE_TITLE = "20px"    # 三级页面标题（配置页面顶部）
 FONT_SIZE_CARD_TITLE = "16px"    # 卡片标题（配置分组）
 FONT_SIZE_SECTION_TITLE = "15px"  # 分组标题（功能列表头部）
 FONT_SIZE_BODY = "14px"          # 正文 / 列表项
+FONT_SIZE_FIELD_LABEL = "14px"   # 参数标题（表单字段 label，与正文同大小保证可读性）
 FONT_SIZE_SMALL = "12px"         # 辅助说明文字
 FONT_SIZE_TINY = "11px"          # 徽章等极小文字
 
@@ -180,6 +181,7 @@ def inject_design_tokens() -> str:
         --font-size-card-title: {FONT_SIZE_CARD_TITLE};
         --font-size-section-title: {FONT_SIZE_SECTION_TITLE};
         --font-size-body: {FONT_SIZE_BODY};
+        --font-size-field-label: {FONT_SIZE_FIELD_LABEL};
         --font-size-small: {FONT_SIZE_SMALL};
         --font-size-tiny: {FONT_SIZE_TINY};
 

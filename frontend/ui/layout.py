@@ -198,9 +198,27 @@ class DrawerLayout:
         }}
         /* 参数标题（表单 label） */
         .q-field .q-field__label {{
-            font-size: var(--font-size-small);
+            font-size: var(--font-size-field-label);
             font-weight: var(--font-weight-normal);
             color: var(--text-secondary);
+        }}
+
+        /* ============ 配置区布局约束 ============ */
+        /* 配置内容区内：row 允许换行 + 统一间距，避免输入框挤爆显示不完整 */
+        .config-content .row {{
+            flex-wrap: wrap;
+            gap: var(--spacing-sm) var(--spacing-md);
+        }}
+        .config-content .row > * {{
+            min-width: 0;
+        }}
+        /* 网格占满配置区宽度（config-content 为 flex column，子项默认内容宽） */
+        .config-content .nicegui-grid {{
+            width: 100%;
+        }}
+        /* 网格内纵向单元：设置项内部上下结构紧凑排列 */
+        .config-content .nicegui-column {{
+            gap: var(--spacing-xs);
         }}
 
         /* ============ 统一卡片 ============ */
@@ -1093,7 +1111,7 @@ class DrawerLayout:
                     ''')
 
                 # 内容区域
-                with ui.column().style('''
+                with ui.column().classes('config-content').style('''
                     width: 100%;
                     padding: 20px;
                     overflow-y: auto;
