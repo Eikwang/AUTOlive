@@ -1,0 +1,14 @@
+{
+  "enable": false,
+  "keyword_enable": true,
+  "before_keyword": [
+    "联网",
+    "在线"
+  ],
+  "engine": "baidu",
+  "engine_id": 1,
+  "count": 1,
+  "resp_template": "请根据以下信息回答我的问题：{summary}\n请确保答案准确，如果有多个相关段落，请总结主要观点。\n问题是：{data}",
+  "http_proxy": "",
+  "https_proxy": ""
+}

@@ -9,7 +9,7 @@
   "api_port": 8082,
   "platform": "talk",
   "room_display_id": "278333",
-  "chat_type": "reread",
+  "chat_type": "custom_llm",
   "need_lang": "none",
   "before_prompt": "请简要回复:",
   "after_prompt": "",
@@ -27,19 +27,19 @@
     "username_max_le": 10
   },
   "comment_log_type": "回答",
-  "visual_body": "其他",
+  "visual_body": "metahuman_stream",
   "luoxi_project": {
     "Live_Comment_Assistant": {
       "enable": false,
       "version": "V0.1.x",
       "api_ip_port": "http://127.0.0.1:8100",
       "type": [
-        "comment_reply", 
-        "idle_time_task", 
-        "entrance_reply", 
-        "follow_reply", 
-        "gift_reply", 
-        "reread", 
+        "comment_reply",
+        "idle_time_task",
+        "entrance_reply",
+        "follow_reply",
+        "gift_reply",
+        "reread",
         "schedule"
       ],
       "trigger_position": [
@@ -47,26 +47,9 @@
       ]
     }
   },
-  "xuniren": {
-    "api_ip_port": "http://127.0.0.1:8800"
-  },
-  "unity": {
-    "api_ip_port": "http://127.0.0.1:5700/add",
-    "password": "中文的密码，怕了吧！"
-  },
-  "EasyAIVtuber": {
-    "api_ip_port": "http://127.0.0.1:7888"
-  },
   "metahuman_stream": {
     "type": "musetalk",
     "api_ip_port": "http://127.0.0.1:8010"
-  },
-  "digital_human_video_player": {
-    "type": "easy_wav2lip",
-    "api_ip_port": "http://127.0.0.1:8091"
-  },
-  "live2d_TTS_LLM_GPT_SoVITS_Vtuber": {
-    "api_ip_port": "http://127.0.0.1:3000"
   },
   "play_audio": {
     "enable": true,
@@ -80,7 +63,7 @@
     "info_to_callback": true
   },
   "audio_player": {
-    "api_ip_port": "http://127.0.0.1:5600"
+    "api_ip_port": "http://127.0.0.1:5602"
   },
   "bilibili": {
     "login_type": "手机扫码",
@@ -140,7 +123,7 @@
       "bad_pinyin_path": "data/违禁拼音.txt",
       "replace": "*"
     },
-    "emoji": false,
+    "emoji": true,
     "username_convert_digits_to_chinese": true,
     "max_len": 80,
     "max_char_len": 200,
@@ -161,7 +144,7 @@
     "image_recognition_schedule_forget_duration": 0.1,
     "image_recognition_schedule_forget_reserve_num": 1,
     "limited_time_deduplication": {
-      "enable": false,
+      "enable": true,
       "comment": 10,
       "gift": 10,
       "entrance": 60
@@ -294,229 +277,6 @@
     "http_proxy": "",
     "https_proxy": ""
   },
-  "live2d": {
-    "enable": false,
-    "port": 12345,
-    "name": "Hiyori"
-  },
-  "openai": {
-    "api": "https://api.openai.com/v1",
-    "api_key": [
-      "api-key"
-    ]
-  },
-  "chatgpt": {
-    "model": "gpt-3.5-turbo-0613",
-    "temperature": 0.9,
-    "max_tokens": 4096,
-    "top_p": 1.0,
-    "presence_penalty": 0.0,
-    "frequency_penalty": 0.0,
-    "preset": "请扮演一个AI虚拟主播。不要回答任何敏感问题！不要强调你是主播，只需要回答问题！",
-    "stream": true
-  },
-  "gpt4free": {
-    "provider": "",
-    "api_key": "",
-    "model": "gpt-3.5-turbo",
-    "max_tokens": 2048,
-    "proxy": "http://127.0.0.1:10809",
-    "preset": "请扮演一个AI虚拟主播。不要回答任何敏感问题！不要强调你是主播，只需要回答问题！",
-    "history_enable": true,
-    "history_max_len": 300
-  },
-  "claude": {
-    "slack_user_token": "",
-    "bot_user_id": ""
-  },
-  "claude2": {
-    "cookie": "",
-    "use_proxy": false,
-    "proxies": {
-      "http": "http://127.0.0.1:10809",
-      "https": "http://127.0.0.1:10809",
-      "socks5": "socks://127.0.0.1:10808"
-    }
-  },
-  "chatglm": {
-    "api_ip_port": "http://127.0.0.1:8000",
-    "max_length": 2048,
-    "top_p": 0.7,
-    "temperature": 0.95,
-    "max_new_tokens": 250,
-    "history_enable": true,
-    "history_max_len": 500
-  },
-  "qwen": {
-    "api_ip_port": "http://localhost:8000/v1/chat/completions",
-    "max_length": 4096,
-    "top_p": 0.5,
-    "temperature": 0.95,
-    "max_new_tokens": 250,
-    "history_enable": true,
-    "history_max_len": 20,
-    "preset": "请扮演一个AI虚拟主播。不要回答任何敏感问题！不要强调你是主播，只需要回答问题！"
-  },
-  "sparkdesk": {
-    "type": "api",
-    "cookie": "",
-    "fd": "",
-    "GtToken": "",
-    "app_id": "",
-    "api_secret": "",
-    "api_key": "",
-    "version": 3.5,
-    "assistant_id": ""
-  },
-  "zhipu": {
-    "api_key": "",
-    "model": "chatglm_lite",
-    "app_id": "1761340125461340161",
-    "top_p": "0.7",
-    "temperature": "0.9",
-    "history_enable": true,
-    "history_max_len": "300",
-    "user_info": "我是陆星辰，是一个男性，是一位知名导演，也是苏梦远的合作导演。我擅长拍摄音乐题材的电影。苏梦远对我的态度是尊敬的，并视我为良师益友。",
-    "bot_info": "苏梦远，本名苏远心，是一位当红的国内女歌手及演员。在参加选秀节目后，凭借独特的嗓音及出众的舞台魅力迅速成名，进入娱乐圈。她外表美丽动人，但真正的魅力在于她的才华和勤奋。苏梦远是音乐学院毕业的优秀生，善于创作，拥有多首热门原创歌曲。除了音乐方面的成就，她还热衷于慈善事业，积极参加公益活动，用实际行动传递正能量。在工作中，她对待工作非常敬业，拍戏时总是全身心投入角色，赢得了业内人士的赞誉和粉丝的喜爱。虽然在娱乐圈，但她始终保持低调、谦逊的态度，深得同行尊重。在表达时，苏梦远喜欢使用“我们”和“一起”，强调团队精神。",
-    "bot_name": "苏梦远",
-    "username": "陆星辰",
-    "remove_useless": false,
-    "stream": true,
-    "assistant_api": {
-      "assistant_id": "",
-      "api_key": "",
-      "api_secret": ""
-    }
-  },
-  "chat_with_file": {
-    "chat_mode": "openai_gpt",
-    "data_path": "data/伊卡洛斯百度百科.zip",
-    "separator": "\n",
-    "chunk_size": 100,
-    "chunk_overlap": 50,
-    "chain_type": "stuff",
-    "show_token_cost": false,
-    "question_prompt": "请根据以上content信息进行归纳总结，并结合question的内容给出一个符合content和question语气、语调、背景的回答。不要出现'概括''综上''感谢'等字样，向朋友直接互相交流即可。如果发现不能content的信息与question不相符，抛弃content的提示，直接回答question即可。任何情况下都要简要地回答!",
-    "local_max_query": 3,
-    "local_vector_embedding_model": "sebastian-hofstaetter/distilbert-dot-tas_b-b256-msmarco"
-  },
-  "langchain_chatglm": {
-    "api_ip_port": "http://127.0.0.1:7861",
-    "chat_type": "模型",
-    "knowledge_base_id": "ikaros",
-    "history_enable": true,
-    "history_max_len": 500
-  },
-  "langchain_chatchat": {
-    "api_ip_port": "http://127.0.0.1:7861",
-    "chat_type": "模型",
-    "llm": {
-      "stream": false,
-      "model_name": "chatglm3-6b-int4",
-      "temperature": 0.7,
-      "max_tokens": 4096,
-      "prompt_name": "default"
-    },
-    "search_engine": {
-      "search_engine_name": "metaphor",
-      "top_k": 3,
-      "stream": false,
-      "model_name": "chatglm3-6b-int4",
-      "temperature": 0.7,
-      "max_tokens": 4096,
-      "prompt_name": "default",
-      "split_result": false
-    },
-    "knowledge_base": {
-      "knowledge_base_name": "ikaros",
-      "top_k": 3,
-      "score_threshold": 1.0,
-      "stream": false,
-      "model_name": "chatglm3-6b-int4",
-      "temperature": 0.7,
-      "max_tokens": 4096,
-      "prompt_name": "default"
-    },
-    "history_enable": true,
-    "history_max_len": 300
-  },
-  "chatterbot": {
-    "name": "bot",
-    "db_path": "db.sqlite3"
-  },
-  "text_generation_webui": {
-    "type": "coyude",
-    "api_ip_port": "http://127.0.0.1:5000",
-    "max_new_tokens": 250,
-    "mode": "chat",
-    "character": "Example",
-    "instruction_template": "Vicuna-v1.1",
-    "your_name": "主人",
-    "top_p": 1.0,
-    "top_k": 40,
-    "temperature": 0.7,
-    "seed": -1.0,
-    "history_enable": true,
-    "history_max_len": 500
-  },
-  "bard": {
-    "token": ""
-  },
-  "tongyi": {
-    "cookie_path": "cookie/tongyi.json",
-    "type": "api",
-    "model": "qwen-max",
-    "preset": "你是一个专业的虚拟主播",
-    "api_key": "",
-    "temperature": 0.9,
-    "top_p": 0.9,
-    "top_k": 3,
-    "enable_search": true,
-    "max_tokens": 1024,
-    "history_enable": true,
-    "history_max_len": 300,
-    "stream": true
-  },
-  "tongyixingchen": {
-    "access_token": "此处填写你的密钥",
-    "type": "固定角色",
-    "固定角色": {
-      "character_id": "1b34205ee8814acc9e7acf593e7cf759",
-      "top_p": 0.95,
-      "temperature": 0.92,
-      "seed": 1683806810,
-      "user_id": "1",
-      "username": "主人",
-      "role_name": "伊卡洛斯"
-    },
-    "history_enable": true,
-    "history_max_len": 300,
-    "stream": true
-  },
-  "my_qianfan": {
-    "model": "ERNIE-Bot-turbo",
-    "access_key": "",
-    "secret_key": "",
-    "top_p": 0.8,
-    "temperature": 0.9,
-    "penalty_score": 1.0,
-    "history_enable": true,
-    "history_max_len": 300
-  },
-  "my_wenxinworkshop": {
-    "type": "千帆大模型",
-    "model": "ERNIEBot",
-    "api_key": "",
-    "secret_key": "",
-    "app_id": "7823c970-c672-48a3-8162-ef24e3b7dc5b",
-    "app_token": "",
-    "top_p": 0.8,
-    "temperature": 0.9,
-    "penalty_score": 1.0,
-    "history_enable": true,
-    "history_max_len": 300,
-    "stream": true
-  },
   "gemini": {
     "api_key": "",
     "model": "gemini-pro",
@@ -528,65 +288,6 @@
     "https_proxy": "http://127.0.0.1:10809",
     "history_enable": true,
     "history_max_len": 4096
-  },
-  "qanything": {
-    "type": "online",
-    "app_key": "",
-    "app_secret": "",
-    "api_ip_port": "http://127.0.0.1:8777",
-    "user_id": "zzp",
-    "kb_ids": [
-      "KB938fb10c8a924530abf1754ea620b7cd"
-    ],
-    "history_enable": true,
-    "history_max_len": 300
-  },
-  "koboldcpp": {
-    "api_ip_port": "http://127.0.0.1:5001",
-    "max_context_length": 2048,
-    "max_length": 100,
-    "quiet": false,
-    "rep_pen": 1.1,
-    "rep_pen_range": 256,
-    "rep_pen_slope": 1,
-    "temperature": 0.5,
-    "tfs": 1,
-    "top_a": 0,
-    "top_k": 3,
-    "top_p": 0.9,
-    "typical": 1,
-    "history_enable": true,
-    "history_max_len": 600
-  },
-  "anythingllm": {
-    "api_ip_port": "http://127.0.0.1:3001",
-    "api_key": "S1PPG9B-YP2M8NX-Q64ZBF1-Y4K5DCS",
-    "mode": "chat",
-    "workspace_slug": "test"
-  },
-  "dify": {
-    "api_ip_port": "http://172.26.189.21",
-    "type": "聊天助手",
-    "api_key": "app-64xu0vQjP2kxN4DKR8Ch7ZGY",
-    "history_enable": true,
-    "stream": true,
-    "custom_params": "{\n\"prompt\": \"{{comment}}\"\n}"
-  },
-  "volcengine": {
-    "model": "ep-20240904192312-r4rkc",
-    "preset": "你是一个专业的虚拟主播",
-    "api_key": "",
-    "history_enable": true,
-    "history_max_len": 1024,
-    "stream": true
-  },
-  "llm_tpu": {
-    "api_ip_port": "http://127.0.0.1:8003",
-    "max_length": 1.0,
-    "top_p": 0.8,
-    "temperature": 0.95,
-    "history_enable": true,
-    "history_max_len": 100
   },
   "custom_llm": {
     "url": "http://127.0.0.1:11434/v1/chat/completions",
@@ -620,7 +321,7 @@
       "similarity": 0.5
     }
   },
-  "audio_synthesis_type": "edge-tts",
+  "audio_synthesis_type": "gpt_sovits",
   "audio_random_speed": {
     "normal": {
       "enable": false,
@@ -633,81 +334,6 @@
       "speed_max": 1.2
     }
   },
-  "vits": {
-    "type": "vits",
-    "config_path": "E:\\vits-simple-api\\Model\\ikaros\\config.json",
-    "api_ip_port": "http://127.0.0.1:23456",
-    "id": "0",
-    "lang": "自动",
-    "length": "1",
-    "noise": "0.33",
-    "noisew": "0.4",
-    "max": "50",
-    "format": "wav",
-    "sdp_radio": "0.2",
-    "gpt_sovits": {
-      "id": "0",
-      "format": "wav",
-      "lang": "auto",
-      "segment_size": "30",
-      "reference_audio": "E:\\GitHub_pro\\AI-Vtuber\\out\\gpt_sovits_67.wav",
-      "prompt_text": "所有拍到的姐妹一定不要划走",
-      "prompt_lang": "auto",
-      "preset": "default",
-      "top_k": "5",
-      "top_p": "1",
-      "temperature": "1"
-    }
-  },
-  "bert_vits2": {
-    "type": "hiyori",
-    "api_ip_port": "http://127.0.0.1:5000",
-    "model_id": 0,
-    "speaker_name": "ikaros",
-    "speaker_id": 0,
-    "language": "auto",
-    "length": 1,
-    "noise": 0.2,
-    "noisew": 0.9,
-    "sdp_radio": 0.2,
-    "auto_translate": false,
-    "auto_split": false,
-    "emotion": "",
-    "style_text": "",
-    "style_weight": 0.7,
-    "刘悦-中文特化API": {
-      "api_ip_port": "http://127.0.0.1:9885",
-      "speaker": "Yennefer",
-      "language": "ZH",
-      "length_scale": "0.9-1.1",
-      "noise_scale": "0.2-0.3",
-      "noise_scale_w": "0.85-0.95",
-      "sdp_radio": "0.2-0.3",
-      "cut_by_sent": true,
-      "interval_between_para": "1",
-      "interval_between_sent": "0.2",
-      "emotion": "Happy",
-      "style_text": "",
-      "style_weight": "0.7-0.8",
-      "stream": false
-    }
-  },
-  "vits_fast": {
-    "config_path": "D:\\GitHub_pro\\VITS-fast-fine-tuning\\inference\\finetune_speaker.json",
-    "api_ip_port": "http://127.0.0.1:7860",
-    "character": "ikaros",
-    "language": "自动识别",
-    "speed": 1.0
-  },
-  "ddsp_svc": {
-    "enable": false,
-    "config_path": "E:\\DDSP-SVC-3.0\\exp\\combsub-test\\config.yaml",
-    "api_ip_port": "http://127.0.0.1:6844",
-    "fSafePrefixPadLength": 0.0,
-    "fPitchChange": 0.0,
-    "sSpeakId": 0,
-    "sampleRate": 44100
-  },
   "so_vits_svc": {
     "enable": false,
     "config_path": "E:\\so-vits-svc\\configs\\ikaros_v1.json",
@@ -715,75 +341,6 @@
     "spk": "ikaros",
     "tran": 1.0,
     "wav_format": "wav"
-  },
-  "edge-tts": {
-    "voice": "zh-CN-XiaoyiNeural",
-    "rate": "+0%",
-    "volume": "+0%",
-    "proxy": ""
-  },
-  "elevenlabs": {
-    "api_key": "",
-    "voice": "Rachel",
-    "model": "eleven_monolingual_v1"
-  },
-  "genshinvoice_top": {
-    "speaker": "神里绫华_ZH",
-    "format": "wav",
-    "length": "1.25",
-    "noise": "0.2",
-    "noisew": "0.9",
-    "language": "ZH"
-  },
-  "tts_ai_lab_top": {
-    "appid": "",
-    "token": "",
-    "speaker": "白露",
-    "sdp_ratio": "0.2",
-    "noise": "0.5",
-    "noisew": "0.9",
-    "length": "1.0",
-    "lang": "zh"
-  },
-  "bark_gui": {
-    "api_ip_port": "http://127.0.0.1:7860",
-    "spk": "zh_speaker_0",
-    "generation_temperature": 0.6,
-    "waveform_temperature": 0.7,
-    "end_of_sentence_probability": 0.05,
-    "quick_generation": true,
-    "seed": -1.0,
-    "batch_count": 1
-  },
-  "vall_e_x": {
-    "api_ip_port": "http://127.0.0.1:7860",
-    "language": "auto-detect",
-    "accent": "no-accent",
-    "voice_preset": "ikaros",
-    "voice_preset_file_path": "D:\\GitHub_pro\\AI-Vtuber\\tests\\test_VALL-E-X\\ikaros.npz"
-  },
-  "openai_tts": {
-    "type": "api",
-    "api_ip_port": "https://api.openai.com/v1",
-    "model": "tts-1",
-    "voice": "nova",
-    "api_key": "你的openai api key"
-  },
-  "reecho_ai": {
-    "Authorization": "sk-xxx",
-    "model": "reecho-neural-voice-001",
-    "randomness": 97,
-    "stability_boost": 40,
-    "voiceId": "b4b885c3-89a7-46d4-badb-015a55bb3a91",
-    "promptId": "default",
-    "probability_optimization": 99,
-    "break_clone": false,
-    "flash": false,
-    "origin_audio": false,
-    "stream": false
-  },
-  "gradio_tts": {
-    "request_parameters": "{{\"url\": \"https://xzjosh-nana7mi-bert-vits2.hf.space/--replicas/b9be4/\", \"fn_index\": 0, \"data_analysis\": 1, \"text_input\": \"{content}\", \"speaker_option\": \"Nana7mi\", \"sdp_ratio\": 0.5, \"noise\": 0.6, \"noise_w\": 0.9, \"length\": 1}}"
   },
   "gpt_sovits": {
     "type": "api",
@@ -847,144 +404,6 @@
       "speed": "1.0",
       "emotion": "正常"
     }
-  },
-  "clone_voice": {
-    "type": "tts",
-    "api_ip_port": "http://127.0.0.1:9988",
-    "voice": "cn-nan.wav",
-    "language": "zh-cn",
-    "speed": 1.0
-  },
-  "azure_tts": {
-    "subscription_key": "",
-    "region": "japanwest",
-    "voice_name": "zh-CN-XiaoyanNeural"
-  },
-  "fish_speech": {
-    "type": "web",
-    "api_ip_port": "http://127.0.0.1:8001",
-    "model_name": "default",
-    "model_config": {
-      "device": "cuda",
-      "llama": {
-        "config_name": "text2semantic_finetune",
-        "checkpoint_path": "checkpoints/text2semantic-400m-v0.2-4k.pth",
-        "precision": "bfloat16",
-        "tokenizer": "fishaudio/speech-lm-v1",
-        "compile": true
-      },
-      "vqgan": {
-        "config_name": "vqgan_pretrain",
-        "checkpoint_path": "checkpoints/vqgan-v1.pth"
-      }
-    },
-    "tts_config": {
-      "prompt_text": "",
-      "prompt_tokens": "",
-      "max_new_tokens": 0,
-      "top_k": 3,
-      "top_p": 0.5,
-      "repetition_penalty": 1.5,
-      "temperature": 0.7,
-      "order": "zh,jp,en",
-      "use_g2p": true,
-      "seed": 1,
-      "speaker": ""
-    },
-    "web": {
-      "enable_ref_audio": true,
-      "ref_audio_path": "/tmp/gradio/18e6fd9a7ff4169adfb76f5602ced08042a6be93/audio.wav",
-      "ref_text": "…不行，我必须去救他！",
-      "maximum_tokens_per_batch": 0,
-      "iterative_prompt_length": 48,
-      "top_p": 0.7,
-      "repetition_penalty": 1.5,
-      "temperature": 0.7,
-      "speaker": "神里绫华_ZH",
-      "enable_ref_audio_update": true
-    },
-    "api_1.1.0": {
-      "reference_text": "",
-      "reference_audio": "",
-      "max_new_tokens": 0,
-      "chunk_length": 30,
-      "top_p": 0.7,
-      "repetition_penalty": 1.5,
-      "temperature": 0.7,
-      "speaker": "",
-      "format": "wav",
-      "streaming": false
-    }
-  },
-  "chattts": {
-    "type": "gradio_0621",
-    "api_ip_port": "http://127.0.0.1:9880",
-    "gradio_ip_port": "http://127.0.0.1:8080",
-    "temperature": 0.3,
-    "audio_seed_input": 2,
-    "top_p": 0.7,
-    "top_k": 20,
-    "text_seed_input": 42,
-    "refine_text_flag": true,
-    "api": {
-      "media_type": "wav",
-      "seed": 2581,
-      "streaming": 0
-    }
-  },
-  "cosyvoice": {
-    "type": "gradio_0707",
-    "gradio_ip_port": "http://127.0.0.1:9886",
-    "api_ip_port": "http://127.0.0.1:9880",
-    "gradio_0707": {
-      "mode_checkbox_group": "预训练音色",
-      "sft_dropdown": "中文女",
-      "prompt_text": "",
-      "prompt_wav_upload": "",
-      "instruct_text": "",
-      "seed": 0
-    },
-    "api_0819": {
-      "speaker": "中文女",
-      "new": 0,
-      "speed": 1.0,
-      "streaming": 0
-    }
-  },
-  "f5_tts": {
-    "gradio_ip_port": "http://127.0.0.1:7860",
-    "type": "gradio_1023",
-    "ref_audio_orig": "F:\\GPT-SoVITS-0304\\output\\slicer_opt\\smoke1.wav",
-    "ref_text": "整整策划了半年了，终于现在有结果了",
-    "model": "F5-TTS",
-    "remove_silence": false,
-    "cross_fade_duration": 0.15,
-    "speed": 1
-  },
-  "multitts": {
-    "api_ip_port": "http://192.168.31.180:8774",
-    "speed": 50,
-    "volume": 50,
-    "pitch": 50,
-    "voice": ""
-  },
-  "melotts": {
-    "api_ip_port": "http://127.0.0.1:8101",
-    "language": "ZH",
-    "device": "auto",
-    "use_hf": true,
-    "config_path": "",
-    "ckpt_path": "",
-    "speaker_id": 0,
-    "sdp_ratio": 0.2,
-    "noise_scale": 0.6,
-    "noise_scale_w": 0.8,
-    "speed": 1
-  },
-  "index_tts": {
-    "api_ip_port": "http://127.0.0.1:6008",
-    "prompt_audio": "C://Users//Administrator//Music//光动嘴不如亲自做给你看.wav",
-    "temperature": 0.8
   },
   "choose_song": {
     "enable": false,
@@ -1080,7 +499,7 @@
     "no_recording_during_playback": true,
     "no_recording_during_playback_sleep_interval": 1.0,
     "username": "主人",
-    "type": "google",
+    "type": "faster_whisper",
     "continuous_talk": false,
     "trigger_key": "Q",
     "stop_trigger_key": "S",
@@ -1156,7 +575,7 @@
     "model": "gemini",
     "img_save_path": "./out/图像识别",
     "prompt": "请讲解一下图片里的内容",
-    "screenshot_window_title": null,
+    "screenshot_window_title": "None",
     "screenshot_delay": 3.0,
     "loop_screenshot_enable": false,
     "loop_screenshot_delay": 15,
@@ -1425,15 +844,15 @@
         ],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [
-          "data/闲时任务/音频/ikaros/主人，你刚才是不是说我们会永远在一起.wav",
-          "data/闲时任务/音频/ikaros/好想赶快见到主人.wav"
-        ],
         "img_path": [
           "ui/bg.png",
           "ui/icon.png",
           "C:/Users/Administrator/Pictures/aivtb/1.png",
           "C:/Users/Administrator/Pictures/aivtb/2.png"
+        ],
+        "local_audio": [
+          "data/闲时任务/音频/ikaros/主人，你刚才是不是说我们会永远在一起.wav",
+          "data/闲时任务/音频/ikaros/好想赶快见到主人.wav"
         ]
       },
       {
@@ -1454,8 +873,8 @@
         ],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1491,8 +910,8 @@
         ],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1520,8 +939,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1550,8 +969,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1568,8 +987,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1587,8 +1006,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1618,8 +1037,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1634,8 +1053,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1650,8 +1069,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       },
       {
         "keywords": [
@@ -1668,8 +1087,8 @@
         "copywriting": [],
         "serial_name": "",
         "serial_send_data": [],
-        "local_audio": [],
-        "img_path": []
+        "img_path": [],
+        "local_audio": []
       }
     ]
   },
@@ -1908,8 +1327,8 @@
   },
   "webui": {
     "ip": "127.0.0.1",
-    "port": 8081,
-    "title": "AI Vtuber",
+    "port": "8086",
+    "title": "AUTO Vtuber",
     "auto_run": false,
     "local_dir_to_endpoint": {
       "enable": false,
@@ -2008,68 +1427,453 @@
         "coordination_program": true
       },
       "llm": {
-        "chatgpt": true,
-        "claude": true,
-        "chatglm": true,
-        "qwen": true,
-        "zhipu": true,
-        "chat_with_file": true,
-        "langchain_chatglm": true,
-        "langchain_chatchat": true,
-        "chatterbot": true,
-        "text_generation_webui": true,
-        "sparkdesk": true,
-        "bard": true,
-        "tongyi": true,
-        "tongyixingchen": true,
-        "my_wenxinworkshop": true,
-        "gemini": true,
-        "qanything": true,
-        "koboldcpp": true,
-        "anythingllm": true,
-        "gpt4free": true,
-        "dify": true,
-        "volcengine": true,
-        "llm_tpu": true,
         "custom_llm": true
       },
       "tts": {
-        "edge-tts": true,
-        "vits": true,
-        "bert_vits2": true,
-        "vits_fast": true,
-        "elevenlabs": true,
-        "genshinvoice_top": true,
-        "tts_ai_lab_top": true,
-        "bark_gui": true,
-        "vall_e_x": true,
-        "openai_tts": true,
-        "reecho_ai": true,
-        "gradio_tts": true,
-        "gpt_sovits": true,
-        "clone_voice": true,
-        "azure_tts": true,
-        "fish_speech": true,
-        "chattts": true,
-        "cosyvoice": true,
-        "f5_tts": true,
-        "multitts": true,
-        "melotts": true,
-        "index_tts": true
+        "gpt_sovits": true
       },
       "svc": {
-        "ddsp_svc": true,
         "so_vits_svc": true
       },
       "visual_body": {
-        "live2d": true,
-        "xuniren": true,
-        "unity": true,
-        "EasyAIVtuber": true,
-        "metahuman_stream": true,
-        "digital_human_video_player": true,
-        "live2d_TTS_LLM_GPT_SoVITS_Vtuber": true
+        "metahuman_stream": true
       }
-    }
+    },
+    "drawer_mini": false,
+    "config_items": {
+      "common_config": {
+        "label": "通用配置",
+        "type": "group",
+        "items": {
+          "read_comment": {
+            "label": "读取评论",
+            "type": "switch",
+            "value": true
+          },
+          "read_username": {
+            "label": "读取用户名",
+            "type": "switch",
+            "value": true
+          },
+          "filter": {
+            "label": "过滤",
+            "type": "switch",
+            "value": true
+          },
+          "thanks": {
+            "label": "感谢",
+            "type": "switch",
+            "value": true
+          },
+          "local_qa": {
+            "label": "本地问答",
+            "type": "switch",
+            "value": true
+          }
+        }
+      },
+      "llm": {
+        "label": "大语言模型",
+        "type": "group",
+        "items": {
+          "provider": {
+            "label": "提供商",
+            "type": "select",
+            "options": [
+              "openai",
+              "custom"
+            ],
+            "value": "openai"
+          },
+          "model": {
+            "label": "模型",
+            "type": "input",
+            "value": "gpt-3.5-turbo"
+          },
+          "api_key": {
+            "label": "API Key",
+            "type": "input",
+            "value": ""
+          }
+        }
+      },
+      "tts": {
+        "label": "文本转语音",
+        "type": "group",
+        "items": {
+          "provider": {
+            "label": "提供商",
+            "type": "select",
+            "options": [
+              "edge-tts",
+              "gpt-sovits"
+            ],
+            "value": "edge-tts"
+          },
+          "voice": {
+            "label": "语音",
+            "type": "input",
+            "value": "zh-CN-XiaoxiaoNeural"
+          }
+        }
+      },
+      "copywriting": {
+        "label": "文案",
+        "type": "group",
+        "items": {
+          "content": {
+            "label": "文案内容",
+            "type": "textarea",
+            "value": ""
+          }
+        }
+      },
+      "bilibili": {
+        "label": "哔哩哔哩配置",
+        "type": "group",
+        "items": {
+          "login_type": {
+            "label": "登录方式",
+            "type": "select",
+            "value": "手机扫码",
+            "options": [
+              "手机扫码",
+              "账号密码",
+              "cookie"
+            ]
+          },
+          "username": {
+            "label": "账号",
+            "type": "input",
+            "value": ""
+          },
+          "password": {
+            "label": "密码",
+            "type": "input",
+            "value": ""
+          },
+          "cookie": {
+            "label": "Cookie",
+            "type": "input",
+            "value": ""
+          }
+        }
+      },
+      "room_settings": {
+        "label": "直播间设置",
+        "type": "group",
+        "items": {
+          "room_id": {
+            "label": "直播间ID",
+            "type": "input",
+            "value": "278333"
+          }
+        }
+      },
+      "talk": {
+        "label": "聊天配置",
+        "type": "group",
+        "items": {
+          "chat_type": {
+            "label": "聊天类型",
+            "type": "select",
+            "value": "custom_llm",
+            "options": [
+              "custom_llm",
+              "local_qa"
+            ]
+          },
+          "before_prompt": {
+            "label": "前置提示词",
+            "type": "input",
+            "value": "请简要回复:"
+          },
+          "after_prompt": {
+            "label": "后置提示词",
+            "type": "input",
+            "value": ""
+          }
+        }
+      },
+      "image_recognition": {
+        "label": "图像识别配置",
+        "type": "group",
+        "items": {
+          "enable": {
+            "label": "启用图像识别",
+            "type": "switch",
+            "value": false
+          }
+        }
+      },
+      "web": {
+        "label": "页面配置",
+        "type": "group",
+        "items": {
+          "ip": {
+            "label": "IP地址",
+            "type": "input",
+            "value": "127.0.0.1"
+          },
+          "port": {
+            "label": "端口",
+            "type": "input",
+            "value": "8080"
+          },
+          "title": {
+            "label": "页面标题",
+            "type": "input",
+            "value": "AI Vtuber"
+          }
+        }
+      }
+    },
+    "function_groups": [
+      {
+        "name": "基础功能",
+        "icon": "settings",
+        "functions": [
+          {
+            "name": "通用配置",
+            "tab_key": "common_config",
+            "enabled": true
+          },
+          {
+            "name": "平台配置",
+            "tab_key": "platform_config",
+            "enabled": true
+          },
+          {
+            "name": "音频播放",
+            "tab_key": "audio_play",
+            "enabled": true
+          },
+          {
+            "name": "web字幕打印机",
+            "tab_key": "web_captions_printer",
+            "enabled": true
+          },
+          {
+            "name": "日志",
+            "tab_key": "log_config",
+            "enabled": true
+          }
+        ]
+      },
+      {
+        "name": "AI对话",
+        "icon": "chat",
+        "functions": [
+          {
+            "name": "大语言模型",
+            "tab_key": "llm",
+            "enabled": true
+          },
+          {
+            "name": "文本转语音",
+            "tab_key": "tts",
+            "enabled": true
+          },
+          {
+            "name": "变声",
+            "tab_key": "svc",
+            "enabled": true
+          },
+          {
+            "name": "聊天",
+            "tab_key": "talk",
+            "enabled": true
+          },
+          {
+            "name": "图像识别",
+            "tab_key": "image_recognition",
+            "enabled": true
+          },
+          {
+            "name": "动态文案",
+            "tab_key": "trends_copywriting",
+            "enabled": true
+          },
+          {
+            "name": "Stable Diffusion",
+            "tab_key": "sd_config",
+            "enabled": true
+          }
+        ]
+      },
+      {
+        "name": "互动设置",
+        "icon": "groups",
+        "functions": [
+          {
+            "name": "积分",
+            "tab_key": "integral",
+            "enabled": true
+          },
+          {
+            "name": "助播",
+            "tab_key": "assistant_anchor",
+            "enabled": true
+          },
+          {
+            "name": "翻译",
+            "tab_key": "translate",
+            "enabled": true
+          },
+          {
+            "name": "串口",
+            "tab_key": "serial",
+            "enabled": true
+          },
+          {
+            "name": "过滤",
+            "tab_key": "filter_config",
+            "enabled": true
+          },
+          {
+            "name": "消息遗忘&保留",
+            "tab_key": "filter_forget",
+            "enabled": true
+          },
+          {
+            "name": "限定时间段去重",
+            "tab_key": "filter_dedup",
+            "enabled": true
+          },
+          {
+            "name": "消息队列&音频队列",
+            "tab_key": "filter_queue",
+            "enabled": true
+          },
+          {
+            "name": "弹幕黑名单",
+            "tab_key": "blacklist",
+            "enabled": true
+          },
+          {
+            "name": "念弹幕",
+            "tab_key": "read_comment",
+            "enabled": true
+          },
+          {
+            "name": "答谢",
+            "tab_key": "thanks",
+            "enabled": true
+          },
+          {
+            "name": "定时任务",
+            "tab_key": "schedule",
+            "enabled": true
+          },
+          {
+            "name": "闲时任务",
+            "tab_key": "idle_time_task",
+            "enabled": true
+          },
+          {
+            "name": "自定义命令",
+            "tab_key": "custom_cmd",
+            "enabled": true
+          }
+        ]
+      },
+      {
+        "name": "高级功能",
+        "icon": "build",
+        "functions": [
+          {
+            "name": "虚拟身体",
+            "tab_key": "visual_body",
+            "enabled": true
+          },
+          {
+            "name": "文案",
+            "tab_key": "copywriting",
+            "enabled": true
+          },
+          {
+            "name": "数据分析",
+            "tab_key": "data_analysis",
+            "enabled": true
+          },
+          {
+            "name": "本地问答",
+            "tab_key": "local_qa",
+            "enabled": true
+          },
+          {
+            "name": "点歌模式",
+            "tab_key": "choose_song",
+            "enabled": true
+          },
+          {
+            "name": "联网搜索",
+            "tab_key": "search_online",
+            "enabled": true
+          },
+          {
+            "name": "按键映射",
+            "tab_key": "key_mapping",
+            "enabled": true
+          },
+          {
+            "name": "洛曦直播弹幕助手",
+            "tab_key": "luoxi",
+            "enabled": true
+          },
+          {
+            "name": "数据库设置",
+            "tab_key": "database_config",
+            "enabled": true
+          }
+        ]
+      },
+      {
+        "name": "系统设置",
+        "icon": "admin_panel_settings",
+        "functions": [
+          {
+            "name": "webui配置",
+            "tab_key": "webui_config",
+            "enabled": true
+          },
+          {
+            "name": "本地路径访问",
+            "tab_key": "local_dir_endpoint",
+            "enabled": true
+          },
+          {
+            "name": "配置模板",
+            "tab_key": "config_template",
+            "enabled": true
+          },
+          {
+            "name": "板块显示/隐藏",
+            "tab_key": "show_card",
+            "enabled": true
+          },
+          {
+            "name": "账号管理",
+            "tab_key": "account_manage",
+            "enabled": true
+          },
+          {
+            "name": "动态配置",
+            "tab_key": "trends_config",
+            "enabled": true
+          },
+          {
+            "name": "异常报警",
+            "tab_key": "abnormal_alarm",
+            "enabled": true
+          },
+          {
+            "name": "联动程序",
+            "tab_key": "coordination_program",
+            "enabled": true
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,97 +1,57 @@
-[tool.poetry]
-name = "ai-vtuber"
-version = "0.30.0"
-description = "AI Vtuber，结合ASR、LLM、TTS、SVC、SD等功能为一体的开源AI软件"
-authors = ["ikaros <327209194@qq.com>"]
-license = "GPL-3.0"
+[project]
+name = "luna-ai"
+version = "1.0.0"
+description = "Luna AI - 一站式 AI 虚拟主播解决方案"
 readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
 
-[tool.poetry.dependencies]
-python = "^3.10"
-requests = "2.32.3"
-wenxinworkshop = { git = "https://gitee.com/ikaros-521/WenxinWorkshop-Python-SDK", rev = "12b863fca7ec1cdf969d73a04b50f66d2d24a878" }
-blivedm = { git = "https://gitee.com/ikaros-521/blivedm", rev = "c9ac671f783c4c3eaa4ee4e7738226ebbf402259" }
-sparkdesk-api = { git = "https://gitee.com/ikaros-521/sparkdesk-api", rev = "bb830c0f1a1b5c575a29a24c4077d6482aa9e6e1" }
-openai = "*"
-pygame = "*"
-edge-tts = "6.1.6"
-langid = "*"
-aiohttp = "3.9.1"
-asyncio = "*"
-slack_sdk = "3.21.3"
-profanity = "1.1"
-elevenlabs = "0.2.8"
-PyPDF2 = "*"
-protobuf_inspector = "*"
-websocket-client = "*"
-websocket-client-py3 = "*"
-tiktoken = "*"
-pyahocorasick = "*"
-webuiapi = "*"
-pyvirtualcam = "*"
-numpy = "*"
-faiss-cpu = "*"
-sentence_transformers = "*"
-pydub = "*"
-pydantic = "1.10.13"
-send2trash = "*"
-keyboard = "*"
-PyAudio = "*"
-SpeechRecognition = "*"
-baidu-aip = "*"
-chardet = "*"
-pypinyin = "*"
-gradio_client = "*"
-schedule = "*"
-bilibili-api-python = "*"
-langchain = "0.0.142"
-playwright = "*"
-protobuf = "3.20.3"
-certifi = "*"
-charset-normalizer = "*"
-greenlet = "*"
-idna = "*"
-lxml = "*"
-pyee = "*"
-typing_extensions = "*"
-urllib3 = "2.2.2"
-pyhandytools = "*"
-curl_cffi = "*"
-zhipuai = "*"
-bardapi = "*"
-revTongYi = "*"
-pyautogui = "*"
-nicegui = "1.4.30"
-pytchat = "*"
-PySocks = "*"
-pure-protobuf = "3.0.0a5"
-xingchen = "1.1.5"
-emoji = "*"
-google-generativeai = "*"
-colorlog = "*"
-faster_whisper = "*"
-httpx = "0.25.2"
-Pillow = "10.1.0"
-pygtrans = "*"
-jieba = "*"
-gradio = "4.16.0"
-TikTokLive = "*"
-azure-cognitiveservices-speech = "*"
-pyjwt = "*"
-dashscope = "*"
-pygetwindow = "*"
-opencv-python = "*"
-g4f = "*"
-starlette = "0.36.3"
-pyserial = "*"
+[tool.ruff]
+# 行宽限制
+line-length = 120
+# 目标 Python 版本
+target-version = "py310"
 
-# dy2
-betterproto = "2.0.0b6"
-loguru = "*"
+[tool.ruff.lint]
+# 启用规则集
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff specific
+]
+ignore = [
+    "E501",   # 行过长（由格式化工具处理）
+    "B008",   # 函数参数中的函数调用
+    "SIM108", # 三元表达式（可读性差）
+]
 
-# asr
-funasr = "1.1.3"
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # 允许 __init__.py 中的未使用导入
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.ruff.format]
+# 格式化配置
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.black]
+line-length = 120
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

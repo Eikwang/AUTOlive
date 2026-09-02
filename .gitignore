@@ -253,3 +253,38 @@ static/
 
 add_dependencies.py
 
+# ===========================================
+# 开发路线图相关
+# ===========================================
+
+# 配置目录（敏感信息）
+config/*.json
+!config/*.example.json
+
+# 开发记录（可选忽略）
+# docs/开发记录/
+
+# IDE 配置
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+
+# Ruff 缓存
+.ruff_cache/
+
+# 测试覆盖率
+htmlcov/
+.coverage
+coverage.xml
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+
+test_*.py
+.claude/
+.agent-teams/
+.pytest_cache/
+docs/

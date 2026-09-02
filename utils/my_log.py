@@ -1,66 +1,19 @@
-# import sys
-# from loguru import logger
+# -*- coding: UTF-8 -*-
+"""
+日志模块
 
-# from utils.common import Common
-# from utils.config import Config
-
-
-# # 配置文件路径
-# config_path = 'config.json'
-# common = Common()
-
-# logger.debug("配置文件路径=" + str(config_path))
-
-# # 实例化配置类
-# config = Config(config_path)
-
-# # 获取当前时间并生成日志文件路径
-# file_path = "./log/log-" + common.get_bj_time(1) + ".txt"
-
-# # 配置 logger
-# def configure_logger(file_path, log_level, max_file_size):
-#     level = log_level.upper() if log_level else "INFO"
-#     max_size = max_file_size if max_file_size else "1024 MB"
-
-#     # 清空之前的handlers
-#     logger.remove()
-
-#     # 配置控制台输出
-#     if level == "INFO":
-#         logger.add(sys.stderr, format="{time:YYYY-MM-DD HH:mm:ss.SSS} | <lvl>{level:8}</>| <lvl>{message}</>", colorize=True, level=level)
-
-#     # 配置文件输出
-#     logger.add(file_path, level=level, rotation=max_size)
-
-# # 获取日志配置
-# log_level = config["webui"]["log"].get("log_level", "INFO")
-# max_file_size = config["webui"]["log"].get("max_file_size", "1024 MB")
-
-# # 配置 logger
-# configure_logger(file_path, log_level, max_file_size)
-
-# # 导出 logger 供其他模块使用
-# __all__ = ["logger"]
-
+提供日志配置和 logger
+"""
 
 import sys
 import logging
 from loguru import logger
 
-from utils.common import Common
-from utils.config import Config
+# 从 base 模块导入 logger（避免循环导入）
+from .base import logger as base_logger
 
 # 配置文件路径
 config_path = 'config.json'
-common = Common()
-
-logger.debug("配置文件路径=" + str(config_path))
-
-# 实例化配置类
-config = Config(config_path)
-
-# 获取当前时间并生成日志文件路径
-file_path = "./log/log-" + common.get_bj_time(1) + ".txt"
 
 # 配置 logger
 def configure_logger(file_path, log_level, max_file_size):
@@ -71,19 +24,10 @@ def configure_logger(file_path, log_level, max_file_size):
     logger.remove()
 
     # 配置控制台输出
-    # logger.add(sys.stderr, format="{time:YYYY-MM-DD HH:mm:ss.SSS} | <lvl>{level:8}</>| <lvl>{message}</>", colorize=True, level=level)
     logger.add(sys.stderr, colorize=True, level=level)
-
 
     # 配置文件输出
     logger.add(file_path, level=level, rotation=max_size)
-
-# 获取日志配置
-log_level = config["webui"]["log"].get("log_level", "INFO")
-max_file_size = config["webui"]["log"].get("max_file_size", "1024 MB")
-
-# 配置 logger
-configure_logger(file_path, log_level, max_file_size)
 
 # 获取 jieba 库的日志记录器，并设置其级别为 WARNING
 jieba_logger = logging.getLogger("jieba")
@@ -107,13 +51,22 @@ werkzeug_logger.setLevel(logging.WARNING)
 # 将 loguru 与标准 logging 结合
 class InterceptHandler(logging.Handler):
     def emit(self, record):
-        loguru_logger = logger.bind(name=record.name)
-        level = logger.level(record.levelname).name
-        frame, depth = logging.currentframe(), 2
-        while frame is not None and frame.f_globals["__name__"] != __name__:
-            frame = frame.f_back
-            depth += 1
-        loguru_logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        try:
+            loguru_logger = logger.bind(name=record.name)
+            level = logger.level(record.levelname).name
+            frame, depth = logging.currentframe(), 2
+            while frame is not None and frame.f_globals["__name__"] != __name__:
+                frame = frame.f_back
+                depth += 1
+            loguru_logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        except ValueError:
+            # 处理 call stack is not deep enough 的情况
+            loguru_logger = logger.bind(name=record.name)
+            level = logger.level(record.levelname).name
+            loguru_logger.opt(exception=record.exc_info).log(level, record.getMessage())
+        except Exception:
+            # 忽略日志处理错误，避免影响主程序
+            pass
 
 # 将 InterceptHandler 添加到 jieba logger
 jieba_logger.addHandler(InterceptHandler())

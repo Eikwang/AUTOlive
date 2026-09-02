@@ -1,0 +1,100 @@
+{
+  "play_audio": {
+    "enable": true,
+    "text_split_enable": true,
+    "interval_num_min": 1,
+    "interval_num_max": 2,
+    "normal_interval_min": 0.3,
+    "normal_interval_max": 0.5,
+    "out_path": "out",
+    "player": "pygame",
+    "info_to_callback": true
+  },
+  "audio_player": {
+    "api_ip_port": "http://127.0.0.1:5600"
+  },
+  "audio_synthesis_type": "gpt_sovits",
+  "audio_random_speed": {
+    "normal": {
+      "enable": false,
+      "speed_min": 0.8,
+      "speed_max": 1.2
+    },
+    "copywriting": {
+      "enable": false,
+      "speed_min": 0.8,
+      "speed_max": 1.2
+    }
+  },
+  "so_vits_svc": {
+    "enable": false,
+    "config_path": "E:\\so-vits-svc\\configs\\ikaros_v1.json",
+    "api_ip_port": "http://127.0.0.1:1145",
+    "spk": "ikaros",
+    "tran": 1.0,
+    "wav_format": "wav"
+  },
+  "gpt_sovits": {
+    "type": "api",
+    "gradio_ip_port": "http://127.0.0.1:7860",
+    "api_ip_port": "http://127.0.0.1:9880",
+    "ref_audio_path": "F:\\GPT-SoVITS\\raws\\ikaros\\21.wav",
+    "prompt_text": "マスター、どうりょくろか、いいえ、なんでもありません",
+    "prompt_language": "日文",
+    "language": "自动识别",
+    "cut": "凑四句一切",
+    "gpt_model_path": "F:\\GPT-SoVITS\\GPT_weights\\ikaros-e15.ckpt",
+    "sovits_model_path": "F:\\GPT-SoVITS\\SoVITS_weights\\ikaros_e8_s280.pth",
+    "api_0322": {
+      "text_lang": "中英混合",
+      "ref_audio_path": "F:\\GPT-SoVITS\\raws\\ikaros\\21.wav",
+      "prompt_text": "マスター、どうりょくろか、いいえ、なんでもありません",
+      "prompt_lang": "日文",
+      "top_k": 1,
+      "top_p": 0.8,
+      "temperature": 0.8,
+      "text_split_method": "按标点符号切",
+      "batch_size": 20,
+      "speed_factor": 1.0,
+      "split_bucket": false,
+      "return_fragment": false,
+      "fragment_interval": "0.3"
+    },
+    "api_0706": {
+      "refer_wav_path": "F:\\GPT-SoVITS-0304\\output\\slicer_opt\\smoke1.wav",
+      "text_language": "中文",
+      "prompt_text": "整整策划了半年了，终于现在有结果了",
+      "prompt_language": "中文",
+      "cut_punc": "，。"
+    },
+    "v2_api_0821": {
+      "text_lang": "zh",
+      "ref_audio_path": "F:\\GPT-SoVITS-0304\\output\\slicer_opt\\smoke1.wav",
+      "aux_ref_audio_paths": [],
+      "prompt_lang": "zh",
+      "prompt_text": "整整策划了半年了，终于现在有结果了",
+      "top_k": 5,
+      "top_p": 1.0,
+      "temperature": 1.0,
+      "text_split_method": "cut0",
+      "batch_size": 1,
+      "batch_threshold": 0.75,
+      "split_bucket": true,
+      "speed_factor": 1.0,
+      "fragment_interval": 0.3,
+      "seed": -1,
+      "media_type": "wav",
+      "streaming_mode": false,
+      "parallel_infer": true,
+      "repetition_penalty": 1.35
+    },
+    "webtts": {
+      "version": "1",
+      "api_ip_port": "http://127.0.0.1:8080",
+      "spk": "sanyueqi",
+      "lang": "zh",
+      "speed": "1.0",
+      "emotion": "正常"
+    }
+  }
+}

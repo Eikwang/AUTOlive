@@ -1,0 +1,10 @@
+{
+  "platform": "talk",
+  "room_display_id": "",
+  "chat_type": "custom_llm",
+  "need_lang": "none",
+  "before_prompt": "请简要回复:",
+  "after_prompt": "",
+  "api_ip": "127.0.0.1",
+  "api_port": 8082
+}

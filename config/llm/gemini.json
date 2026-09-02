@@ -1,0 +1,12 @@
+{
+  "api_key": "",
+  "model": "gemini-pro",
+  "max_output_tokens": 20,
+  "temperature": 1.0,
+  "top_p": 0.7,
+  "top_k": 40,
+  "http_proxy": "http://127.0.0.1:10809",
+  "https_proxy": "http://127.0.0.1:10809",
+  "history_enable": true,
+  "history_max_len": 4096
+}

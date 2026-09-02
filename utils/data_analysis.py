@@ -13,16 +13,35 @@ class Data_Analysis:
     def __init__(self, config_path):
         self.config = Config(config_path)
         self.common = Common()
+        self.db = None  # 数据库实例
+        
+        # 初始化数据库
+        self._init_database()
 
         # # 获取 jieba 库的日志记录器
         # jieba_logger = logger.getLogger("jieba")
         # # 设置 jieba 日志记录器的级别为 WARNING
         # jieba_logger.setLevel(logger.WARNING)
 
+    def _init_database(self):
+        """初始化数据库连接"""
+        try:
+            db_path = self.config.get('database', 'path')
+            if db_path and os.path.exists(db_path):
+                self.db = SQLiteDB(db_path)
+                logger.info(f"数据模块初始化数据库连接: {db_path}")
+            else:
+                logger.warning(f"数据库文件不存在: {db_path}")
+                self.db = None
+        except Exception as e:
+            logger.error(f"初始化数据库连接失败: {e}")
+            self.db = None
 
     # 重载config
     def reload_config(self, config_path):
         self.config = Config(config_path)
+        # 重新初始化数据库
+        self._init_database()
 
     # 获取重复数最高的关键词数据
     def get_most_common_words(self, text_list, top_num=10):
@@ -81,13 +100,16 @@ class Data_Analysis:
                 logger.warning(f"数据库：{self.config.get('database', 'path')} 不存在，如果您是第一次启动项目，且没有 运行的情况下，那么请忽略此报错信息，正常运行后，会自动创建数据库，无须担心")
                 return None
 
-            db = SQLiteDB(self.config.get('database', 'path'))
+            # 使用共享的数据库实例
+            if self.db is None:
+                logger.error("数据库连接未初始化")
+                return None
 
             # 查询数据
             select_data_sql = '''
             SELECT content FROM danmu
             '''
-            data_list = db.fetch_all(select_data_sql)
+            data_list = self.db.fetch_all(select_data_sql)
             text_list = [data[0] for data in data_list]
 
             data_json = self.get_most_common_words(text_list, top_num)
@@ -131,7 +153,40 @@ class Data_Analysis:
             return option
         except Exception as e:
             logger.error(traceback.format_exc())
-            return None
+            # 返回空图表配置，避免 None 导致 ui.echart 出错
+            return {
+                'title': {
+                    'text': '弹幕关键词统计（暂无数据）',
+                    'left': 'center'
+                },
+                'tooltip': {
+                    'trigger': 'item'
+                },
+                'legend': {
+                    'type': 'scroll',
+                    'orient': 'vertical',
+                    'right': 10,
+                    'top': 20,
+                    'bottom': 20,
+                    'data': []
+                },
+                'series': [
+                    {
+                        'name': '关键词',
+                        'type': 'pie',
+                        'radius': '55%',
+                        'center': ['50%', '60%'],
+                        'data': [],
+                        'emphasis': {
+                            'itemStyle': {
+                                'shadowBlur': 10,
+                                'shadowOffsetX': 0,
+                                'shadowColor': 'rgba(0, 0, 0, 0.5)'
+                            }
+                        }
+                    }
+                ]
+            }
 
 
     def get_integral_option(self, type="integral", top_num=10):
@@ -149,7 +204,10 @@ class Data_Analysis:
                 logger.warning(f"数据库：{self.config.get('database', 'path')} 不存在，如果您是第一次启动项目，且没有 运行的情况下，那么请忽略此报错信息，正常运行后，会自动创建数据库，无须担心")
                 return None
             
-            db = SQLiteDB(self.config.get('database', 'path'))
+            # 使用共享的数据库实例
+            if self.db is None:
+                logger.error("数据库连接未初始化")
+                return None
 
             # 查询数据
             select_data_sql = f'''
@@ -157,7 +215,7 @@ class Data_Analysis:
             ORDER BY {type} DESC
             LIMIT {top_num};
             '''
-            data_list = db.fetch_all(select_data_sql)
+            data_list = self.db.fetch_all(select_data_sql)
 
             
             # 使用列表推导式将每个元组转换为列表
@@ -313,7 +371,10 @@ class Data_Analysis:
                 logger.warning(f"数据库：{self.config.get('database', 'path')} 不存在，如果您是第一次启动项目，且没有 运行的情况下，那么请忽略此报错信息，正常运行后，会自动创建数据库，无须担心")
                 return None
             
-            db = SQLiteDB(self.config.get('database', 'path'))
+            # 使用共享的数据库实例
+            if self.db is None:
+                logger.error("数据库连接未初始化")
+                return None
 
             # 查询数据
             select_data_sql = f'''
@@ -321,7 +382,7 @@ class Data_Analysis:
             ORDER BY total_price DESC
             LIMIT {top_num};
             '''
-            data_list = db.fetch_all(select_data_sql)
+            data_list = self.db.fetch_all(select_data_sql)
 
             # 使用列表推导式将每个元组转换为列表
             username_list = [t[0] for t in data_list]
