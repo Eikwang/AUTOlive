@@ -188,6 +188,14 @@ class DrawerLayout:
             font-weight: var(--font-weight-title);
             color: var(--text-title);
         }}
+        /* 卡片内首个裸 label 视为卡片标题（ui.label 渲染为无类 div，
+           row/column/field 等均带类名被 :not([class]) 排除） */
+        .q-card > div:first-child:not([class]) {{
+            font-size: var(--font-size-card-title);
+            font-weight: var(--font-weight-title);
+            color: var(--text-title);
+            margin-bottom: var(--spacing-sm);
+        }}
         /* 参数标题（表单 label） */
         .q-field .q-field__label {{
             font-size: var(--font-size-small);
