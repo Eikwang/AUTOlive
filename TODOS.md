@@ -1,5 +1,12 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-09-22) — runtime312 启动脚本切换
+
+1. **api_old.py 与 flask_socketio 处置**（P3, S）— 旧 API 入口是否保留/归档；flask_socketio 仅其使用（runtime312 未装）。全仓库依赖审计发现，非两 webui 入口所需。
+2. **users.pth 注入升级为整合正式议题**（P2, S）— runtime312 的 `Lib\site-packages\users.pth` 硬编码注入 6 个 GPT-SoVITS 路径进所有进程，存在模块遮蔽风险；启动脚本 sys.path 断言只是临时保险，应从源头移除或收编管理。
+3. **EDTalk 目录硬耦合的结构性解耦**（P3, M）— AI-Vtuber 启动命脉指向 `D:\AI\EDTalk\runtime312`，EDTalk 挪动/重装即断；环境复制/软链/搬迁方案待评估。启动预检已缓解。
+4. **UC-1 裁决联动**（P2, —）— webui-bak.py 弃用/适配裁决后：若弃用→归档 webui-bak.py + 适配债销案；若适配→nicegui 3.x 逐处适配（与下方第 1 条 2026-09-02 项合并推进）。
+
 ## Deferred Items from /autoplan (2026-09-02) — 六项目统一环境整合
 
 1. **gradio/pydantic 版本 API 差异适配**（P1, M）— 统一环境里 gradio 只能装一个版本、AI-Vtuber 需从 pydantic 1.x 适配 2.x。待统一环境落地后作为"后期适配"第一优先。阻塞：统一环境补装完成。
