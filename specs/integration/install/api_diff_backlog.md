@@ -11,8 +11,9 @@
 | eunjeon | GPT-SoVITS 韩语 mecab | 仅韩语 TTS 需要 | 关闭（中文直播场景无影响） |
 | pynini | GPT-SoVITS 文本正则化 | tn/itn 链路可选 | 关闭（`--only-binary` 无二进制；tn/itn 用替代后端） |
 | gruut | GPT-SoVITS 死代码引用 | 无（phonemizer.py 无调用方） | 不装 |
-| google-generativeai | AI-Vtuber Gemini 通道 | 旧 SDK 硬性要求 protobuf 5.x，与 pb2 保护约束（protobuf==7.35.1）冲突 | 挂起；适配期迁移到新 google-genai SDK 或留旧环境跑该通道 |
+| google-generativeai | AI-Vtuber Gemini 通道 | 旧 SDK 硬性要求 protobuf 5.x，与 pb2 保护约束（protobuf==7.35.1）冲突 | **【裁决 2026-09-22 /autoplan 最终门】**采纳守卫方案①：gemini.py 顶层导入已加 try 守卫，缺包降级为警告，启动不阻断；选项③（无视约束裸装）升格为**禁止**（运行期静默破坏弹幕 pb2）。通道恢复路径=②迁移 google-genai（装包+适配，未排期） |
 | xingchen | AI-Vtuber 讯飞星火通道 | 硬性要求 pydantic<2，与基线 pydantic==2.13.4 冲突（constraints 已拦截） | 挂起；适配期处理或留旧环境 |
+| zhipuai | AI-Vtuber 智谱AI 通道 | 2026-09-02 批次6 安装遗漏（本次审计发现缺失并阻断启动） | **【裁决 2026-09-22 /autoplan 最终门】**zhipu.py 已加缺包守卫（同上）；用户手动补装命令已 dry-run 实证（`pip install -c constraints.txt zhipuai` → 2.1.5.20250825 + PyJWT 2.8.0，不触碰基线），装后实例化冒烟通过即为通道可用 |
 | wenxinworkshop | AI-Vtuber 声明 | PyPI 无此包（声明笔误或私有源） | 跳过；百度文心走 baidu-aip（已装） |
 | PySimpleGUI | RVC 旧声明 | 代码实际 import FreeSimpleGUI（已装） | 不装（付费授权） |
 | torch-directml | RVC DML 备用后端 | NVIDIA 机器不需要 | 不装 |

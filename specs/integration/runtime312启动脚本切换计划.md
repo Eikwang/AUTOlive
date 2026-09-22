@@ -543,6 +543,34 @@ Synthesized from this review's findings. Each task derives from a specific findi
 <!-- /autoplan-accepted:ceo -->
 
 
+# 执行记录（2026-09-22，最终批准门裁决后开工）
+
+## 门上裁决（用户 2026-09-22）
+
+| 项 | 裁决 |
+|---|---|
+| UC-1 | **B：带警告切换**——1.bat 照新模板改写，头部加醒目警告（nicegui 3.x 待适配，勿在直播中依赖） |
+| UC-2 | **A：采纳守卫**——zhipu.py/gemini.py 顶层导入加 try 守卫，缺包降级为警告+使用时 RuntimeError（含指引） |
+| 总体 | 批准开工 |
+
+## 已完成
+
+| 步骤 | 结果 |
+|---|---|
+| 启动程序.bat 改写 | 完整模板落地（chcp 65001/预检/RT 覆盖/指引行/cmd /k/UTF-8 无 BOM） |
+| 启动程序1.bat 改写 | 同模板 + 6 行警告头（UC-1=B） |
+| UC-2 守卫 | zhipu.py:1-15/类守卫 + gemini.py:1-19/类守卫，缺包 logger 警告不阻断启动 |
+| boot_probe_child.py | sys.path 遮蔽断言固化为永久项（Eng T2） |
+| T5 裁决落盘 | api_diff_backlog.md 补 google-generativeai/zhipuai 裁决附注（带日期） |
+| 验证 | BOM 双 bat 合格；boot_probe **桩集合=空**（守卫生效）；SHADOW_OK；webui.py **BOOT_OK（零补装）**；webui-bak 死于预期内 nicegui ValueError（已警告标注） |
+
+## 剩余（用户手动）
+
+1. 补装 zhipuai（命令见第 3 节，dry-run 已实证）→ 实例化冒烟 → 双击 `启动程序.bat` → 8086 探活。
+2. 按需启用 B 组（blivedm 本地 wheel / langchain 三包，命令见第 3 节）。
+3. 2 周并行观察期后：Miniconda3 归档 + api_old 处置裁决（TODOS）。
+
+
 # DX REVIEW（DX POLISH，/autoplan 2026-09-22）
 
 > 双声部：Codex 不可用（未认证），Claude 独立子代理声部 `[subagent-only]`。

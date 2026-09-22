@@ -39,6 +39,20 @@ except Exception:
     import traceback
     traceback.print_exc()
 
+# users.pth 遮蔽断言（永久项，/autoplan 2026-09-22 Eng T2）：
+# runtime312 的 site-packages/users.pth 注入 6 个 GPT-SoVITS 路径，
+# 关键本地模块必须解析到本项目，否则存在模块遮蔽。
+try:
+    import utils
+    _utils_dir = os.path.dirname(os.path.abspath(utils.__file__))
+    assert _utils_dir == os.path.join(ROOT, "utils"), f"utils 被遮蔽: {utils.__file__}"
+    print("SHADOW_OK: utils 解析至本项目")
+except AssertionError as e:
+    print(f"SHADOW_FAIL: {e}")
+except Exception:
+    import traceback
+    traceback.print_exc()
+
 try:
     import importlib.util
     spec = importlib.util.spec_from_file_location(

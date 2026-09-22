@@ -1,4 +1,9 @@
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    GENAI_AVAILABLE = False  # 缺包守卫：启动不阻断，通道使用时报错（/autoplan 2026-09-22 UC-2）
 # import vertexai
 # from vertexai.generative_models import GenerativeModel, Part
 import os
@@ -6,8 +11,13 @@ import traceback
 
 from utils.my_log import logger
 
+if not GENAI_AVAILABLE:
+    logger.warning("google-generativeai 未安装，Gemini 通道降级为不可用（启动不受影响）；处置选项见 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节")
+
 class Gemini:
     def __init__(self, data):
+        if not GENAI_AVAILABLE:
+            raise RuntimeError("google-generativeai 未安装，Gemini 通道不可用——处置选项（含禁止裸装说明）见 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节")
         try:
             self.config_data = data
 

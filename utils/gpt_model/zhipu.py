@@ -1,10 +1,18 @@
-import zhipuai
+try:
+    import zhipuai
+    ZHIPUAI_AVAILABLE = True
+except ImportError:
+    zhipuai = None
+    ZHIPUAI_AVAILABLE = False  # 缺包守卫：启动不阻断，通道使用时报错（/autoplan 2026-09-22 UC-2）
 import traceback
 import re
 import json
 
 import time
-import jwt  # 确保这是 PyJWT 库
+try:
+    import jwt  # 确保这是 PyJWT 库
+except ImportError:
+    jwt = None
 import requests
 from urllib.parse import urljoin
 from packaging import version
@@ -12,8 +20,13 @@ from packaging import version
 from utils.common import Common
 from utils.my_log import logger
 
+if not ZHIPUAI_AVAILABLE:
+    logger.warning("zhipuai 未安装，智谱AI 通道降级为不可用（启动不受影响）；补装见 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节")
+
 class Zhipu:
     def __init__(self, data):
+        if not ZHIPUAI_AVAILABLE:
+            raise RuntimeError("zhipuai 未安装，智谱AI 通道不可用——请按 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节补装")
         self.common = Common()
 
         self.config_data = data
