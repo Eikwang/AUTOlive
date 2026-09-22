@@ -2507,16 +2507,6 @@ def goto_func_page():
                         "cam_screenshot_delay": (input_image_recognition_cam_screenshot_delay, 'float'),
                         "loop_cam_screenshot_enable": (switch_image_recognition_loop_cam_screenshot_enable, 'bool'),
                         "loop_cam_screenshot_delay": (input_image_recognition_loop_cam_screenshot_delay, 'int'),
-                        "gemini": {
-                            "model": (select_image_recognition_gemini_model, 'str'),
-                            "api_key": (input_image_recognition_gemini_api_key, 'str'),
-                            "http_proxy": (input_image_recognition_gemini_http_proxy, 'str'),
-                            "https_proxy": (input_image_recognition_gemini_https_proxy, 'str'),
-                        },
-                        "zhipu": {
-                            "model": (select_image_recognition_zhipu_model, 'str'),
-                            "api_key": (input_image_recognition_zhipu_api_key, 'str'),
-                        },
                         "blip": {
                             "model": (select_image_recognition_blip_model, 'str'),
                         },
@@ -4527,35 +4517,7 @@ def goto_func_page():
 
                         prompt = input_image_recognition_prompt.value
 
-                        if select_image_recognition_model.value == "gemini":
-                            from utils.gpt_model.gemini import Gemini
-
-                            gemini = Gemini(config.get("image_recognition", "gemini"))
-
-                            resp_content = gemini.get_resp_with_img(prompt, screenshot_path)
-
-                            data = {
-                                "type": "reread",
-                                "username": config.get("talk", "username"),
-                                "content": resp_content,
-                                "insert_index": -1
-                            }
-                        elif select_image_recognition_model.value == "zhipu":
-                            from utils.gpt_model.zhipu import Zhipu
-
-                            zhipu = Zhipu(config.get("image_recognition", "zhipu"))
-
-                            resp_content = zhipu.get_resp_with_img(prompt, screenshot_path)
-
-                            data = {
-                                "type": "reread",
-                                "data": {
-                                    "username": config.get("talk", "username"),
-                                    "content": resp_content,
-                                    "insert_index": -1
-                                }
-                            }
-                        elif select_image_recognition_model.value == "blip":
+                        if select_image_recognition_model.value == "blip":
                             from utils.gpt_model.blip import Blip
 
                             blip = Blip(config.get("image_recognition", "blip"))
@@ -4648,8 +4610,8 @@ def goto_func_page():
                 with ui.row():
                     button_image_recognition_enable = ui.switch('启用', value=config.get("image_recognition", "enable")).style(switch_internal_css)
                     select_image_recognition_model = ui.select(
-                        label='模型', 
-                        options={'gemini': 'gemini', 'zhipu': '智谱AI', 'blip': 'blip'}, 
+                        label='模型',
+                        options={'blip': 'blip'},
                         value=config.get("image_recognition", "model")
                     ).style("width:150px")
                     
@@ -4698,28 +4660,6 @@ def goto_func_page():
                         switch_image_recognition_loop_cam_screenshot_enable = ui.switch('循环截图并发送', value=config.get("image_recognition", "loop_cam_screenshot_enable")).style(switch_internal_css)
                         input_image_recognition_loop_cam_screenshot_delay = ui.input(label='N秒后自动截图', value=config.get("image_recognition", "loop_cam_screenshot_delay"), placeholder='自动截图延迟，可以自动触发图像识别').style("width:100px")
                         
-            with ui.card().style(card_css):
-                ui.label("Gemini")
-                with ui.row():
-                    select_image_recognition_gemini_model = ui.select(
-                        label='模型', 
-                        options={'gemini-pro-vision': 'gemini-pro-vision'}, 
-                        value=config.get("image_recognition", "gemini", "model")
-                    ).style("width:150px")
-                    input_image_recognition_gemini_api_key = ui.input(label='API Key', value=config.get("image_recognition", "gemini", "api_key"), placeholder='Gemini API KEY')
-                    input_image_recognition_gemini_http_proxy = ui.input(label='HTTP代理地址', value=config.get("image_recognition", "gemini", "http_proxy"), placeholder='http代理地址，需要魔法才能使用，所以需要配置此项。').style("width:200px;")
-                    input_image_recognition_gemini_https_proxy = ui.input(label='HTTPS代理地址', value=config.get("image_recognition", "gemini", "https_proxy"), placeholder='https代理地址，需要魔法才能使用，所以需要配置此项。').style("width:200px;")
-
-            with ui.card().style(card_css):
-                ui.label("智谱AI")
-                with ui.row():
-                    select_image_recognition_zhipu_model = ui.select(
-                        label='模型', 
-                        options={'glm-4v': 'glm-4v'}, 
-                        value=config.get("image_recognition", "zhipu", "model")
-                    ).style("width:150px")
-                    input_image_recognition_zhipu_api_key = ui.input(label='API Key', value=config.get("image_recognition", "zhipu", "api_key"), placeholder='智谱 API KEY')
-            
             with ui.card().style(card_css):
                 ui.label("Blip")
                 with ui.row():

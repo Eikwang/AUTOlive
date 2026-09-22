@@ -11,14 +11,12 @@ from utils.my_log import logger
 
 from utils.gpt_model.custom_llm import Custom_LLM
 
-# 视觉模型
-from utils.gpt_model.zhipu import Zhipu
-from utils.gpt_model.gemini import Gemini
+# 视觉模型（gemini/zhipu 通道已弃用并移除，/autoplan 2026-09-22 用户裁决）
 from utils.gpt_model.blip import Blip
 
 class GPT_Model:
     openai = None
-    
+
     def set_model_config(self, model_name, config):
         model_classes = {
             "custom_llm": Custom_LLM,
@@ -29,10 +27,13 @@ class GPT_Model:
 
     def set_vision_model_config(self, model_name, config):
         model_classes = {
-            "gemini": Gemini,
-            "zhipu": Zhipu,
             "blip": Blip,
         }
+
+        if model_name not in model_classes:
+            # 旧配置可能残留已弃用通道（gemini/zhipu），回退到 blip 并告警，避免 KeyError 中断功能链路
+            logger.warning(f"视觉模型通道 '{model_name}' 已弃用或不存在，已回退到 blip（配置项 image_recognition.model 建议更新为 blip）")
+            model_name = "blip"
 
         setattr(self, model_name, model_classes[model_name](config))
 

@@ -545,6 +545,31 @@ Synthesized from this review's findings. Each task derives from a specific findi
 
 # 执行记录（2026-09-22，最终批准门裁决后开工）
 
+## 第二轮：双击失败修复 + 弃用链清理（用户实测反馈驱动）
+
+**用户报告**：两个脚本双击启动均失败；并澄清 zhipu/gemini 通道在新版系统已弃用，要求删除残留。
+
+**失败根因（实测复现）**：bat 文件被编辑器以 GBK 重存（原计划规定 UTF-8 无 BOM），而 bat 内
+`chcp 65001` 使 cmd 将后续行按 UTF-8 解码——GBK 字节错位导致 cmd 行缓冲偏移碎裂，
+全部命令"不是内部或外部命令"，python 从未执行。**教训**：模板把编码纪律押在"文件永不被重存"上不成立；
+中文 Windows 的 bat 应直接使用原生 GBK 编码，与编辑器行为天然兼容。
+
+**修复与清理**：
+
+| 步骤 | 结果 |
+|---|---|
+| 两个 bat 重写为 **GBK 编码 + 去掉 chcp 65001**（CRLF，加"勿改存 UTF-8"注释） | cmd 实测 0 碎裂；主 bat 真实拉起到 `NiceGUI ready`（修复前 10+ 碎裂命令） |
+| **删除弃用通道**（用户澄清 zhipu/gemini 已弃用） | 删 `utils/gpt_model/zhipu.py`、`gemini.py`；gpt.py 删导入+注册表项+加弃用回退保护（旧配置命中已弃用通道时告警并回退 blip） |
+| 前端 image_recognition.py | 删 Gemini/智谱 配置卡与 options；模型选择只留 blip |
+| webui-bak.py | 四处成套删除：gemini/zhipu 派发分支、UI 卡块、config 保存映射、options（防 NameError） |
+| config.json | `image_recognition.model: 'gemini' → 'blip'`（关键：不改此项前端 select 会在 nicegui 3.x 下同 webui-bak 一样当场 ValueError；gemini/zhipu 子键保留为用户数据） |
+| 验证 | 残留导入扫描=零（仅 .claude/worktrees 旧副本）；boot_probe BOOT_OK+SHADOW_OK；直跑起服 `GET / → 200` 零错误；cmd 实跑双 bat 0 碎裂（主 bat NiceGUI ready；旧版死于预期内 nicegui ValueError） |
+
+**第二轮门上裁决的处置更新**：UC-2 守卫方案被弃用链整体删除取代（通道不复存在，守卫对象消失）；
+zhipuai 补装清单作废（不再需要任何依赖补装）。UC-1 维持 B（带警告切换）。
+
+## 第一轮完成（2026-09-22 门上裁决后）
+
 ## 门上裁决（用户 2026-09-22）
 
 | 项 | 裁决 |

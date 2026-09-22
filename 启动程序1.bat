@@ -1,15 +1,15 @@
 @echo off
-rem AI-Vtuber æ—§ç‰ˆå•ä½“ç•Œé¢å…¥å£ï¼ˆwebui-bak.pyï¼Œnicegui 1.x æ—¶ä»£äº§ç‰©ï¼‰
+rem AI-Vtuber ¾É°æµ¥Ìå½çÃæÈë¿Ú£¨webui-bak.py£¬nicegui 1.x Ê±´ú²úÎï£©
 rem ============================================================
-rem âš ï¸âš ï¸âš ï¸  è­¦å‘Šï¼šæ­¤å…¥å£åœ¨ runtime312 ä¸Šå¾…é€‚é…ï¼ˆnicegui 3.x ä¸å…¼å®¹ï¼Œå®æµ‹å¿…å´©ï¼‰
-rem âš ï¸âš ï¸âš ï¸  æ—¥å¸¸å¯åŠ¨è¯·ç”¨ å¯åŠ¨ç¨‹åº.bat ï¼›å‹¿åœ¨ç›´æ’­ä¸­ä¾èµ–æœ¬è„šæœ¬
+rem ¾¯¸æ£º´ËÈë¿ÚÔÚ runtime312 ÉÏ´ıÊÊÅä£¨nicegui 3.x ²»¼æÈİ£¬Êµ²â±Ø±À£©
+rem ÈÕ³£Æô¶¯ÇëÓÃ Æô¶¯³ÌĞò.bat £»ÎğÔÚÖ±²¥ÖĞÒÀÀµ±¾½Å±¾
 rem ============================================================
-rem è‡ªåŠ¨åŒ–/æ— äººå€¼å®ˆåœºæ™¯å¯åˆ é™¤æœ«å°¾ cmd /kï¼ˆçª—å£ä¿æ´»ä»…ä¸ºåŒå‡»åœºæ™¯è®¾è®¡ï¼‰
-chcp 65001 >nul
+rem ×Ô¶¯»¯/ÎŞÈËÖµÊØ³¡¾°¿ÉÉ¾³ıÄ©Î² cmd /k£¨´°¿Ú±£»î½öÎªË«»÷³¡¾°Éè¼Æ£©
+rem ±¾ÎÄ¼şÎª ANSI/GBK ±àÂë£¨ÓëÖĞÎÄ Windows cmd Ô­ÉúÂëÒ³Ò»ÖÂ£©£¬ÇëÎğ¸Ä´æÎª UTF-8
 if not defined RT set "RT=D:\AI\EDTalk\runtime312"
 if not exist "%RT%\python.exe" (
-  echo [é¢„æ£€å¤±è´¥] æœªæ‰¾åˆ°è§£é‡Šå™¨: %RT%\python.exe
-  echo è¯·æ£€æŸ¥ D:\AI\EDTalk\runtime312 æ˜¯å¦å­˜åœ¨ï¼ˆEDTalk æŒªåŠ¨/é‡è£…ä¼šå¯¼è‡´æ­¤è·¯å¾„å¤±æ•ˆï¼‰
+  echo [Ô¤¼ìÊ§°Ü] Î´ÕÒµ½½âÊÍÆ÷: %RT%\python.exe
+  echo Çë¼ì²é D:\AI\EDTalk\runtime312 ÊÇ·ñ´æÔÚ£¨EDTalk Å²¶¯/ÖØ×°»áµ¼ÖÂ´ËÂ·¾¶Ê§Ğ§£©
   pause
   exit /b 1
 )
@@ -18,6 +18,6 @@ set PATH=%RT%;%RT%\Scripts;%RT%\Library\bin;%FFMPEG_PATH%;%PATH%
 SET KMP_DUPLICATE_LIB_OK=TRUE
 SET HF_ENDPOINT=https://hf-mirror.com
 cd /d %~dp0
-echo å¦‚å¯åŠ¨æŠ¥ ModuleNotFoundErrorï¼Œè¯·æŒ‰ specs/integration/runtime312å¯åŠ¨è„šæœ¬åˆ‡æ¢è®¡åˆ’.md ç¬¬ 2.3 èŠ‚æ¸…å•è¡¥è£…ä¾èµ–
+echo ÈçÆô¶¯±¨ ModuleNotFoundError£¬Çë°´ specs/integration/runtime312Æô¶¯½Å±¾ÇĞ»»¼Æ»®.md µÚ 2.3 ½ÚÇåµ¥²¹×°ÒÀÀµ
 "%RT%\python.exe" webui-bak.py
 cmd /k

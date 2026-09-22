@@ -35,7 +35,7 @@ def create_image_recognition_tab(
                 _auto_save(ui.switch('启用', value=get_nested_value(config, "image_recognition", "enable")).style(switch_internal_css), ("image_recognition", "enable"))
                 _auto_save(ui.select(
                     label='模型',
-                    options={'gemini': 'gemini', 'zhipu': '智谱AI', 'blip': 'blip'},
+                    options={'blip': 'blip'},
                     value=get_nested_value(config, "image_recognition", "model")
                 ).style("width:100%;"), ("image_recognition", "model"))
             _auto_save(ui.input(label='截图保存路径', value=get_nested_value(config, "image_recognition", "img_save_path"), placeholder='截图保存路径，支持绝对或相对路径').style("width:100%;"), ("image_recognition", "img_save_path"))
@@ -81,28 +81,6 @@ def create_image_recognition_tab(
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('循环截图并发送', value=get_nested_value(config, "image_recognition", "loop_cam_screenshot_enable")).style(switch_internal_css), ("image_recognition", "loop_cam_screenshot_enable"))
                     ui.button('截图并发送', color=button_internal_color).style(button_internal_css)
-
-    with ui.card().style(card_css):
-        ui.label("Gemini")
-        with ui.grid(columns=3):
-            ui.select(
-                label='模型',
-                options={'gemini-pro-vision': 'gemini-pro-vision'},
-                value=get_nested_value(config, "image_recognition", "gemini", "model")
-            ).style("width:100%;")
-            ui.input(label='API Key', value=get_nested_value(config, "image_recognition", "gemini", "api_key"), placeholder='Gemini API KEY').style("width:100%;")
-            ui.input(label='HTTP代理地址', value=get_nested_value(config, "image_recognition", "gemini", "http_proxy"), placeholder='http代理地址').style("width:100%;")
-            ui.input(label='HTTPS代理地址', value=get_nested_value(config, "image_recognition", "gemini", "https_proxy"), placeholder='https代理地址').style("width:100%;")
-
-    with ui.card().style(card_css):
-        ui.label("智谱AI")
-        with ui.grid(columns=3):
-            ui.select(
-                label='模型',
-                options={'glm-4v': 'glm-4v'},
-                value=get_nested_value(config, "image_recognition", "zhipu", "model")
-            ).style("width:100%;")
-            ui.input(label='API Key', value=get_nested_value(config, "image_recognition", "zhipu", "api_key"), placeholder='智谱 API KEY').style("width:100%;")
 
     with ui.card().style(card_css):
         ui.label("Blip")
