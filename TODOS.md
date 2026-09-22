@@ -7,6 +7,8 @@
 3. **EDTalk 目录硬耦合的结构性解耦**（P3, M）— AI-Vtuber 启动命脉指向 `D:\AI\EDTalk\runtime312`，EDTalk 挪动/重装即断；环境复制/软链/搬迁方案待评估。启动预检已缓解。
 4. **UC-1 裁决联动**（P2, —）— webui-bak.py 弃用/适配裁决后：若弃用→归档 webui-bak.py + 适配债销案；若适配→nicegui 3.x 逐处适配（与下方第 1 条 2026-09-02 项合并推进）。
 
+5. **utils/__init__.py 惰性化（PEP 562 `__getattr__`）**（P2, M）— 当前巨石顶层导入链（web_server→my_handle→gpt→zhipu/gemini）使可选 LLM 通道包成为所有入口的硬依赖，本次两类启动阻断皆源于此。守卫只是止血，惰性化才是根因修复；否则下一个可选通道包还会复现同类阻断。（Eng A1，2026-09-22）
+
 ## Deferred Items from /autoplan (2026-09-02) — 六项目统一环境整合
 
 1. **gradio/pydantic 版本 API 差异适配**（P1, M）— 统一环境里 gradio 只能装一个版本、AI-Vtuber 需从 pydantic 1.x 适配 2.x。待统一环境落地后作为"后期适配"第一优先。阻塞：统一环境补装完成。
