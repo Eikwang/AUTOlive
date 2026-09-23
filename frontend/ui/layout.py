@@ -1381,7 +1381,7 @@ class DrawerLayout:
         from frontend.ui.tabs import (
             common_config, llm, tts, svc, visual_body, copywriting,
             talk, image_recognition, integral, assistant_anchor,
-            translate, serial, data_analysis, web,
+            translate, serial, data_analysis,
             audio_play, web_captions_printer, log_config,
             filter_config, filter_forget, filter_dedup, filter_queue,
             blacklist, read_comment, thanks, schedule, idle_time_task,

@@ -53,7 +53,6 @@ from frontend.ui.tabs import (
     translate,
     serial,
     data_analysis,
-    web,
     audio_play,
     web_captions_printer,
     log_config,
@@ -641,12 +640,7 @@ class AIVtuberApp:
                 )
 
             # 页面配置标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['web']).style(self.navigation_tabs.tab_panel_css):
-                web.create_web_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
+            # 页面配置标签页（web.py 已删除——batch2 C-B1）
 
         # 创建底部控制按钮
         self._create_control_buttons()
