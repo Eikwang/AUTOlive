@@ -117,8 +117,12 @@ class AIVtuberApp:
         # 存储运行的子进程
         self.my_subprocesses = {}
 
-        # 暗夜模式
+        # 暗夜模式（任务7/DG-B8：单实例收敛 + 按配置初始化——先于任何 UI 构建
+        # 与 check_login，登录页不闪白；缺省 light）
         self.dark_mode = ui.dark_mode()
+        self.dark_mode.value = bool(
+            get_nested_value(self.config._config, "webui", "dark_mode", default=False)
+        )
 
         # 初始化Audio类（与原文件 webui-bak.py L141 一致）
         try:
@@ -481,7 +485,8 @@ class AIVtuberApp:
         self.drawer_layout = DrawerLayout(
             self.config._config,
             save_callback=self.config.save,
-            app=self
+            app=self,
+            dark_mode=self.dark_mode
         )
 
         # 创建左侧导航栏
@@ -892,7 +897,7 @@ class AIVtuberApp:
         # 获取WebUI配置
         webui_ip = get_nested_value(self.config._config, "webui", "ip", default="0.0.0.0")
         webui_port = get_nested_value(self.config._config, "webui", "port", default=8086)
-        webui_title = get_nested_value(self.config._config, "webui", "title", default="AI Vtuber")
+        webui_title = get_nested_value(self.config._config, "webui", "title", default="AUTO-LIVE")
 
         # 设置页面标题
         ui.page_title(webui_title)

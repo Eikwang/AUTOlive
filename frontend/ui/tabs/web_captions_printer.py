@@ -27,10 +27,8 @@ def create_web_captions_printer_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="web_captions_printer")
 
     # web字幕打印机（与原文件 webui-bak.py L3620-3632 一致）
-    if get_nested_value(config, "webui", "show_card", "common_config", "web_captions_printer"):
-        with ui.card().style(card_css):
-            ui.label('web字幕打印机')
-            with ui.grid(columns=3):
-                with ui.column().style("width:100%;"):
-                    _auto_save(ui.switch('启用', value=get_nested_value(config, "web_captions_printer", "enable")).style(switch_internal_css), ("web_captions_printer", "enable"))
-                    _auto_save(ui.input(label='API地址', value=get_nested_value(config, "web_captions_printer", "api_ip_port"), placeholder='web字幕打印机的API地址').style("width:100%;"), ("web_captions_printer", "api_ip_port"))
+    with ui.card().style(card_css):
+        ui.label('web字幕打印机')
+        with ui.grid(columns=3):
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.input(label='API地址', value=get_nested_value(config, "web_captions_printer", "api_ip_port"), placeholder='web字幕打印机的API地址').style("width:100%;"), ("web_captions_printer", "api_ip_port"))

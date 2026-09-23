@@ -504,7 +504,7 @@
         "trigger_key": "Q",
         "stop_trigger_key": "S",
         "volume_threshold": 800.0,
-        "silence_threshold": 15.0,
+        "silence_threshold": "5",
         "CHANNELS": 1,
         "RATE": 16000,
         "show_chat_log": true,
@@ -1328,7 +1328,7 @@
     "webui": {
         "ip": "127.0.0.1",
         "port": "8086",
-        "title": "AUTO Vtuber",
+        "title": "AUTO-LIVE",
         "auto_run": false,
         "local_dir_to_endpoint": {
             "enable": false,
@@ -1401,42 +1401,6 @@
                     "switch_internal": "",
                     "echart": "width:100%; height:600px;"
                 }
-            }
-        },
-        "show_card": {
-            "common_config": {
-                "read_comment": true,
-                "read_username": true,
-                "filter": true,
-                "thanks": true,
-                "local_qa": true,
-                "choose_song": true,
-                "sd": true,
-                "search_online": true,
-                "log": true,
-                "schedule": true,
-                "idle_time_task": true,
-                "trends_copywriting": true,
-                "database": true,
-                "play_audio": true,
-                "web_captions_printer": true,
-                "key_mapping": true,
-                "custom_cmd": true,
-                "trends_config": true,
-                "abnormal_alarm": true,
-                "coordination_program": true
-            },
-            "llm": {
-                "custom_llm": true
-            },
-            "tts": {
-                "gpt_sovits": true
-            },
-            "svc": {
-                "so_vits_svc": true
-            },
-            "visual_body": {
-                "metahuman_stream": true
             }
         },
         "drawer_mini": false,
@@ -1847,11 +1811,6 @@
                     {
                         "name": "配置模板",
                         "tab_key": "config_template",
-                        "enabled": true
-                    },
-                    {
-                        "name": "板块显示/隐藏",
-                        "tab_key": "show_card",
                         "enabled": true
                     },
                     {

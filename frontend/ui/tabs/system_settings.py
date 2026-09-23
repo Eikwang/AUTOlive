@@ -56,8 +56,6 @@ def create_local_dir_endpoint_tab(config, theme_config, set_config_callback):
             ui.button('增加配置组', color=button_internal_color).style(button_internal_css)
             ui.button('删除配置组', color=button_internal_color).style(button_internal_css)
         with ui.grid(columns=3):
-            _auto_save(ui.switch('启用', value=get_nested_value(config, "webui", "local_dir_to_endpoint", "enable")).style(switch_internal_css), ("webui", "local_dir_to_endpoint", "enable"))
-        with ui.grid(columns=3):
             webui_local_dir_to_endpoint_config_card = ui.card()
             for index, endpoint_config in enumerate(config.get("webui", {}).get("local_dir_to_endpoint", {}).get("config", [])):
                 with webui_local_dir_to_endpoint_config_card.style(card_css):
@@ -93,57 +91,12 @@ def create_config_template_tab(config, theme_config, set_config_callback):
 # ============================================================
 # 板块显示/隐藏
 # ============================================================
-def create_show_card_tab(config, theme_config, set_config_callback):
-    """创建板块显示/隐藏页面"""
-    card_css = theme_config.get("card", "")
-    switch_internal_css = theme_config.get("switch_internal", "")
 
-    with ui.card().style(card_css):
-        ui.label("板块显示/隐藏")
-
-        with ui.card().style(card_css):
-            ui.label("通用配置")
-            with ui.grid(columns=3):
-                for key, label in [
-                    ('read_comment', '念弹幕'), ('filter', '过滤'), ('thanks', '答谢'),
-                    ('local_qa', '本地问答'), ('choose_song', '点歌'), ('sd', 'Stable Diffusion'),
-                    ('log', '日志'), ('schedule', '定时任务'), ('idle_time_task', '闲时任务'),
-                    ('trends_copywriting', '动态文案'), ('database', '数据库'), ('play_audio', '音频播放'),
-                    ('web_captions_printer', 'web字幕打印机'), ('key_mapping', '按键/文案映射'),
-                    ('custom_cmd', '自定义命令'), ('trends_config', '动态配置'),
-                    ('abnormal_alarm', '异常报警'), ('coordination_program', '联动程序'),
-                ]:
-                    ui.switch(label, value=get_nested_value(config, "webui", "show_card", "common_config", key)).style(switch_internal_css)
-
-        with ui.card().style(card_css):
-            ui.label("大语言模型")
-            with ui.grid(columns=3):
-                ui.switch('自定义LLM', value=get_nested_value(config, "webui", "show_card", "llm", "custom_llm")).style(switch_internal_css)
-
-        with ui.card().style(card_css):
-            ui.label("文本转语音")
-            with ui.grid(columns=3):
-                ui.switch('gpt_sovits', value=get_nested_value(config, "webui", "show_card", "tts", "gpt_sovits")).style(switch_internal_css)
-
-        with ui.card().style(card_css):
-            ui.label("变声")
-            with ui.grid(columns=3):
-                ui.switch('SO-VITS-SVC', value=get_nested_value(config, "webui", "show_card", "svc", "so_vits_svc")).style(switch_internal_css)
-
-        with ui.card().style(card_css):
-            ui.label("虚拟身体")
-            with ui.grid(columns=3):
-                ui.switch('metahuman_stream', value=get_nested_value(config, "webui", "show_card", "visual_body", "metahuman_stream")).style(switch_internal_css)
-
-
-# ============================================================
-# 账号管理
-# ============================================================
 def create_account_manage_tab(config, theme_config, set_config_callback):
     """创建账号管理页面"""
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
-    _auto_save = _get_auto_save(config, set_config_callback, tab_key="config_template")
+    _auto_save = _get_auto_save(config, set_config_callback, tab_key="account_manage")
 
     with ui.card().style(card_css):
         ui.label("账号管理")
@@ -161,12 +114,10 @@ def create_trends_config_tab(config, theme_config, set_config_callback):
     """创建动态配置页面"""
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
-    _auto_save = _get_auto_save(config, set_config_callback, tab_key="show_card")
+    _auto_save = _get_auto_save(config, set_config_callback, tab_key="trends_config")
 
     with ui.card().style(card_css):
         ui.label('动态配置')
-        with ui.grid(columns=3):
-            _auto_save(ui.switch('启用', value=get_nested_value(config, "trends_config", "enable")).style(switch_internal_css), ("trends_config", "enable"))
         for index, trends_config_path in enumerate(config.get("trends_config", {}).get("path", [])):
             with ui.grid(columns=3):
                 ui.input(label="在线人数范围", value=trends_config_path.get("online_num", "0-999999999"), placeholder='在线人数范围').style("width:100%;")
@@ -180,7 +131,7 @@ def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
     """创建异常报警页面"""
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
-    _auto_save = _get_auto_save(config, set_config_callback, tab_key="account_manage")
+    _auto_save = _get_auto_save(config, set_config_callback, tab_key="abnormal_alarm")
 
     with ui.card().style(card_css):
         ui.label('异常报警')

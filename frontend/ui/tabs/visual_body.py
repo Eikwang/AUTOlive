@@ -30,21 +30,20 @@ def create_visual_body_tab(
     card_css = theme_config.get("card", "")
 
     # metahuman_stream配置
-    if get_nested_value(config, "webui", "show_card", "visual_body", "metahuman_stream"):
-        with ui.card().style(card_css):
-            ui.label("metahuman_stream")
-            with ui.grid(columns=3):
-                FormField.create_select(
-                    label='类型',
-                    options={'ernerf': 'ernerf', 'musetalk': 'musetalk', 'wav2lip': 'wav2lip'},
-                    value=get_nested_value(config, "metahuman_stream", "type"),
-                    on_change=lambda e: set_config_callback("metahuman_stream", "type", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='API地址',
-                    value=get_nested_value(config, "metahuman_stream", "api_ip_port"),
-                    placeholder='metahuman_stream应用启动API后，监听的ip和端口',
-                    on_change=lambda e: set_config_callback("metahuman_stream", "api_ip_port", e.value),
-                    style="width:100%;"
-                )
+    with ui.card().style(card_css):
+        ui.label("metahuman_stream")
+        with ui.grid(columns=3):
+            FormField.create_select(
+                label='类型',
+                options={'ernerf': 'ernerf', 'musetalk': 'musetalk', 'wav2lip': 'wav2lip'},
+                value=get_nested_value(config, "metahuman_stream", "type"),
+                on_change=lambda e: set_config_callback("metahuman_stream", "type", e.value),
+                style="width:100%;"
+            )
+            FormField.create_input(
+                label='API地址',
+                value=get_nested_value(config, "metahuman_stream", "api_ip_port"),
+                placeholder='metahuman_stream应用启动API后，监听的ip和端口',
+                on_change=lambda e: set_config_callback("metahuman_stream", "api_ip_port", e.value),
+                style="width:100%;"
+            )

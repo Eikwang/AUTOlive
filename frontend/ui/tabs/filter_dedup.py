@@ -25,12 +25,10 @@ def create_filter_dedup_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="filter_dedup")
 
-    if get_nested_value(config, "webui", "show_card", "common_config", "filter"):
-        with ui.card().style(card_css):
-            with ui.expansion('限定时间段内数据重复丢弃', icon="settings", value=True).classes('w-full'):
-                with ui.grid(columns=3):
-                    with ui.column().style("width:100%;"):
-                        _auto_save(ui.switch('启用', value=get_nested_value(config, "filter", "limited_time_deduplication", "enable")).style(switch_internal_css), keys=("filter", "limited_time_deduplication", "enable"))
-                        _auto_save(ui.input(label='弹幕检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "comment"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "comment"))
-                    _auto_save(ui.input(label='礼物检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "gift"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "gift"))
-                    _auto_save(ui.input(label='入场检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "entrance"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "entrance"))
+    with ui.card().style(card_css):
+        with ui.expansion('限定时间段内数据重复丢弃', icon="settings", value=True).classes('w-full'):
+            with ui.grid(columns=3):
+                with ui.column().style("width:100%;"):
+                    _auto_save(ui.input(label='弹幕检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "comment"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "comment"))
+                _auto_save(ui.input(label='礼物检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "gift"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "gift"))
+                _auto_save(ui.input(label='入场检测周期', value=get_nested_value(config, "filter", "limited_time_deduplication", "entrance"), placeholder='在这个周期时间（秒）内，重复的数据将被丢弃').style("width:100%;").tooltip('在这个周期时间（秒）内，重复的数据将被丢弃'), keys=("filter", "limited_time_deduplication", "entrance"))

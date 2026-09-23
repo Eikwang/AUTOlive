@@ -8,6 +8,7 @@ import asyncio
 from nicegui import ui
 from typing import Dict, Any, Optional
 
+from frontend.config.enable_paths import ENABLE_PATHS
 from utils.my_log import logger
 
 
@@ -289,7 +290,7 @@ class DrawerLayout:
         """
         ui.add_head_html(f"<style>{css}</style>")
 
-    def __init__(self, config: Dict[str, Any], save_callback=None, app=None):
+    def __init__(self, config: Dict[str, Any], save_callback=None, app=None, dark_mode=None):
         """
         初始化 Drawer 布局
 
@@ -298,10 +299,13 @@ class DrawerLayout:
             save_callback: 保存配置的回调函数
             app: AIVtuberApp 实例（Optional，E1：None 时启停按钮降级为禁用态，
                  兼容测试构造点；生产装配处传入 self）
+            dark_mode: 主进程的单例 ui.dark_mode() 实例（E-F4：禁再 new，
+                 None 时 toggle_theme 内惰性创建兜底）
         """
         self.config = config
         self.save_callback = save_callback
         self.app = app
+        self.dark_mode = dark_mode
         self.tabs = {}
         self.tab_panels = {}
         self.drawer = None
@@ -309,7 +313,7 @@ class DrawerLayout:
         self.function_list = None
         self.config_page = None
         self.drawer_mini = config.get("webui", {}).get("drawer_mini", False)
-        self.dark_mode = None
+        # self.dark_mode 已在签名块按注入实例赋值（E-F4 单实例，禁覆盖为 None）
         self.current_group = None
         self.current_function = None  # 当前选中的功能名称
         self.function_list_container = None
@@ -333,6 +337,9 @@ class DrawerLayout:
         self.start_button = None
         self.stop_button = None
         self.restart_button = None
+        # 任务6/DG-B1：配置页关闭态状态条引用（实时同步用）
+        self.config_status_label = None
+        self._current_page_enable_path = None
 
         # 注入全局样式
         self.inject_global_styles()
@@ -373,36 +380,49 @@ class DrawerLayout:
         if "webui" not in self.config:
             self.config["webui"] = {}
         self.config["webui"]["drawer_mini"] = self.drawer_mini
-        # 保存配置到文件
-        self.save_config()
+        # 保存配置到文件（E-F1：save_config 已透传异常，此处兜底可见反馈）
+        try:
+            self.save_config()
+        except Exception as e:
+            logger.error(f"折叠状态保存失败: {e}")
+            ui.notify(position="top", type="negative", message="折叠状态保存失败")
 
     def get_drawer_width(self) -> str:
         """获取导航栏宽度"""
         return '60px' if self.drawer_mini else '300px'
 
-    def save_config(self):
-        """保存配置到文件"""
+    def save_config(self) -> bool:
+        """保存配置到文件（E-F1：透传异常，不吞——调用方决定失败反馈）"""
         if self.save_callback:
-            try:
-                self.save_callback()
-            except Exception as e:
-                print(f"保存配置失败: {e}")
+            self.save_callback()
+            return True
+        return False
 
     def toggle_theme(self):
-        """切换深色/浅色主题"""
+        """切换深色/浅色主题（任务7/DG-B8：切换即写 webui.dark_mode 持久化）"""
         if self.dark_mode is None:
             self.dark_mode = ui.dark_mode()
 
         # NiceGUI 的 dark_mode 是一个布尔值
         self.dark_mode.value = not self.dark_mode.value
 
-        # 更新按钮文本
+        # 更新按钮文本与图标（随态切换）
         if hasattr(self, 'theme_button') and self.theme_button:
             self.theme_button.text = "深色模式" if self.dark_mode.value else "浅色模式"
+            self.theme_button.props(
+                f'icon={"light_mode" if self.dark_mode.value else "dark_mode"}'
+            )
 
-        # 保存主题偏好
-        new_theme = "dark" if self.dark_mode.value else "light"
-        self.save_theme_preference(new_theme)
+        # 任务7/DG-B8：持久化到 webui.dark_mode（写内存 + save_config 落盘；
+        # 勿触 legacy webui.theme 段）；失败可见（负反馈），主题本身已切换
+        try:
+            if "webui" not in self.config:
+                self.config["webui"] = {}
+            self.config["webui"]["dark_mode"] = bool(self.dark_mode.value)
+            self.save_config()
+        except Exception as e:
+            logger.error(f"主题偏好保存失败: {e}")
+            ui.notify(position="top", type="negative", message="主题保存失败，重启后将恢复原主题")
 
         # 显示切换通知
         ui.notify(
@@ -411,14 +431,8 @@ class DrawerLayout:
             message=f"已切换到{'深色' if self.dark_mode.value else '浅色'}模式"
         )
 
-    def save_theme_preference(self, theme: str):
-        """保存主题偏好"""
-        # 简化实现，只保存 light 或 dark
-        pass
-
-    def load_theme_preference(self) -> str:
-        """加载主题偏好"""
-        return "dark" if self.dark_mode and self.dark_mode.value else "light"
+    # save_theme_preference/load_theme_preference 已删除（任务7：持久化内联进
+    # toggle_theme 写 webui.dark_mode；旧实现为 pass 空壳）
 
 
     # ============ 系统启停控制（任务1：接回 AIVtuberApp 函数链）============
@@ -705,9 +719,11 @@ class DrawerLayout:
                 align-items: center;
                 background: var(--color-primary);
             '''):
-                ui.label("AI Vtuber").style('''
-                    font-size: var(--font-size-card-title);
-                    font-weight: var(--font-weight-title);
+                ui.label("AUTO-LIVE").style('''
+                    font-size: var(--font-size-banner);
+                    font-weight: var(--font-weight-heavy);
+                    letter-spacing: 0.12em;
+                    text-transform: uppercase;
                     color: var(--text-on-primary);
                 ''')
 
@@ -1105,13 +1121,12 @@ class DrawerLayout:
                 # 渲染功能列表
                 self._render_function_list(group_name, functions)
 
-        # 默认显示第一个功能的配置页面
+        # 默认显示第一个功能的配置页面（DG-B9：拦截移除——关闭的功能同样可达）
         if functions:
             first_func = functions[0]
-            if first_func.get("enabled", True):
-                self.current_function = first_func["name"]
-                self._render_function_list(group_name, functions)
-                self.show_config_page(first_func["name"])
+            self.current_function = first_func["name"]
+            self._render_function_list(group_name, functions)
+            self.show_config_page(first_func["name"])
 
     def _render_function_list(self, group_name: str, functions: list, filter_keyword: str = ""):
         """渲染功能列表 - 单列列表布局"""
@@ -1144,15 +1159,13 @@ class DrawerLayout:
 
             # 渲染功能列表项
             for idx, func in enumerate(filtered_functions):
-                # 存储功能信息
+                # 存储功能信息（任务6：enabled 随迁移退役，仅存 tab_key）
                 self.function_items[func["name"]] = {
-                    "enabled": func.get("enabled", True),
                     "tab_key": func.get("tab_key", "")
                 }
 
                 # 功能列表项
                 func_name = func["name"]
-                is_enabled = func.get("enabled", True)
                 is_selected = (self.current_function == func_name)
 
                 # 选中状态样式
@@ -1188,7 +1201,8 @@ class DrawerLayout:
                     # 避免开关点击误触发行选中（保护 toggle_function 语义）。
                     list_item.on('click', lambda e, name=func_name: self._on_function_click(name))
 
-                    # 第一行：功能名称和启用开关
+                    # 第一行：功能名称和启用开关（任务6：仅"有启用"功能渲染开关，
+                    # 直绑业务路径；无启用功能不渲染——D-B1）
                     with ui.row().style('''
                         width: 100%;
                         align-items: center;
@@ -1203,13 +1217,16 @@ class DrawerLayout:
                             transition: all var(--transition-fast);
                         ''')
 
-                        # 启用开关（stop 冒泡：点击开关不触发行选中）
-                        ui.switch(
-                            value=is_enabled,
-                            on_change=lambda e, name=func_name: self.toggle_function(name, e.value)
-                        ).style('transform: scale(0.7);').on(
-                            'click', js_handler='(e) => e.stopPropagation()'
-                        )
+                        # 启用开关（D-B1/E-B2/DG-B7：绑业务路径，初值逐字一致，
+                        # toast 替换式，aria-label，scale 0.85；stop 冒泡保留）
+                        enable_path = ENABLE_PATHS.get(func.get("tab_key", ""))
+                        if enable_path:
+                            ui.switch(
+                                value=bool(get_nested_value(self.config, *enable_path)),
+                                on_change=lambda e, name=func_name, path=enable_path: self._on_enable_switch(name, path, e)
+                            ).style('transform: scale(0.85);').props(
+                                f'aria-label={func_name}'
+                            ).on('click', js_handler='(e) => e.stopPropagation()')
 
                     # 第二行：功能描述（可选）
                     if func.get("description"):
@@ -1221,17 +1238,6 @@ class DrawerLayout:
 
     def _on_function_click(self, function_name: str):
         """点击功能项时的处理"""
-        # 检查功能是否启用
-        if function_name in self.function_items:
-            func_info = self.function_items[function_name]
-            if not func_info.get("enabled", True):
-                ui.notify(
-                    position="top",
-                    type="warning",
-                    message=f"功能 {function_name} 已禁用"
-                )
-                return
-
         # 设置当前选中的功能
         self.current_function = function_name
 
@@ -1248,45 +1254,32 @@ class DrawerLayout:
         functions = self.get_group_functions(group_name)
         self._render_function_list(group_name, functions, keyword)
 
-    def toggle_function(self, function_name: str, enabled: bool):
-        """切换功能启用/禁用状态"""
-        # 更新 function_items
-        if function_name in self.function_items:
-            self.function_items[function_name]["enabled"] = enabled
+    def _on_enable_switch(self, func_name: str, path: tuple, e):
+        """二级菜单启用开关（任务6/D-B1）：写业务路径，失败双回滚（F1/F2）。
 
-        # 更新配置
-        function_groups = self.config.get("webui", {}).get("function_groups", [])
-        for group in function_groups:
-            for func in group.get("functions", []):
-                if func["name"] == function_name:
-                    func["enabled"] = enabled
-                    # 显示状态切换通知
-                    ui.notify(
-                        position="top",
-                        type="info",
-                        message=f"功能 {function_name} 已{'启用' if enabled else '禁用'}"
-                    )
-                    return
+        幂等护栏：e.value == config 当前值时直接返回——回滚赋值会再触发本
+        处理器，此时两者相等，自然终止，无循环无重复 toast。
+        """
+        current = get_nested_value(self.config, *path)
+        if bool(e.value) == bool(current):
+            return
+
+        set_cb = self._create_set_config_callback()
+        ok = set_cb(*path, value=bool(e.value), _notify=False)
+        if ok:
+            ui.notify(position="top", type="positive",
+                      message=f"已{'开启' if e.value else '关闭'} {func_name}")
+            # DG-B1：当前配置页状态条实时同步
+            if (self.config_status_label is not None
+                    and self._current_page_enable_path == path):
+                self.config_status_label.set_visibility(not bool(e.value))
+        else:
+            # UI 回滚（内存字典已由 set_config 恢复旧值）；回滚赋值若再触发
+            # 本处理器，命中幂等护栏自然返回
+            e.sender.value = bool(current)
 
     def show_config_page(self, function_name: str):
         """显示配置页面"""
-        # 检查功能是否启用
-        if function_name not in self.function_items:
-            return
-
-        func_info = self.function_items[function_name]
-        if not func_info.get("enabled", True):
-            # 功能禁用，不显示配置页面
-            if self.config_page is not None:
-                self.config_page.clear()
-                with self.config_page:
-                    ui.label("功能已禁用").style('''
-                        text-align: center;
-                        color: var(--text-hint);
-                        padding: 40px;
-                        font-size: var(--font-size-card-title);
-                    ''')
-            return
 
         # 直接渲染配置页面
         self.render_config_page(function_name)
@@ -1349,6 +1342,28 @@ class DrawerLayout:
                         font-weight: var(--font-weight-title);
                         color: var(--text-title);
                     ''')
+
+                # DG-B1 关闭态状态条（仅"有启用开关"的功能渲染；实时同步引用
+                # self.config_status_label，由 _on_enable_switch 定点更新）
+                enable_path = ENABLE_PATHS.get(tab_key)
+                self._current_page_enable_path = enable_path
+                self.config_status_label = None
+                if enable_path:
+                    is_on = bool(get_nested_value(self.config, *enable_path))
+                    with ui.row().style('''
+                        width: 100%;
+                        padding: 8px 20px;
+                        align-items: center;
+                        gap: 8px;
+                        background: var(--bg-page);
+                        border-bottom: 1px solid var(--divider-color);
+                    ''') as status_row:
+                        ui.icon('info').style(
+                            'font-size: 16px; color: var(--color-warning);')
+                        self.config_status_label = ui.label(
+                            "该功能当前已关闭（左侧列表开关），参数修改保存但暂不生效"
+                        ).style('font-size: var(--font-size-small); color: var(--color-warning);')
+                    status_row.set_visibility(not is_on)
 
                 # 内容区域
                 with ui.column().classes('config-content').style('''
@@ -1427,7 +1442,6 @@ class DrawerLayout:
             'webui_config': lambda: system_settings.create_webui_config_tab(self.config, theme_config, set_cb),
             'local_dir_endpoint': lambda: system_settings.create_local_dir_endpoint_tab(self.config, theme_config, set_cb),
             'config_template': lambda: system_settings.create_config_template_tab(self.config, theme_config, set_cb),
-            'show_card': lambda: system_settings.create_show_card_tab(self.config, theme_config, set_cb),
             'account_manage': lambda: system_settings.create_account_manage_tab(self.config, theme_config, set_cb),
             'trends_config': lambda: system_settings.create_trends_config_tab(self.config, theme_config, set_cb),
             'abnormal_alarm': lambda: system_settings.create_abnormal_alarm_tab(self.config, theme_config, set_cb),
@@ -1459,25 +1473,36 @@ class DrawerLayout:
 
     def _create_set_config_callback(self):
         """创建配置回调函数"""
-        def set_config(*keys, value):
-            """设置配置值"""
-            # 更新配置字典
+        def set_config(*keys, value, _notify=True):
+            """设置配置值并落盘。
+
+            E-F1/F6：save 失败时回滚内存字典旧值并返回 False（异常不再吞掉）；
+            成功时默认弹「配置已保存」，开关类调用方传 _notify=False 自定义文案。
+            """
             config = self.config
             for key in keys[:-1]:
                 if key not in config:
                     config[key] = {}
                 config = config[key]
+
+            old_value = config.get(keys[-1])
             config[keys[-1]] = value
+            try:
+                self.save_config()
+            except Exception as e:
+                # 双回滚之一：内存字典恢复旧值（UI 回滚由调用方负责）
+                config[keys[-1]] = old_value
+                logger.error(f"配置保存失败 ({'->'.join(keys)}): {e}")
+                ui.notify(position="top", type="negative", message="配置保存失败，请查看日志")
+                return False
 
-            # 保存配置到文件
-            self.save_config()
-
-            # 显示保存成功通知
-            ui.notify(
-                position="top",
-                type="positive",
-                message="配置已保存"
-            )
+            if _notify:
+                ui.notify(
+                    position="top",
+                    type="positive",
+                    message="配置已保存"
+                )
+            return True
 
         return set_config
 

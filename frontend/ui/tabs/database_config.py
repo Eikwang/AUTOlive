@@ -27,12 +27,11 @@ def create_database_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="database")
 
     # 数据库（与原文件 webui-bak.py L3652-3659 一致）
-    if get_nested_value(config, "webui", "show_card", "common_config", "database"):
-        with ui.card().style(card_css):
-            ui.label('数据库')
-            with ui.grid(columns=3):
-                with ui.column().style("width:100%;"):
-                    _auto_save(ui.switch('弹幕日志', value=get_nested_value(config, "database", "comment_enable")).style(switch_internal_css), ("database", "comment_enable"))
-                    _auto_save(ui.switch('入场日志', value=get_nested_value(config, "database", "entrance_enable")).style(switch_internal_css), ("database", "entrance_enable"))
-                    _auto_save(ui.switch('礼物日志', value=get_nested_value(config, "database", "gift_enable")).style(switch_internal_css), ("database", "gift_enable"))
-                _auto_save(ui.input(label='数据库路径', value=get_nested_value(config, "database", "path"), placeholder='数据库文件存储路径').style("width:100%;"), ("database", "path"))
+    with ui.card().style(card_css):
+        ui.label('数据库')
+        with ui.grid(columns=3):
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.switch('弹幕日志', value=get_nested_value(config, "database", "comment_enable")).style(switch_internal_css), ("database", "comment_enable"))
+                _auto_save(ui.switch('入场日志', value=get_nested_value(config, "database", "entrance_enable")).style(switch_internal_css), ("database", "entrance_enable"))
+                _auto_save(ui.switch('礼物日志', value=get_nested_value(config, "database", "gift_enable")).style(switch_internal_css), ("database", "gift_enable"))
+            _auto_save(ui.input(label='数据库路径', value=get_nested_value(config, "database", "path"), placeholder='数据库文件存储路径').style("width:100%;"), ("database", "path"))

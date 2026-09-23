@@ -26,41 +26,39 @@ def create_read_comment_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="read_comment")
 
-    if get_nested_value(config, "webui", "show_card", "common_config", "read_comment"):
-        with ui.card().style(card_css):
-            ui.label('念弹幕')
-            with ui.grid(columns=3):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "read_comment", "enable")).style(switch_internal_css), keys=("read_comment", "enable"))
-                with ui.column().style("width:100%;"):
-                    _auto_save(ui.switch('念用户名', value=get_nested_value(config, "read_comment", "read_username_enable")).style(switch_internal_css), keys=("read_comment", "read_username_enable"))
-                    _auto_save(ui.input(label='用户名最大长度', value=get_nested_value(config, "read_comment", "username_max_len"), placeholder='需要保留的用户名的最大长度，超出部分将被丢弃').style("width:100%;").tooltip('需要保留的用户名的最大长度，超出部分将被丢弃'), keys=("read_comment", "username_max_len"))
-                _auto_save(ui.switch('变声', value=get_nested_value(config, "read_comment", "voice_change")).style(switch_internal_css), keys=("read_comment", "voice_change"))
-            with ui.grid(columns=3):
-                _auto_save(ui.textarea(
-                    label='念用户名文案',
-                    placeholder='念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用',
-                    value=textarea_data_change(get_nested_value(config, "read_comment", "read_username_copywriting"))
-                ).style("width:100%;").tooltip('念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用'), keys=("read_comment", "read_username_copywriting"))
-            with ui.grid(columns=3):
-                with ui.column().style("width:100%;"):
-                    _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "read_comment", "periodic_trigger", "enable")).style(switch_internal_css), keys=("read_comment", "periodic_trigger", "enable"))
-                    _auto_save(ui.input(
-                        label='触发周期最小值',
-                        value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time_min"),
-                        placeholder='例如：5'
-                    ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能，周期时间从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "periodic_time_min"))
-                    _auto_save(ui.input(
-                        label='触发周期最大值',
-                        value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time_max"),
-                        placeholder='例如：10'
-                    ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能，周期时间从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "periodic_time_max"))
+    with ui.card().style(card_css):
+        ui.label('念弹幕')
+        with ui.grid(columns=3):
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.switch('念用户名', value=get_nested_value(config, "read_comment", "read_username_enable")).style(switch_internal_css), keys=("read_comment", "read_username_enable"))
+                _auto_save(ui.input(label='用户名最大长度', value=get_nested_value(config, "read_comment", "username_max_len"), placeholder='需要保留的用户名的最大长度，超出部分将被丢弃').style("width:100%;").tooltip('需要保留的用户名的最大长度，超出部分将被丢弃'), keys=("read_comment", "username_max_len"))
+            _auto_save(ui.switch('变声', value=get_nested_value(config, "read_comment", "voice_change")).style(switch_internal_css), keys=("read_comment", "voice_change"))
+        with ui.grid(columns=3):
+            _auto_save(ui.textarea(
+                label='念用户名文案',
+                placeholder='念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用',
+                value=textarea_data_change(get_nested_value(config, "read_comment", "read_username_copywriting"))
+            ).style("width:100%;").tooltip('念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用'), keys=("read_comment", "read_username_copywriting"))
+        with ui.grid(columns=3):
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "read_comment", "periodic_trigger", "enable")).style(switch_internal_css), keys=("read_comment", "periodic_trigger", "enable"))
                 _auto_save(ui.input(
-                    label='触发次数最小值',
-                    value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_min"),
-                    placeholder='例如：0'
-                ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_min"))
+                    label='触发周期最小值',
+                    value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time_min"),
+                    placeholder='例如：5'
+                ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能，周期时间从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "periodic_time_min"))
                 _auto_save(ui.input(
-                    label='触发次数最大值',
-                    value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_max"),
-                    placeholder='例如：1'
-                ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_max"))
+                    label='触发周期最大值',
+                    value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time_max"),
+                    placeholder='例如：10'
+                ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能，周期时间从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "periodic_time_max"))
+            _auto_save(ui.input(
+                label='触发次数最小值',
+                value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_min"),
+                placeholder='例如：0'
+            ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_min"))
+            _auto_save(ui.input(
+                label='触发次数最大值',
+                value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_max"),
+                placeholder='例如：1'
+            ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_max"))

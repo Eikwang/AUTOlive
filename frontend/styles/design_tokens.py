@@ -20,15 +20,17 @@ FONT_FAMILY = (
     '"Hiragino Sans GB", "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif'
 )
 
-FONT_SIZE_PAGE_TITLE = "20px"    # 三级页面标题（配置页面顶部）
+FONT_SIZE_PAGE_TITLE = "16px"    # 三级页面标题（D-B3 v2：与二级标题统一 16px，页级靠标题带背景区分）
 FONT_SIZE_CARD_TITLE = "16px"    # 卡片标题（配置分组）
-FONT_SIZE_SECTION_TITLE = "15px"  # 分组标题（功能列表头部）
+FONT_SIZE_SECTION_TITLE = "16px"  # 二级列表头标题（D-B3 v2：与三级页标题统一 16px）
 FONT_SIZE_BODY = "14px"          # 正文 / 列表项
 FONT_SIZE_FIELD_LABEL = "14px"   # 参数标题（表单字段 label，与正文同大小保证可读性）
 FONT_SIZE_SMALL = "12px"         # 辅助说明文字
 FONT_SIZE_TINY = "11px"          # 徽章等极小文字
+FONT_SIZE_BANNER = "20px"        # 导航栏品牌横幅（D-B2 v2：AUTO-LIVE）
 
 FONT_WEIGHT_TITLE = "600"
+FONT_WEIGHT_HEAVY = "800"        # 品牌横幅重字重（D-B2 v2：工业感全大写+宽字距）
 FONT_WEIGHT_EMPHASIS = "500"
 FONT_WEIGHT_NORMAL = "400"
 
@@ -184,9 +186,11 @@ def inject_design_tokens() -> str:
         --font-size-field-label: {FONT_SIZE_FIELD_LABEL};
         --font-size-small: {FONT_SIZE_SMALL};
         --font-size-tiny: {FONT_SIZE_TINY};
+        --font-size-banner: {FONT_SIZE_BANNER};
 
         /* 字重 */
         --font-weight-title: {FONT_WEIGHT_TITLE};
+        --font-weight-heavy: {FONT_WEIGHT_HEAVY};
         --font-weight-emphasis: {FONT_WEIGHT_EMPHASIS};
         --font-weight-normal: {FONT_WEIGHT_NORMAL};
 

@@ -53,8 +53,8 @@ class LoginForm:
             self.login_card = ui.card().style(self.login_card_css)
             
             with self.login_card:
-                self.label_login = ui.label('AI    Vtuber').style(
-                    "font-size: 30px;letter-spacing: 5px;color: #3b3838;"
+                self.label_login = ui.label('AUTO-LIVE').style(
+                    "font-size: 30px;letter-spacing: 5px;color: #3b3838;font-weight: 800;text-transform: uppercase;"
                 )
                 
                 self.username_input = ui.input(
