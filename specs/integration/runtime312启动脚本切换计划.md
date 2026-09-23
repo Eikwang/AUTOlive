@@ -1,6 +1,6 @@
-<!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Ikaros-521-AI-Vtuber\\main-autoplan-restore-20260922-165941.md" -->
+<!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Ikaros-521-AUTOlive\\main-autoplan-restore-20260922-165941.md" -->
 ## Implementation plan
-# AI-Vtuber 启动脚本切换 runtime312（Python 3.12）+ 依赖缺口清单
+# AUTOlive 启动脚本切换 runtime312（Python 3.12）+ 依赖缺口清单
 
 > 生成日期：2026-09-22 ｜ 任务来源：用户指令（/autoplan）
 > 目标：将 `启动程序.bat` / `启动程序1.bat` 从 Miniconda3（activate.bat 激活）切换为
@@ -11,9 +11,9 @@
 
 - 2026-09-02 已完成六项目统一环境整合（见 `specs/integration/统一环境依赖整合计划.md`）：
   runtime312 补装 ~130 包、冒烟 42/43、统一启动脚本建于 `D:\AI\start\`（并行期模式，旧 .bat 未动）。
-- 本次为用户明确指令：**直接修改 AI-Vtuber 自有的两个启动脚本**（不再走并行期新建模式），
+- 本次为用户明确指令：**直接修改 AUTOlive 自有的两个启动脚本**（不再走并行期新建模式），
   并产出依赖缺口清单。
-- 旧环境：`D:\AI\AI-Vtuber\Miniconda3`（Python 3.10.11）；新环境：`D:\AI\EDTalk\runtime312`
+- 旧环境：`D:\AI\AUTOlive\Miniconda3`（Python 3.10.11）；新环境：`D:\AI\EDTalk\runtime312`
   （Python 3.12.12，conda 环境但 `Scripts\activate.bat` 已不存在——实测验证，grep 无结果）。
 
 ## 2. 调查结果（关键事实，均已实测）
@@ -22,14 +22,14 @@
 
 runtime312 是 conda 环境（conda-meta 存在）但 **activate.bat 缺失**（本次实测确认）。
 可用启动模式 = 直接调用解释器 + PATH 前置，先例为 2026-09-02 的
-`D:\AI\start\start_aivtuber.bat`（42/43 冒烟使用同一模式）。
+`D:\AI\start\start_autolive.bat`（42/43 冒烟使用同一模式）。
 
 **完整可照抄模板**（DX 审查 F8/F9/F10 采纳：UTF-8 无 BOM 保存 + chcp 65001 防中文乱码、
 RT 可环境变量覆盖、报错现场带修复指引）：
 
 ```bat
 @echo off
-rem AI-Vtuber 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
+rem AUTOlive 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
 rem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）
 chcp 65001 >nul
 if not defined RT set "RT=D:\AI\EDTalk\runtime312"
@@ -99,7 +99,7 @@ cmd /k
 ### 2.4 环境附带发现（记录在案）
 
 - runtime312 的 `Lib\site-packages\users.pth` 硬编码注入 6 个 GPT-SoVITS 路径进所有进程
-  （潜在模块遮蔽风险；当前两入口未受影响，AI-Vtuber 自有目录在 sys.path 前列）。
+  （潜在模块遮蔽风险；当前两入口未受影响，AUTOlive 自有目录在 sys.path 前列）。
 - 基础栈健康（干净进程逐项验证）：torch 2.11.0+cu128、numpy 2.4.6、requests 2.34.2、
   urllib3 1.26.20、socketio、nicegui 3.16.0 全部 import OK。
 
@@ -116,17 +116,17 @@ cmd /k
 
    **A 组（启动阻断）**
    - zhipuai（已 dry-run 实证）：
-     `D:\AI\EDTalk\runtime312\python.exe -m pip install -c D:\AI\AI-Vtuber\specs\integration\install\constraints.txt zhipuai`
+     `D:\AI\EDTalk\runtime312\python.exe -m pip install -c D:\AI\AUTOlive\specs\integration\install\constraints.txt zhipuai`
    - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）
      ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。
 
    **B 组（功能级，按需启用）**
    - blivedm（bilibili2 弹幕）：**先归档为本地 wheel 再装**（项目既有惯例，见 install/wheels_sha256.txt；
      gitee 个人仓库存在改名/私有化风险，远程命令不可作长期交付物，Eng H1）：
-     `D:\AI\EDTalk\runtime312\python.exe -m pip download -d D:\AI\AI-Vtuber\specs\integration\install\wheels git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`
+     `D:\AI\EDTalk\runtime312\python.exe -m pip download -d D:\AI\AUTOlive\specs\integration\install\wheels git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`
      然后 `pip install -c <constraints> <本地wheel路径>`；哈希记入 wheels_sha256.txt。
    - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：
-     `D:\AI\EDTalk\runtime312\python.exe -m pip install -c D:\AI\AI-Vtuber\specs\integration\install\constraints.txt langchain-community langchain-classic langchain-text-splitters`
+     `D:\AI\EDTalk\runtime312\python.exe -m pip install -c D:\AI\AUTOlive\specs\integration\install\constraints.txt langchain-community langchain-classic langchain-text-splitters`
      （装后跑 import 冒烟验证 8 个旧路径；**是否在用：与 blivedm 同级不确定**——chat_with_file 无静态外部
      引用者，可能经动态派发调用或为死代码，装包前先确认引用点存在，Eng H2）
    - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。
@@ -141,7 +141,7 @@ cmd /k
    - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言固化为该脚本永久断言项**（users.pth 是共享
      环境文件，一次性检查无回归价值，Eng T2）；
    - bat 编码机械验证（BOM 会使 `@echo off` 首行报 `'∩╗┐@echo' 不是内部或外部命令`，Eng T3）：
-     `powershell -c "$b=[IO.File]::ReadAllBytes('D:\AI\AI-Vtuber\启动程序.bat')[0..2]; if(($b)-ceq(0xEF,0xBB,0xBF)){'有BOM-不合格'}else{'无BOM-合格'}"`;
+     `powershell -c "$b=[IO.File]::ReadAllBytes('D:\AI\AUTOlive\启动程序.bat')[0..2]; if(($b)-ceq(0xEF,0xBB,0xBF)){'有BOM-不合格'}else{'无BOM-合格'}"`;
    - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、
      在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；
      `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。
@@ -169,7 +169,7 @@ cmd /k
 
 | 子问题 | 已有方案 | 复用 |
 |---|---|---|
-| runtime312 无 activate.bat 的启动模式 | D:\AI\start\start_aivtuber.bat（PATH 前置） | 是（模板照抄） |
+| runtime312 无 activate.bat 的启动模式 | D:\AI\start\start_autolive.bat（PATH 前置） | 是（模板照抄） |
 | 安装保护机制 | specs/integration/install/constraints.txt | 是（清单附命令引用） |
 | 冒烟/探测方法 | install/smoke_test.py、boot_probe_iter.py（本次新增） | 是 |
 | 旧环境回滚 | git 跟踪的两个 .bat + Miniconda3 未动 | 是 |
@@ -229,7 +229,7 @@ cmd /k
 | # | 前提 | 评估 | 结论 |
 |---|---|---|---|
 | P1 | runtime312 无 activate.bat，需解释器直启 | 已实证：conda-meta 存在但 Scripts\activate.bat 缺失（grep 无结果） | 接受 |
-| P2 | start_aivtuber.bat 的 PATH 前置模式适用于自有 bat | 同一环境同一模式，42/43 冒烟先例 | 接受 |
+| P2 | start_autolive.bat 的 PATH 前置模式适用于自有 bat | 同一环境同一模式，42/43 冒烟先例 | 接受 |
 | P3 | 两 bat 均 git 跟踪、可回滚 | 已实证：`git ls-files` 命中两文件 | 接受（子代理发现 5 已验证） |
 | P4 | zhipuai 可装且兼容 | **已实证（子代理发现 4 采纳）**：`pip install --dry-run -c constraints.txt zhipuai` 干净解析，装 zhipuai 2.1.5.20250825（2025-08 新版，比旧环境 2023 版新）+ PyJWT 2.8.0，不触碰基线包 | 接受（假设已变证据） |
 | P5 | webui.py BOOT_OK = 可用 | 模块级验证；nicegui 服务真实起服、页面渲染未端到端验证——列入验证步骤 | 接受（带缓解） |
@@ -239,7 +239,7 @@ cmd /k
 
 ## 0B 已有资产复用
 
-- `D:\AI\start\start_aivtuber.bat`（解释器直启模板）——照抄模式。
+- `D:\AI\start\start_autolive.bat`（解释器直启模板）——照抄模式。
 - `specs/integration/install/constraints.txt`（基线保护）——清单命令引用。
 - `install/boot_probe_iter.py`（本次新增的迭代桩探测）——可复用为切换后回归探测。
 - git 跟踪 + 旧环境未动——分钟级回滚资产。
@@ -341,7 +341,7 @@ ValueError(Invalid value) | N ←GAP | 属 webui-bak 适配债（UC-1）     | t
 本次唯一"数据流"= 依赖清单交付流：调查(AST+桩探测) → 清单(分级+使用方) → 用户手动安装 → 验证(预检断言)。阴影路径：装错环境（绝对路径命令拦截）、部分安装（清单逐项可勾选）、装后仍崩（boot_probe_iter.py 回归探测）。无 UI 交互面。无新发现。
 
 ### S5 代码质量
-本计划不改业务代码（UC-2 未决前）；bat 模板与 start_aivtuber.bat 一致（DRY：同一形态两处镜像，差异仅入口文件名——可接受的最小重复）。无发现。
+本计划不改业务代码（UC-2 未决前）；bat 模板与 start_autolive.bat 一致（DRY：同一形态两处镜像，差异仅入口文件名——可接受的最小重复）。无发现。
 
 ### S6 测试
 ```
@@ -425,7 +425,7 @@ CONFIRMED = 双方一致（含采纳修正后）。DISAGREE = 单声部异议，
 
 ## Dream state delta
 
-本计划完成后：AI-Vtuber 两个自有启动脚本脱离 conda 激活语义（12 个月理想态的"一键+健康检查"达成前半）；依赖缺口从"启动即崩不可见"变为"分级清单+使用方定位"；Miniconda3 首次有了可验证的退出标准。距理想态还差：UC-1（webui-bak 命运）、UC-2（守卫化）、start\ 脚本收敛三步，均已显式在账。
+本计划完成后：AUTOlive 两个自有启动脚本脱离 conda 激活语义（12 个月理想态的"一键+健康检查"达成前半）；依赖缺口从"启动即崩不可见"变为"分级清单+使用方定位"；Miniconda3 首次有了可验证的退出标准。距理想态还差：UC-1（webui-bak 命运）、UC-2（守卫化）、start\ 脚本收敛三步，均已显式在账。
 
 ## 错误/救援登记册与失效模式登记册
 
@@ -515,9 +515,9 @@ Synthesized from this review's findings. Each task derives from a specific findi
 
 > **勘误与补充（规格评审第 2 轮采纳，2026-09-22）**：
 > 1. accepted 块中"FFMPEG_PATH/KMP_DUPLICATE_LIB_OK/HF_ENDPOINT 保留"措辞不准——前两项为原 bat
->    保留，**HF_ENDPOINT 为新增**（承自 start\start_aivtuber.bat 模板）。块字节保持不变，以此勘误为准。
+>    保留，**HF_ENDPOINT 为新增**（承自 start\start_autolive.bat 模板）。块字节保持不变，以此勘误为准。
 > 2. accepted 块硬性约束②中的 constraints 路径应为绝对路径
->    `D:\AI\AI-Vtuber\specs\integration\install\constraints.txt`（相对路径在错误 cwd 下静默失效）。
+>    `D:\AI\AUTOlive\specs\integration\install\constraints.txt`（相对路径在错误 cwd 下静默失效）。
 > 3. 窗口保持：模板必须含 `cmd /k`（S2"用户可见"与 S9"显式失败"以此成立）。
 > 4. 最低验收判据 scope：仅绑定 `启动程序.bat`；`启动程序1.bat` 按 UC-1(本次) 裁决另行定义。
 
@@ -622,7 +622,7 @@ Expects:   双击即起；缺包时知道装什么怎么装；改坏了能一键
 ```
 Tool / 基线                        | TTHW            | Notable DX Choice
 旧体验（Miniconda activate.bat）   | 双击 1 步       | 但失败不可见（窗口闪退）
-D:\AI\start\start_aivtuber.bat 先例| 双击 1 步       | 42/43 冒烟背书
+D:\AI\start\start_autolive.bat 先例| 双击 1 步       | 42/43 冒烟背书
 本计划                             | 双击 1 步 + 首次手动 pip（约 5 分钟，一次性） | 失败可见 + 现场修复指引 + cmd /k 保窗
 目标档位：内部工具第一梯队（日常双击 <=1 分钟到 UI；首次装包 <=5 分钟）
 ```
@@ -752,7 +752,7 @@ CONFIRMED = 双声部一致（含采纳修正后）；外部声部 N/A（Codex �
 | 项 | 理由 |
 |---|---|
 | UC-1 三分支 bat 预写 3 份完整文件 | 投机产物，裁决后写一份真实的即可 |
-| 启动脚本重命名（start_aivtuber 风格） | 历史命名，本计划不改文件名（F6 仅加注释） |
+| 启动脚本重命名（start_autolive 风格） | 历史命名，本计划不改文件名（F6 仅加注释） |
 | 启动日志落盘（重定向到 log 文件） | cmd /k 场景窗口即日志；落盘属 start_all 编排议题（TODOS 已有） |
 
 ## DX 完成摘要
@@ -782,7 +782,7 @@ CONFIRMED = 双声部一致（含采纳修正后）；外部声部 N/A（Codex �
 | 10 | DX | blivedm/langchain 命令以 dry-run 实证为准 | 机械 | P5 | fork 源与兼容包均实证 | 只写"需裁决" |
 | 11 | DX | Review record 顶部加权威声明（正文>摘要块） | 机械 | P5 | 消除双源漂移 | 删除摘要块（不可变） |
 
-<!-- autoplan-baseline-edits:dx {"sourceSha256":"93d660c65d01deb993948acad192a16890d4dbf0bc27c8c2477905e3596381e9","replacements":[{"oldText":"### 2.1 启动方式（B6 修订）\n\nruntime312 是 conda 环境（conda-meta 存在）但 **activate.bat 缺失**（本次实测确认）。\n可用启动模式 = 直接调用解释器 + PATH 前置，先例为 2026-09-02 的\n`D:\\AI\\start\\start_aivtuber.bat`（42/43 冒烟使用同一模式）：\n\n```bat\nset RT=D:\\AI\\EDTalk\\runtime312\nif not exist \"%RT%\\python.exe\" (\n  echo [预检失败] 未找到解释器: %RT%\\python.exe\n  echo 请检查 D:\\AI\\EDTalk\\runtime312 是否存在（EDTalk 挪动/重装会导致此路径失效）\n  pause\n  exit /b 1\n)\nset FFMPEG_PATH=%RT%\\ffmpeg\\bin\nset PATH=%RT%;%RT%\\Scripts;%RT%\\Library\\bin;%FFMPEG_PATH%;%PATH%\nSET KMP_DUPLICATE_LIB_OK=TRUE\nSET HF_ENDPOINT=https://hf-mirror.com\ncd /d %~dp0\n\"%RT%\\python.exe\" webui.py\ncmd /k\n```\n\n> 窗口保持：原两 bat 末尾的 `cmd /k` **必须保留**（承自原脚本与 start\\ 模板）——\n> 缺失它，双击场景下补装前的 ModuleNotFoundError 会一闪而过，\"失败可见\"不成立。\n\n原 bat 已有的 `FFMPEG_PATH` 设置（恰好已指向 runtime312\\ffmpeg\\bin）与\n`KMP_DUPLICATE_LIB_OK=TRUE` 保留；`CONDA_PATH`/`CALL activate.bat` 整体移除；\n新增 `%~dp0` 定位（消除对双击时工作目录的依赖）。\n\n","newText":"### 2.1 启动方式（B6 修订）\n\nruntime312 是 conda 环境（conda-meta 存在）但 **activate.bat 缺失**（本次实测确认）。\n可用启动模式 = 直接调用解释器 + PATH 前置，先例为 2026-09-02 的\n`D:\\AI\\start\\start_aivtuber.bat`（42/43 冒烟使用同一模式）。\n\n**完整可照抄模板**（DX 审查 F8/F9/F10 采纳：UTF-8 无 BOM 保存 + chcp 65001 防中文乱码、\nRT 可环境变量覆盖、报错现场带修复指引）：\n\n```bat\n@echo off\nrem AI-Vtuber 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版\nrem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）\nchcp 65001 >nul\nif not defined RT set \"RT=D:\\AI\\EDTalk\\runtime312\"\nif not exist \"%RT%\\python.exe\" (\n  echo [预检失败] 未找到解释器: %RT%\\python.exe\n  echo 请检查 D:\\AI\\EDTalk\\runtime312 是否存在（EDTalk 挪动/重装会导致此路径失效）\n  pause\n  exit /b 1\n)\nset FFMPEG_PATH=%RT%\\ffmpeg\\bin\nset PATH=%RT%;%RT%\\Scripts;%RT%\\Library\\bin;%FFMPEG_PATH%;%PATH%\nSET KMP_DUPLICATE_LIB_OK=TRUE\nSET HF_ENDPOINT=https://hf-mirror.com\ncd /d %~dp0\necho 如启动报 ModuleNotFoundError，请按 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节清单补装依赖\n\"%RT%\\python.exe\" webui.py\ncmd /k\n```\n\n要点：原 bat 的 `FFMPEG_PATH`（已指向 runtime312\\ffmpeg\\bin）与 `KMP_DUPLICATE_LIB_OK=TRUE`\n保留；`HF_ENDPOINT` 为**新增**（承 start\\ 模板）；`CONDA_PATH`/`CALL activate.bat` 移除；\n`%~dp0` 定位消除对工作目录的依赖；`chcp 65001` 保证中文 echo 不乱码（**文件须以 UTF-8 无 BOM 保存**）；\n`if not defined RT` 允许临时覆盖解释器路径（并行测试其他 runtime）。\n\n"},{"oldText":"| blivedm | 0.1.2 | 未安装 | utils/platforms/bilibili2.py:1-3（B站新版直播 open_live 弹幕）、api_old.py:641-643 | bilibili2 平台弹幕不可用（平台为动态加载，不阻启动）。是否在用：config.json 有配置痕迹但无法确证使用中 |\n","newText":"| blivedm | 0.1.2 | 未安装 | utils/platforms/bilibili2.py:1-3（B站新版直播 open_live 弹幕）、api_old.py:641-643 | bilibili2 平台弹幕不可用（平台为动态加载，不阻启动）。是否在用：config.json 有配置痕迹但无法确证使用中。**安装来源已实证**：PyPI 仅 0.1.1（缺 open_live 模块）；旧环境的 0.1.2 来自用户自有 fork `gitee.com/ikaros-521/blivedm`（commit c9ac671，direct_url.json 实证）——**须从该 fork 装**，命令见第 3 节 |\n"},{"oldText":"| langchain（子模块） | 0.0.142 | 1.3.18（大版本跃迁） | utils/chat_with_file/**（聊天文档功能，懒加载） | 8 个旧路径子模块全部缺失：document_loaders、llms、prompts、text_splitter、vectorstores、chains.question_answering、embeddings.openai、callbacks——新版结构移入 langchain-community/classic，需版本裁决或代码适配 |\n","newText":"| langchain（子模块） | 0.0.142 | 1.3.18（大版本跃迁） | utils/chat_with_file/**（聊天文档功能，懒加载） | 8 个旧路径子模块全部缺失：document_loaders、llms、prompts、text_splitter、vectorstores、chains.question_answering、embeddings.openai、callbacks。**恢复路径已 dry-run 实证**：`langchain-community 0.4.2 + langchain-classic 1.0.8 + langchain-text-splitters 1.1.2` 干净解析（langchain-classic 即 1.x 兼容旧命名空间包），装后需 import 冒烟验证——命令见第 3 节 |\n"},{"oldText":"## 3. 实施任务清单\n\n1. **改写 `启动程序.bat`**（→ webui.py）：按 2.1 模板（含预检），`\"%RT%\\python.exe\" webui.py`。\n2. **`启动程序1.bat`（→ webui-bak.py）处置**：⚠️ **受 UC-1(本次) 门控**——webui-bak.py 在 runtime312 上实测必崩（nicegui 3.x，见 2.3-C），先经最终批准门三选一（留旧环境指向 / 归档 / 带警告切换），裁决后执行。\n3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行；zhipuai 附推荐命令：\n   `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt zhipuai`\n   （**解释器与 constraints 均用绝对路径**——后者用相对路径会在错误 cwd 下静默失去约束保护；\n   google-generativeai 三选一裁决前不得安装）。\n4. **验证**（补装后）：双击 `启动程序.bat` → 预检通过 → nicegui 起服日志行 → 8086 探活；\n   `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n   在首个缺失包处给出**可读错误**且**窗口保持可见**（`cmd /k` 生效，模块名可见，非一闪而过）；\n   `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n\n","newText":"## 3. 实施任务清单\n\n1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`；\n   1.bat 版本将入口行改为 `webui-bak.py`、头部注释标注\"旧版单体界面，nicegui 1.x 时代\"）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n2. **`启动程序1.bat`（→ webui-bak.py）处置**：⚠️ **受 UC-1(本次) 门控**——webui-bak.py 在 runtime312 上\n   实测必崩（nicegui 3.x，见 2.3-C），先经最终批准门三选一（留旧环境指向 / 归档 / 带警告切换），裁决后执行。\n3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕，从用户 fork 装）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`（装后跑 import 冒烟验证 8 个旧路径）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，UC-2/最终门裁决后执行其一）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n"}]} -->
+<!-- autoplan-baseline-edits:dx {"sourceSha256":"93d660c65d01deb993948acad192a16890d4dbf0bc27c8c2477905e3596381e9","replacements":[{"oldText":"### 2.1 启动方式（B6 修订）\n\nruntime312 是 conda 环境（conda-meta 存在）但 **activate.bat 缺失**（本次实测确认）。\n可用启动模式 = 直接调用解释器 + PATH 前置，先例为 2026-09-02 的\n`D:\\AI\\start\\start_autolive.bat`（42/43 冒烟使用同一模式）：\n\n```bat\nset RT=D:\\AI\\EDTalk\\runtime312\nif not exist \"%RT%\\python.exe\" (\n  echo [预检失败] 未找到解释器: %RT%\\python.exe\n  echo 请检查 D:\\AI\\EDTalk\\runtime312 是否存在（EDTalk 挪动/重装会导致此路径失效）\n  pause\n  exit /b 1\n)\nset FFMPEG_PATH=%RT%\\ffmpeg\\bin\nset PATH=%RT%;%RT%\\Scripts;%RT%\\Library\\bin;%FFMPEG_PATH%;%PATH%\nSET KMP_DUPLICATE_LIB_OK=TRUE\nSET HF_ENDPOINT=https://hf-mirror.com\ncd /d %~dp0\n\"%RT%\\python.exe\" webui.py\ncmd /k\n```\n\n> 窗口保持：原两 bat 末尾的 `cmd /k` **必须保留**（承自原脚本与 start\\ 模板）——\n> 缺失它，双击场景下补装前的 ModuleNotFoundError 会一闪而过，\"失败可见\"不成立。\n\n原 bat 已有的 `FFMPEG_PATH` 设置（恰好已指向 runtime312\\ffmpeg\\bin）与\n`KMP_DUPLICATE_LIB_OK=TRUE` 保留；`CONDA_PATH`/`CALL activate.bat` 整体移除；\n新增 `%~dp0` 定位（消除对双击时工作目录的依赖）。\n\n","newText":"### 2.1 启动方式（B6 修订）\n\nruntime312 是 conda 环境（conda-meta 存在）但 **activate.bat 缺失**（本次实测确认）。\n可用启动模式 = 直接调用解释器 + PATH 前置，先例为 2026-09-02 的\n`D:\\AI\\start\\start_autolive.bat`（42/43 冒烟使用同一模式）。\n\n**完整可照抄模板**（DX 审查 F8/F9/F10 采纳：UTF-8 无 BOM 保存 + chcp 65001 防中文乱码、\nRT 可环境变量覆盖、报错现场带修复指引）：\n\n```bat\n@echo off\nrem AUTOlive 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版\nrem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）\nchcp 65001 >nul\nif not defined RT set \"RT=D:\\AI\\EDTalk\\runtime312\"\nif not exist \"%RT%\\python.exe\" (\n  echo [预检失败] 未找到解释器: %RT%\\python.exe\n  echo 请检查 D:\\AI\\EDTalk\\runtime312 是否存在（EDTalk 挪动/重装会导致此路径失效）\n  pause\n  exit /b 1\n)\nset FFMPEG_PATH=%RT%\\ffmpeg\\bin\nset PATH=%RT%;%RT%\\Scripts;%RT%\\Library\\bin;%FFMPEG_PATH%;%PATH%\nSET KMP_DUPLICATE_LIB_OK=TRUE\nSET HF_ENDPOINT=https://hf-mirror.com\ncd /d %~dp0\necho 如启动报 ModuleNotFoundError，请按 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节清单补装依赖\n\"%RT%\\python.exe\" webui.py\ncmd /k\n```\n\n要点：原 bat 的 `FFMPEG_PATH`（已指向 runtime312\\ffmpeg\\bin）与 `KMP_DUPLICATE_LIB_OK=TRUE`\n保留；`HF_ENDPOINT` 为**新增**（承 start\\ 模板）；`CONDA_PATH`/`CALL activate.bat` 移除；\n`%~dp0` 定位消除对工作目录的依赖；`chcp 65001` 保证中文 echo 不乱码（**文件须以 UTF-8 无 BOM 保存**）；\n`if not defined RT` 允许临时覆盖解释器路径（并行测试其他 runtime）。\n\n"},{"oldText":"| blivedm | 0.1.2 | 未安装 | utils/platforms/bilibili2.py:1-3（B站新版直播 open_live 弹幕）、api_old.py:641-643 | bilibili2 平台弹幕不可用（平台为动态加载，不阻启动）。是否在用：config.json 有配置痕迹但无法确证使用中 |\n","newText":"| blivedm | 0.1.2 | 未安装 | utils/platforms/bilibili2.py:1-3（B站新版直播 open_live 弹幕）、api_old.py:641-643 | bilibili2 平台弹幕不可用（平台为动态加载，不阻启动）。是否在用：config.json 有配置痕迹但无法确证使用中。**安装来源已实证**：PyPI 仅 0.1.1（缺 open_live 模块）；旧环境的 0.1.2 来自用户自有 fork `gitee.com/ikaros-521/blivedm`（commit c9ac671，direct_url.json 实证）——**须从该 fork 装**，命令见第 3 节 |\n"},{"oldText":"| langchain（子模块） | 0.0.142 | 1.3.18（大版本跃迁） | utils/chat_with_file/**（聊天文档功能，懒加载） | 8 个旧路径子模块全部缺失：document_loaders、llms、prompts、text_splitter、vectorstores、chains.question_answering、embeddings.openai、callbacks——新版结构移入 langchain-community/classic，需版本裁决或代码适配 |\n","newText":"| langchain（子模块） | 0.0.142 | 1.3.18（大版本跃迁） | utils/chat_with_file/**（聊天文档功能，懒加载） | 8 个旧路径子模块全部缺失：document_loaders、llms、prompts、text_splitter、vectorstores、chains.question_answering、embeddings.openai、callbacks。**恢复路径已 dry-run 实证**：`langchain-community 0.4.2 + langchain-classic 1.0.8 + langchain-text-splitters 1.1.2` 干净解析（langchain-classic 即 1.x 兼容旧命名空间包），装后需 import 冒烟验证——命令见第 3 节 |\n"},{"oldText":"## 3. 实施任务清单\n\n1. **改写 `启动程序.bat`**（→ webui.py）：按 2.1 模板（含预检），`\"%RT%\\python.exe\" webui.py`。\n2. **`启动程序1.bat`（→ webui-bak.py）处置**：⚠️ **受 UC-1(本次) 门控**——webui-bak.py 在 runtime312 上实测必崩（nicegui 3.x，见 2.3-C），先经最终批准门三选一（留旧环境指向 / 归档 / 带警告切换），裁决后执行。\n3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行；zhipuai 附推荐命令：\n   `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt zhipuai`\n   （**解释器与 constraints 均用绝对路径**——后者用相对路径会在错误 cwd 下静默失去约束保护；\n   google-generativeai 三选一裁决前不得安装）。\n4. **验证**（补装后）：双击 `启动程序.bat` → 预检通过 → nicegui 起服日志行 → 8086 探活；\n   `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n   在首个缺失包处给出**可读错误**且**窗口保持可见**（`cmd /k` 生效，模块名可见，非一闪而过）；\n   `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n\n","newText":"## 3. 实施任务清单\n\n1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`；\n   1.bat 版本将入口行改为 `webui-bak.py`、头部注释标注\"旧版单体界面，nicegui 1.x 时代\"）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n2. **`启动程序1.bat`（→ webui-bak.py）处置**：⚠️ **受 UC-1(本次) 门控**——webui-bak.py 在 runtime312 上\n   实测必崩（nicegui 3.x，见 2.3-C），先经最终批准门三选一（留旧环境指向 / 归档 / 带警告切换），裁决后执行。\n3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕，从用户 fork 装）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`（装后跑 import 冒烟验证 8 个旧路径）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，UC-2/最终门裁决后执行其一）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n"}]} -->
 
 <!-- autoplan-accepted:dx -->
 - 启动脚本必须以 UTF-8 无 BOM 保存并含 chcp 65001（中文 echo 不乱码是验收项）。
@@ -803,7 +803,7 @@ CONFIRMED = 双声部一致（含采纳修正后）；外部声部 N/A（Codex �
 
 ## Step 0 范围挑战（映射到已有代码）
 
-- **复用确认**：启动模式复用 start_aivtuber.bat 先例；安装保护复用 constraints.txt 机制；回归探测复用
+- **复用确认**：启动模式复用 start_autolive.bat 先例；安装保护复用 constraints.txt 机制；回归探测复用
   boot_probe_iter.py；blivedm 归档复用 wheels_sha256.txt 本地 wheel 惯例（Eng H1 主动对齐）。无平行重建。
 - **最小变更集**：2 个 bat + 1 份计划文档；复杂度检查不触发（<8 文件、0 新类/服务）——不启动缩减门。
 - **TODOS 交叉**：api_old 处置（CEO 新增）与 flask_socketio 装包决策联动；UC-1 裁决联动项已登记。
@@ -881,7 +881,7 @@ COVERAGE: 计划内测试项 6/6 分支均有归属（含 3 项本审查新增�
 QUALITY: ★★★:2 ★★:4  |  GAPS: 0（T1/T2/T3 补后）
 ```
 
-测试计划工件已写盘：`~/.gstack/projects/Ikaros-521-AI-Vtuber/admin-main-eng-review-test-plan-20260922-175500.md`。
+测试计划工件已写盘：`~/.gstack/projects/Ikaros-521-AUTOlive/admin-main-eng-review-test-plan-20260922-175500.md`。
 
 ## Section 4 性能
 解释器直启较 conda activate 省去激活开销（亚秒级）；运行期服务拓扑不变；无 N+1/内存/缓存面。无发现。
@@ -964,7 +964,7 @@ Sequential implementation, no parallelization opportunity.（两 bat 同模块�
 | 16 | Eng | A1 PEP 562 → TODOS | 机械 | P2 | 根因修复超爆炸半径 | 纳入本批次 |
 | 17 | Eng | S1 信任标注入第 6 节 | 机械 | P5 | 留存审计依据 | 不标 |
 
-<!-- autoplan-baseline-edits:eng {"sourceSha256":"5403edb61d4a26aeb1c7eb9e350515c1983fc1f10411d7f1f04651b0d42deb87","replacements":[{"oldText":"1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`；\n   1.bat 版本将入口行改为 `webui-bak.py`、头部注释标注\"旧版单体界面，nicegui 1.x 时代\"）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n","newText":"1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n   ⚠️ **本任务仅覆盖主 bat**（`启动程序.bat`）——`启动程序1.bat` 整体归任务 2 处置，\n   裁决前**不得改动**（它当前在旧环境下仍可用，抢先改写=人为制造必坏中间态，Eng E1）。\n   两份 bat 若在裁决后同批修改，须同步套用同一模板（Eng A2 防漂移）。\n"},{"oldText":"3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕，从用户 fork 装）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`（装后跑 import 冒烟验证 8 个旧路径）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，UC-2/最终门裁决后执行其一）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n","newText":"3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕）：**先归档为本地 wheel 再装**（项目既有惯例，见 install/wheels_sha256.txt；\n     gitee 个人仓库存在改名/私有化风险，远程命令不可作长期交付物，Eng H1）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip download -d D:\\AI\\AI-Vtuber\\specs\\integration\\install\\wheels git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n     然后 `pip install -c <constraints> <本地wheel路径>`；哈希记入 wheels_sha256.txt。\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AI-Vtuber\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`\n     （装后跑 import 冒烟验证 8 个旧路径；**是否在用：与 blivedm 同级不确定**——chat_with_file 无静态外部\n     引用者，可能经动态派发调用或为死代码，装包前先确认引用点存在，Eng H2）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - zhipuai 装**后冒烟**（dry-run 只证解析，不证运行时 API，Eng T1）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -c \"from zhipuai import ZhipuAI; ZhipuAI(api_key='probe')\"`（能实例化即过）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言固化为该脚本永久断言项**（users.pth 是共享\n     环境文件，一次性检查无回归价值，Eng T2）；\n   - bat 编码机械验证（BOM 会使 `@echo off` 首行报 `'∩╗┐@echo' 不是内部或外部命令`，Eng T3）：\n     `powershell -c \"$b=[IO.File]::ReadAllBytes('D:\\AI\\AI-Vtuber\\启动程序.bat')[0..2]; if(($b)-ceq(0xEF,0xBB,0xBF)){'有BOM-不合格'}else{'无BOM-合格'}\"`;\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，最终门裁决后执行其一；Eng E2 论证：**守卫①是三选一的支配策略**——\n   选②时守卫 except 分支自然不触发、选③时守卫正是\"通道不可用但不崩\"的落地形式、选①守卫即本体，\n   唯一反方论点\"守卫掩盖配置错误\"已由 logger 警告缓解。最终门对 UC-2 的推荐即\"采纳守卫①\"）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n"},{"oldText":"## 6. 风险与回滚\n\n- 脚本改动两文件、均 git 跟踪，`git checkout` 即回滚，分钟级。\n- 旧 Miniconda3 环境不删除、不修改——热回滚资产完好。**退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3（无退出标准的\"统一环境\"会永久停在双环境并行）。\n- zhipuai 安装是唯一可能触碰基线的动作，且由用户手动执行并带 constraints 保护（dry-run 已验证不触碰）。\n","newText":"## 6. 风险与回滚\n\n- 脚本改动两文件、均 git 跟踪，`git checkout` 即回滚，分钟级。\n- 旧 Miniconda3 环境不删除、不修改——热回滚资产完好。**退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3（无退出标准的\"统一环境\"会永久停在双环境并行）。\n- zhipuai 安装是唯一可能触碰基线的动作，且由用户手动执行并带 constraints 保护（dry-run 已验证不触碰）。\n- **供应链信任标注（Eng S1）**：`HF_ENDPOINT=https://hf-mirror.com` 为本次新增环境变量，模型/分词器\n  下载经第三方镜像——国内网络下的社区惯例，属**明示接受的信任决策**，留此存照供后续审计。\n"}]} -->
+<!-- autoplan-baseline-edits:eng {"sourceSha256":"5403edb61d4a26aeb1c7eb9e350515c1983fc1f10411d7f1f04651b0d42deb87","replacements":[{"oldText":"1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`；\n   1.bat 版本将入口行改为 `webui-bak.py`、头部注释标注\"旧版单体界面，nicegui 1.x 时代\"）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n","newText":"1. **改写 `启动程序.bat`**（→ webui.py）：**照抄 2.1 完整模板**（入口行为 `webui.py`）。\n   文件以 **UTF-8 无 BOM** 保存（配 `chcp 65001` 保证中文 echo 不乱码）。\n   ⚠️ **本任务仅覆盖主 bat**（`启动程序.bat`）——`启动程序1.bat` 整体归任务 2 处置，\n   裁决前**不得改动**（它当前在旧环境下仍可用，抢先改写=人为制造必坏中间态，Eng E1）。\n   两份 bat 若在裁决后同批修改，须同步套用同一模板（Eng A2 防漂移）。\n"},{"oldText":"3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕，从用户 fork 装）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`（装后跑 import 冒烟验证 8 个旧路径）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言**（users.pth 注入保险）；\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，UC-2/最终门裁决后执行其一）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n","newText":"3. **产出依赖补装清单**（本文件 2.3 节）交付用户手动执行，全部使用**绝对路径**：\n\n   **A 组（启动阻断）**\n   - zhipuai（已 dry-run 实证）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt zhipuai`\n   - google-generativeai：**禁止直接安装**。三选一裁决前不动：① 不装+代码守卫（若 UC-2 采纳，见任务 6）\n     ② 迁移 google-genai（装 `google-genai` 新 SDK + gemini.py 代码适配）③ 永久放弃 Gemini 通道（接受通道不可用）。\n\n   **B 组（功能级，按需启用）**\n   - blivedm（bilibili2 弹幕）：**先归档为本地 wheel 再装**（项目既有惯例，见 install/wheels_sha256.txt；\n     gitee 个人仓库存在改名/私有化风险，远程命令不可作长期交付物，Eng H1）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip download -d D:\\AI\\AUTOlive\\specs\\integration\\install\\wheels git+https://gitee.com/ikaros-521/blivedm@c9ac671f783c4c3eaa4ee4e7738226ebbf402259`\n     然后 `pip install -c <constraints> <本地wheel路径>`；哈希记入 wheels_sha256.txt。\n   - langchain 旧命名空间恢复（聊天文档功能，已 dry-run）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -m pip install -c D:\\AI\\AUTOlive\\specs\\integration\\install\\constraints.txt langchain-community langchain-classic langchain-text-splitters`\n     （装后跑 import 冒烟验证 8 个旧路径；**是否在用：与 blivedm 同级不确定**——chat_with_file 无静态外部\n     引用者，可能经动态派发调用或为死代码，装包前先确认引用点存在，Eng H2）\n   - flask_socketio：仅 api_old.py 用——**建议先裁决 api_old 去留**（TODOS 已登记）再决定是否装。\n   - coverage：测试工具，try 保护，可忽略。\n\n4. **验证**（前提链：zhipuai 已装 **且** Gemini 通道按裁决落地（任务 6）——缺一则 webui.py 仍在\n   `gemini.py:1` 处崩溃，8086 探活不可达）：\n   - 双击 `启动程序.bat` → 预检通过（中文不乱码）→ nicegui 起服日志行 → 浏览器打开\n     `http://127.0.0.1:8086`（或 `curl -s -o NUL -w \"%{http_code}\" http://127.0.0.1:8086`）；\n   - zhipuai 装**后冒烟**（dry-run 只证解析，不证运行时 API，Eng T1）：\n     `D:\\AI\\EDTalk\\runtime312\\python.exe -c \"from zhipuai import ZhipuAI; ZhipuAI(api_key='probe')\"`（能实例化即过）；\n   - `boot_probe_iter.py` 回归（桩集合应为空）+ **sys.path 首位断言固化为该脚本永久断言项**（users.pth 是共享\n     环境文件，一次性检查无回归价值，Eng T2）；\n   - bat 编码机械验证（BOM 会使 `@echo off` 首行报 `'∩╗┐@echo' 不是内部或外部命令`，Eng T3）：\n     `powershell -c \"$b=[IO.File]::ReadAllBytes('D:\\AI\\AUTOlive\\启动程序.bat')[0..2]; if(($b)-ceq(0xEF,0xBB,0xBF)){'有BOM-不合格'}else{'无BOM-合格'}\"`;\n   - 最低验收判据（不依赖用户装包）：`启动程序.bat` 以 runtime312 解释器启动、PATH 前置生效、\n     在首个缺失包处给出**可读错误且窗口保持可见**（`cmd /k` 生效）、**错误现场含修复指引**（echo 提示行）；\n     `启动程序1.bat` 的验收判据按 UC-1(本次) 裁决结果另行定义。\n   - 回滚方式：`git checkout -- 启动程序.bat 启动程序1.bat`（两文件均为 git 跟踪文件，旧环境未动）。\n5. **Miniconda3 退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3；\n   UC-1(本次) 裁决同期给出。\n6. **Gemini 通道落地**（条件任务，最终门裁决后执行其一；Eng E2 论证：**守卫①是三选一的支配策略**——\n   选②时守卫 except 分支自然不触发、选③时守卫正是\"通道不可用但不崩\"的落地形式、选①守卫即本体，\n   唯一反方论点\"守卫掩盖配置错误\"已由 logger 警告缓解。最终门对 UC-2 的推荐即\"采纳守卫①\"）：\n   ① zhipu.py/gemini.py 顶层导入加 try 守卫（缺失时 logger 警告\"通道不可用，功能降级\"，不阻断启动）\n   ② 装 google-genai 并适配 gemini.py（适配工作）\n   ③ 放弃通道（无代码动作，仅清单销案）。\n\n"},{"oldText":"## 6. 风险与回滚\n\n- 脚本改动两文件、均 git 跟踪，`git checkout` 即回滚，分钟级。\n- 旧 Miniconda3 环境不删除、不修改——热回滚资产完好。**退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3（无退出标准的\"统一环境\"会永久停在双环境并行）。\n- zhipuai 安装是唯一可能触碰基线的动作，且由用户手动执行并带 constraints 保护（dry-run 已验证不触碰）。\n","newText":"## 6. 风险与回滚\n\n- 脚本改动两文件、均 git 跟踪，`git checkout` 即回滚，分钟级。\n- 旧 Miniconda3 环境不删除、不修改——热回滚资产完好。**退役线**：runtime312 稳定运行 2 周 + 功能冒烟通过 → 归档 Miniconda3（无退出标准的\"统一环境\"会永久停在双环境并行）。\n- zhipuai 安装是唯一可能触碰基线的动作，且由用户手动执行并带 constraints 保护（dry-run 已验证不触碰）。\n- **供应链信任标注（Eng S1）**：`HF_ENDPOINT=https://hf-mirror.com` 为本次新增环境变量，模型/分词器\n  下载经第三方镜像——国内网络下的社区惯例，属**明示接受的信任决策**，留此存照供后续审计。\n"}]} -->
 
 <!-- autoplan-accepted:eng -->
 - 任务 1 仅覆盖 `启动程序.bat`；`启动程序1.bat` 在 UC-1 裁决前不得改动（E1，防人为制造必坏中间态）。

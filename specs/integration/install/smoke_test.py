@@ -49,7 +49,7 @@ def baseline_drift():
 
 def pb2_roundtrip():
     """Eng B1：真实 pb2 序列化/反序列化（非仅 import）。"""
-    sys.path.insert(0, r"D:\AI\AI-Vtuber")
+    sys.path.insert(0, r"D:\AI\AUTOlive")
     import dy_pb2
     from google.protobuf.descriptor import FieldDescriptor
     # 防御式：扫模块成员找消息类（老式 gencode，无文件级 message_types_by_name）

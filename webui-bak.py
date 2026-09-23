@@ -850,7 +850,7 @@ def goto_func_page():
                 "result": {
                     "code": 200,
                     "msg": "合成成功",
-                    "audio_path": "E:\\GitHub_pro\\AI-Vtuber\\out\\gpt_sovits_4.wav"
+                    "audio_path": "E:\\GitHub_pro\\AUTOlive\\out\\gpt_sovits_4.wav"
                 }
             }
         }
@@ -1494,7 +1494,7 @@ def goto_func_page():
                     ui.notify(position="top", type="warning", message="哔哩哔哩2 在不登录的情况下，无法获取用户完整的用户名")
 
             if select_visual_body.value == "metahuman_stream":
-                ui.notify(position="top", type="warning", message="对接metahuman_stream时，语音合成由metahuman_stream托管，不受AI Vtuber控制，请自行参考官方文档对接TTS")
+                ui.notify(position="top", type="warning", message="对接metahuman_stream时，语音合成由metahuman_stream托管，不受AUTOlive控制，请自行参考官方文档对接TTS")
 
             if config.get("webui", "show_card", "common_config", "local_qa"):
                 if not common.is_json_convertible(textarea_local_qa_text_json_file_content.value):

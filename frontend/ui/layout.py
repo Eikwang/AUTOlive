@@ -297,7 +297,7 @@ class DrawerLayout:
         Args:
             config: 配置字典
             save_callback: 保存配置的回调函数
-            app: AIVtuberApp 实例（Optional，E1：None 时启停按钮降级为禁用态，
+            app: AutoliveApp 实例（Optional，E1：None 时启停按钮降级为禁用态，
                  兼容测试构造点；生产装配处传入 self）
             dark_mode: 主进程的单例 ui.dark_mode() 实例（E-F4：禁再 new，
                  None 时 toggle_theme 内惰性创建兜底）
@@ -435,7 +435,7 @@ class DrawerLayout:
     # toggle_theme 写 webui.dark_mode；旧实现为 pass 空壳）
 
 
-    # ============ 系统启停控制（任务1：接回 AIVtuberApp 函数链）============
+    # ============ 系统启停控制（任务1：接回 AutoliveApp 函数链）============
     # 空壳处置（R2 C-2）：原 update_system_status/toggle_system/start_system/
     # stop_system/show_running_status_page 仅翻转状态字符串、不调用后端，已删除。
     # running_flag（app 层）为唯一状态源；本类只持 pending_flag（E5）。

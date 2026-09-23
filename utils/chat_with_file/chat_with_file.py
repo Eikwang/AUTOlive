@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 """
-@Project : AI-Vtuber
+@Project : AUTOlive
 @File    : chat_with_file.py
 @Author  : HildaM
 @Email   : Hilda_quan@163.com

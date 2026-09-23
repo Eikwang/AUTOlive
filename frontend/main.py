@@ -1,6 +1,6 @@
 from frontend.ui.components.config_helper import get_nested_value
 """
-AI Vtuber 主入口文件
+AUTOlive 主入口文件
 模块化的WebUI应用程序
 """
 import sys
@@ -85,8 +85,8 @@ from frontend.styles.themes import init_theme_manager, get_theme_manager
 from utils.my_log import logger
 
 
-class AIVtuberApp:
-    """AI Vtuber 应用程序类"""
+class AutoliveApp:
+    """AUTOlive 应用程序类"""
     
     def __init__(self):
         """初始化应用程序"""
@@ -141,7 +141,7 @@ class AIVtuberApp:
             logger.warning(f"数据分析模块初始化失败: {e}")
             self.data_analysis = None
 
-        logger.info("AI Vtuber 应用程序初始化完成")
+        logger.info("AUTOlive 应用程序初始化完成")
     
     def _init_directories(self):
         """初始化必要的目录"""
@@ -480,7 +480,7 @@ class AIVtuberApp:
     def create_main_ui(self):
         """创建主界面 - 使用新的 drawer 布局"""
         # 使用新的 DrawerLayout，传入保存回调函数与 app 引用（E1：启停按钮经此调用
-        # AIVtuberApp 函数链；app 为 Optional，None 时按钮降级为禁用态，兼容测试构造）
+        # AutoliveApp 函数链；app 为 Optional，None 时按钮降级为禁用态，兼容测试构造）
         self.drawer_layout = DrawerLayout(
             self.config._config,
             save_callback=self.config.save,
@@ -918,7 +918,7 @@ class AIVtuberApp:
 def main():
     """主函数"""
     try:
-        app = AIVtuberApp()
+        app = AutoliveApp()
         app.run()
     except Exception as e:
         logger.error(f"应用程序启动失败: {e}")

@@ -1,4 +1,4 @@
-# AI Vtuber 项目结构
+# AUTOlive 项目结构
 
 ## 目录结构
 

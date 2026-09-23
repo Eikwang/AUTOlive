@@ -1,5 +1,5 @@
-# 批次6：AI-Vtuber 缺失包（66 个；禁 bulk 装 requirements_common.txt——uv override 妥协产物）
-# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch6_aivtuber.txt
+# 批次6：AUTOlive 缺失包（66 个；禁 bulk 装 requirements_common.txt——uv override 妥协产物）
+# 用法：runtime312\python.exe -m pip install -c constraints.txt -r batch6_autolive.txt
 altair
 asyncio-mqtt
 azure-cognitiveservices-speech

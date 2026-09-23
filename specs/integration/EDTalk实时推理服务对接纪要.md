@@ -5,7 +5,7 @@
 
 ## 1. 现状核实
 
-- AI-Vtuber **当前无任何 EDTalk 实时服务对接代码**（全仓无 `audio/push` /
+- AUTOlive **当前无任何 EDTalk 实时服务对接代码**（全仓无 `audio/push` /
   `segment/switch` / `:8000` 调用命中）。"虚拟身体"目前仅为类型选择
   （`config.visual_body = 'metahuman_stream'`），tab 内容只有
   `metahuman_stream` 一节（`frontend/ui/tabs/visual_body.py`，NiceGUI，
@@ -22,7 +22,7 @@
 | 统一环境决定 | `specs/integration/统一环境依赖整合计划.md` | 所有服务统一 `EDTalk\runtime312` 解释器；拓扑=各服务独立端口、中枢 HTTP 调用；已盘点"EDTalk 无 .bat"缺口（9.4） |
 | 启动脚本缺口 | 同上 9.4 | EDTalk 侧需补 `realtime_serve` 启动 .bat（本对接顺带闭合） |
 
-## 3. AI-Vtuber 侧改造清单（后续任务，按序）
+## 3. AUTOlive 侧改造清单（后续任务，按序）
 
 **A1 前端「虚拟身体」tab 扩展**（`frontend/ui/tabs/visual_body.py`）
 - 新增 `edtalk_realtime` 节，分两区：
@@ -59,7 +59,7 @@
 - `playback_manager.py:147、245` 两处 play 旁：若 `visual_body == 'edtalk_realtime'`
   则推送 PCM（16kHz int16；若 TTS 输出采样率不同需在此转码或确认 TTS 输出规格）。
 - EDTalk 侧虚拟摄像头画面由 OBS/直播推流端消费（与 metahuman_stream 的
-  "TTS 托管"模式相反：音频仍由 AI-Vtuber 管控并双路分发）。
+  "TTS 托管"模式相反：音频仍由 AUTOlive 管控并双路分发）。
 
 **A4 反应段联动**（弹幕 → 表情段）
 - 弹幕/回复触发点调 `POST /segment/switch`（建议 `at=segment_end` 或
@@ -72,7 +72,7 @@
   不会漂移；服务器未完成的部分前端可用契约 mock。
 - 409 语义（gaze/repair 启动 off）→ 前端先 GET /status 读 `{mode}_capable`
   再渲染开关可用态。
-- 默认回环绑定对 AI-Vtuber 无感（同机 127.0.0.1 直连）。
+- 默认回环绑定对 AUTOlive 无感（同机 127.0.0.1 直连）。
 
 ## 5. 待办决议记录
 

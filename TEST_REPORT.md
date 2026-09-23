@@ -2,7 +2,7 @@
 
 ## 测试概述
 
-对 AI Vtuber 模块化代码库进行了全面的测试验证，包括语法检查、导入测试、功能测试和代码质量检查。
+对 AUTOlive 模块化代码库进行了全面的测试验证，包括语法检查、导入测试、功能测试和代码质量检查。
 
 ## 测试结果
 
@@ -17,16 +17,16 @@
 所有模块都能正确导入：
 
 #### 配置模块
-- ✓ ai_vtuber.config.settings (Settings, init_config, get_config)
-- ✓ ai_vtuber.config.paths (get_base_path, get_config_path, get_log_dir, get_output_dir)
+- ✓ autolive.config.settings (Settings, init_config, get_config)
+- ✓ autolive.config.paths (get_base_path, get_config_path, get_log_dir, get_output_dir)
 
 #### 工具模块
-- ✓ ai_vtuber.utils.helpers (ProgramManager, SystemCommand)
-- ✓ ai_vtuber.utils.common (textarea_data_change)
-- ✓ ai_vtuber.utils.audio (Audio)
+- ✓ autolive.utils.helpers (ProgramManager, SystemCommand)
+- ✓ autolive.utils.common (textarea_data_change)
+- ✓ autolive.utils.audio (Audio)
 
 #### UI组件模块
-- ✓ ai_vtuber.ui.components (NavigationTabs, ThemeManager, SearchFilter, ControlButtons, LoginForm, ExpansionPanel, FormField)
+- ✓ autolive.ui.components (NavigationTabs, ThemeManager, SearchFilter, ControlButtons, LoginForm, ExpansionPanel, FormField)
 
 #### 标签页模块
 - ✓ common_config (create_common_config_tab)
@@ -45,7 +45,7 @@
 - ✓ web (create_web_tab)
 
 #### 主模块
-- ✓ ai_vtuber.main (AIVtuberApp)
+- ✓ autolive.main (AutoliveApp)
 
 ### 3. 功能测试 ✓ PASS
 

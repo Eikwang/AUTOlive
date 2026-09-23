@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 """
-@Project : AI-Vtuber
+@Project : AUTOlive
 @File    : claude_model.py
 @Author  : HildaM
 @Email   : Hilda_quan@163.com

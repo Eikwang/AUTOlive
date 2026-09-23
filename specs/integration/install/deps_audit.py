@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""AI-Vtuber webui.py / webui-bak.py 全量依赖审计（runtime312 适配前置调查）
+"""AUTOlive webui.py / webui-bak.py 全量依赖审计（runtime312 适配前置调查）
 
 用法：D:\\AI\\EDTalk\\runtime312\\python.exe deps_audit.py
 逻辑：AST 解析两个入口 → 递归跟随项目内本地模块（含父包 __init__ 链）→ 收集第三方 import
@@ -14,7 +14,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))  # .../specs/integration/install → AI-Vtuber 根
+    os.path.abspath(__file__)))))  # .../specs/integration/install → AUTOlive 根
 ENTRIES = ["webui.py", "webui-bak.py"]
 
 imports = {}        # top_name -> {file: [(lineno, kind)]}

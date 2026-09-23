@@ -1,4 +1,4 @@
-# AI Vtuber 项目依赖
+# AUTOlive 项目依赖
 # 核心框架
 nicegui>=1.4.0
 

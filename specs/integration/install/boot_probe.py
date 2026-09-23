@@ -7,7 +7,7 @@ import importlib.abc, importlib.machinery
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))  # .../specs/integration/install → AI-Vtuber 根
+    os.path.abspath(__file__)))))  # .../specs/integration/install → AUTOlive 根
 sys.path.insert(0, ROOT)
 
 def is_local_top(top):

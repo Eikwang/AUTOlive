@@ -7,7 +7,7 @@ body:
     id: env-os
     attributes:
       label: 操作系统
-      description: 选择运行 AI Vtuber 的操作系统
+      description: 选择运行 AUTOlive 的操作系统
       options:
         - Windows
         - MacOS
@@ -20,7 +20,7 @@ body:
     id: env-python-ver
     attributes:
       label: Python 版本
-      description: 填写运行 AI Vtuber 的 Python 版本
+      description: 填写运行 AUTOlive 的 Python 版本
       placeholder: e.g. 3.10.11
     validations:
       required: true
@@ -28,8 +28,8 @@ body:
   - type: input
     id: env-nb-ver
     attributes:
-      label: AI Vtuber 版本
-      description: 填写 AI Vtuber 版本（日期）
+      label: AUTOlive 版本
+      description: 填写 AUTOlive 版本（日期）
       placeholder: e.g. 20240510
     validations:
       required: true

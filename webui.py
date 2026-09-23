@@ -13,13 +13,13 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # 导入并运行模块化应用
-from frontend.main import AIVtuberApp
+from frontend.main import AutoliveApp
 from utils.my_log import logger
 
 def main():
     """主函数"""
     try:
-        app = AIVtuberApp()
+        app = AutoliveApp()
         app.run()
     except Exception as e:
         logger.error(f"应用程序启动失败: {e}")

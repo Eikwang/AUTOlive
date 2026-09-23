@@ -3,7 +3,7 @@ global_idle_time = 0
 last_username_list = None
 last_liveroom_data = None
 
-# 待播放音频数量（在使用 音频播放器 或者 metahuman-stream等不通过AI Vtuber播放音频的对接项目时，使用此变量记录是是否还有音频没有播放完）
+# 待播放音频数量（在使用 音频播放器 或者 metahuman-stream等不通过AUTOlive播放音频的对接项目时，使用此变量记录是是否还有音频没有播放完）
 wait_play_audio_num = 0
 wait_synthesis_msg_num = 0
 

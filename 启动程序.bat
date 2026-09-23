@@ -1,5 +1,5 @@
 @echo off
-rem AI-Vtuber 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
+rem AUTOlive 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
 rem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）
 rem 本文件为 ANSI/GBK 编码（与中文 Windows cmd 原生码页一致），请勿改存为 UTF-8
 if not defined RT set "RT=D:\AI\EDTalk\runtime312"

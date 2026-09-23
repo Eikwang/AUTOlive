@@ -1,5 +1,5 @@
 @echo off
-rem AI-Vtuber 旧版单体界面入口（webui-bak.py，nicegui 1.x 时代产物）
+rem AUTOlive 旧版单体界面入口（webui-bak.py，nicegui 1.x 时代产物）
 rem ============================================================
 rem 警告：此入口在 runtime312 上待适配（nicegui 3.x 不兼容，实测必崩）
 rem 日常启动请用 启动程序.bat ；勿在直播中依赖本脚本

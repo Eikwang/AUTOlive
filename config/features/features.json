@@ -1040,7 +1040,7 @@
   "webui": {
     "ip": "127.0.0.1",
     "port": 8081,
-    "title": "AI Vtuber",
+    "title": "AUTOlive",
     "auto_run": false,
     "local_dir_to_endpoint": {
       "enable": false,

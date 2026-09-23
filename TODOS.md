@@ -2,7 +2,7 @@
 
 ## Deferred Items from /autoplan (2026-09-24) — 项目更名为 AUTOlive
 
-1. **conda 环境名文档-脚本分裂统一**（P3, S）— DX 阶段发现（DX-R3）：specs/技术栈.md 的 conda 示例用 `aivtuber`（改名后为 `autolive`），而 Scripts/半自动/1.创建虚拟环境.bat 实际创建 `ai_vtb` 环境——上游既有的文档/脚本不一致，改名后依然存在。统一方案二选一：文档示例改 `ai_vtb` 对齐脚本（零风险），或脚本+文档统一改名并重建环境（破坏性，需用户重装环境）。依赖：无；建议在下次动 conda 环境时顺手处理。
+1. **conda 环境名文档-脚本分裂统一**（P3, S）— DX 阶段发现（DX-R3）：specs/技术栈.md 的 conda 示例用 `autolive`（改名后为 `autolive`），而 Scripts/半自动/1.创建虚拟环境.bat 实际创建 `ai_vtb` 环境——上游既有的文档/脚本不一致，改名后依然存在。统一方案二选一：文档示例改 `ai_vtb` 对齐脚本（零风险），或脚本+文档统一改名并重建环境（破坏性，需用户重装环境）。依赖：无；建议在下次动 conda 环境时顺手处理。
 
 ## Deferred Items from /autoplan (2026-09-23) — 前端导航栏增强 + 菜单重排
 
@@ -22,14 +22,14 @@
 
 1. **api_old.py 与 flask_socketio 处置**（P3, S）— 旧 API 入口是否保留/归档；flask_socketio 仅其使用（runtime312 未装）。全仓库依赖审计发现，非两 webui 入口所需。
 2. **users.pth 注入升级为整合正式议题**（P2, S）— runtime312 的 `Lib\site-packages\users.pth` 硬编码注入 6 个 GPT-SoVITS 路径进所有进程，存在模块遮蔽风险；启动脚本 sys.path 断言只是临时保险，应从源头移除或收编管理。
-3. **EDTalk 目录硬耦合的结构性解耦**（P3, M）— AI-Vtuber 启动命脉指向 `D:\AI\EDTalk\runtime312`，EDTalk 挪动/重装即断；环境复制/软链/搬迁方案待评估。启动预检已缓解。
+3. **EDTalk 目录硬耦合的结构性解耦**（P3, M）— AUTOlive 启动命脉指向 `D:\AI\EDTalk\runtime312`，EDTalk 挪动/重装即断；环境复制/软链/搬迁方案待评估。启动预检已缓解。
 4. **UC-1 裁决联动**（P2, —）— 【已裁决 2026-09-22：B 带警告切换】1.bat 已照新模板改写并带警告头；webui-bak.py 的 nicegui 3.x 适配债保持挂起（与下方第 1 条 2026-09-02 项合并推进）。2 周退役线时复核是否升级为归档。UC-2 已裁决采纳导入守卫（zhipu.py/gemini.py 已落地），google-genai 迁移（选项②）未排期。
 
 5. **utils/__init__.py 惰性化（PEP 562 `__getattr__`）**（P2, M）— 当前巨石顶层导入链（web_server→my_handle→gpt→zhipu/gemini）使可选 LLM 通道包成为所有入口的硬依赖，本次两类启动阻断皆源于此。守卫只是止血，惰性化才是根因修复；否则下一个可选通道包还会复现同类阻断。（Eng A1，2026-09-22）
 
 ## Deferred Items from /autoplan (2026-09-02) — 六项目统一环境整合
 
-1. **gradio/pydantic 版本 API 差异适配**（P1, M）— 统一环境里 gradio 只能装一个版本、AI-Vtuber 需从 pydantic 1.x 适配 2.x。待统一环境落地后作为"后期适配"第一优先。阻塞：统一环境补装完成。
+1. **gradio/pydantic 版本 API 差异适配**（P1, M）— 统一环境里 gradio 只能装一个版本、AUTOlive 需从 pydantic 1.x 适配 2.x。待统一环境落地后作为"后期适配"第一优先。阻塞：统一环境补装完成。
 2. **uv 化重建单一可复现环境**（P2, L）— 用 pyproject+lock 替代 conda+裸 pip 的 379+ 包混合环境（conda 导出 requirements 不可靠）。待统一环境稳定运行 1-2 个月后评估。
 3. **opencv 三变体收敛为 opencv-contrib-python**（P3, S）— 当前 opencv-python/-contrib/-headless 并存互覆盖；收敛需先冒烟 EDTalk 推理链。
 4. **开发/测试依赖与运行依赖分文件**（P3, M）— 统一环境稳定后整理。
