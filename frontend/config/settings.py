@@ -134,6 +134,65 @@ class Settings:
 _config_instance: Optional[Settings] = None
 
 
+# 新配置节默认值（EDTalk功能集成计划 §4.1.4：init 时 ensure-default，
+# 加载后补写缺失键并落盘，防 get 返回 None）。
+# 注意：此处只补"缺失键"，不覆盖用户已配置的值。
+_EDTALK_REALTIME_DEFAULTS: Dict[str, Any] = {
+    "enable": False,
+    "api_ip_port": "http://127.0.0.1:8000",
+    "character_dir": "wy",
+    "target_fps": 25,
+    "buffer_frames": 16,
+    "preroll_frames": 8,
+    "face_repair": "adaptive",
+    "gaze_correction": "adaptive",
+    "gaze_convergence": 0.05,
+    "segments": "auto",
+    "host": "127.0.0.1",
+    "api_token": "",
+    "port": 8000,
+    "interpreter_path": "D:\\AI\\EDTalk\\runtime312\\python.exe",
+    "reaction_segment": True,
+}
+
+_FASTRAG_DEFAULTS: Dict[str, Any] = {
+    "enable": False,
+    "port": 11420,
+}
+
+
+def _ensure_defaults(config: "Settings") -> None:
+    """补写新增配置节的缺失键（只补缺失，不覆盖既有值）并落盘。"""
+    changed = False
+    cfg = config._config
+    if "edtalk_realtime" not in cfg:
+        cfg["edtalk_realtime"] = dict(_EDTALK_REALTIME_DEFAULTS)
+        changed = True
+    else:
+        for key, value in _EDTALK_REALTIME_DEFAULTS.items():
+            if key not in cfg["edtalk_realtime"]:
+                cfg["edtalk_realtime"][key] = value
+                changed = True
+    if "fastrag" not in cfg:
+        cfg["fastrag"] = dict(_FASTRAG_DEFAULTS)
+        changed = True
+    else:
+        for key, value in _FASTRAG_DEFAULTS.items():
+            if key not in cfg["fastrag"]:
+                cfg["fastrag"][key] = value
+                changed = True
+    if changed:
+        try:
+            config.save()
+        except Exception as e:
+            # 落盘失败不阻塞启动（内存中默认值已生效），但要可见
+            try:
+                from utils.my_log import logger
+                logger.error(f"新配置节默认值落盘失败（内存中已生效）：{e}")
+            except Exception:
+                pass
+
+
 def get_config() -> Settings:
     """获取全局配置实例"""
     global _config_instance
@@ -154,6 +213,7 @@ def init_config(config_path: str) -> Settings:
     """
     global _config_instance
     _config_instance = Settings(config_path)
+    _ensure_defaults(_config_instance)
     return _config_instance
 
 

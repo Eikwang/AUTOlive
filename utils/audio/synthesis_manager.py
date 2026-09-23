@@ -8,6 +8,7 @@ import os
 import traceback
 from copy import deepcopy
 from ..my_log import logger
+from ..edtalk_realtime import is_edtalk_active
 
 
 class SynthesisMixin:
@@ -28,6 +29,19 @@ class SynthesisMixin:
 
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处
+                #
+                # 音频分流（EDTalk功能集成计划 §4.3.2，与启动条件对齐杜绝静音组合）：
+                # - metahuman_stream：文本 echo，TTS 由对端托管（既有逻辑）
+                # - edtalk_realtime 且 enable：走本地 TTS 合成 → 播放环节跳过本地播放、
+                #   推送 /audio/push_full 给 EDTalk 帧锁定播放（playback_manager 分流）
+                # - edtalk_realtime 但 enable=false：走本地 TTS + 本地正常播放
+                #   （有声音、无数字人画面）——UI 侧常驻警告提示服务未启用
+                if self.config.get("visual_body") == "edtalk_realtime" and not is_edtalk_active(self.config):
+                    logger.warning(
+                        "数字人服务未启用（edtalk_realtime.enable=false）："
+                        "本次音频将走本地声音播放，无数字人画面与口型"
+                    )
+
                 if self.config.get("visual_body") == "metahuman_stream":
                     logger.debug(f"合成音频前的原始数据：{message['content']}")
                     # 针对配置传参遗漏情况，主动补上，避免异常

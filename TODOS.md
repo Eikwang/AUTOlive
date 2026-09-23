@@ -1,5 +1,11 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-09-24) — EDTalk 功能集成
+
+1. **训练产物→推理服务自动接线**（P2, M）— CEO 阶段延期：训练主播产出 audio2lip ckpt 后自动替换实时推理角色权重。依赖：本期训练链路（train_streamer pipeline）落地并稳定。落地时注意 ckpt 格式（audio2lip 单独键 vs 完整格式，见 EDTalk 记忆「部署注意」）。
+2. **多角色管理/训练队列**（P3, L）— CEO 阶段延期：单角色全链路先落地；多角色需角色目录约定与训练排队 UI。依赖：第 1 条。
+3. **训练断点续训**（P2, M）— CEO 阶段延期：长训练（底模微调+口型微调累计 ~15h）中断后从最近 checkpoint 恢复；当前为步骤级失败即停。train_fine_tune/train_audio2mouth 原生支持 resume_ckpt，主要工作是编排层的状态记录与 UI。
+
 ## Deferred Items from /autoplan (2026-09-24) — 项目更名为 AUTOlive
 
 1. **conda 环境名文档-脚本分裂统一**（P3, S）— DX 阶段发现（DX-R3）：specs/技术栈.md 的 conda 示例用 `autolive`（改名后为 `autolive`），而 Scripts/半自动/1.创建虚拟环境.bat 实际创建 `ai_vtb` 环境——上游既有的文档/脚本不一致，改名后依然存在。统一方案二选一：文档示例改 `ai_vtb` 对齐脚本（零风险），或脚本+文档统一改名并重建环境（破坏性，需用户重装环境）。依赖：无；建议在下次动 conda 环境时顺手处理。

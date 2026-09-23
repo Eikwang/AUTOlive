@@ -124,7 +124,24 @@ class WebServer:
             except Exception as e:
                 logger.error(f"回调请求失败！{e}")
                 return CommonResult(code=-1, message=f"回调请求失败！{e}")
-        
+
+        @self.app.get("/edtalk_status")
+        async def edtalk_status():
+            """EDTalk 推送健康度快照（EDTalk功能集成计划 §4.3.1）。
+
+            webui 画面设置页轮询此端点渲染推送健康度可见面
+            （正常 / 未启动 / 最近 N 次失败）。推送发生在本进程
+            （main.py 运行时），webui 经既有代理链路读取。
+            """
+            try:
+                from utils.edtalk_realtime.edtalk_client import get_registered_client
+                client = get_registered_client()
+                if client is None:
+                    return {"code": 200, "data": {"available": False, "reason": "音频模块未初始化"}}
+                return {"code": 200, "data": {"available": True, **client.health_snapshot()}}
+            except Exception as e:
+                return {"code": -1, "message": f"获取 EDTalk 状态失败：{e}"}
+
         logger.info("API路由注册完成")
     
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):

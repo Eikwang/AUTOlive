@@ -190,7 +190,12 @@ class AutoliveApp:
             logger.error(f"配置保存失败: {e}")
     
     def start_programs(self):
-        """根据配置启动所有程序（与原文件 webui-bak.py L211-243 一致）"""
+        """根据配置启动所有程序（与原文件 webui-bak.py L211-243 一致）
+
+        EDTalk 功能集成（§4.2）：本函数也是实时推理服务器与 fastrag server 的
+        启动挂接点——拉起均显式 shell=False + list 传参（native H1：存量
+        coordination_program 路径的 shell=True 不得沿用到新分支）。
+        """
         config_data = self.config._config
 
         # 启动协同程序
@@ -207,7 +212,8 @@ class AutoliveApp:
             app_dir = os.path.dirname(app_path) if app_path else "."
 
             # 使用 Python 解释器路径和 app.py 路径构建命令
-            cmd = [executable, app_path]
+            # （对接纪要 A2：parameters 全量透传，向后兼容——既有条目仅 app_path）
+            cmd = [executable] + parameters
 
             logger.info(f"运行程序: {name} 位于: {app_dir}")
 
@@ -217,6 +223,148 @@ class AutoliveApp:
                 self.my_subprocesses[name] = process
             except Exception as e:
                 logger.error(f"启动程序 {name} 失败: {e}")
+
+        # EDTalk 实时推理服务器（计划 §4.2：开关双检 + 端口幂等 + 身份验证）
+        self._start_edtalk_realtime(config_data)
+
+        # fastrag 知识库服务（计划 §6.2）
+        self._start_fastrag(config_data)
+
+    def _start_edtalk_realtime(self, config_data: dict):
+        """拉起 EDTalk realtime_serve 服务（计划 §4.2 + Eng 义务⑨⑬）。
+
+        - 开关双检：visual_body == "edtalk_realtime" 且 edtalk_realtime.enable
+        - 解释器存在性校验（缺失报错附修复动作）
+        - 端口幂等探测 + GET /status 身份验证（占用者未必是 realtime_serve）
+        - 训练进行中检测（双向显存防护）
+        - 显式 shell=False + list 传参（native H1）
+        """
+        try:
+            ed_cfg = config_data.get("edtalk_realtime", {})
+        except Exception:
+            ed_cfg = {}
+        if config_data.get("visual_body") != "edtalk_realtime" or not ed_cfg.get("enable"):
+            return
+
+        interpreter = ed_cfg.get("interpreter_path") or "D:\\AI\\EDTalk\\runtime312\\python.exe"
+        if not os.path.exists(interpreter):
+            logger.error(
+                f"EDTalk 解释器不存在：{interpreter}。problem=解释器缺失；"
+                f"cause=runtime312 未安装或路径变更；"
+                f"fix=修改画面设置页『解释器路径』配置项指向可用解释器"
+            )
+            return
+
+        # 训练进行中检测（双向显存防护，16GB 卡训练与推理不可并存）
+        try:
+            from utils.train_streamer import pipeline as _train_pipeline
+            if getattr(_train_pipeline, "training_running", False):
+                logger.warning(
+                    "训练正在进行中，启动实时推理服务器将导致 GPU 显存冲突（16GB 卡）——已跳过拉起，建议错开"
+                )
+                ui.notify(position="top", type="warning",
+                          message="训练进行中，实时推理服务未启动（显存冲突风险），建议错开")
+                return
+        except ImportError:
+            pass
+
+        edtalk_dir = os.path.join(str(get_base_path()), "edtalk")
+        if not os.path.isdir(edtalk_dir):
+            logger.error(
+                f"EDTalk 运行副本目录不存在：{edtalk_dir}。problem=副本缺失；"
+                f"cause=尚未执行复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
+            )
+            return
+
+        port = int(ed_cfg.get("port", 8000))
+        host = ed_cfg.get("host", "127.0.0.1")
+
+        # 端口幂等探测 + 身份验证（native E5）：占用者未必是 realtime_serve
+        already_running = False
+        try:
+            import requests as _requests
+            probe = _requests.get(f"http://127.0.0.1:{port}/status", timeout=2)
+            if probe.status_code == 200 and "available_segments" in probe.text:
+                already_running = True
+                logger.warning(f"EDTalk realtime_serve 已在运行（端口 {port}），跳过拉起")
+            elif probe.status_code == 200:
+                logger.error(
+                    f"端口 {port} 被其他 HTTP 服务占用（响应非 realtime_serve）。"
+                    f"problem=端口冲突；cause=端口被未知服务占用；"
+                    f"fix=修改画面设置页『端口』配置项或结束占用进程"
+                )
+                ui.notify(position="top", type="negative",
+                          message=f"端口 {port} 被非 EDTalk 服务占用，实时推理未启动")
+                return
+        except Exception:
+            pass  # 连接失败 = 端口空闲，正常走拉起
+
+        if already_running:
+            ui.notify(position="top", type="warning",
+                      message=f"EDTalk 服务已在运行（端口 {port}），跳过重复拉起")
+            return
+
+        # 参数映射（config.edtalk_realtime → RUNBOOK 启动参数表）
+        cmd = [interpreter, "-m", "realtime_serve.main"]
+        cmd += ["--character-dir", str(ed_cfg.get("character_dir", "wy"))]
+        cmd += ["--target-fps", str(ed_cfg.get("target_fps", 25))]
+        cmd += ["--buffer-frames", str(ed_cfg.get("buffer_frames", 16))]
+        cmd += ["--preroll-frames", str(ed_cfg.get("preroll_frames", 8))]
+        face_repair = ed_cfg.get("face_repair", "adaptive")
+        if face_repair and face_repair != "off":
+            cmd += ["--face-repair", face_repair]
+        gaze = ed_cfg.get("gaze_correction", "adaptive")
+        if gaze and gaze != "off":
+            cmd += ["--gaze-correction", gaze]
+        cmd += ["--gaze-convergence", str(ed_cfg.get("gaze_convergence", 0.05))]
+        segments = ed_cfg.get("segments", "auto")
+        if segments and segments != "auto":
+            cmd += ["--segments"] + str(segments).split()
+        elif segments == "auto":
+            cmd += ["--segments", "auto"]
+        cmd += ["--host", host]
+        cmd += ["--port", str(port)]
+        api_token = (ed_cfg.get("api_token") or "").strip()
+        if api_token:
+            cmd += ["--api-token", api_token]
+
+        try:
+            # 显式 shell=False + list 传参（native H1：路径含空格/中文不会被 cmd.exe 打碎）
+            process = subprocess.Popen(cmd, cwd=edtalk_dir, shell=False)
+            self.my_subprocesses["edtalk_realtime"] = process
+            logger.info(f"运行程序: edtalk_realtime（PID {process.pid}，端口 {port}）")
+        except Exception as e:
+            logger.error(f"启动 EDTalk realtime_serve 失败: {e}")
+
+    def _start_fastrag(self, config_data: dict):
+        """拉起 fastrag server（计划 §6.2 + Eng 义务⑬：端口环境变量注入）。"""
+        fastrag_cfg = config_data.get("fastrag", {})
+        if not fastrag_cfg.get("enable"):
+            return
+
+        base = str(get_base_path())
+        fastrag_dir = os.path.join(base, "edtalk", "fastrag")
+        server_exe = os.path.join(fastrag_dir, "server.exe")
+        if not os.path.exists(server_exe):
+            logger.error(
+                f"fastrag server.exe 不存在：{server_exe}。problem=可执行文件缺失；"
+                f"cause=fastrag 未复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
+            )
+            return
+
+        port = int(fastrag_cfg.get("port", 11420))
+        env = os.environ.copy()
+        # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2）
+        env["FASTRAG__SERVER__PORT"] = str(port)
+
+        try:
+            process = subprocess.Popen(
+                [server_exe], cwd=fastrag_dir, shell=False, env=env
+            )
+            self.my_subprocesses["fastrag"] = process
+            logger.info(f"运行程序: fastrag（PID {process.pid}，端口 {port}）")
+        except Exception as e:
+            logger.error(f"启动 fastrag 失败: {e}")
 
         # 启动主程序 main.py（E3：用 webui 自身解释器，避免 PATH 解析到错误 python——
         # 定时任务/其它 shell 启动 webui 时尤其危险；原实现沿用 webui-bak 的 "python" 硬编码）

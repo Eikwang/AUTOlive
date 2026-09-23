@@ -18,6 +18,8 @@ from ..my_log import logger
 from ..config import Config
 from utils.audio_handle.my_tts import MY_TTS
 from utils.audio_handle.audio_player import AUDIO_PLAYER
+from utils.edtalk_realtime import EDTalkClient, is_edtalk_active
+from utils.edtalk_realtime.edtalk_client import register_client
 
 # 导入子模块
 from .queue_manager import QueueMixin
@@ -114,3 +116,9 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
             self.only_play_copywriting_thread.start()
 
         Audio.audio_player =  AUDIO_PLAYER(self.config.get("audio_player"))
+
+        # EDTalk 实时推理客户端（EDTalk功能集成计划 §4.3.1）：
+        # 无论是否激活都创建（构造廉价），is_edtalk_active() 在使用点判定；
+        # 注册到模块级 holder，供 main.py 运行时 /edtalk_status 健康度端点读取。
+        self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"))
+        register_client(self.edtalk_client)

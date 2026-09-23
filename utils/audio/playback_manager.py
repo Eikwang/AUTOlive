@@ -7,6 +7,7 @@ import threading
 import traceback
 import os
 from ..my_log import logger
+from ..edtalk_realtime import is_edtalk_active
 
 
 class PlaybackMixin:
@@ -117,8 +118,16 @@ class PlaybackMixin:
                     # print(voice_tmp_path)
 
                     # 根据接入的虚拟身体类型执行不同逻辑（仅保留metahuman_stream在合成前处理）
+                    # EDTalk 实时推理模式（EDTalk功能集成计划 §4.3.3）：跳过本地播放——
+                    # EDTalk 端 sounddevice 帧锁定播放（本地播放会双声），TTS 落盘
+                    # （含变速）后仅推送 /audio/push_full。推送协程内阻塞等待完成
+                    # 判定（背压），失败降级记录不阻塞直播主流程。
                     # 根据播放器类型进行区分
-                    if self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
+                    if is_edtalk_active(self.config):
+                        await self.edtalk_client.push_full(
+                            voice_tmp_path, content=data_json.get("content", "")
+                        )
+                    elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
                         if "insert_index" in data_json:
                             data_json = {
                                 "type": data_json["type"],
@@ -179,7 +188,16 @@ class PlaybackMixin:
 
 
     def stop_current_audio(self):
-        """停止当前播放的音频"""
+        """停止当前播放的音频
+
+        注意（EDTalk 模式语义变化，native E6）：edtalk_realtime 激活时本地播放
+        已被跳过，弹幕打断只作用于本地 mixer/audio_player；EDTalk 端无
+        flush-audio 契约端点，打断不会停止其音频播放。已列入 edtalk/README
+        语义变化清单。
+        """
+        if is_edtalk_active(self.config):
+            # EDTalk 契约无音频 flush 端点——静默跳过（保持既有调用方兼容）
+            return
         if self.config.get("play_audio", "player") == "audio_player":
             self.audio_player.skip_current_stream()
         else:
@@ -229,8 +247,11 @@ class PlaybackMixin:
 
                 logger.info(f"变速后音频输出在 {audio_path}")
 
-                # 根据接入的虚拟身体类型执行不同逻辑（仅保留metahuman_stream在合成前处理）
-                if self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
+                # EDTalk 实时推理模式：跳过本地播放，推送变速后文件（native E6：
+                # 变速发生在播放旁路，推送必须使用变速后的产物）
+                if is_edtalk_active(self.config):
+                    await self.edtalk_client.push_full(audio_path, content="文案播放")
+                elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
                     data_json = {
                         "type": "copywriting",
                         "voice_path": audio_path,

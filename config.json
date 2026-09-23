@@ -1784,12 +1784,17 @@
         ]
       },
       {
-        "name": "虚拟身体",
+        "name": "数字人",
         "icon": "accessibility_new",
         "functions": [
           {
-            "name": "虚拟身体",
+            "name": "画面设置",
             "tab_key": "visual_body",
+            "enabled": true
+          },
+          {
+            "name": "训练主播",
+            "tab_key": "train_streamer",
             "enabled": true
           }
         ]
@@ -1847,5 +1852,26 @@
       }
     ],
     "dark_mode": true
+  },
+  "edtalk_realtime": {
+    "enable": false,
+    "api_ip_port": "http://127.0.0.1:8000",
+    "character_dir": "wy",
+    "target_fps": 25,
+    "buffer_frames": 16,
+    "preroll_frames": 8,
+    "face_repair": "adaptive",
+    "gaze_correction": "adaptive",
+    "gaze_convergence": 0.05,
+    "segments": "auto",
+    "host": "127.0.0.1",
+    "api_token": "",
+    "port": 8000,
+    "interpreter_path": "D:\\AI\\EDTalk\\runtime312\\python.exe",
+    "reaction_segment": true
+  },
+  "fastrag": {
+    "enable": false,
+    "port": 11420
   }
 }
