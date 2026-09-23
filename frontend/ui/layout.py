@@ -1202,11 +1202,12 @@ class DrawerLayout:
                     list_item.on('click', lambda e, name=func_name: self._on_function_click(name))
 
                     # 第一行：功能名称和启用开关（任务6：仅"有启用"功能渲染开关，
-                    # 直绑业务路径；无启用功能不渲染——D-B1）
+                    # 直绑业务路径；无启用功能不渲染——D-B1；min-height 统一行高）
                     with ui.row().style('''
                         width: 100%;
                         align-items: center;
                         justify-content: space-between;
+                        min-height: 36px;
                     '''):
                         # 功能名称（点击行为已上移到容器，跟随容器热区）
                         ui.label(func_name).style(f'''
