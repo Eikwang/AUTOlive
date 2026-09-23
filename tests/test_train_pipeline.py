@@ -131,24 +131,31 @@ def test_progress_corrupt_returns_none(tmp_path, monkeypatch):
 
 
 def test_judge_eval_pass():
-    """指标全过门槛 → None（通过）。"""
-    p = _make_pipeline.__wrapped__ if hasattr(_make_pipeline, "__wrapped__") else None  # noqa
-    metrics = {"pose_mae": 10.0, "paste_proxy": 3.0, "bg_ssim_drop": 0.01, "mouth_ratio": 1.0}
+    """实测字段（jsonl metrics 嵌套）全过门槛 → None（通过）。"""
     pipeline = TrainPipeline(
         config_data={"edtalk_realtime": {}}, video_dir=".", role_name="x",
     )
-    assert pipeline._judge_eval(metrics) is None
+    parsed = {
+        "base": {"bg_ssim": 0.9489},
+        "candidate": {"pose_keep_mae_px": 7.0, "paste_proxy_mae_px": 1.8,
+                      "bg_ssim": 0.9676, "lip_open_ratio_vs_ref": 0.98},
+    }
+    assert pipeline._judge_eval(parsed) is None
 
 
-def test_judge_eval_fail_and_fuzzy_match():
-    """键名模糊匹配 + 超门槛原因聚合。"""
+def test_judge_eval_fail_reasons():
+    """超门槛原因聚合（姿势MAE 超限 + SSIM 降幅超限）。"""
     pipeline = TrainPipeline(
         config_data={"edtalk_realtime": {}}, video_dir=".", role_name="x",
     )
-    metrics = {"PoseMAE": 15.0, "paste_distance": 5.0}  # 非规范键名
-    reasons = pipeline._judge_eval(metrics)
+    parsed = {
+        "base": {"bg_ssim": 0.99},
+        "candidate": {"pose_keep_mae_px": 15.0, "bg_ssim": 0.90,
+                      "lip_open_ratio_vs_ref": 0.98},
+    }
+    reasons = pipeline._judge_eval(parsed)
     assert reasons is not None
-    assert "MAE" in reasons and "贴回" in reasons
+    assert "MAE" in reasons and "SSIM" in reasons
 
 
 def test_judge_eval_unparseable_defers_to_human():
@@ -156,7 +163,7 @@ def test_judge_eval_unparseable_defers_to_human():
     pipeline = TrainPipeline(
         config_data={"edtalk_realtime": {}}, video_dir=".", role_name="x",
     )
-    assert pipeline._judge_eval({}) is not None
+    assert pipeline._judge_eval({"base": {}, "candidate": {}}) is not None
 
 
 # ---------- 5. argv 签名映射 ----------

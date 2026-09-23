@@ -314,7 +314,7 @@ class TrainPipeline:
                 self._write_progress(3, "running")
                 eval_out = "tools/eval_results"
                 cmd = [self.interpreter, "tools/eval_finetune.py",
-                       "--cand-ckpt", f"ckpt_models/{self.role_name}/checkpoint/30000.pt",
+                       "--cand-ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
                        "--datapath", self.role_name,
                        "--out-dir", eval_out]
                 if not self._run_step(cmd, 3):
@@ -347,7 +347,7 @@ class TrainPipeline:
                 self._write_progress(4, "running")
                 cmd = [self.interpreter, "train/train_audio2mouth.py",
                        "--data_path", self.role_name,
-                       "--resume_ckpt", f"ckpt_models/{self.role_name}/checkpoint/30000.pt",
+                       "--resume_ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
                        "--audio2lip_ckpt", "ckpts/Audio2Lip.pt",
                        "--exp_name", self.role_name] + AUDIO2MOUTH_ARGS
                 if not self._run_step(cmd, 4):
@@ -386,8 +386,13 @@ class TrainPipeline:
     # ---------- 评估解析 ----------
 
     def _parse_eval_results(self, out_dir: str) -> dict:
-        """解析 eval_results.jsonl（机器可读输出，Eng 义务②）。"""
-        metrics = {}
+        """解析 eval_results.jsonl（机器可读输出，Eng 义务②）。
+
+        实际结构（eval_finetune.py 实测）：每行一个 JSON，含 role 字段
+        （base=底模对照行 / candidate=候选行），指标嵌套在 metrics 内。
+        返回 {"base": {...}, "candidate": {...}} 两个 metrics 字典。
+        """
+        parsed = {"base": {}, "candidate": {}}
         path = os.path.join(out_dir, "eval_results.jsonl")
         try:
             with open(path, encoding="utf-8") as f:
@@ -397,42 +402,50 @@ class TrainPipeline:
                         continue
                     try:
                         row = json.loads(line)
-                        if isinstance(row, dict):
-                            metrics.update(row)
+                        role = row.get("role", "candidate")
+                        metrics = row.get("metrics") or {}
+                        if role in parsed and metrics:
+                            parsed[role] = metrics  # 取最后一行（最新）
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
             self._log(f"[评估] 结果文件读取失败：{e}")
-        self._log(f"[评估] 指标：{json.dumps(metrics, ensure_ascii=False)}")
-        return metrics
+        self._log(f"[评估] base 指标：{json.dumps(parsed['base'], ensure_ascii=False)}")
+        self._log(f"[评估] candidate 指标：{json.dumps(parsed['candidate'], ensure_ascii=False)}")
+        return parsed
 
-    def _judge_eval(self, metrics: dict) -> str | None:
-        """按门槛判定评估结果。返回 None=通过（或无法解析——交人工判断）；
-        返回字符串=未过门槛的原因。"""
-        if not metrics:
+    def _judge_eval(self, parsed: dict) -> str | None:
+        """按门槛判定评估结果（EDTalk RUNBOOK §单角色微调）。
+
+        实测字段（eval_results.jsonl metrics 嵌套）：
+        - pose_keep_mae_px ≤ 11.1（姿势保持）
+        - paste_proxy_mae_px ≤ 3.6（贴回代理）
+        - 背景 SSIM 降幅：base.bg_ssim - candidate.bg_ssim ≤ 0.02
+        - lip_open_ratio_vs_ref ∈ [0.8, 1.25]（开合比）
+
+        返回 None=通过（或无法解析——交人工判断）；字符串=未过门槛原因。
+        """
+        cand = parsed.get("candidate") or {}
+        base = parsed.get("base") or {}
+        if not cand:
             self._log("[评估] 未解析到指标——交由用户人工判断（门槛参考：姿势MAE≤11.1px、贴回≤3.6px、背景SSIM降幅≤0.02、开合比0.8-1.25）")
             return "未解析到评估指标"
-        # 键名模糊匹配（eval 脚本字段命名可能演进）
-        def find_key(candidates):
-            lowered = {k.lower(): v for k, v in metrics.items()}
-            for c in candidates:
-                for k, v in lowered.items():
-                    if c in k:
-                        return v
-            return None
         reasons = []
-        mae = find_key(["pose_mae", "mae"])
+        mae = cand.get("pose_keep_mae_px")
         if mae is not None and float(mae) > EVAL_THRESHOLDS["pose_mae"]:
-            reasons.append(f"姿势MAE {mae} > {EVAL_THRESHOLDS['pose_mae']}")
-        paste = find_key(["paste", "贴回"])
+            reasons.append(f"姿势MAE {mae:.2f} > {EVAL_THRESHOLDS['pose_mae']}")
+        paste = cand.get("paste_proxy_mae_px")
         if paste is not None and float(paste) > EVAL_THRESHOLDS["paste_proxy"]:
-            reasons.append(f"贴回代理 {paste} > {EVAL_THRESHOLDS['paste_proxy']}")
-        ssim_drop = find_key(["ssim_drop", "ssim 降幅"])
-        if ssim_drop is not None and float(ssim_drop) > EVAL_THRESHOLDS["bg_ssim_drop"]:
-            reasons.append(f"背景SSIM降幅 {ssim_drop} > {EVAL_THRESHOLDS['bg_ssim_drop']}")
-        ratio = find_key(["ratio", "开合比"])
+            reasons.append(f"贴回代理 {paste:.2f} > {EVAL_THRESHOLDS['paste_proxy']}")
+        cand_ssim = cand.get("bg_ssim")
+        base_ssim = base.get("bg_ssim")
+        if cand_ssim is not None and base_ssim is not None:
+            drop = float(base_ssim) - float(cand_ssim)
+            if drop > EVAL_THRESHOLDS["bg_ssim_drop"]:
+                reasons.append(f"背景SSIM降幅 {drop:.3f} > {EVAL_THRESHOLDS['bg_ssim_drop']}")
+        ratio = cand.get("lip_open_ratio_vs_ref")
         if ratio is not None and not (EVAL_THRESHOLDS["mouth_ratio"][0] <= float(ratio) <= EVAL_THRESHOLDS["mouth_ratio"][1]):
-            reasons.append(f"开合比 {ratio} 超出 {EVAL_THRESHOLDS['mouth_ratio']}")
+            reasons.append(f"开合比 {ratio:.2f} 超出 {EVAL_THRESHOLDS['mouth_ratio']}")
         return "；".join(reasons) if reasons else None
 
     # ---------- 用户确认与停止 ----------
@@ -458,3 +471,59 @@ class TrainPipeline:
                 logger.info(f"训练子进程 {self._process.pid} 已终止（用户停止）")
             except Exception as e:
                 logger.error(f"终止训练子进程失败：{e}")
+
+    # ---------- 应用到数字人（训练→开播接线，A1 映射已验证） ----------
+
+    @staticmethod
+    def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000) -> str:
+        """把训练产物应用到实时推理（打通"训练→开播"最后一公里）。
+
+        映射（2026-09-24 迷你冒烟 strict 加载验证通过）：
+        - ckpt_models/<角色>/checkpoint/<iter:06d>.pt 的 ['gen'] state_dict
+          → <character_dir>/checkpoint/new.pt（realtime_serve Generator 权重）
+        - 口型微调产物 audio2lip ckpt → <character_dir>/audio2lip.pt
+
+        Args:
+            role_name: 训练角色名
+            character_dir: realtime_serve 角色素材目录名（config.edtalk_realtime.character_dir）
+            iter_count: 底模微调 iter（定位产物文件名）
+
+        Returns:
+            成功消息；失败抛异常（调用方 catch 后 notify）。
+        """
+        import torch
+
+        edtalk_dir = get_edtalk_dir()
+        char_root = os.path.join(edtalk_dir, character_dir)
+        ckpt_dir = os.path.join(char_root, "checkpoint")
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        # 1) Generator 权重：gen 键 → new.pt（仅自产 ckpt 校验，native S2）
+        cand_path = os.path.join(edtalk_dir, "ckpt_models", role_name, "checkpoint", f"{iter_count:06d}.pt")
+        if not os.path.exists(cand_path):
+            raise FileNotFoundError(f"训练产物不存在：{cand_path}")
+        cand = torch.load(cand_path, map_location="cpu", weights_only=False)
+        if "gen" not in cand:
+            raise ValueError(f"产物缺少 gen 键（非本编排器自产 ckpt？）：{cand_path}")
+        new_pt_path = os.path.join(ckpt_dir, "new.pt")
+        torch.save({"gen": cand["gen"]}, new_pt_path)
+
+        # 2) 口型权重：口型微调产物 → audio2lip.pt
+        a2l_dir = os.path.join(edtalk_dir, "Audio2Lip", role_name)
+        a2l_src = None
+        if os.path.isdir(a2l_dir):
+            # 取该角色最新口型微调产物
+            for root, _, files in os.walk(a2l_dir):
+                pts = sorted(f for f in files if f.endswith(".pt"))
+                if pts:
+                    a2l_src = os.path.join(root, pts[-1])
+        if a2l_src:
+            shutil.copy2(a2l_src, os.path.join(char_root, "audio2lip.pt"))
+            a2l_msg = f"口型权重 {a2l_src} → audio2lip.pt"
+        else:
+            a2l_msg = "未找到口型微调产物（audio2lip.pt 保持不变）"
+
+        return (
+            f"已应用：gen → {new_pt_path}；{a2l_msg}。"
+            f"重启 realtime_serve 后生效（停止并重新『运行系统』）"
+        )
