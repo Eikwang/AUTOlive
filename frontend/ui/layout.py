@@ -3,8 +3,12 @@ from frontend.ui.components.config_helper import get_nested_value
 UI布局模块
 负责创建主界面布局
 """
+import asyncio
+
 from nicegui import ui
 from typing import Dict, Any, Optional
+
+from utils.my_log import logger
 
 
 class UILayout:
@@ -239,6 +243,35 @@ class DrawerLayout:
             transition: all var(--transition-fast);
         }}
 
+        /* ============ 系统启停控制（任务1/DG-2/DG-4/任务2.3）============ */
+        /* 禁用 Quasar 默认中心涟漪与悬停浮层——悬停统一为整个按钮表面变化 */
+        .sys-btn .q-ripple,
+        .theme-btn .q-ripple {{
+            display: none;
+        }}
+        .sys-btn::before, .sys-btn::after,
+        .theme-btn::before, .theme-btn::after {{
+            display: none !important;
+        }}
+        /* 彩色启停按钮：悬停 = 全表面亮度变化（免新增色值令牌，双主题安全） */
+        .sys-btn-start:hover, .sys-btn-stop:hover, .sys-btn-restart:hover {{
+            filter: brightness(0.88);
+        }}
+        /* 中性按钮（主题切换）：悬停 = 整按钮 --bg-hover 背景 */
+        .theme-btn:hover {{
+            background: var(--bg-hover) !important;
+        }}
+        /* 禁用态（DG-4）：Quasar 1.x 禁用类名为 .disabled（非 .q-btn--disabled）
+           + 统一降透明度 + not-allowed */
+        .sys-btn.disabled, .sys-btn.q-btn--disabled {{
+            opacity: 0.45 !important;
+            cursor: not-allowed;
+        }}
+        /* 复合按钮容器 */
+        .sys-composite .q-btn {{
+            min-width: 0;
+        }}
+
         /* ============ 统一输入框 ============ */
         .q-field--standard .q-field__control {{
             border-radius: var(--radius-md);
@@ -256,16 +289,19 @@ class DrawerLayout:
         """
         ui.add_head_html(f"<style>{css}</style>")
 
-    def __init__(self, config: Dict[str, Any], save_callback=None):
+    def __init__(self, config: Dict[str, Any], save_callback=None, app=None):
         """
         初始化 Drawer 布局
 
         Args:
             config: 配置字典
             save_callback: 保存配置的回调函数
+            app: AIVtuberApp 实例（Optional，E1：None 时启停按钮降级为禁用态，
+                 兼容测试构造点；生产装配处传入 self）
         """
         self.config = config
         self.save_callback = save_callback
+        self.app = app
         self.tabs = {}
         self.tab_panels = {}
         self.drawer = None
@@ -285,11 +321,18 @@ class DrawerLayout:
         self.search_results = []
         self.search_keyword = ""
         self.search_results_container = None
-        self.system_status = "stopped"
-        self.system_button_text = "运行系统"
-        self.system_button_color = "var(--color-success)"
         self.tabs_mapping = {}
         self.theme_button = None
+
+        # 系统启停控制（任务1：running_flag 为唯一状态源，本类不保存状态副本）
+        self.pending_flag = False       # E5：操作进行中标志（pending 窗口内全部禁用）
+        self.pending_label = ""         # pending 期间状态条文案（停止中…/重启中…）
+        self.control_section = None     # E9：折叠态隐藏的按钮簇容器（状态条+启停按钮）
+        self.status_dot = None
+        self.status_label = None
+        self.start_button = None
+        self.stop_button = None
+        self.restart_button = None
 
         # 注入全局样式
         self.inject_global_styles()
@@ -323,6 +366,9 @@ class DrawerLayout:
                 background: var(--bg-card);
                 border-right: 1px solid var(--border-color);
             ''')
+        # E9：折叠态隐藏启停控制区（60px 下复合按钮与 44px 点击目标数学不成立）
+        if self.control_section is not None:
+            self.control_section.visible = not self.drawer_mini
         # 保存状态到配置
         if "webui" not in self.config:
             self.config["webui"] = {}
@@ -375,54 +421,220 @@ class DrawerLayout:
         return "dark" if self.dark_mode and self.dark_mode.value else "light"
 
 
-    def update_system_status(self, status: str):
-        """更新系统状态"""
-        self.system_status = status
-        if status == "running":
-            self.system_button_text = "停止运行"
-            self.system_button_color = "var(--color-danger)"
-        elif status == "stopped":
-            self.system_button_text = "运行系统"
-            self.system_button_color = "var(--color-success)"
-
-    def toggle_system(self):
-        """切换系统运行/停止状态"""
-        if self.system_status == "running":
-            self.stop_system()
-        else:
-            self.start_system()
-
-    def start_system(self):
-        """启动系统"""
-        if self.system_status != "running":
-            self.update_system_status("running")
-
-    def stop_system(self):
-        """停止系统"""
-        if self.system_status != "stopped":
-            self.update_system_status("stopped")
+    # ============ 系统启停控制（任务1：接回 AIVtuberApp 函数链）============
+    # 空壳处置（R2 C-2）：原 update_system_status/toggle_system/start_system/
+    # stop_system/show_running_status_page 仅翻转状态字符串、不调用后端，已删除。
+    # running_flag（app 层）为唯一状态源；本类只持 pending_flag（E5）。
 
     def is_system_running(self) -> bool:
-        """检查系统是否运行"""
-        return self.system_status == "running"
+        """检查系统是否运行（直读 app.running_flag）"""
+        return bool(self.app is not None and getattr(self.app, "running_flag", False))
 
-    def show_running_status_page(self):
-        """显示运行状态页面"""
-        if self.config_page is not None:
-            self.config_page.clear()
-            with self.config_page:
-                ui.label("运行状态").style('font-size: var(--font-size-page-title); font-weight: var(--font-weight-title); color: var(--text-title); margin-bottom: 10px;')
-                ui.label("管理系统运行状态").style('margin-bottom: 15px; color: var(--text-secondary);')
+    def _guard_app(self) -> bool:
+        """app 引用守卫（注入缺失时给出可见反馈，不抛裸异常）"""
+        if self.app is None:
+            ui.notify(position="top", type="warning", message="系统控制不可用（未连接应用实例）")
+            return False
+        return True
 
-                with ui.card().style('margin-bottom: 10px; padding: 15px;'):
-                    ui.label("系统状态").style('font-weight: var(--font-weight-title); margin-bottom: 5px; color: var(--text-title);')
-                    ui.label(f"当前状态: {self.system_status}").style('margin-bottom: 10px;')
+    def _set_pending(self, pending: bool, label: str = ""):
+        """pending 标志 + 即时 UI 刷新（E5：pending 期间 timer 跳过，状态由这里独占）"""
+        self.pending_flag = pending
+        self.pending_label = label
+        self._update_control_ui()
 
-                    # 系统状态按钮
-                    self.system_button = ui.button(
-                        self.system_button_text,
-                        on_click=self.toggle_system
-                    ).style(f'background-color: {self.system_button_color};').classes('w-full')
+    def _update_control_ui(self):
+        """按钮/状态条唯一来源 = f(running_flag, pending_flag)（E5/DG-4/C1）"""
+        running = self.is_system_running()
+        pending = self.pending_flag
+
+        # 状态条（DG-6/D4/DG-10：圆点+文字双通道，色盲安全；文案语义如实）
+        if self.status_dot is not None and self.status_label is not None:
+            if pending:
+                dot_color = "var(--color-warning)"
+                text = self.pending_label or "处理中…"
+            elif running:
+                dot_color = "var(--color-success)"
+                text = "运行中"
+            else:
+                dot_color = "var(--text-hint)"
+                text = "已停止"
+            self.status_dot.style(
+                f"width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: {dot_color};"
+            )
+            self.status_label.style(
+                f"font-size: var(--font-size-body); color: {'var(--text-body)' if (running or pending) else 'var(--text-hint)'};"
+            )
+            self.status_label.text = text
+
+        # 按钮可用态：pending 窗口全部禁用；running 决定启动 vs 停止/重启
+        if self.start_button is not None:
+            if not running and not pending:
+                self.start_button.enable()
+            else:
+                self.start_button.disable()
+        if self.stop_button is not None:
+            if running and not pending:
+                self.stop_button.enable()
+            else:
+                self.stop_button.disable()
+        if self.restart_button is not None:
+            if running and not pending:
+                self.restart_button.enable()
+            else:
+                self.restart_button.disable()
+
+    def _sync_from_flag(self):
+        """ui.timer 回调（C1）：同步 running_flag 外部变化；pending 期间跳过（E5）"""
+        try:
+            if self.pending_flag:
+                return
+            self._update_control_ui()
+        except Exception as e:
+            logger.error(f"启停状态同步失败: {e}")
+
+    def _execute_start(self):
+        """启动系统（免确认；api 静默通道 + UI 单条结果 notify——F12）"""
+        if not self._guard_app():
+            return
+        self._set_pending(True, "启动中…")
+        try:
+            result = self.app.run_external_program(type="api") or {}
+            if result.get("code") == 200:
+                ui.notify(position="top", type="positive", message="程序开始运行")
+            else:
+                ui.notify(position="top", type="negative",
+                          message=result.get("msg", "运行失败"))
+        except Exception as e:
+            logger.error(f"启动系统失败: {e}")
+            ui.notify(position="top", type="negative", message=f"启动失败：{e}")
+        finally:
+            self._set_pending(False)
+            self._update_control_ui()
+
+    def _confirm_stop(self):
+        """停止确认对话框（C2/DG-5：文案区分后果，确认键用 --color-danger）"""
+        if not self._guard_app():
+            return
+        with ui.dialog() as dialog, ui.card().style("min-width: 320px;"):
+            ui.label("确认停止").style(
+                "font-size: var(--font-size-card-title); font-weight: var(--font-weight-title); color: var(--text-title); margin-bottom: 4px;")
+            ui.label("将结束当前运行，直播中断").style("color: var(--text-body);")
+            with ui.row().style("justify-content: flex-end; width: 100%; gap: 8px; margin-top: 8px;"):
+                ui.button("取消", on_click=dialog.close, color=None).props("flat no-caps").style(
+                    "color: var(--text-body);")
+                ui.button("确认停止", on_click=lambda: self._do_stop(dialog), color=None).props(
+                    "unelevated no-caps").style(
+                    "background: var(--color-danger); color: var(--text-on-primary);")
+        dialog.open()
+
+    def _do_stop(self, dialog):
+        dialog.close()
+        self._set_pending(True, "停止中…")
+        try:
+            result = self.app.stop_external_program(type="api") or {}
+            code = result.get("code")
+            if code == 200:
+                ui.notify(position="top", type="positive", message="程序已停止")
+            elif code == 0:
+                ui.notify(position="top", type="warning", message="程序未在运行")
+            else:
+                ui.notify(position="top", type="negative",
+                          message=result.get("msg", "停止失败"))
+        except Exception as e:
+            logger.error(f"停止系统失败: {e}")
+            ui.notify(position="top", type="negative", message=f"停止失败：{e}")
+        finally:
+            self._set_pending(False)
+            self._update_control_ui()
+
+    def _confirm_restart(self):
+        """重启确认对话框（C2/DG-5）"""
+        if not self._guard_app():
+            return
+        with ui.dialog() as dialog, ui.card().style("min-width: 320px;"):
+            ui.label("确认重启").style(
+                "font-size: var(--font-size-card-title); font-weight: var(--font-weight-title); color: var(--text-title); margin-bottom: 4px;")
+            ui.label("将先停止再拉起，短暂中断").style("color: var(--text-body);")
+            with ui.row().style("justify-content: flex-end; width: 100%; gap: 8px; margin-top: 8px;"):
+                ui.button("取消", on_click=dialog.close, color=None).props("flat no-caps").style(
+                    "color: var(--text-body);")
+                ui.button("确认重启", on_click=lambda: self._do_restart(dialog), color=None).props(
+                    "unelevated no-caps").style(
+                    "background: var(--color-success); color: var(--text-on-primary);")
+        dialog.open()
+
+    async def _do_restart(self, dialog):
+        """系统级重启（D-02：stop + 间隔 + run，控制台 webui 自身不重启）"""
+        dialog.close()
+        self._set_pending(True, "重启中…")
+        try:
+            stop_result = self.app.stop_external_program(type="api") or {}
+            if stop_result.get("code") == -1:
+                ui.notify(position="top", type="negative",
+                          message=stop_result.get("msg", "停止失败"))
+                return
+            # E4：停止与拉起之间留 1.5s——声卡/串口/弹幕连接释放存在滞后，
+            # 背靠背 stop+run 会让新进程抢不到设备（且失败被静默）。
+            await asyncio.sleep(1.5)
+            run_result = self.app.run_external_program(type="api") or {}
+            if run_result.get("code") == 200:
+                ui.notify(position="top", type="positive", message="已重启")
+            else:
+                ui.notify(position="top", type="negative",
+                          message=run_result.get("msg", "重启失败"))
+        except Exception as e:
+            logger.error(f"重启系统失败: {e}")
+            ui.notify(position="top", type="negative", message=f"重启失败：{e}")
+        finally:
+            self._set_pending(False)
+            self._update_control_ui()
+
+    def _create_control_section(self):
+        """构建启停控制区（任务1：状态条 + 启动系统 + 停止&重启复合按钮）
+
+        E1：app 为 None 时按钮全部禁用（降级绑定，兼容测试构造点）。
+        """
+        self.control_section = ui.column().style("width: 100%; padding: 0; gap: 8px;")
+        with self.control_section:
+            # 状态条（DG-6：按钮簇正上方独立全宽）
+            with ui.row().style("width: 100%; align-items: center; gap: 8px; padding: 0 2px;"):
+                self.status_dot = ui.element("div").style(
+                    "width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--text-hint);")
+                self.status_label = ui.label("已停止").style(
+                    "font-size: var(--font-size-body); color: var(--text-hint);")
+                with self.status_label:
+                    ui.tooltip("进程已拉起，无退出监控（v1 语义）")
+
+            # 启动系统（绿色主按钮；DG-11：min-height 44px）
+            # remove bg-primary：NiceGUI 默认色类带 !important，会压过 inline 背景
+            self.start_button = ui.button("启动系统", on_click=self._execute_start, color=None).props(
+                "unelevated no-caps").classes("sys-btn sys-btn-start").style(
+                """width: 100%; min-height: 44px;
+                   background: var(--color-success); color: var(--text-on-primary);
+                   border-radius: var(--radius-md);
+                   font-weight: var(--font-weight-emphasis);""")
+
+            # 停止&重启复合按钮（DG-2：一体圆角容器 + 1px 中缝，两半独立 hover）
+            with ui.row().classes("sys-composite").style(
+                "width: 100%; gap: 0; padding: 0; flex-wrap: nowrap; align-items: stretch; "
+                "border-radius: var(--radius-md); overflow: hidden;"):
+                self.stop_button = ui.button("停止", on_click=self._confirm_stop, color=None).props(
+                    "unelevated no-caps").classes("sys-btn sys-btn-stop").style(
+                    """flex: 1; min-height: 44px; border-radius: 0;
+                       background: var(--color-danger); color: var(--text-on-primary);
+                       font-weight: var(--font-weight-emphasis);""")
+                ui.element("div").style(
+                    "width: 1px; background: var(--divider-color); flex-shrink: 0; align-self: stretch;")
+                self.restart_button = ui.button("重启", on_click=self._confirm_restart, color=None).props(
+                    "unelevated no-caps").classes("sys-btn sys-btn-restart").style(
+                    """flex: 1; min-height: 44px; border-radius: 0;
+                       background: var(--color-success); color: var(--text-on-primary);
+                       font-weight: var(--font-weight-emphasis);""")
+
+        # E9：折叠态隐藏（60px 下复合按钮与 44px 点击目标数学不成立）
+        self.control_section.visible = not self.drawer_mini
+        self._update_control_ui()
 
     def migrate_tabs(self):
         """迁移现有 tabs 功能到新布局"""
@@ -520,19 +732,23 @@ class DrawerLayout:
             # 渲染分组导航
             self._render_group_navigation(function_groups)
 
-            # 底部工具栏
+            # 底部工具栏（任务1：启停控制区置于主题按钮上方；border-top = DG-3 与列表分隔）
             with ui.column().style('''
                 width: 100%;
                 padding: var(--spacing-md);
                 margin-top: auto;
                 border-top: 1px solid var(--border-color);
                 background: var(--bg-page);
+                gap: 8px;
             '''):
-                # 主题切换按钮
+                # 启停控制区（状态条 + 启动系统 + 停止&重启复合按钮）
+                self._create_control_section()
+
+                # 主题切换按钮（任务2.3：flat 改 unelevated，悬停高亮整个按钮）
                 self.theme_button = ui.button(
                     "深色模式" if self.dark_mode and self.dark_mode.value else "浅色模式",
-                    on_click=self.toggle_theme
-                ).props('icon=dark_mode flat').style('''
+                    on_click=self.toggle_theme, color=None
+                ).props('icon=dark_mode unelevated no-caps').classes('theme-btn').style('''
                     width: 100%;
                     justify-content: flex-start;
                     text-transform: none;
@@ -541,7 +757,12 @@ class DrawerLayout:
                     border-radius: var(--radius-md);
                     transition: all var(--transition-fast);
                     color: var(--text-body);
+                    background: transparent;
+                    min-height: 40px;
                 ''')
+
+        # 启停状态定时同步（C1/E5：2s 轮询 running_flag 外部变化，pending 期间跳过）
+        ui.timer(2.0, self._sync_from_flag)
 
     def _render_group_navigation(self, function_groups: list):
         """渲染分组导航"""
@@ -564,16 +785,30 @@ class DrawerLayout:
                 text_color = 'var(--text-title)' if is_selected else 'var(--text-body)'
                 text_weight = 'var(--font-weight-title)' if is_selected else 'var(--font-weight-emphasis)'
 
-                with ui.row().style(f'''
+                group_row = ui.row().style(f'''
                     width: 100%;
                     position: relative;
                     cursor: pointer;
-                    padding: 8px 12px;
+                    padding: 12px 16px;
                     align-items: center;
                     background: {bg_color};
                     border-left: {border_left};
                     transition: all var(--transition-fast);
-                ''').on('click', lambda e, g=group_name: self.select_group(g)):
+                ''')
+                group_row.on('click', lambda e, g=group_name: self.select_group(g))
+                # 任务3：一级菜单补 hover 并与二级统一（--bg-hover，仅未选中项生效）
+                def make_group_hover(selected):
+                    def on_enter(e):
+                        if not selected:
+                            e.sender.style('background-color: var(--bg-hover)')
+                    def on_leave(e):
+                        if not selected:
+                            e.sender.style('background-color: transparent')
+                    return on_enter, on_leave
+                enter_h, leave_h = make_group_hover(is_selected)
+                group_row.on('mouseenter', enter_h)
+                group_row.on('mouseleave', leave_h)
+                with group_row:
                     ui.icon(icon).style(f'''
                         margin-right: 8px;
                         color: {icon_color};
@@ -948,6 +1183,10 @@ class DrawerLayout:
                     enter_handler, leave_handler = make_hover_handler(is_selected)
                     list_item.on('mouseenter', enter_handler)
                     list_item.on('mouseleave', leave_handler)
+                    # 任务5：点击热区上移到整个列表项容器（原实现只绑在功能名 label 上，
+                    # 点 padding 空白区/描述行不生效）。启用开关经 js_handler stop 冒泡，
+                    # 避免开关点击误触发行选中（保护 toggle_function 语义）。
+                    list_item.on('click', lambda e, name=func_name: self._on_function_click(name))
 
                     # 第一行：功能名称和启用开关
                     with ui.row().style('''
@@ -955,21 +1194,22 @@ class DrawerLayout:
                         align-items: center;
                         justify-content: space-between;
                     '''):
-                        # 功能名称（可点击）
+                        # 功能名称（点击行为已上移到容器，跟随容器热区）
                         ui.label(func_name).style(f'''
                             font-size: var(--font-size-body);
                             font-weight: {name_weight};
                             color: {name_color};
                             flex: 1;
-                            cursor: pointer;
                             transition: all var(--transition-fast);
-                        ''').on('click', lambda e, name=func_name: self._on_function_click(name))
+                        ''')
 
-                        # 启用开关
+                        # 启用开关（stop 冒泡：点击开关不触发行选中）
                         ui.switch(
                             value=is_enabled,
                             on_change=lambda e, name=func_name: self.toggle_function(name, e.value)
-                        ).style('transform: scale(0.7);')
+                        ).style('transform: scale(0.7);').on(
+                            'click', js_handler='(e) => e.stopPropagation()'
+                        )
 
                     # 第二行：功能描述（可选）
                     if func.get("description"):

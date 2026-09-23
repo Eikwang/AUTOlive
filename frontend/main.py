@@ -7,6 +7,7 @@ import sys
 import os
 import signal
 import subprocess
+import traceback
 from pathlib import Path
 
 # 添加项目根目录到Python路径
@@ -20,7 +21,7 @@ from frontend.config.settings import init_config, get_config
 from frontend.config.paths import get_base_path, get_config_path, get_log_dir, get_output_dir
 
 # 导入工具模块
-from frontend.utils.helpers import ProgramManager, SystemCommand
+from frontend.utils.helpers import SystemCommand
 from frontend.utils.common import textarea_data_change
 
 # 导入UI模块
@@ -103,18 +104,11 @@ class AIVtuberApp:
         # 初始化主题管理器
         self.theme_manager = init_theme_manager(self.config._config)
         
-        # 初始化程序管理器
-        self.program_manager = ProgramManager()
-
         # 初始化UI组件
         self.navigation_tabs = NavigationTabs(self.config._config)
         self.control_buttons = ControlButtons(self.config._config)
         self.login_form = LoginForm(self.config._config)
         self.theme_manager_ui = ThemeManager(self.config._config)
-
-        # 初始化新的 DrawerLayout
-        from frontend.ui.layout import DrawerLayout
-        self.drawer_layout = DrawerLayout(self.config._config)
 
         # 状态变量
         self.running_flag = False
@@ -221,15 +215,16 @@ class AIVtuberApp:
             except Exception as e:
                 logger.error(f"启动程序 {name} 失败: {e}")
 
-        # 启动主程序 main.py
+        # 启动主程序 main.py（E3：用 webui 自身解释器，避免 PATH 解析到错误 python——
+        # 定时任务/其它 shell 启动 webui 时尤其危险；原实现沿用 webui-bak 的 "python" 硬编码）
         name = "main"
         base_path = str(get_base_path())
         try:
             # 根据操作系统的不同，微调参数
             if sys.platform not in ['win32']:
-                process = subprocess.Popen(["python", "main.py"], cwd=base_path, shell=False)
+                process = subprocess.Popen([sys.executable, "main.py"], cwd=base_path, shell=False)
             else:
-                process = subprocess.Popen(["python", "main.py"], cwd=base_path, shell=True)
+                process = subprocess.Popen([sys.executable, "main.py"], cwd=base_path, shell=True)
             self.my_subprocesses[name] = process
             logger.info(f"运行程序: {name}")
         except Exception as e:
@@ -286,6 +281,23 @@ class AIVtuberApp:
             # 启动协同程序和主程序
             self.start_programs()
 
+            # 启动后一次性存活检查（E2）：3 秒后 poll 各子进程。部分失败场景下
+            # start_programs 内部只 logger.error（沿用移植自 webui-bak 的行为），
+            # 且 Windows shell=True 时命令不存在 Popen 也可能"假成功"——这里把
+            # 秒退程序变成用户可见的 negative notify。不复位 running_flag：
+            # 持续监控/自动恢复属独立议题（TODOS「main.py 子进程退出监控」条目）。
+            def check_processes_alive():
+                for name, proc in list(self.my_subprocesses.items()):
+                    try:
+                        if proc.poll() is not None:
+                            logger.error(f"启动后检查: 程序 {name} 已退出 (code={proc.returncode})")
+                            ui.notify(position="top", type="negative",
+                                      message=f"程序 {name} 启动后已退出，请查看日志")
+                    except Exception as e:
+                        logger.error(f"启动后检查 {name} 失败: {e}")
+
+            ui.timer(3.0, check_processes_alive, once=True)
+
             if type == "webui":
                 ui.notify(position="top", type="positive", message="程序开始运行")
             logger.info("程序开始运行")
@@ -294,7 +306,7 @@ class AIVtuberApp:
         except Exception as e:
             if type == "webui":
                 ui.notify(position="top", type="negative", message=f"错误：{e}")
-            logger.error(f"程序运行失败: {e}")
+            logger.error(traceback.format_exc())
             self.running_flag = False
 
             return {"code": -1, "msg": f"运行失败！{e}"}
@@ -464,10 +476,12 @@ class AIVtuberApp:
     
     def create_main_ui(self):
         """创建主界面 - 使用新的 drawer 布局"""
-        # 使用新的 DrawerLayout，传入保存回调函数
+        # 使用新的 DrawerLayout，传入保存回调函数与 app 引用（E1：启停按钮经此调用
+        # AIVtuberApp 函数链；app 为 Optional，None 时按钮降级为禁用态，兼容测试构造）
         self.drawer_layout = DrawerLayout(
             self.config._config,
-            save_callback=self.config.save
+            save_callback=self.config.save,
+            app=self
         )
 
         # 创建左侧导航栏
@@ -486,16 +500,17 @@ class AIVtuberApp:
             self.drawer_layout.select_group(first_group)
             self.drawer_layout.show_function_list(first_group)
 
+        # 是否启用自动运行功能（E7：先于控制按钮构建执行——按钮初始态直接反映
+        # running_flag，避免 auto_run 场景下按钮先构建出错误初始态、再等 timer 纠正）
+        if get_nested_value(self.config._config, "webui", "auto_run"):
+            logger.info("自动运行 已启用")
+            self.run_external_program(type="api")
+
         # 创建底部控制按钮
         self._create_control_buttons()
 
         # 创建回到顶部按钮
         self._create_scroll_top_button()
-
-        # 是否启用自动运行功能
-        if get_nested_value(self.config._config, "webui", "auto_run"):
-            logger.info("自动运行 已启用")
-            self.run_external_program(type="api")
 
     def create_main_ui_old(self):
         """创建主界面 - 旧版本（使用 tabs 布局）"""
@@ -709,6 +724,10 @@ class AIVtuberApp:
                 elif cmd_type == 'stop':
                     resp_json = self.stop_external_program(type="api")
                 elif cmd_type == 'restart':
+                    # 语义注记（E3 批次 /sys_cmd 语义标注）：此处 restart = 重启 webui
+                    # 控制台自身（os.execl，见 restart_application），与 WebUI 导航栏
+                    # 「停止&重启」按钮的系统级重启（stop+run，控制台不重启）不同。
+                    # 语义统一/废弃待后续裁决（TODOS「/sys_cmd 重启语义统一」条目）。
                     api_type = data_json.get('api_type', 'api')
                     resp_json = self.restart_application(type=api_type)
                 elif cmd_type == 'factory':
