@@ -32,7 +32,8 @@ frontend/
 │       ├── llm.py                 # 大语言模型标签页
 │       ├── tts.py                 # 文本转语音标签页
 │       ├── svc.py                 # 变声标签页
-│       ├── visual_body.py         # 虚拟身体标签页
+│       ├── visual_body.py         # 画面设置标签页（EDTalk 实时推理配置+运行控制）
+│       ├── train_streamer.py      # 训练主播标签页（一键全链路训练）
 │       ├── copywriting.py         # 文案标签页
 │       ├── talk.py                # 聊天标签页
 │       ├── image_recognition.py   # 图像识别标签页
@@ -75,7 +76,8 @@ frontend/
 - **llm.py**: 大语言模型配置标签页
 - **tts.py**: 文本转语音配置标签页
 - **svc.py**: 变声配置标签页
-- **visual_body.py**: 虚拟身体配置标签页
+- **visual_body.py**: 画面设置配置标签页（驱动类型/EDTalk 配置/运行控制区）
+- **train_streamer.py**: 训练主播标签页（预处理+微调+评估+口型训练一键编排）
 - **copywriting.py**: 文案配置标签页
 - **talk.py**: 聊天配置标签页
 - **image_recognition.py**: 图像识别配置标签页
