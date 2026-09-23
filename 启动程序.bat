@@ -14,6 +14,5 @@ set PATH=%RT%;%RT%\Scripts;%RT%\Library\bin;%FFMPEG_PATH%;%PATH%
 SET KMP_DUPLICATE_LIB_OK=TRUE
 SET HF_ENDPOINT=https://hf-mirror.com
 cd /d %~dp0
-echo 如启动报 ModuleNotFoundError，请按 specs/integration/runtime312启动脚本切换计划.md 第 2.3 节清单补装依赖
 "%RT%\python.exe" webui.py
 cmd /k

@@ -30,7 +30,6 @@ def create_custom_cmd_tab(
         ui.label('自定义命令')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "custom_cmd", "enable")).style(switch_internal_css), ("custom_cmd", "enable"))
                 _auto_save(ui.select(label='类型', options={'弹幕': '弹幕'}, value=get_nested_value(config, "custom_cmd", "type")).style("width:100%;"), ("custom_cmd", "type"))
         custom_cmd_config_var = {}
         custom_cmd_config_card = ui.card()

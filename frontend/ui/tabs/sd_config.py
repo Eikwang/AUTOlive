@@ -30,7 +30,6 @@ def create_sd_config_tab(
         ui.label('Stable Diffusion')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "sd", "enable")).style(switch_internal_css), ("sd", "enable"))
                 _auto_save(ui.select(label='翻译类型', options={'none': '不启用', 'baidu': '百度翻译', 'google': '谷歌翻译'}, value=get_nested_value(config, "sd", "translate_type")).style("width:100%;"), ("sd", "translate_type"))
             _sd_llm_type_val = get_nested_value(config, "sd", "prompt_llm", "type")
             _sd_llm_type_options = {'custom_llm': '自定义LLM'}

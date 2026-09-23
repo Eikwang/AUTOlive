@@ -1,5 +1,9 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-09-24) — 项目更名为 AUTOlive
+
+1. **conda 环境名文档-脚本分裂统一**（P3, S）— DX 阶段发现（DX-R3）：specs/技术栈.md 的 conda 示例用 `aivtuber`（改名后为 `autolive`），而 Scripts/半自动/1.创建虚拟环境.bat 实际创建 `ai_vtb` 环境——上游既有的文档/脚本不一致，改名后依然存在。统一方案二选一：文档示例改 `ai_vtb` 对齐脚本（零风险），或脚本+文档统一改名并重建环境（破坏性，需用户重装环境）。依赖：无；建议在下次动 conda 环境时顺手处理。
+
 ## Deferred Items from /autoplan (2026-09-23) — 前端导航栏增强 + 菜单重排
 
 1. **启停操作日志回显到前端日志区**（P3, S-M）— CEO 阶段 cherry-pick C3：ui.notify + logger 已覆盖反馈闭环，日志区回显属增强非缺口。依赖：前端日志区数据通道形态。
@@ -11,6 +15,8 @@
 7. **running_flag check-then-act 竞态窗口**（P3, S）— eng F10：main.py L278/L284 之间存在 TOCTOU 窗口（UI executor 线程与 /sys_cmd async endpoint 理论可并发）；单机自用风险极低。建议后续用 threading.Lock 或单一调度路径收口。
 8. **config.json.bak 缺失致 factory 必炸**（P3, S）— eng F11：/sys_cmd factory 依赖根目录 config.json.bak，仓库当前不存在该文件，恢复出厂必失败。与「重启按钮是恢复路径」叙事相邻，修复 = 生成/维护该备份或移除 factory 入口。
 9. **测试资产入库**（P2, S）— 实施发现：.gitignore:286 的 `test_*.py` 规则使整个测试套件（42+ 文件）不进版本库——改写后的 test_task_16_new.py 也无法提交，测试改动在协作间丢失。建议：收窄该规则（如仅忽略报告文件）并把 tests/features 入库。
+
+10. **functions[].enabled 僵尸数据退役**（P3, S）— batch2 CEO native 发现6：二级开关迁移后该字段退出消费，43 个 enabled 全 True 与实际业务状态不符，遗留误导。后续以 migrate 脚本一次性删除或注释 deprecated（确认 validate_integration 等无依赖）。
 
 ## Deferred Items from /autoplan (2026-09-22) — runtime312 启动脚本切换
 

@@ -30,7 +30,6 @@ def create_luoxi_tab(
         ui.label("洛曦 直播弹幕助手")
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "luoxi_project", "Live_Comment_Assistant", "enable")).style(switch_internal_css), keys=("luoxi_project", "Live_Comment_Assistant", "enable"))
                 _auto_save(ui.select(label='对接版本', options={'V0.1.x': 'V0.1.x'}, value=get_nested_value(config, "luoxi_project", "Live_Comment_Assistant", "version")).style("width:100%;"), keys=("luoxi_project", "Live_Comment_Assistant", "version"))
                 _auto_save(ui.input(label='API地址', value=get_nested_value(config, "luoxi_project", "Live_Comment_Assistant", "api_ip_port"), placeholder='洛曦 直播弹幕助手 API地址').style("width:100%;"), keys=("luoxi_project", "Live_Comment_Assistant", "api_ip_port"))
         with ui.card().style(card_css):

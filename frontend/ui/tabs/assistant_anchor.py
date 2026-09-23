@@ -33,7 +33,6 @@ def create_assistant_anchor_tab(
 
     with ui.grid(columns=3):
         with ui.column().style("width:100%;"):
-            _auto_save(ui.switch('启用', value=get_nested_value(config, "assistant_anchor", "enable")).style(switch_internal_css), ("assistant_anchor", "enable"))
             _auto_save(ui.input(label='助播名', value=get_nested_value(config, "assistant_anchor", "username"), placeholder='助播的用户名').style("width:100%;"), ("assistant_anchor", "username"))
         _audio_syn_val = get_nested_value(config, "assistant_anchor", "audio_synthesis_type")
         _audio_syn_options = dict(audio_synthesis_type_options)

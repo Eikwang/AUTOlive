@@ -28,7 +28,6 @@ def create_translate_tab(
 
     with ui.grid(columns=3):
         with ui.column().style("width:100%;"):
-            _auto_save(ui.switch('启用', value=get_nested_value(config, "translate", "enable")).style(switch_internal_css), ("translate", "enable"))
             _auto_save(ui.select(
                 label='类型',
                 options={'baidu': '百度翻译', 'google': '谷歌翻译'},

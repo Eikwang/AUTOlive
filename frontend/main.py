@@ -891,7 +891,7 @@ class AIVtuberApp:
         # 获取WebUI配置
         webui_ip = get_nested_value(self.config._config, "webui", "ip", default="0.0.0.0")
         webui_port = get_nested_value(self.config._config, "webui", "port", default=8086)
-        webui_title = get_nested_value(self.config._config, "webui", "title", default="AUTO-LIVE")
+        webui_title = get_nested_value(self.config._config, "webui", "title", default="AUTOlive")
 
         # 设置页面标题
         ui.page_title(webui_title)

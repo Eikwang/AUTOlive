@@ -28,8 +28,6 @@ def create_integral_tab(
     # 通用
     with ui.card().style(card_css):
         ui.label("通用")
-        with ui.grid(columns=3):
-            _auto_save(ui.switch('启用', value=get_nested_value(config, "integral", "enable")).style(switch_internal_css), ("integral", "enable"))
 
     # 签到
     with ui.card().style(card_css):

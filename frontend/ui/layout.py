@@ -719,7 +719,7 @@ class DrawerLayout:
                 align-items: center;
                 background: var(--color-primary);
             '''):
-                ui.label("AUTO-LIVE").style('''
+                ui.label("AUTOlive").style('''
                     font-size: var(--font-size-banner);
                     font-weight: var(--font-weight-heavy);
                     letter-spacing: 0.12em;

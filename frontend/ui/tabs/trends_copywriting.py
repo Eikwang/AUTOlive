@@ -30,7 +30,6 @@ def create_trends_copywriting_tab(
         ui.label('动态文案')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "trends_copywriting", "enable")).style(switch_internal_css), ("trends_copywriting", "enable"))
                 _llm_type_val = get_nested_value(config, "trends_copywriting", "llm_type")
                 _llm_type_options = {'custom_llm': '自定义LLM'}
                 if _llm_type_val and _llm_type_val not in _llm_type_options:

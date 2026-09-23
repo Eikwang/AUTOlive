@@ -27,7 +27,7 @@ FONT_SIZE_BODY = "14px"          # 正文 / 列表项
 FONT_SIZE_FIELD_LABEL = "14px"   # 参数标题（表单字段 label，与正文同大小保证可读性）
 FONT_SIZE_SMALL = "12px"         # 辅助说明文字
 FONT_SIZE_TINY = "11px"          # 徽章等极小文字
-FONT_SIZE_BANNER = "20px"        # 导航栏品牌横幅（D-B2 v2：AUTO-LIVE）
+FONT_SIZE_BANNER = "20px"        # 导航栏品牌横幅（D-B2 v2：AUTOlive）
 
 FONT_WEIGHT_TITLE = "600"
 FONT_WEIGHT_HEAVY = "800"        # 品牌横幅重字重（D-B2 v2：工业感全大写+宽字距）

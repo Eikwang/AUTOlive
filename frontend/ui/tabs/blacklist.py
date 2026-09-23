@@ -42,5 +42,4 @@ def create_blacklist_tab(
         with ui.expansion('弹幕黑名单', icon="settings", value=True).classes('w-full'):
             with ui.grid(columns=1):
                 with ui.column().style("width:100%; gap:0;"):
-                    _auto_save(ui.switch('启用', value=get_nested_value(config, "filter", "blacklist", "enable")).style(switch_internal_css), ("filter", "blacklist", "enable"))
                     _auto_save(ui.textarea(label='用户名 黑名单', value=_textarea_data_change(get_nested_value(config, "filter", "blacklist", "username")), placeholder='屏蔽此名单内所有用户的弹幕，用户名以换行分隔').style("width:100%;"), ("filter", "blacklist", "username"))

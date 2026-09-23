@@ -30,7 +30,6 @@ def create_idle_time_task_tab(
         ui.label('闲时任务')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "idle_time_task", "enable")).style(switch_internal_css), ("idle_time_task", "enable"))
                 _auto_save(ui.select(
                     label='机制类型',
                     options={

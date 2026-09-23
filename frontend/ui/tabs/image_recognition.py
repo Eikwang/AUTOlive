@@ -32,7 +32,6 @@ def create_image_recognition_tab(
         ui.label("通用")
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "image_recognition", "enable")).style(switch_internal_css), ("image_recognition", "enable"))
                 _auto_save(ui.select(
                     label='模型',
                     options={'blip': 'blip'},
