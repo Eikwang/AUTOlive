@@ -288,3 +288,16 @@ test_*.py
 .agent-teams/
 .pytest_cache/
 docs/
+
+# === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===
+edtalk/ckpts/
+edtalk/ckpt_models/
+edtalk/realtime_serve/weights/
+edtalk/realtime_serve/*.log
+edtalk/fastrag/*.exe
+edtalk/fastrag/target/
+edtalk/fastrag/chekpoint/
+edtalk/fastrag/kbindex/
+edtalk/fastrag/*.log
+edtalk/train_progress/.lock-*
+edtalk/data_preprocess/data_preprocess_for_train/__pycache__/

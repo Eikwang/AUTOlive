@@ -111,3 +111,14 @@ main.py
 2. **可复用组件**: UI组件设计为可复用的独立单元
 3. **配置驱动**: 通过配置文件控制UI样式和行为
 4. **模块化**: 功能按模块组织，便于维护和扩展
+## 内置字幕页（frontend/web_captions/，2026-09-25 整合新增）
+
+| 文件 | 内容 | git 处置 |
+|---|---|---|
+| web_captions/index.html | 字幕显示页 DOM（#subtitle_bg > #subtitle + 状态横幅） | 入库 |
+| web_captions/index.js | 渲染逻辑（渐显/打字机/隐藏）+XSS 转义+D1 初始同步+断线自检+透明语义 | 入库 |
+| web_captions/index.css | 字幕样式子集（用户配置驱动，不走 design_tokens——面向 OBS 浏览器源） | 入库 |
+| web_captions/socket.io.js | 本地打包 socket.io 客户端（源项目复制，避免 CDN 依赖） | 入库 |
+
+服务挂载：主系统进程 utils/web_server.py（路由 /captions、/captions/{fname}、
+socket.io /captions_ws/socket.io、/builtin_status、/builtin_control）。

@@ -198,7 +198,6 @@ class AUDIO_PLAY_CENTER:
         audio.export(tmp_audio_path, format="wav")
 
         wf = wave.open(tmp_audio_path, "rb")
-        self._done_event.clear()
         self._skip_event.clear()
         completed_flag = {"fired": False}
         self._current = {
@@ -209,10 +208,8 @@ class AUDIO_PLAY_CENTER:
         def callback(in_data, frame_count, time_info, status):
             data = wf.readframes(frame_count)
             if len(data) == 0:
-                # EOF：标记完成，残余缓冲 <100ms 可忽略
-                if not completed_flag["fired"]:
-                    completed_flag["fired"] = True
-                    self._done_event.set()
+                # EOF：让 PortAudio 排空缓冲后自然转 inactive（实证：喂完最后一帧
+                # 后 PortAudio 不再调用回调，EOF 不能在此处作为完成信号）
                 return (b"", pyaudio.paComplete)
             return (data, pyaudio.paContinue)
 
@@ -237,11 +234,12 @@ class AUDIO_PLAY_CENTER:
             self.stream.start_stream()
             logger.info(f"builtin播放开始：type={data_json.get('type')} path={voice_path}")
 
-            # 有界轮询等待（替代源 while...pass 自旋；暂停时流已 stop，done 不触发，
-            # 由 0.25s 轮询保持响应性——CPU 开销可忽略）
-            while not self._done_event.wait(0.25):
+            # 完成判定 = 流转 inactive（pyaudio 实证：EOF 无独立回调信号）。
+            # 0.1s 有界轮询——已修复的原缺陷是"零休眠 pass 自旋烧 CPU"，非轮询本身。
+            while self.stream is not None and self.stream.is_active():
                 if self._skip_event.is_set() or self._stop_flag.is_set():
                     break
+                time.sleep(0.1)
 
             skipped = self._skip_event.is_set() or self._stop_flag.is_set()
             logger.info(f"builtin播放结束：{'跳过' if skipped else '完成'} type={data_json.get('type')}")

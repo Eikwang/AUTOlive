@@ -212,16 +212,14 @@ class CaptionsManager:
 
     def _enqueue(self, content, start_delay_ms, keep_time_ms):
         queue_max = int(self._cfg("queue_max", 100) or 100)
-        try:
-            self.message_queue.put_nowait((content, start_delay_ms, keep_time_ms))
-        except queue.Full:
-            # 满载丢最旧（S7：字幕可丢，台词不可丢）
+        # 满载丢最旧（S7：字幕可丢，台词不可丢）；手动 qsize 检查以支持热改 queue_max
+        while self.message_queue.qsize() >= max(1, queue_max):
             try:
                 dropped = self.message_queue.get_nowait()
-                logger.warning(f"字幕队列满载（>{queue_max}），丢弃最旧：{dropped[0][:20]}")
+                logger.warning(f"字幕队列满载（>{queue_max}），丢弃最旧：{str(dropped[0])[:20]}")
             except queue.Empty:
-                pass
-            self.message_queue.put_nowait((content, start_delay_ms, keep_time_ms))
+                break
+        self.message_queue.put_nowait((content, start_delay_ms, keep_time_ms))
 
     # ---------- 节流线程（串行消费：start_delay → emit → keep_time） ----------
     def _process_message_queue(self):

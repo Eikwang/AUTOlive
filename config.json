@@ -27,7 +27,7 @@
     "username_max_le": 10
   },
   "comment_log_type": "回答",
-  "visual_body": "metahuman_stream",
+  "visual_body": "edtalk_realtime",
   "luoxi_project": {
     "Live_Comment_Assistant": {
       "enable": false,
@@ -63,6 +63,33 @@
     "info_to_callback": true
   },
   "audio_player": {
+    "device_index": -1,
+    "queue_max": 50,
+    "audio_interval": 0,
+    "random_audio_interval": {
+      "enable": false,
+      "min": 0.1,
+      "max": 3
+    },
+    "priority_mapping": {
+      "reread_top_priority": 999,
+      "comment": 30,
+      "local_qa_audio": 30,
+      "reread": 25,
+      "gift": 20,
+      "entrance": 20,
+      "follow": 20,
+      "thanks": 20,
+      "song": 20,
+      "read_comment": 20,
+      "talk": 15,
+      "idle_time_task": 10,
+      "schedule": 10,
+      "image_recognition_schedule": 10,
+      "trends_copywriting": 10,
+      "abnormal_alarm": 5,
+      "copywriting": 1
+    },
     "api_ip_port": "http://127.0.0.1:5602"
   },
   "bilibili": {
@@ -706,7 +733,22 @@
   },
   "web_captions_printer": {
     "enable": false,
-    "api_ip_port": "http://127.0.0.1:5500"
+    "keep_time_align_audio": true,
+    "queue_max": 100,
+    "show_mode": "1",
+    "single_char_show_time": 80,
+    "gradient_show_time": 500,
+    "hide_time": 1000,
+    "show_over_hide_time": 2000,
+    "bg_color": "rgba(0,0,0,0.6)",
+    "body_bg_color": "none",
+    "font_color": "#FFFFFF",
+    "subtitle_font_family": "Microsoft YaHei",
+    "subtitle_font_size": 24,
+    "subtitle_font_weight": "bold",
+    "subtitle_webkit_text_stroke": 0,
+    "subtitle_bg_width": 400,
+    "subtitle_bg_height": 60
   },
   "integral": {
     "enable": false,
@@ -1259,24 +1301,7 @@
       }
     ]
   },
-  "coordination_program": [
-    {
-      "enable": false,
-      "name": "captions_printer",
-      "executable": "E://GitHub_pro//captions_printer//pkg//captions_printer-v4.1//Miniconda3//python.exe",
-      "parameters": [
-        "E://GitHub_pro//captions_printer//pkg//captions_printer-v4.1//app.py"
-      ]
-    },
-    {
-      "enable": false,
-      "name": "audio_player",
-      "executable": "E://GitHub_pro//audio_player//pkg//audio_player_v2-20240320//Miniconda3//python.exe",
-      "parameters": [
-        "E://GitHub_pro//audio_player//pkg//audio_player_v2-20240320//app.py"
-      ]
-    }
-  ],
+  "coordination_program": [],
   "assistant_anchor": {
     "enable": false,
     "username": "助播",

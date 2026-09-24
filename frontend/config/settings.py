@@ -160,6 +160,53 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "port": 11420,
 }
 
+# audio_player/captions_printer 整合（2026-09-25 计划 §4.5/§5.4/R7）
+_AUDIO_PLAYER_DEFAULTS: Dict[str, Any] = {
+    "device_index": -1,
+    "queue_max": 50,
+    "audio_interval": 0,
+    "random_audio_interval": {"enable": False, "min": 0.1, "max": 3},
+    "priority_mapping": {
+        "reread_top_priority": 999,
+        "comment": 30,
+        "local_qa_audio": 30,
+        "reread": 25,
+        "gift": 20,
+        "entrance": 20,
+        "follow": 20,
+        "thanks": 20,
+        "song": 20,
+        "read_comment": 20,
+        "talk": 15,
+        "idle_time_task": 10,
+        "schedule": 10,
+        "image_recognition_schedule": 10,
+        "trends_copywriting": 10,
+        "abnormal_alarm": 5,
+        "copywriting": 1,
+    },
+    # api_ip_port 仅外部服务模式（audio_player/audio_player_v2）使用，保留兼容
+}
+
+_WEB_CAPTIONS_PRINTER_DEFAULTS: Dict[str, Any] = {
+    "keep_time_align_audio": True,
+    "queue_max": 100,
+    "show_mode": "1",
+    "single_char_show_time": 80,
+    "gradient_show_time": 500,
+    "hide_time": 1000,
+    "show_over_hide_time": 2000,
+    "bg_color": "rgba(0,0,0,0.6)",
+    "body_bg_color": "none",
+    "font_color": "#FFFFFF",
+    "subtitle_font_family": "Microsoft YaHei",
+    "subtitle_font_size": 24,
+    "subtitle_font_weight": "bold",
+    "subtitle_webkit_text_stroke": 0,
+    "subtitle_bg_width": 400,
+    "subtitle_bg_height": 60,
+}
+
 
 def _ensure_defaults(config: "Settings") -> None:
     """补写新增配置节的缺失键（只补缺失，不覆盖既有值）并落盘。"""
@@ -181,6 +228,33 @@ def _ensure_defaults(config: "Settings") -> None:
             if key not in cfg["fastrag"]:
                 cfg["fastrag"][key] = value
                 changed = True
+    if "audio_player" not in cfg:
+        cfg["audio_player"] = dict(_AUDIO_PLAYER_DEFAULTS)
+        changed = True
+    else:
+        for key, value in _AUDIO_PLAYER_DEFAULTS.items():
+            if key not in cfg["audio_player"]:
+                cfg["audio_player"][key] = value
+                changed = True
+    if "web_captions_printer" not in cfg:
+        cfg["web_captions_printer"] = dict(_WEB_CAPTIONS_PRINTER_DEFAULTS)
+        changed = True
+    else:
+        for key, value in _WEB_CAPTIONS_PRINTER_DEFAULTS.items():
+            if key not in cfg["web_captions_printer"]:
+                cfg["web_captions_printer"][key] = value
+                changed = True
+        # 整合后内置化：外部服务地址键退役（计划 §5.4）
+        if "api_ip_port" in cfg["web_captions_printer"]:
+            del cfg["web_captions_printer"]["api_ip_port"]
+            changed = True
+    # coordination_program 过期外部服务条目清理（计划 §4.6）
+    coord = cfg.get("coordination_program")
+    if isinstance(coord, list) and coord:
+        cleaned = [c for c in coord if isinstance(c, dict) and c.get("executable", "").startswith("E://GitHub_pro//") is False]
+        if len(cleaned) != len(coord):
+            cfg["coordination_program"] = cleaned
+            changed = True
     if changed:
         try:
             config.save()
