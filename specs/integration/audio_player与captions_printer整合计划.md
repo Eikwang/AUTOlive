@@ -1,7 +1,7 @@
 <!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Eikwang-AUTOlive\\main-autoplan-restore-20260925-000531.md" -->
 # AUTOlive × audio_player / captions_printer 功能整合计划
 
-> **Status: APPROVED（2026-09-25，用户最终批准门选项 A）**｜两项 User Challenge 按既定方向维持（打断恢复不新增=NOT in scope、桌面窗口丢弃）；taste 两项按推荐（字幕页透明默认、pygame 默认+一步切换引导）。
+> **Status: APPROVED + 实施完成待首日实测（2026-09-25）**——T1-T9 全部落码：单测 11/11、音频冒烟 3/3（真实声卡回放）、全链 import 通过；待系统运行时执行字幕链路冒烟与 EDTalk 偏移实测（R10）。实施要点修正：pyaudio EOF 无回调信号（实证）→完成判定改为 is_active 有界轮询（原承诺的纯 Event 方案不可行，缺陷实质=零休眠自旋，已消除）。原批准标记：｜两项 User Challenge 按既定方向维持（打断恢复不新增=NOT in scope、桌面窗口丢弃）；taste 两项按推荐（字幕页透明默认、pygame 默认+一步切换引导）。
 
 > 日期：2026-09-24 ｜ 发起：用户 /autoplan 指令
 > 前置事实：三代码库实地摸底（AUTOlive 直读 + audio_player/captions_printer 全量通读，2026-09-24）
