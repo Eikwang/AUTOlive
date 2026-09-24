@@ -80,7 +80,7 @@
 ### 4.2 接口适配（调用点零改动）
 
 - 内置播放器暴露与 `AUDIO_PLAYER` 客户端**相同的 6 方法签名**：`play(data)`（→ add_audio_json）、`pause_stream()`、`resume_stream()`、`skip_current_stream()`、`get_list()`、`clear()`（→ clear_audio_json）。
-- **get_list UI 扩展（design D5/D6）**：get_list 为前端控制区返回轻量摘要 `{queue_len, playing, paused, current:{type, content截断20字}}`——内置播放器自有读取口，仅 UI 消费，不触碰 playback_manager 鸭子类型调用点；为控制区状态回显（播放中/已暂停/空闲）与「正在播放」感知提供数据源。
+- **get_status() UI 专用方法（design D5/D6 + dx 发现3）**：内置播放器新增独立方法 `get_status()` 返回轻量摘要 `{queue_len, playing, paused, current:{type, content截断20字}}`——**get_list 保持鸭子类型契约原样不动**（避免一名两契约：同名方法两种返回形状是未来接入者的陷阱）；get_status 仅 UI 消费，不触碰 playback_manager 调用点；为控制区状态回显（播放中/已暂停/空闲）与「正在播放」感知提供数据源。
 - audio_core.py:118 按 `play_audio.player` 分流实例化：`builtin` → 内置 `AUDIO_PLAY_CENTER`，其余 → 既有 HTTP 客户端。playback_manager.py 两处 `self.audio_player.play(data_json)`（156、266）零逻辑改动。
 - **stop_current_audio 条件修复（spec C-1）**：playback_manager.py:201 现条件 `== "audio_player"`（不含 v2/builtin；且 mixer_normal 类属性仅 pygame 分支赋值，builtin 模式下弹幕打断将命中 None.music → AttributeError 或打断静默失效）——该行条件改为 `in ["audio_player", "audio_player_v2", "builtin"]`（一行改动，顺带修复 v2 既有缺陷；此为"调用点零改动"承诺的唯一声明例外）。builtin 停止语义调用目标 = skip_current_stream()（6 方法中唯一"停当前"语义；mixer_normal 在 builtin 下为 None 不可用）——实施时以单测闭合：打断后无 AttributeError、下一播放正常（native F6）。
 - 分支条件扩展：`elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]`（130、254 两处）。
@@ -97,7 +97,7 @@
 
 ### 4.4 播放完成回调
 
-> **队列有界（S7）**：源播放器与字幕队列均无上限。对齐 EDTalk 计划"链路队列全有界+阻塞式背压"既定义务：内置播放器待播队列上限 50（满载 add_audio_json 阻塞等待，上游 voice_tmp_path_queue 已有界）、字幕队列上限 100（满载丢弃最旧并日志告警——字幕可丢，台词不可丢）。（对齐 info_to_callback）
+> **队列有界（S7 + dx 发现7）**：源播放器与字幕队列均无上限。对齐 EDTalk 计划"链路队列全有界+阻塞式背压"既定义务：内置播放器待播队列上限 50（满载 add_audio_json 阻塞等待，上游 voice_tmp_path_queue 已有界）、字幕队列上限 100（满载丢弃最旧并日志告警——字幕可丢，台词不可丢）。**两上限进 config 高级键（audio_player.queue_max / web_captions_printer.queue_max，默认 50/100）——高密度礼物场景的可调逃生门，不硬编码**。（对齐 info_to_callback）
 
 外部 audio_player 模式下，播放完成由外部服务 POST /callback 回传（audio_play_center.py:40-59）；内置后改为进程内回调：`AUDIO_PLAY_CENTER` 支持注册完成回调，audio_core 初始化时注册 `send_audio_play_info_to_callback`（注意其为 async 协程——播放器在独立线程，经 `asyncio.run_coroutine_threadsafe` 提交到主 loop，或以同步 wrapper 封装；实施时按 Audio 类既有线程/协程模型选型，eng 审查把关）。`play_audio.info_to_callback` 开关语义不变。
 
@@ -128,7 +128,7 @@
 
 | 源（D:\AI\captions_printer\） | 目标（D:\AI\AUTOlive\） | 处置 |
 |---|---|---|
-| app.py 的 MessageQueueManager（:37-88）+ CHARACTER_DELAY/DEFAULT_START_DELAY | utils/web_captions/captions_manager.py（类 CaptionsManager） | 原样移植，emit 通道改造为 socket.io 广播 |
+| app.py 的 MessageQueueManager（:37-88）+ CHARACTER_DELAY/DEFAULT_START_DELAY | utils/web_captions/captions_manager.py（类 CaptionsManager） | 移植；**节流参数改为读 config 键 single_char_show_time（单一事实源——dx 发现4：后端常量与前端 config 键双源会使"改键破坏防叠字保证"，用警告替代修复是缺陷）**；emit 通道改造为 socket.io 广播 |
 | js/index.js 的 showSubtitle/show1/show2/hideSubtitle/clearSubtitle（:238-376）+ `\n` 解码（:240-244） | frontend/web_captions/index.js | 移植渲染逻辑，去配置控制台代码；show_mode 改由 config 决定 |
 | index.html:63-65 字幕显示区 DOM | frontend/web_captions/index.html | 仅保留字幕区（去控制台表单） |
 | css/index.css:5-19 #subtitle/#subtitle_bg | frontend/web_captions/index.css | 子集移植（字幕页是独立页面，不走 design_tokens——该页面向 OBS 浏览器源，样式由用户配置驱动） |
@@ -144,7 +144,7 @@
 - `@app.get('/captions')` 返回字幕页（HTMLResponse 读 frontend/web_captions/index.html）；静态资源同目录服务。
 - 推送通道：**独立 socket.io ASGI 挂载**（`socketio.ASGIApp(socketio.AsyncServer(async_mode="asgi"))` mount 至 `/captions_ws/`，客户端连接 `socket.io` path `/captions_ws/socket.io`）；emit 在主系统进程 event loop 内执行（与 uvicorn 同 loop）。python-socketio 已安装（实测），零新依赖。
 - **并发模型（spec CL-1）**：`CaptionsManager.push(data_json)` 为异步入口，内部做**线程安全入队**（list+Lock，沿用源 MessageQueueManager 模式）；内部节流线程逐条出队，经 `asyncio.run_coroutine_threadsafe` 将 `sio.emit` 提交主系统 event loop（web_server 启动 uvicorn 时捕获 loop 引用）。config_update 广播同通道。
-- **enable 语义（spec N-3）**：socket.io 挂载与 /captions 路由随主系统启动无条件创建（结构性 mount）；enable 仅控制 push 短路；开关修改后重启主系统生效。
+- **enable 语义（spec N-3 + dx 发现2 修订）**：socket.io 挂载与 /captions 路由随主系统启动无条件创建（结构性 mount）；**enable 改为 push 入口实时读 config（与样式热更新同口径，保存即生效无需重启——挂载本就无条件创建，短路只是布尔判断，无冷缓存约束）；tooltip 注明「样式与开关均即时生效」**。
 - 事件契约沿用原项目：服务端→客户端 `message`（{content, start_delay, keep_time}）与 `config_update`；客户端→服务端无需任何事件（手动发送功能不移植）。
 - **初始状态同步（design D1，发布阻断级修复）**：sio `connect` 事件回调中向新连接 emit 一次当前完整字幕配置（与 config_update 同数据源）——OBS 浏览器源每次打开/刷新/重连即恢复用户配置样式；仅靠增量广播会使样式在重开后回退默认，热更新承诺失效。
 
@@ -152,6 +152,7 @@
 
 - playback_manager.py:74-75 修复为进程内直调：`await self.captions_manager.push(data_json)`（CaptionsManager 单例随 audio_core 初始化创建；照 EDTalkClient 的 register_client 模式注册全局 holder，供非 Audio 上下文使用）。
 - **异常隔离（S4）**：CaptionsManager.push 内部全捕获+日志计数，任何字幕错误不得传播进播放循环（调用点在播放主 try 块内，异常会吞掉当轮播放）；content 为空时跳过推送（不推空字幕）。
+- **字幕失败运营可见（dx 发现1，D9 原则贯彻到字幕侧）**：①字幕页 socket.io disconnect 时页内自显「字幕服务未连接」（OBS 源里直接可见，排查零成本）；②push 连续失败达阈值（3 次）时向音频页控制区错误条（D9）同步提示「字幕推送失败」——同一原则双标是设计缺陷。
 - **keep_time 对齐音频时长**（原服务端忽略 keep_time 的升级修复）：push 时从 `data_json["voice_path"]` 读取音频时长（soundfile，已安装），字幕保持至音频播完（keep_time = max(音频时长, 保底显示时长)）；读时长失败降级为原自动计算（len*CHARACTER_DELAY + DEFAULT_START_DELAY）。配置开关 `keep_time_align_audio`（默认 true）。
 - 字幕推送位于播放分支之前（现状位置），**EDTalk 推送模式 / pygame / builtin 全模式共用**——内置字幕打印机补齐 EDTalk 模式字幕能力（原模式无任何字幕）。
 - enable=false 时零开销（不创建 socket 广播、不进队列——CaptionsManager.push 入口短路）。
@@ -191,7 +192,7 @@
 
 1. 播放器 select 增加选项 `builtin`（label"内置播放器"）；tooltip 更新：pygame=系统自带默认 / 内置播放器=进程内队列播放（插队/暂停/续播） / audio_player(_v2)=外部服务模式（需自行启动外部项目；兼容保留，builtin 稳定一个版本后移除——sunset 判据登记 TODOS，native F4）。
 2. `audio_player` 卡片改造（**播放器选择修改后重启主系统生效——与字幕 enable 同口径，选项旁标注（design D11）；实施首日验证可否热切，可热切再升级提示**）：
-   - "内置播放器"卡：设备下拉（get_all_audio_device_info 异步枚举 + "系统默认"项，device_index；**loading 态「正在枚举设备…」、空列表态「未检测到音频设备，将使用系统默认」且下拉禁用为默认项——design D8**）、播放间隔、随机间隔（开关+上下限）、优先级映射（只读）折叠区：默认收起，展开显示 type→优先级数值表 + 一行「未识别类型排队尾」；v1 无编辑入口（design D4）。
+   - "内置播放器"卡：设备下拉（get_all_audio_device_info 异步枚举 + "系统默认"项，device_index；**loading 态「正在枚举设备…」、空列表态「未检测到音频设备，将使用系统默认」且下拉禁用为默认项——design D8**）、播放间隔、随机间隔（开关+上下限）、优先级映射（只读）折叠区：默认收起，展开显示 type→优先级数值表 + 一行「未识别类型排队尾；如需调整可在 config.json 的 audio_player.priority_mapping 中修改（dx 发现7 逃生门注明）」；v1 无 UI 编辑入口（design D4）。
    - "外部服务 API 地址"输入框：选 builtin/pygame 时**隐藏**（动态显隐），选 audio_player(_v2) 时显示（保留 is_url_check 校验）。
 3. 互斥提示（对齐 EDTalk 计划四组合提示模式）：`is_edtalk_active` 为真时页面顶部常驻提示"数字人模式下音频由 EDTalk 播放"，**同时播放器 select 置 disabled（视觉锁死）——「可改但无效」是认知失调路径，「禁用+说明」更诚实（design D3）**。（来源：计划初稿既有条目，非 0G cherry-pick）
 4. 小型控制区（卡片常驻）：选 builtin 时显示队列条数回显（get_list）与暂停/续播/跳过当前/清空队列四按钮——运营者手动打断用；未选 builtin 时卡片显示空态文案"内置播放器未启用"。tooltip 注明语义边界："插队仅重排待播顺序，不打断当前播放"（native F1 预期管理）。
@@ -199,11 +200,13 @@
    - **刷新机制（design D7）**：ui.timer 1s 轮询，仅当选 builtin 且页面可见时激活；get_list 返回轻量摘要不持锁全量拷贝（防闪烁与锁竞争）。
    - **错误条（design D9）**：控制区顶部显示最近一次播放器错误（可关闭）——R1 设备失败附设备列表与 device_index 指引、R8 ffmpeg 报错在此浮出；直播中运营者不看日志文件，播放静默失败必须 UI 可见。日志仍全量。
 5. 全部新 UI 走 design_tokens 令牌 + 3 列网格 + width:100% 样板（硬约束）。
+6. **文档交付物（dx 发现5）**：①STRUCTURE.md 登记三处新模块（utils/audio/builtin_play_center.py、utils/web_captions/、frontend/web_captions/——本仓既有义务先例）；②短文档《字幕与内置播放器接入》：OBS 三步接入+设备选择+依赖说明，R1/R8 错误文案落具体文档锚点（防指向空锚点）。
+7. §4.5/§5.4 JSON 示例实施时在设置页 tooltip 或文档注明「示例中 // 注释仅为说明，config.json 不支持注释」。
 
 ### 6.2 web字幕打印机页（frontend/ui/tabs/web_captions_printer.py）
 
 1. 补 `enable` 开关（现状 UI 缺失，仅有 API 地址——断链三重奏之一）；**开关旁三步微指引（design D12）**：「①开启并保存 → ②重启主系统生效 → ③复制下方地址到 OBS 浏览器源」。
-2. 移除 API 地址输入框；新增**字幕页地址回显**（只读 + "复制地址"按钮，供 OBS 浏览器源粘贴；地址 = http://<api_ip>:<api_port>/captions，api_ip 为 0.0.0.0 时回显 127.0.0.1）。
+2. 移除 API 地址输入框；新增**字幕页地址回显**（只读 + "复制地址"按钮，供 OBS 浏览器源粘贴；地址 = http://<api_ip>:<api_port>/captions，api_ip 为 0.0.0.0 时回显 127.0.0.1；**附一行「双机直播：远程 OBS 请将 127.0.0.1 替换为本机局域网 IP」——dx 发现8**）。
 3. 新增样式配置卡（14 键，**卡内三组信息架构——design D2**）：①平铺区=显示模式 select（渐显/打字机）+字体/字号/字重/描边+文字色/背景色/页面背景色（色盘）；②次级区=字幕区宽高；③**高级折叠区（默认收起）**=渐显时长/单字时长/隐藏时长/播完保留时长 4 个渲染时序微调键，tooltip 注明单位 ms 与"误改破坏字幕节奏"风险。
 4. `keep_time_align_audio` 开关（"字幕时长对齐音频"）。
 5. 热更新语义标注：样式修改保存后字幕页即时生效（config_update 广播），无需刷新 OBS 源。
@@ -246,6 +249,7 @@
 6. 回归：pygame 模式、外部 audio_player 模式（HTTP 客户端路径）、既有启动/停止链路均不受影响；字幕断链修复后原 AttributeError 场景消失。
 7. 零新增 pip 依赖（pyaudio/pydub/python-socketio runtime312 已具备，实测 2026-09-24）。
 8. 配置迁移：老 config.json 升级后所有新键有默认值，web_captions_printer.enable=false 行为零变化；coordination_program 过期条目清除后启动无报错。
+9. **首日冒烟具名脚本 `Scripts/smoke_builtin_captions.py`（dx 发现6）**：覆盖 builtin 播放+完成回调+停止 / 字幕页连接+推送+config_update / EDTalk 模式字幕偏移实测（R10）——R2/R4/R10 的统一执行入口，登记为验收第 9 条。
 
 
 <!-- autoplan-accepted:ceo -->
@@ -484,3 +488,91 @@ DESIGN OUTSIDE VOICES — LITMUS SCORECARD:
 ```
 
 **UNRESOLVED DECISIONS（留 Phase 4）**：D10③ 字幕页默认背景色（白底 vs 透明默认）——taste。
+
+### DX DUAL VOICES — CONSENSUS TABLE [subagent-only]（Codex 400 不可用，三轮一致）
+
+| 维度 | Claude | Codex | Consensus |
+|---|---|---|---|
+| 1. Getting started < 5 min? | 用户侧 ~3min 达标（微指引+复制按钮）；开发者侧缺具名冒烟入口→已补 | N/A | N/A |
+| 2. API/CLI naming guessable? | get_status 拆分后一致（发现3）；默认值保守正确 | N/A | N/A |
+| 3. Error messages actionable? | problem+cause+fix 齐（R1-R10）；文档锚点补齐（发现5） | N/A | N/A |
+| 4. Docs findable & complete? | 页内微指引优秀；STRUCTURE.md+短文档交付物补齐（发现5） | N/A | N/A |
+| 5. Upgrade path safe? | 默认零变化+ensure-default+外部模式保留（发现7 逃生门） | N/A | N/A |
+| 6. Dev environment friction-free? | 零新增依赖+具名冒烟脚本（发现6） | N/A | N/A |
+
+单声部 critical 发现：无（1 high 已落义务）。
+
+### DX Step 0 记录（autoplan 覆盖：DX POLISH / persona P6 推断）
+
+**Persona（推断，沿 EDTalk 先例）**：单人直播运营者（兼自维护者）——白天配置、晚上开播；不看日志文件；容错窗口以分钟计；期望"开关打开就能用"。
+**TTHW 评估**：用户侧 hello world = OBS 内第一条字幕 ≈ 5 步（开启→保存→重启→复制地址→OBS 粘贴）≈ 3 分钟 = **Competitive 档达标**（2-5min）；内置播放器 = 2 步（选 builtin→重启）。目标维持 Competitive（重启主系统是既有启动模型，消除它=新范围）。
+**Magical moment（0D，既有载具）**：地址复制进 OBS、字幕随语音逐句浮现——载具 = 地址回显+复制按钮+三步微指引（D12/D10 修复带入，零新增范围）。
+
+### Developer Journey Map（9 段）
+
+| STAGE | 运营者做什么 | 摩擦点 | 状态 |
+|---|---|---|---|
+| Discover | 基础功能分组见"音频播放/web字幕打印机" | 无（既有导航） | ok |
+| Install | 零安装（系统内置，依赖已具备） | 无 | ok |
+| Setup | 选 builtin / 开 enable | 播放器生效需重启（D11 已标注） | fixed |
+| Hello World | 首条字幕上屏 / builtin 播放 | OBS 透明默认（D10③ taste 留门） | fixed |
+| Real Usage | 日常直播（插队/暂停/字幕） | 队列上限硬编码（发现7 已配置化） | fixed |
+| Debug | 控制区错误条+状态行+字幕页自检 | 字幕侧静默失败（发现1 已修） | fixed |
+| Adjust | 改样式热更新 | 时序键双源（发现4 已单源化） | fixed |
+| Upgrade | 老 config 升级 | ensure-default 补键（R7） | ok |
+| Recover | 远程 OBS / 双机 | 127.0.0.1 替换说明（发现8 已补） | fixed |
+
+### Developer Empathy Narrative（第一人称）
+
+"晚上八点要开播。我在基础功能里找到'音频播放'，把播放器切成'内置播放器'——选项旁写着'重启后生效'，明白。切到'web字幕打印机'，打开开关，旁边三步指引写得清楚：开启保存→重启→复制地址。重启系统（本来每次开播也要重启）。地址旁边有复制按钮，还有一行小字提醒我双机直播要换 IP——我正准备问这个。OBS 里加浏览器源粘进去，字幕跟着 TTS 一句句浮出来，透明背景，正好压在画面底部。播到一半有粉丝刷了礼物，礼物音频排在下一条最前面——我注意到它是排队进来的，当前这句没被打断，tooltip 早就说过。改了个字号，OBS 里立即变了，不用重启。全场没碰过一次日志文件。"（预测标注：字幕偏移与设备失败场景为计划层推断，冒烟脚本实测收口。）
+
+### DX Passes 1-8（autoplan auto-decide）
+
+**Pass 1 起步体验：7 → 9**——D12 三步微指引+复制按钮+生效时机诚实标注（既有）；发现6 冒烟脚本补开发者侧 TTHW 入口；发现8 远程 OBS 说明。Stripe test：运营者一个会话内从"没见过"到"字幕上屏"✓（3min）。
+**Pass 2 API 设计：6 → 9**——发现3 get_status 拆名（一名两契约陷阱消除）；发现4 节流参数单源化（改键即破坏防叠字保证的陷阱消除）；发现7 队列上限配置化+priority 手改路径注明；默认值保守正确（pygame/enable=false/device_index=-1）。
+**Pass 3 错误消息：7 → 9**——发现1 字幕侧可见性（D9 双标修复：页内自检+错误条联动）；发现5 错误文案落具体文档锚点（防空指）；R1-R10 表本就 problem+cause+fix 齐。
+**Pass 4 文档学习：5 → 9**——发现5 交付物：STRUCTURE.md 三模块登记+《字幕与内置播放器接入》短文档+JSON 注释标注；页内微指引（D12）既有。
+**Pass 5 升级迁移：9 → 9**——默认值零变化、ensure-default 补键、外部模式保留+sunset 判据、无破坏性变更。No new issues。
+**Pass 6 环境工具：8 → 9**——零新增 pip 依赖、runtime312 统一解释器、发现6 冒烟脚本=可重复验证入口；Windows 单机场景明确。
+**Pass 7 社区生态：N/A**——单机自用直播工具，无社区/生态面（如实声明，不计分；无 findings）。
+**Pass 8 度量反馈：6 → 8**——发现6 冒烟脚本使 R2/R4/R10 可重复度量；TTHW 用户侧无埋点（单机自用，遥测=范围外，如实声明残留）；boomerang-ready（/devex-review 可实测对照）。
+
+### DX Scorecard（8 维）
+
+```
++====================================================================+
+|              DX SCORECARD — audio_player/captions_printer 整合      |
++====================================================================+
+| 1. Getting Started   | 7/10 → 9/10（微指引/冒烟入口/远程说明）      |
+| 2. API Design        | 6/10 → 9/10（get_status/单源/逃生门）        |
+| 3. Errors & Debug    | 7/10 → 9/10（字幕可见性/文档锚点）           |
+| 4. Documentation     | 5/10 → 9/10（STRUCTURE.md+接入短文档）       |
+| 5. Upgrade Path      | 9/10 → 9/10（零破坏迁移）                    |
+| 6. Environment       | 8/10 → 9/10（零依赖+冒烟脚本）               |
+| 7. Community         | N/A（单机工具，不适用）                      |
+| 8. Measurement       | 6/10 → 8/10（冒烟可重复；TTHW 埋点范围外）    |
++--------------------------------------------------------------------+
+| Overall              | 5/10 → 8/10（最低计分维度=Pass 8）           |
+| TTHW                 | ~3min（Competitive 达标）→ 维持               |
++====================================================================+
+```
+
+### DX Implementation Checklist（实施对照清单）
+
+- [ ] get_status() 独立方法（get_list 契约不动）
+- [ ] 字幕页 disconnect 自显"字幕服务未连接"+push 3 次失败联动音频错误条
+- [ ] enable push 入口实时读 config（与样式同口径热生效）
+- [ ] 节流参数读 config single_char_show_time（单一事实源）
+- [ ] queue_max 两键进 config（50/100 默认）
+- [ ] priority 折叠区注明 config 手改路径
+- [ ] 远程 OBS IP 替换说明行
+- [ ] STRUCTURE.md 三模块登记 +《字幕与内置播放器接入》短文档
+- [ ] JSON 注释标注（tooltip/文档）
+- [ ] Scripts/smoke_builtin_captions.py 冒烟脚本（验收第 9 条）
+
+### DX 阶段 NOT in scope / What already exists
+
+NOT in scope：TTHW 埋点遥测（单机自用无此需求）；开发者文档站（页内指引+一篇短文档覆盖）。
+What already exists：config_auto_save 机制、设计令牌、二级列表导航、runtime312 统一环境、migrate/ensure-default——全部复用。
+
+**UNRESOLVED DECISIONS（DX 阶段）**：0（全部义务已落；D10③ 属设计阶段遗留 taste，已在设计记录登记）。
