@@ -6,6 +6,7 @@ from frontend.ui.tabs import (
     llm,
     tts,
     svc,
+    train_voice,
     visual_body,
     copywriting,
     talk,

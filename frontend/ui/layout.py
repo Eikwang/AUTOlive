@@ -1395,7 +1395,8 @@ class DrawerLayout:
             blacklist, read_comment, thanks, schedule, idle_time_task,
             custom_cmd, trends_copywriting, sd_config, local_qa,
             choose_song, search_online, key_mapping, luoxi, database_config,
-            system_settings, platform_config, train_streamer
+            system_settings, platform_config, train_streamer,
+            train_voice
         )
 
         # 获取主题配置 - 使用简化的浅色/深色模式
@@ -1439,6 +1440,7 @@ class DrawerLayout:
             # 高级功能
             'visual_body': lambda: visual_body.create_visual_body_tab(self.config, theme_config, set_cb),
             'train_streamer': lambda: train_streamer.create_train_streamer_tab(self.config, theme_config, set_cb),
+            'train_voice': lambda: train_voice.create_train_voice_tab(self.config, theme_config, set_cb),
             'copywriting': lambda: copywriting.create_copywriting_tab(self.config, theme_config, set_cb),
             'data_analysis': lambda: data_analysis.create_data_analysis_tab(self.config, theme_config, set_cb),
             'local_qa': lambda: local_qa.create_local_qa_tab(self.config, theme_config, set_cb),

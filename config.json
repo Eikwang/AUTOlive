@@ -1823,6 +1823,12 @@
                         "name": "训练主播",
                         "tab_key": "train_streamer",
                         "enabled": true
+                    },
+                    {
+                        "name": "训练声音",
+                        "tab_key": "train_voice",
+                        "enabled": true,
+                        "has_switch": false
                     }
                 ]
             },

@@ -126,12 +126,16 @@ def create_tts_tab(
                 style="width:100%;"
             )
             FormField.create_input(
-                label='API地址（http）', 
-                value=get_nested_value(config, "gpt_sovits", "api_ip_port"), 
+                label='API地址（http）',
+                value=get_nested_value(config, "gpt_sovits", "api_ip_port"),
                 placeholder='官方API程序启动后监听的地址',
                 on_change=lambda e: set_config_callback("gpt_sovits", "api_ip_port", e.value),
                 style="width:100%;"
             )
+
+        # 声音档案选择器（P2-4/D7：分组"我的声音档案/内置音色"，写入 gpt_sovits 节的
+        # 当前档案模型对；零档案空态指向训练页 B-6）
+        _render_voice_profile_selector(config, card_css)
             
         with ui.grid(columns=3):
             FormField.create_input(
@@ -558,3 +562,87 @@ def _load_gpt_sovits_model(config: Dict[str, Any]):
     """
     # TODO: 实现模型加载功能
     logger.warning("GPT-SoVITS模型加载功能待实现")
+
+def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
+    """P2-4/D7/D8/B-6：声音档案分组选择器 + 模型对写入 gpt_sovits 节。
+
+    - 分组"我的声音档案/内置音色"（手动配置项即内置）
+    - 点选档案 → 把 GPT-SoVITS 模型对/参考音频写入 gpt_sovits 节
+      （托管 api_v2 重启托管进程完成切换——R2 降级路径，P2-4 义务）
+    - 零档案 → 空态卡片指向训练页
+    """
+    from nicegui import ui as _ui
+    from utils.voice_profiles import load_profiles
+
+    profiles = load_profiles()
+    if not profiles:
+        with _ui.card().style(card_css):
+            _ui.label("声音档案").style("font-weight:var(--font-weight-emphasis)")
+            _ui.label("暂无档案——训练完成后自动出现在此处").style(
+                "font-size:12px;color:var(--text-secondary)")
+        return
+
+    with _ui.card().style(card_css):
+        _ui.label("声音档案（我的）")
+        with _ui.grid(columns=2):
+            current_gpt = get_nested_value(config, "gpt_sovits", "gpt_model_path") or ""
+            for pid, prof in profiles.items():
+                is_current = prof.get("gpt_model") and (
+                    os.path.normcase(prof["gpt_model"]) == os.path.normcase(current_gpt))
+                with _ui.row().style(
+                    "width:100%;align-items:center;border:1px solid var(--border-color);"
+                    "border-radius:var(--radius-md);padding:6px 10px;"
+                ):
+                    mark = "● " if is_current else ""
+                    _ui.label(f"{mark}{prof.get('name', pid)}").style("flex:1")
+                    if prof.get("note"):
+                        _ui.label(prof["note"]).style(
+                            "font-size:11px;color:var(--text-secondary)")
+                    _ui.button("选用" if not is_current else "当前",
+                               on_click=lambda pid=pid, prof=prof: _apply_profile(
+                                   config, pid, prof),
+                               ).props("dense unelevated no-caps")
+
+
+def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
+    """选用档案：模型对/参考音频写入 gpt_sovits 节 + 托管进程重启切换（R2 兜底）。"""
+    from nicegui import ui as _ui
+    set_cb = None
+    # gpt_sovits 节字段写入（经 config 回调持久化）
+    try:
+        from frontend.utils.common import notify_ok
+    except ImportError:
+        notify_ok = None
+    fields = {
+        "gpt_model_path": prof.get("gpt_model", ""),
+        "sovits_model_path": prof.get("sovits_model", ""),
+        "ref_audio_path": prof.get("ref_audio", ""),
+        "prompt_text": prof.get("prompt_text", ""),
+        "prompt_language": prof.get("prompt_lang", "zh"),
+    }
+    # 经前端已有的 set_config 机制由页面保存——这里直接改内存 config 并持久化
+    from utils.config import Config
+    import json, tempfile, os as _os
+    cfg_path = _os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.dirname(_os.path.abspath(__file__)))), "config.json")
+    with open(cfg_path, encoding="utf-8") as f:
+        data = json.load(f)
+    data["gpt_sovits"].update(fields)
+    data["gpt_sovits"]["voice_profile_id"] = pid
+    fd, tmp = tempfile.mkstemp(dir=_os.path.dirname(cfg_path), suffix=".json")
+    with _os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    _os.replace(tmp, cfg_path)
+    # 重载共享 config 缓存（E-4 单写者：本处经 voice_profiles 同款原子替换）
+    Config.reload(cfg_path)
+    # 托管进程重启完成切换（R2 兜底：api_v2 运行中换模不确定→重启秒级中断）
+    try:
+        from utils.service_orchestrator import ServiceRegistry
+        svc = ServiceRegistry.instance().get("gpt-sovits")
+        if svc is not None:
+            import threading as _th
+            _th.Thread(target=svc.manual_restart, daemon=True).start()
+    except Exception:
+        pass
+    _ui.notify(position="top", type="positive",
+               message=f"已选用声音档案「{prof.get('name', pid)}」，GPT-SoVITS 重载中")
