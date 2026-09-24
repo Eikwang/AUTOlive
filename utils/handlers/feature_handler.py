@@ -258,6 +258,32 @@ class FeatureHandler:
                         
                         return True
                     
+                    # P3-2: 先查 covers/ 已有翻唱成品（命中直接回播，零延迟）
+                    try:
+                        from utils.cover_worker import CoverQueue
+                        _cq = getattr(self.my_handle, "cover_queue", None)
+                        if _cq is None:
+                            _cq = CoverQueue(self.my_handle.config, None)
+                            self.my_handle.cover_queue = _cq
+                        _norm = _cq.normalize_song(content)
+                        _covers_dir = _cq._covers_dir()
+                        if os.path.isdir(_covers_dir):
+                            for _fn in os.listdir(_covers_dir):
+                                _base, _ext = os.path.splitext(_fn)
+                                if _ext.lower() in (".wav", ".mp3") and _cq.normalize_song(_base.split("__")[0]) == _norm:
+                                    _cover_full = os.path.abspath(os.path.join(_covers_dir, _fn))
+                                    logger.info(f"[点歌] covers 命中: {_cover_full}")
+                                    _msg = {"type": "song",
+                                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                                            "config": self.my_handle.config.get("filter"),
+                                            "username": username, "content": _cover_full}
+                                    self.my_handle.audio_synthesis_handle(_msg)
+                                    self.my_handle.webui_show_chat_log_callback("点歌(翻唱)", data, _cover_full)
+                                    return True
+                    except Exception:
+                        logger.error("[点歌] covers 检查异常（回退原逻辑）", exc_info=True)
+
                     # 判断是否有此歌曲
                     song_filename = self.my_handle.common.find_best_match(content, choose_song_song_lists, similarity=self.my_handle.config.get("choose_song", "similarity"))
                     if song_filename is None:
@@ -291,6 +317,23 @@ class FeatureHandler:
                     resp_content = f"{self.my_handle.config.get('choose_song', 'song_path')}/{resp_content[0]}"
                     resp_content = os.path.abspath(resp_content)
                     logger.info(f"点歌成功！匹配到的音频路径：{resp_content}")
+                    # P3-2/DX-5: 异步入队翻唱（成品下次点歌零延迟）
+                    try:
+                        from utils.cover_worker import CoverQueue
+                        _cq = getattr(self.my_handle, "cover_queue", None)
+                        if _cq is None:
+                            _cq = CoverQueue(self.my_handle.config, None)
+                            self.my_handle.cover_queue = _cq
+                        _profile_id = self.my_handle.config.get("gpt_sovits", "voice_profile_id") or "default"
+                        _r = _cq.enqueue(username, song_filename, _profile_id)
+                        if _r["action"] == "queued":
+                            _cq.ensure_worker()
+                            logger.info(f"[点歌] 翻唱已入队（{song_filename}，第 {_r['position']} 位）")
+                        elif _r["action"] == "queue_full":
+                            logger.info(f"[点歌] 队列已满，跳过翻唱入队: {song_filename}")
+                        # cooldown/cached: 静默（D6 有意设计）
+                    except Exception:
+                        logger.error("[点歌] 翻唱入队异常（不阻塞播放）", exc_info=True)
                     
                     message = {
                         "type": "song",

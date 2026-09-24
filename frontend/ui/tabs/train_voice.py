@@ -20,6 +20,7 @@ from utils.my_log import logger
 from utils.train_voice_pipeline import (
     FAILED, PENDING, RUNNING, SUCCESS, TrainVoicePipeline,
 )
+from utils.train_rvc_pipeline import TrainRvcPipeline
 
 # 模块级单例（防多开；与 train_streamer 同款范式）
 _pipeline: TrainVoicePipeline | None = None
@@ -66,6 +67,20 @@ def create_train_voice_tab(
             epoch_input = ui.number(label="训练轮数", value=12, min=1, max=100)
             batch_input = ui.number(label="批大小", value=8, min=1, max=64)
             dry_check = ui.checkbox("已是干声（跳过 UVR5）", value=True)
+
+    # ---------- 管线切换（P3-1：GPT-SoVITS / RVC 双流共用一页） ----------
+    pipeline_type_state = {"value": "gpt-sovits"}
+    with ui.card().style(card_css):
+        ui.label("训练管线")
+        with ui.row():
+            ui.button("GPT-SoVITS (TTS)", on_click=lambda: _set_pipeline("gpt-sovits")).props(
+                "unelevated no-caps").style("font-size:12px")
+            ui.button("RVC (变声/翻唱)", on_click=lambda: _set_pipeline("rvc")).props(
+                "unelevated no-caps").style("font-size:12px")
+
+    def _set_pipeline(t):
+        pipeline_type_state["value"] = t
+        ui.notify(position="top", type="info", message=f"训练管线已切换: {t}")
 
     # ---------- GPU 状态卡 ----------
     gpu_label: dict = {}
@@ -138,13 +153,22 @@ def create_train_voice_tab(
             if not exp_input.value.strip():
                 ui.notify(position="top", type="negative", message="请填写实验名")
                 return
-            _pipeline = TrainVoicePipeline(config, paths)
-            _pipeline.prepare(
-                dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
-                total_epoch=int(epoch_input.value or 12),
-                batch_size=int(batch_input.value or 8),
-                already_dry=dry_check.value, authorized=True,
-            )
+            pipeline_type = pipeline_type_state.get("value", "gpt-sovits")
+            if pipeline_type == "rvc":
+                _pipeline = TrainRvcPipeline(config, paths)
+                _pipeline.prepare(
+                    dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
+                    total_epoch=int(epoch_input.value or 20),
+                    batch_size=int(batch_input.value or 8),
+                )
+            else:
+                _pipeline = TrainVoicePipeline(config, paths)
+                _pipeline.prepare(
+                    dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
+                    total_epoch=int(epoch_input.value or 12),
+                    batch_size=int(batch_input.value or 8),
+                    already_dry=dry_check.value, authorized=True,
+                )
         start_btn.set_enabled(False)
         stop_btn.set_enabled(True)
         _pipeline.run_all()
