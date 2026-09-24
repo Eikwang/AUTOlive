@@ -1,6 +1,8 @@
 <!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Eikwang-AUTOlive\\main-autoplan-restore-20260925-000531.md" -->
 # AUTOlive × audio_player / captions_printer 功能整合计划
 
+> **Status: APPROVED（2026-09-25，用户最终批准门选项 A）**｜两项 User Challenge 按既定方向维持（打断恢复不新增=NOT in scope、桌面窗口丢弃）；taste 两项按推荐（字幕页透明默认、pygame 默认+一步切换引导）。
+
 > 日期：2026-09-24 ｜ 发起：用户 /autoplan 指令
 > 前置事实：三代码库实地摸底（AUTOlive 直读 + audio_player/captions_printer 全量通读，2026-09-24）
 > 参照：`specs/integration/EDTalk功能集成计划.md`（同类整合范本）
