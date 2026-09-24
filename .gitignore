@@ -301,3 +301,6 @@ edtalk/fastrag/kbindex/
 edtalk/fastrag/*.log
 edtalk/train_progress/.lock-*
 edtalk/data_preprocess/data_preprocess_for_train/__pycache__/
+
+# P1-4: 共享 RVC 模型目录（大文件走安装包分发，不入库）
+models/rvc/
