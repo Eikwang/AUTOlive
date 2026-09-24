@@ -80,6 +80,7 @@
 ### 4.2 接口适配（调用点零改动）
 
 - 内置播放器暴露与 `AUDIO_PLAYER` 客户端**相同的 6 方法签名**：`play(data)`（→ add_audio_json）、`pause_stream()`、`resume_stream()`、`skip_current_stream()`、`get_list()`、`clear()`（→ clear_audio_json）。
+- **get_list UI 扩展（design D5/D6）**：get_list 为前端控制区返回轻量摘要 `{queue_len, playing, paused, current:{type, content截断20字}}`——内置播放器自有读取口，仅 UI 消费，不触碰 playback_manager 鸭子类型调用点；为控制区状态回显（播放中/已暂停/空闲）与「正在播放」感知提供数据源。
 - audio_core.py:118 按 `play_audio.player` 分流实例化：`builtin` → 内置 `AUDIO_PLAY_CENTER`，其余 → 既有 HTTP 客户端。playback_manager.py 两处 `self.audio_player.play(data_json)`（156、266）零逻辑改动。
 - **stop_current_audio 条件修复（spec C-1）**：playback_manager.py:201 现条件 `== "audio_player"`（不含 v2/builtin；且 mixer_normal 类属性仅 pygame 分支赋值，builtin 模式下弹幕打断将命中 None.music → AttributeError 或打断静默失效）——该行条件改为 `in ["audio_player", "audio_player_v2", "builtin"]`（一行改动，顺带修复 v2 既有缺陷；此为"调用点零改动"承诺的唯一声明例外）。builtin 停止语义调用目标 = skip_current_stream()（6 方法中唯一"停当前"语义；mixer_normal 在 builtin 下为 None 不可用）——实施时以单测闭合：打断后无 AttributeError、下一播放正常（native F6）。
 - 分支条件扩展：`elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]`（130、254 两处）。
@@ -145,6 +146,7 @@
 - **并发模型（spec CL-1）**：`CaptionsManager.push(data_json)` 为异步入口，内部做**线程安全入队**（list+Lock，沿用源 MessageQueueManager 模式）；内部节流线程逐条出队，经 `asyncio.run_coroutine_threadsafe` 将 `sio.emit` 提交主系统 event loop（web_server 启动 uvicorn 时捕获 loop 引用）。config_update 广播同通道。
 - **enable 语义（spec N-3）**：socket.io 挂载与 /captions 路由随主系统启动无条件创建（结构性 mount）；enable 仅控制 push 短路；开关修改后重启主系统生效。
 - 事件契约沿用原项目：服务端→客户端 `message`（{content, start_delay, keep_time}）与 `config_update`；客户端→服务端无需任何事件（手动发送功能不移植）。
+- **初始状态同步（design D1，发布阻断级修复）**：sio `connect` 事件回调中向新连接 emit 一次当前完整字幕配置（与 config_update 同数据源）——OBS 浏览器源每次打开/刷新/重连即恢复用户配置样式；仅靠增量广播会使样式在重开后回退默认，热更新承诺失效。
 
 ### 5.3 推送接线（修复断链 + 时长对齐）
 
@@ -179,6 +181,8 @@
 
 - `api_ip_port` 键**删除**（内置后无外部地址；migrate 时移除，设置页去输入框）。
 - 样式保存（设置页自动保存既有机制）→ 落盘 config.json + `config_update` 广播 → 字幕页即时热更新。
+- **透明语义（design D10，必修）**：body_bg_color 渲染层支持空值/"none" → `background: transparent`（OBS 浏览器源叠加场景必须可表达透明；hex 14 键 schema 无法表达 rgba——映射方案优先，不扩 schema）；字幕页地址回显旁加一行「在 OBS 中添加浏览器源粘贴此地址」。
+- **默认背景色（D10③，taste 留 Phase 4）**：源默认 #FFFFFF 在 OBS 叠加场景=整块白色挡画面；默认改透明 vs 保留白底（存量习惯）留批准门裁决。
 - 字幕页地址 = `http://<api_ip>:<api_port>/captions`（随主系统内部 HTTP API 配置走，无独立端口；api_ip 为 0.0.0.0 时地址回显按既有先例转 127.0.0.1——frontend/main.py:902 同款转换，spec CL-2）。
 
 ## 6. 模块三：前端设置页改造（基础功能分组，页已存在）
@@ -186,18 +190,21 @@
 ### 6.1 音频播放页（frontend/ui/tabs/audio_play.py）
 
 1. 播放器 select 增加选项 `builtin`（label"内置播放器"）；tooltip 更新：pygame=系统自带默认 / 内置播放器=进程内队列播放（插队/暂停/续播） / audio_player(_v2)=外部服务模式（需自行启动外部项目；兼容保留，builtin 稳定一个版本后移除——sunset 判据登记 TODOS，native F4）。
-2. `audio_player` 卡片改造：
-   - "内置播放器"卡：设备下拉（get_all_audio_device_info 枚举 + "系统默认"项，device_index）、播放间隔、随机间隔（开关+上下限）、优先级映射说明文案（展开显示 type→优先级表 + 编辑入口为高级折叠区，v1 仅展示）。
+2. `audio_player` 卡片改造（**播放器选择修改后重启主系统生效——与字幕 enable 同口径，选项旁标注（design D11）；实施首日验证可否热切，可热切再升级提示**）：
+   - "内置播放器"卡：设备下拉（get_all_audio_device_info 异步枚举 + "系统默认"项，device_index；**loading 态「正在枚举设备…」、空列表态「未检测到音频设备，将使用系统默认」且下拉禁用为默认项——design D8**）、播放间隔、随机间隔（开关+上下限）、优先级映射（只读）折叠区：默认收起，展开显示 type→优先级数值表 + 一行「未识别类型排队尾」；v1 无编辑入口（design D4）。
    - "外部服务 API 地址"输入框：选 builtin/pygame 时**隐藏**（动态显隐），选 audio_player(_v2) 时显示（保留 is_url_check 校验）。
-3. 互斥提示（对齐 EDTalk 计划四组合提示模式）：`is_edtalk_active` 为真时页面顶部常驻提示"数字人模式下音频由 EDTalk 播放，播放器选择不生效"。（来源：计划初稿既有条目，非 0G cherry-pick）
+3. 互斥提示（对齐 EDTalk 计划四组合提示模式）：`is_edtalk_active` 为真时页面顶部常驻提示"数字人模式下音频由 EDTalk 播放"，**同时播放器 select 置 disabled（视觉锁死）——「可改但无效」是认知失调路径，「禁用+说明」更诚实（design D3）**。（来源：计划初稿既有条目，非 0G cherry-pick）
 4. 小型控制区（卡片常驻）：选 builtin 时显示队列条数回显（get_list）与暂停/续播/跳过当前/清空队列四按钮——运营者手动打断用；未选 builtin 时卡片显示空态文案"内置播放器未启用"。tooltip 注明语义边界："插队仅重排待播顺序，不打断当前播放"（native F1 预期管理）。
+   - **状态回显行（design D5/D6）**：按钮区上方常驻一行状态：「播放中：[type] 内容…（截断20字）/ 已暂停 / 空闲（队列 N 条）」；暂停时"暂停"按钮禁用、"续播"启用（数据源=get_list UI 扩展）。
+   - **刷新机制（design D7）**：ui.timer 1s 轮询，仅当选 builtin 且页面可见时激活；get_list 返回轻量摘要不持锁全量拷贝（防闪烁与锁竞争）。
+   - **错误条（design D9）**：控制区顶部显示最近一次播放器错误（可关闭）——R1 设备失败附设备列表与 device_index 指引、R8 ffmpeg 报错在此浮出；直播中运营者不看日志文件，播放静默失败必须 UI 可见。日志仍全量。
 5. 全部新 UI 走 design_tokens 令牌 + 3 列网格 + width:100% 样板（硬约束）。
 
 ### 6.2 web字幕打印机页（frontend/ui/tabs/web_captions_printer.py）
 
-1. 补 `enable` 开关（现状 UI 缺失，仅有 API 地址——断链三重奏之一）。
+1. 补 `enable` 开关（现状 UI 缺失，仅有 API 地址——断链三重奏之一）；**开关旁三步微指引（design D12）**：「①开启并保存 → ②重启主系统生效 → ③复制下方地址到 OBS 浏览器源」。
 2. 移除 API 地址输入框；新增**字幕页地址回显**（只读 + "复制地址"按钮，供 OBS 浏览器源粘贴；地址 = http://<api_ip>:<api_port>/captions，api_ip 为 0.0.0.0 时回显 127.0.0.1）。
-3. 新增样式配置卡（14 键：显示模式 select 渐显/打字机、字体/字号/字重/描边、文字色/背景色/页面背景色（色盘）、字幕区宽高、渐显时长/单字时长/隐藏时长/播完保留时长）。
+3. 新增样式配置卡（14 键，**卡内三组信息架构——design D2**）：①平铺区=显示模式 select（渐显/打字机）+字体/字号/字重/描边+文字色/背景色/页面背景色（色盘）；②次级区=字幕区宽高；③**高级折叠区（默认收起）**=渐显时长/单字时长/隐藏时长/播完保留时长 4 个渲染时序微调键，tooltip 注明单位 ms 与"误改破坏字幕节奏"风险。
 4. `keep_time_align_audio` 开关（"字幕时长对齐音频"）。
 5. 热更新语义标注：样式修改保存后字幕页即时生效（config_update 广播），无需刷新 OBS 源。
 
@@ -283,6 +290,7 @@
 - 0G cherry-pick 5 项全部接受（keep_time 对齐/队列控制区/地址复制/动态显隐/过期条目清理），均已落计划条目；§6.1.3 互斥提示标注来源为初稿既有条目（非 0G cherry-pick）。
 - 用户口述"暂停插队续播"按代码实证三项能力（插队/暂停/续播）解读；"打断当前→插播→恢复"前提落差与桌面窗口丢弃列为 User Challenge，留 Phase 4 最终批准门裁决。
 - Spec 审查 C-2 修正（义务）：CEO 摘要 0I 风险编号 R5/R7 错位已纠正；架构图/§4.6/R2/R3/R4/验收4 进程边界措辞同步修正。
+- 设计声部义务（2026-09-25，native 12 项全采纳，[subagent-only]）：D1 初始配置通道（sio connect emit 全量配置——发布阻断级修复）；D5/D6 get_list UI 扩展（queue_len/playing/paused/current 摘要）+控制区状态回显行；D7 ui.timer 1s 轮询（builtin+页面可见才激活）；D9 控制区错误条（R1/R8 浮出）；D2 14 键卡内三组信息架构（时序 4 键收高级折叠区）；D3 EDTalk 激活时 select disabled；D4 优先级映射只读折叠区单一结构；D8 设备下拉 loading/空列表态；D10 body_bg_color 透明语义（空值/none→transparent，OBS 指引行；默认色值 taste 留 Phase 4）；D11 播放器选择重启主系统生效（首日验证热切）；D12 enable 旁三步微指引；mockup 未生成（designer API key 缺失）→实施后 /design-review 视觉 QA 义务（沿 EDTalk 先例）。
 - Spec 审查第2轮 N-1/N-2/N-3 修正（义务）：§4.5 两处风险引用 R7→R5；§6.1.4 控制区改为卡片常驻+按 builtin 显隐内容；§5.2 补 enable 语义（挂载随主系统启动无条件创建，enable 仅控制 push 短路，开关修改重启生效）。
 - native CEO 声部义务（2026-09-25，放行附三条件）：F1 打断恢复升级为 Phase 4 必须裁决项（两 demo 语义：纯队列插队 vs 打断恢复），控制区 tooltip 标注"插队不打断当前播放"；F3 EDTalk 字幕同步实测入首日冒烟（新增 R10）+ 验收5 补同步性；F6 builtin 停止语义闭合 skip_current_stream + 单测；F4 外部模式 tooltip sunset 措辞 + TODOS 登记移除判据；F5 §4 头补 pygame-mixer 替代方案取舍记录；F2 默认值张力（存量 pygame/新配置 builtin 或一次性引导）留 Phase 4 taste；F7/F8 记录无动作。
 <!-- /autoplan-accepted:ceo -->
@@ -406,3 +414,73 @@ CRITICAL GAP = 0（全部 Y/Y/可见/日志）。Error & Rescue Registry 与本�
 ### Dream state delta：本计划使 AUTOlive 距"单仓全内置直播系统"理想缩短两步（消除 2 外部进程+修复活缺陷+补齐 EDTalk 字幕）；剩余差距=EDTalk 回调驱动字幕（R10 条件 TODO）与音量控制（TODOS）。
 
 **UNRESOLVED DECISIONS（留 Phase 4）**：User Challenge #1（打断恢复必须裁决——native 升级为强制）；User Challenge #2（桌面窗口丢弃确认）；Taste：F2 默认值策略。
+
+### DESIGN OUTSIDE VOICES — LITMUS SCORECARD [subagent-only]（Codex 400 不可用；mockup 未生成——designer API key 缺失）
+
+```
+DESIGN OUTSIDE VOICES — LITMUS SCORECARD:
+═══════════════════════════════════════════════════════════════
+  Check                                    Claude  Codex  Consensus
+  ─────────────────────────────────────── ─────── ─────── ─────────
+  1. Brand unmistakable in first screen?   N/A*    —      N/A
+  2. One strong visual anchor?             N/A*    —      N/A
+  3. Scannable by headlines only?          YES     —      N/A
+  4. Each section has one job?             YES     —      N/A
+  5. Cards actually necessary?             YES     —      N/A
+  6. Motion improves hierarchy?            N/A     —      N/A
+  7. Premium without decorative shadows?   YES     —      N/A
+  ─────────────────────────────────────── ─────── ─────── ─────────
+  Hard rejections triggered:               0       —      N/A
+═══════════════════════════════════════════════════════════════
+```
+*字幕页为纯显示面（OBS 叠加），品牌/锚点/motion 类 litmus 不适用；设置页复用既有 design_tokens 样板（OPERATE 模式：calm hierarchy/dense-but-readable/utility language 全部满足）。分类器：设置页=OPERATE（App UI Rules），字幕页=EXPERIENCE（artifact 占满、chrome 退位）。Hard rejection 0：无卡片网格首页/无 hero/无 stacked-cards（设置页卡片=Quasar 既有卡片语义+FormField 样板，卡片即交互容器）。
+
+### Design Passes 1-7（autoplan auto-decide，2026-09-25）
+
+**Pass 1 信息架构：6/10 → 9/10**——发现 D2（14 键无内部层级：时序微调键与高频显示模式混排）D4（优先级映射嵌套表述混乱）。修复：卡内三组（平铺/次级/高级折叠）+映射只读折叠区单一结构（已落）。9 因页面级导航零变更（两页均在既有基础功能分组二级列表）。
+**Pass 2 交互状态覆盖：4/10 → 9/10**——系统性盲区：初始状态通道（D1 critical：connect 时 emit 全量配置——不修则 OBS 重开即样式回退，热更新承诺失效）、按钮状态机（D5：暂停/续播无反馈=盲按钮）、播放感知（D6）、刷新机制（D7）、设备下拉 loading/空态（D8）、错误呈现通道（D9：直播中不看日志文件）。全部已落（get_list UI 扩展+状态回显行+错误条+轮询规范）。9 因字幕页的 loading/error 天然简单（黑屏/自动重连）。
+**Pass 3 用户旅程：5/10 → 9/10**——发现 D10（OBS 透明缺失+白底默认=开箱即失败）、D11（播放器切换生效时机未说明）、D12（首次启用三重门槛无引导）。修复：透明语义+OBS 指引行+生效时机标注+三步微指引（已落）。遗留 D10③（默认白底 vs 透明）=taste 留 Phase 4。
+**Pass 4 AI Slop：8/10 → 9/10**——设置页=OPERATE 模式合规（utility language/calm hierarchy/卡片即交互）；无黑名单命中（无 3 列图标网格/无渐变/无 emoji 装饰；3 列网格=NiceGUI 表单栅格非 feature grid）。字幕页=EXPERIENCE（纯显示）。mockup 未生成，按计划文本评估；9 因视觉证据缺失。
+**Pass 5 设计系统对齐：8/10 → 10/10**——design_tokens 硬约束+FormField/三列网格样板已在计划义务；色盘控件沿用既有；字幕页豁免 tokens（OBS 用户配置驱动，已在计划声明）。
+**Pass 6 响应式/无障碍：7/10 → 9/10**——字幕页 14 键（字号/描边/对比度可配）天然服务观众可读性；OBS 固定分辨率场景明确（无移动断点需求，如实声明）；设置页 3 列网格+width:100% 既有规范覆盖；键盘导航=Quasar 兜底（ARIA 增强沿 EDTalk TODOS 先例保持挂起）。
+**Pass 7 未决设计决策：2 项登记**——①D10③ 字幕页默认背景色（白底 vs 透明默认）→ Phase 4 taste；②视觉 QA 义务（mockup 缺失→实施后 /design-review）→ 义务非决策。
+
+### Design 阶段 NOT in scope（新增 2 项）
+
+| 项 | 理由 |
+|---|---|
+| 字幕页移动端/响应式断点 | 唯一场景=OBS 固定分辨率浏览器源（§5.1 明示）；如实声明无此需求 |
+| 设置页视觉重设计 | 复用既有 design_tokens 样板即合规；页面级重设计超出本期 blast radius |
+
+### What already exists（Design）：design_tokens.py 令牌体系、FormField 组件、3 列网格+width:100% 样板（common_config.py/filter_config.py 模板）、Quasar 色盘控件、二级列表导航——全部复用，零新建模式。
+
+### Design Implementation Tasks（markdown 见任务 JSONL；关键项已并入计划 §4/§5/§6 条目）
+
+### Design Completion Summary
+
+```
+  +====================================================================+
+  |         DESIGN PLAN REVIEW — COMPLETION SUMMARY                    |
+  +====================================================================+
+  | System Audit         | design_tokens 即 DESIGN.md 等价物；UI scope= |
+  |                      | 2 设置页+1 字幕显示页                        |
+  | Step 0               | 初始 4/10（状态通道系统性缺失为最大缺口）     |
+  | Pass 1  (Info Arch)  | 6/10 → 9/10（D2/D4 修复）                    |
+  | Pass 2  (States)     | 4/10 → 9/10（D1/D5/D6/D7/D8/D9 修复）        |
+  | Pass 3  (Journey)    | 5/10 → 9/10（D10/D11/D12 修复）              |
+  | Pass 4  (AI Slop)    | 8/10 → 9/10（0 hard rejection）              |
+  | Pass 5  (Design Sys) | 8/10 → 10/10（tokens 全对齐）                |
+  | Pass 6  (Responsive) | 7/10 → 9/10（OBS 场景明确+可读性可配）        |
+  | Pass 7  (Decisions)  | 2 resolved in-plan, 1 deferred (D10③ taste)  |
+  +--------------------------------------------------------------------+
+  | NOT in scope         | written (2 新增 + §7 既有 8 项)              |
+  | What already exists  | written                                     |
+  | TODOS.md updates     | 1 项（视觉 QA——随实施义务，不入 TODOS）       |
+  | Approved Mockups     | 0 generated（API key 缺失）/ 0 approved      |
+  | Decisions made       | 12（D1-D12 全部落计划条目）                  |
+  | Decisions deferred   | 1（D10③ 默认色值→Phase 4 taste）             |
+  | Overall design score | 4/10 → 9/10                                 |
+  +====================================================================+
+```
+
+**UNRESOLVED DECISIONS（留 Phase 4）**：D10③ 字幕页默认背景色（白底 vs 透明默认）——taste。
