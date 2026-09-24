@@ -61,3 +61,8 @@
 - P2 tasks (搜索功能、主题切换、过渡动画) are IN SCOPE and ready for implementation
 - P3 tasks (颜色字体统一、响应式布局、加载状态) are IN SCOPE and ready for implementation
 - All items above are DEFERRED and should be addressed in future iterations
+
+## Deferred Items from /autoplan (2026-09-25) — audio_player/captions_printer 整合
+
+1. **外部播放器模式 sunset**（P3, S）— CEO F4：audio_player/audio_player_v2 外部模式在 builtin 稳定运行一个版本后从 UI 选项与 HTTP 客户端移除。移除判据：builtin 连续一个版本无 P1/P2 缺陷 + 用户确认不再使用外部服务。依赖：本期 builtin 落地并稳定。
+2. **EDTalk 回调驱动字幕**（P3, M）— CEO F3/R10 条件触发：仅当首日冒烟实测 EDTalk 模式字幕偏移明显（系统性超前 >500ms）时启动——让 EDTalk 端在开口时回调触发字幕显示，替代本地 dequeue 推送。依赖：EDTalk 契约是否提供音频开始播放回调端点。
