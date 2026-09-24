@@ -119,6 +119,12 @@ class MainApplication:
             if gpt_svc is not None:
                 threading.Thread(target=gpt_svc.start, name="svc-start-gpt-sovits", daemon=True).start()
                 logger.info("GPT-SoVITS 托管服务拉起已后台启动")
+            # RVC 变声服务（P2-1）：控制面常驻，音频流按需经前端启停
+            from utils.rvc_service import build_rvc_vc_service
+            rvc_svc = build_rvc_vc_service(self.config, self.autolive_paths)
+            if rvc_svc is not None:
+                threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
+                logger.info("RVC 变声服务拉起已后台启动")
         except Exception:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     
