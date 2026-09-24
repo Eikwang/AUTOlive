@@ -1,0 +1,43 @@
+/* 字幕显示页样式（移植自 captions_printer css/index.css:1-19 子集；
+   页面样式由用户配置驱动，不走 design_tokens——面向 OBS 浏览器源） */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;   /* OBS 叠加默认透明（D10：显式色值经 config 覆盖） */
+  overflow: hidden;
+}
+
+#subtitle {
+  font-size: 24px;
+  color: #ffffff;
+  font-family: 'Microsoft YaHei';
+  -webkit-text-stroke: 0px black;
+  font-weight: 600;
+  opacity: 1;
+  text-align: center;
+  word-break: break-word;
+}
+
+#subtitle_bg {
+  background: transparent;
+  min-height: 60px;
+  padding: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 连接/开关状态横幅（dx 发现1：断线自检；eng E-6：enable 未开启提示） */
+#conn_status {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #ff5555;
+  font: 14px/1.4 'Microsoft YaHei', sans-serif;
+  text-align: center;
+  z-index: 9;
+}

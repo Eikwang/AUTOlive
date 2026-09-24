@@ -5,8 +5,10 @@ Web服务器模块
 
 import asyncio
 import http.server
+import os
 import socketserver
 import threading
+import traceback
 from typing import Optional
 
 from utils.my_log import logger
@@ -54,7 +56,7 @@ class WebServer:
     def _init_fastapi_app(self):
         """初始化FastAPI应用"""
         self.app = FastAPI(title="内部HTTP API", version="1.0.0")
-        
+
         # 允许跨域
         self.app.add_middleware(
             CORSMiddleware,
@@ -63,11 +65,101 @@ class WebServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        
+
         # 注册路由
         self._register_routes()
-        
+
+        # 内置字幕打印机：socket.io 挂载 + /captions 页（整合计划 §5.2，eng E-7：与
+        # 既有 /send 同暴露面，无鉴权为已接受风险并文档注明）
+        self._setup_web_captions()
+
         logger.info("FastAPI应用初始化完成")
+
+    def _setup_web_captions(self):
+        """挂载字幕页路由、socket.io 与 FastAPI startup 的 loop 捕获（D1/E-5/E-6）"""
+        try:
+            import socketio
+            import asyncio
+            from fastapi import Request
+            from fastapi.responses import FileResponse
+
+            captions_root = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "frontend", "web_captions")
+
+            # 独立 socket.io ASGI 挂载（path /captions_ws/socket.io）；
+            # 不复用框架内部 sio，防版本升级耦合
+            sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+            self.app.mount("/captions_ws", socketio.ASGIApp(sio))
+
+            @self.app.get("/captions")
+            async def captions_page():
+                """字幕显示页（OBS 浏览器源粘贴此地址）"""
+                return FileResponse(os.path.join(captions_root, "index.html"))
+
+            @self.app.get("/captions/{fname:path}")
+            async def captions_static(fname: str):
+                """字幕页静态资源（js/css/socket.io 客户端；路径穿越防护）"""
+                safe = os.path.normpath(fname).lstrip("\\/").replace("..", "")
+                target = os.path.join(captions_root, safe)
+                if not os.path.isfile(target):
+                    raise HTTPException(status_code=404, detail="not found")
+                return FileResponse(target)
+
+            @self.app.get("/builtin_status")
+            async def builtin_status():
+                """内置播放器状态+字幕健康（控制区 1s 轮询数据源，dx D5/D6/D9）"""
+                from utils.audio.builtin_play_center import get_builtin_player
+                from utils.web_captions import get_captions_manager
+                player = get_builtin_player()
+                manager = get_captions_manager()
+                return {
+                    "builtin": player is not None,
+                    "status": player.get_status() if player is not None else None,
+                    "captions_failures": manager.submitter.consecutive_failures if manager is not None else 0,
+                }
+
+            @self.app.post("/builtin_control")
+            async def builtin_control(request: Request):
+                """控制区四按钮 + 设备枚举（dx D5；跨进程经内部 API 调用）"""
+                from utils.audio.builtin_play_center import get_builtin_player
+                player = get_builtin_player()
+                if player is None:
+                    return {"code": -1, "message": "内置播放器未启用"}
+                try:
+                    body = await request.json()
+                    action = body.get("action", "")
+                    if action == "pause":
+                        player.pause_stream()
+                    elif action == "resume":
+                        player.resume_stream()
+                    elif action == "skip":
+                        player.skip_current_stream()
+                    elif action == "clear":
+                        player.clear()
+                    elif action == "list_devices":
+                        return {"code": 200, "devices": player.get_all_audio_device_info()}
+                    else:
+                        return {"code": -1, "message": f"未知操作：{action}"}
+                    return {"code": 200, "message": "成功"}
+                except Exception as e:
+                    logger.error(f"builtin_control 处理失败: {e}")
+                    return {"code": -1, "message": f"控制失败：{e}"}
+
+            # FastAPI startup：捕获 uvicorn event loop（eng E-5 提交器用）并桥接字幕管理器
+            @self.app.on_event("startup")
+            async def _captions_startup():
+                from utils.web_captions import register_loop, register_sio, get_captions_manager
+                register_loop(asyncio.get_running_loop())
+                register_sio(sio)
+                manager = get_captions_manager()
+                if manager is not None:
+                    manager.attach(sio)
+                    manager.set_loop(asyncio.get_running_loop())
+                logger.info("字幕 socket.io 挂载完成（/captions_ws + startup loop 捕获）")
+        except Exception:
+            logger.error("字幕模块挂载失败（不影响其余功能）\n" + traceback.format_exc())
+
     
     def _register_routes(self):
         """注册API路由"""
