@@ -9,6 +9,7 @@ from nicegui import ui
 from typing import Dict, Any, Optional
 
 from frontend.config.enable_paths import ENABLE_PATHS
+from frontend.ui.components.service_status import ServiceStatusStrip
 from utils.my_log import logger
 
 
@@ -757,6 +758,12 @@ class DrawerLayout:
                 background: var(--bg-page);
                 gap: 8px;
             '''):
+                # 服务状态常驻条（P1-3：托管服务胶囊区，D3 侧边栏底部固定，
+                # 异常优先排序+置红顶部横幅；数据源 ServiceRegistry，启动后自动出现）
+                self.service_strip_container = ui.column().style('width:100%;gap:4px;')
+                self._service_strip = ServiceStatusStrip()
+                self._service_strip.mount(self.service_strip_container)
+
                 # 启停控制区（状态条 + 启动系统 + 停止&重启复合按钮）
                 self._create_control_section()
 

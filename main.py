@@ -108,6 +108,19 @@ class MainApplication:
         # 初始化任务调度器
         self.task_scheduler = get_task_scheduler(self.config, self.common, self.my_handle, platform)
         logger.info("任务调度器模块初始化完成")
+
+        # 托管服务（P1-1）：gpt_sovits.hosted=true 时随系统拉起 api_v2，
+        # 状态条（P1-3）经 ServiceRegistry 自动展示；失败不阻断主程序（可手动重启）
+        try:
+            from utils.autolive_paths import AutolivePaths
+            from utils.gpt_sovits_service import build_gpt_sovits_service
+            self.autolive_paths = AutolivePaths(self.config)
+            gpt_svc = build_gpt_sovits_service(self.config, self.autolive_paths)
+            if gpt_svc is not None:
+                threading.Thread(target=gpt_svc.start, name="svc-start-gpt-sovits", daemon=True).start()
+                logger.info("GPT-SoVITS 托管服务拉起已后台启动")
+        except Exception:
+            logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     
     def _on_start_recording(self):
         """开始录音的回调函数"""
@@ -195,7 +208,15 @@ class MainApplication:
         
         if self.web_server:
             self.web_server.stop_all()
-        
+
+        # 停止托管服务（P1-1）：优雅 terminate→kill，状态条随 ServiceRegistry 清空
+        try:
+            from utils.service_orchestrator import ServiceRegistry
+            for svc in ServiceRegistry.instance().all():
+                svc.stop()
+        except Exception:
+            logger.error(f"托管服务停止异常: {traceback.format_exc()}")
+
         logger.info("应用程序已停止")
     
     def get_status(self) -> dict:
