@@ -8,6 +8,7 @@ import traceback
 import os
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
+from utils.web_captions import get_captions_manager
 
 
 class PlaybackMixin:
@@ -71,8 +72,12 @@ class PlaybackMixin:
 
 
                     # 判断是否发送web字幕打印机
-                    if self.config.get("web_captions_printer", "enable"):
-                        await self.common.send_to_web_captions_printer(self.config.get("web_captions_printer", "api_ip_port"), data_json)
+                    # 内置字幕模块进程内直调（修复原断链：send_to_web_captions_printer
+                    # 方法不存在，enable=true 即 AttributeError）；enable/样式由
+                    # CaptionsManager 热读，push 内部全捕获（S4 隔离，不阻塞播放）
+                    _captions_manager = get_captions_manager()
+                    if _captions_manager is not None:
+                        await _captions_manager.push(data_json)
 
                     # 洛曦 直播弹幕助手
                     if self.config.get("luoxi_project", "Live_Comment_Assistant", "enable") and                         "音频播放时" in self.config.get("luoxi_project", "Live_Comment_Assistant", "trigger_position"):
@@ -127,7 +132,7 @@ class PlaybackMixin:
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
-                    elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
+                    elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]:
                         if "insert_index" in data_json:
                             data_json = {
                                 "type": data_json["type"],
@@ -198,7 +203,7 @@ class PlaybackMixin:
         if is_edtalk_active(self.config):
             # EDTalk 契约无音频 flush 端点——静默跳过（保持既有调用方兼容）
             return
-        if self.config.get("play_audio", "player") == "audio_player":
+        if self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]:
             self.audio_player.skip_current_stream()
         else:
             self.mixer_normal.music.fadeout(1000)
@@ -251,7 +256,7 @@ class PlaybackMixin:
                 # 变速发生在播放旁路，推送必须使用变速后的产物）
                 if is_edtalk_active(self.config):
                     await self.edtalk_client.push_full(audio_path, content="文案播放")
-                elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
+                elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]:
                     data_json = {
                         "type": "copywriting",
                         "voice_path": audio_path,
@@ -416,7 +421,7 @@ class PlaybackMixin:
         """暂停文案播放"""
         logger.info("暂停文案播放")
         self.copywriting_play_flag = 0
-        if self.config.get("play_audio", "player") == "audio_player":
+        if self.config.get("play_audio", "player") in ["audio_player", "builtin"]:
             pass
             self.audio_player.pause_stream()
         # 由于v2的暂停不会更换音频，所以这个只暂停文案就没有意义了
@@ -432,7 +437,7 @@ class PlaybackMixin:
         logger.info("恢复文案播放")
         self.copywriting_play_flag = 2
         # print(f"Audio.copywriting_play_flag={Audio.copywriting_play_flag}")
-        if self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2"]:
+        if self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]:
             pass
             self.audio_player.resume_stream()
         else:
@@ -443,7 +448,7 @@ class PlaybackMixin:
         """停止文案播放"""
         logger.info("停止文案播放")
         self.copywriting_play_flag = 0
-        if self.config.get("play_audio", "player") == "audio_player":
+        if self.config.get("play_audio", "player") in ["audio_player", "builtin"]:
             self.audio_player.pause_stream()
         # 由于v2的暂停不会更换音频，所以这个只暂停文案就没有意义了
         elif self.config.get("play_audio", "player") == "audio_player_v2":
