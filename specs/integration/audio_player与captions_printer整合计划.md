@@ -90,8 +90,8 @@
 
 | # | 缺陷 | 修复 |
 |---|---|---|
-| 1 | 播放等待为 `while ... : pass` 自旋烧 CPU（audio_play_center.py:158-159） | 改 threading.Event 等待（pyaudio callback 完成事件） |
-| 2 | `./out/tmp_*.wav` 解码临时文件只增不清（:111-115） | 播放完成后删除临时文件；启动时清理遗留 |
+| 1 | 播放等待为 `while ... : pass` 自旋烧 CPU（audio_play_center.py:158-159） | 改 threading.Event 等待（pyaudio callback 完成事件）。**移植重写等待逻辑时一并消掉源 pause/resume 流恢复路径缺陷（eng 补充发现）：内循环退出后主循环退化为 0.2s 轮询、暂停瞬间误触发一次完成回调** |
+| 2 | `./out/tmp_*.wav` 解码临时文件只增不清（:111-115） | 播放完成后删除临时文件；启动时清理遗留。**Windows 句柄次序（eng E-8）：必须先 `wf.close()` → `stream.close()` 再删（源码 :161-163 的 close 被注释、句柄靠 GC，直接删必踩 PermissionError）** |
 | 3 | AttributeError 兜底清空**整个队列**（:174-180） | 单条失败跳过 + 日志，不动队列余项 |
 | 4 | `set_device_index()` 写的字段播放时不读（:209-210），运行时切设备无效 | 播放时读取当前配置 device_index |
 
@@ -109,6 +109,7 @@
   "audio_interval": 0,                   // 播完后固定间隔（秒）
   "random_audio_interval": {"enable": false, "min": 0, "max": 0},
   "priority_mapping": { ... },           // type→优先级数值，默认表按 AUTOlive 实际 type 词表重写（见 R5）
+  "queue_max": 50,                       // 待播队列上限（eng E-9：示例与正文一致；满载阻塞背压）
   "api_ip_port": "http://127.0.0.1:5602" // 仅旧外部模式使用（audio_player/audio_player_v2）
 }
 ```
@@ -119,7 +120,7 @@
 ### 4.6 启动/停止接线与旧条目处置
 
 - 内置播放器随 Audio 类初始化启动（daemon 线程），随**主系统进程**存活（Audio 完整实例化仅发生在主系统进程：my_handle.py:142；webui 内 Audio(type=2) 提前返回不建播放器）——与 pygame 模式线程模型一致，无新增进程管理负担。
-- 系统停止链路挂接：停止运行时对内置播放器执行 clear + 停流（对齐 `stop_audio`/mixer stop 语义；实施时定位既有停止调用点接入）。
+- 系统停止链路挂接：停止运行时对内置播放器执行 clear + 停流（对齐 `stop_audio`/mixer stop 语义）；**首日定位既有停止调用点并写入任务清单（eng E-11：全计划唯一无验收条款的接线点）**。
 - coordination_program 两条过期外部服务条目（config.json:1262-1279，路径 E://GitHub_pro// 已不存在）：**删除**，并在设置页 coordination 相关说明无残留引用（实施时 grep 验证）。
 
 ## 5. 模块二：内置 web 字幕打印机
@@ -143,17 +144,18 @@
 - **挂载目标（spec C-0 修正）**：字幕页与 socket.io 挂载于**主系统进程**的内部 HTTP API（utils/web_server.py 的 FastAPI app，路由在 _register_routes() 内注册——/send、/llm、/callback 同级先例）。**不挂 webui**：webui（frontend/main.py）与主系统是两个进程，CaptionsManager 推送在主系统进程内，挂 webui 跨进程不可达。
 - `@app.get('/captions')` 返回字幕页（HTMLResponse 读 frontend/web_captions/index.html）；静态资源同目录服务。
 - 推送通道：**独立 socket.io ASGI 挂载**（`socketio.ASGIApp(socketio.AsyncServer(async_mode="asgi"))` mount 至 `/captions_ws/`，客户端连接 `socket.io` path `/captions_ws/socket.io`）；emit 在主系统进程 event loop 内执行（与 uvicorn 同 loop）。python-socketio 已安装（实测），零新依赖。
-- **并发模型（spec CL-1）**：`CaptionsManager.push(data_json)` 为异步入口，内部做**线程安全入队**（list+Lock，沿用源 MessageQueueManager 模式）；内部节流线程逐条出队，经 `asyncio.run_coroutine_threadsafe` 将 `sio.emit` 提交主系统 event loop（web_server 启动 uvicorn 时捕获 loop 引用）。config_update 广播同通道。
+- **并发模型（spec CL-1 + eng E-5）**：`CaptionsManager.push(data_json)` 为异步入口，内部做**线程安全入队**（list+Lock，沿用源 MessageQueueManager 模式）；内部节流线程逐条出队，经 `asyncio.run_coroutine_threadsafe` 将 `sio.emit` 提交主系统 event loop（web_server 启动 uvicorn 时捕获 loop 引用）。**loop 引用封装为带有效性检查的提交器：引用缺失/loop 失效/提交失败时计数并走错误条+日志路径（连续 3 次失败提示"字幕推送失败"）——不得静默吞掉（eng E-5）**。config_update 广播同通道。
 - **enable 语义（spec N-3 + dx 发现2 修订）**：socket.io 挂载与 /captions 路由随主系统启动无条件创建（结构性 mount）；**enable 改为 push 入口实时读 config（与样式热更新同口径，保存即生效无需重启——挂载本就无条件创建，短路只是布尔判断，无冷缓存约束）；tooltip 注明「样式与开关均即时生效」**。
 - 事件契约沿用原项目：服务端→客户端 `message`（{content, start_delay, keep_time}）与 `config_update`；客户端→服务端无需任何事件（手动发送功能不移植）。
-- **初始状态同步（design D1，发布阻断级修复）**：sio `connect` 事件回调中向新连接 emit 一次当前完整字幕配置（与 config_update 同数据源）——OBS 浏览器源每次打开/刷新/重连即恢复用户配置样式；仅靠增量广播会使样式在重开后回退默认，热更新承诺失效。
+- **初始状态同步（design D1 + eng E-6）**：sio `connect` 事件回调中向新连接 emit 一次当前完整字幕配置**与 enable 状态**（与 config_update 同数据源）——OBS 浏览器源每次打开/刷新/重连即恢复用户配置样式；enable=false 时前端显示「字幕功能未开启」（否则页面"已连接但永远无字幕"无任何提示）；仅靠增量广播会使样式在重开后回退默认，热更新承诺失效。
 
 ### 5.3 推送接线（修复断链 + 时长对齐）
 
 - playback_manager.py:74-75 修复为进程内直调：`await self.captions_manager.push(data_json)`（CaptionsManager 单例随 audio_core 初始化创建；照 EDTalkClient 的 register_client 模式注册全局 holder，供非 Audio 上下文使用）。
 - **异常隔离（S4）**：CaptionsManager.push 内部全捕获+日志计数，任何字幕错误不得传播进播放循环（调用点在播放主 try 块内，异常会吞掉当轮播放）；content 为空时跳过推送（不推空字幕）。
+- **暂停期间字幕行为（eng E-4）**：CaptionsManager.push 前检查播放器 paused 状态，暂停时阻塞等待（方案②）——暂停插话是显式支持场景（控制区按钮），"音频停了字幕还在走"是必现退化路径，不允许默认隐式退化。
 - **字幕失败运营可见（dx 发现1，D9 原则贯彻到字幕侧）**：①字幕页 socket.io disconnect 时页内自显「字幕服务未连接」（OBS 源里直接可见，排查零成本）；②push 连续失败达阈值（3 次）时向音频页控制区错误条（D9）同步提示「字幕推送失败」——同一原则双标是设计缺陷。
-- **keep_time 对齐音频时长**（原服务端忽略 keep_time 的升级修复）：push 时从 `data_json["voice_path"]` 读取音频时长（soundfile，已安装），字幕保持至音频播完（keep_time = max(音频时长, 保底显示时长)）；读时长失败降级为原自动计算（len*CHARACTER_DELAY + DEFAULT_START_DELAY）。配置开关 `keep_time_align_audio`（默认 true）。
+- **keep_time 对齐音频时长**（原服务端忽略 keep_time 的升级修复；**eng E-1/E-2 时序修订——必修**）：push 时从 `data_json["voice_path"]` 读取音频时长（soundfile），字幕保持至音频播完（keep_time = max(音频时长, 保底显示时长)）；读时长失败降级为原自动计算。配置开关 `keep_time_align_audio`（默认 true）。**修订①（E-1）**：`keep_time_align_audio=true` 时 start_delay 强制 0——源节流器的 default_start_delay(2000ms) 在内置拓扑（推送点在播放前、音频立即开播）下会让每句字幕系统性晚 2 秒开口；原 start_delay 防叠逻辑仅保留给字幕积压（推送快于播放）场景。**修订②（E-2）**：推送点在变速（audio_speed_change）之前——变速启用时按本条 speed 折算 keep_time /= speed（或延迟到播放分支内变速后计算，实施时择一），否则字幕提前 20-23% 消失。**同步断言**：字幕起点与语音起点偏移 <0.5s 进验收 4/5 与冒烟脚本断言（防 R10 归因污染）。
 - 字幕推送位于播放分支之前（现状位置），**EDTalk 推送模式 / pygame / builtin 全模式共用**——内置字幕打印机补齐 EDTalk 模式字幕能力（原模式无任何字幕）。
 - enable=false 时零开销（不创建 socket 广播、不进队列——CaptionsManager.push 入口短路）。
 
@@ -236,8 +238,10 @@
 | R6 | 音频时长读取失败（非 wav 产物/文件损坏） | keep_time 降级为原自动计算（len*80ms+2000ms），不阻塞播放 |
 | R7 | 配置键迁移（web_captions_printer.api_ip_port 删除 + 14 键新增 + audio_player 节扩展） | 沿用既有 ensure-default/migrate 机制（EDTalk 计划确立）；缺键补默认值，防 get 返回 None |
 | R8 | ffmpeg 缺失环境下 pydub 解码非 wav 失败 | ffmpeg 已是系统既有依赖（变速功能同依赖）；报错文案指向环境文档 |
+| R12 | /captions 与 /captions_ws/ 无认证边界（api_ip=0.0.0.0 时局域网可读字幕内容；与既有 /send /llm 同边界，客户端→服务端无事件无写面，非新增高危） | §8 登记为已接受风险 + 文档注明"字幕页非本机私有"（eng E-7） |
 | R9 | 断链修复涉及播放主循环（playback_manager）回归 | 分支结构零逻辑改动原则；回归三模式（pygame/builtin/edtalk）+ 外部模式冒烟 |
 | R10 | EDTalk 模式字幕音画同步——字幕在本地 dequeue 推送，EDTalk 端开口时机由其管线决定，可能系统性超前 | 首日冒烟必测项：EDTalk 模式字幕延迟实测（native F3）；偏移明显则登记"EDTalk 回调驱动字幕"TODO |
+| R11 | EDTalk push_full 降级路径（连接失败不阻塞）下字幕连发互相顶掉（eng E-3：dequeue 速率与 EDTalk 实际播放速率脱钩） | 冒烟补分支：模拟 push_full 降级（断 EDTalk 端）观察字幕节流；连发则降级路径下暂停字幕推送或按音频时长本地节流 |
 
 ## 9. 验收标准
 
@@ -246,7 +250,7 @@
 3. 设备选择：下拉枚举声卡，切换 device_index 后新播放请求走新设备（修复"写了不读"缺陷）；设备打开失败时回退默认设备并报错附设备列表。
 4. web字幕打印机：enable → `http://<api_ip>:<api_port>/captions` 页面随音频逐句显示字幕，样式 14 键修改保存后**即时热更新**；keep_time_align_audio 开启时字幕保持至音频播完。
 5. EDTalk 模式：音频仅推送 EDTalk（无本地播放、无双声），字幕页照常逐句显示（补齐原缺口）；首日冒烟实测字幕与 EDTalk 开口的偏移在可接受范围（native F3，偏移明显则降级登记 TODO）。
-6. 回归：pygame 模式、外部 audio_player 模式（HTTP 客户端路径）、既有启动/停止链路均不受影响；字幕断链修复后原 AttributeError 场景消失。
+6. 回归：pygame 模式、外部 audio_player 模式（HTTP 客户端路径）、既有启动/停止链路均不受影响；字幕断链修复后原 AttributeError 场景消失；停止运行时 builtin 播放器 clear+停流生效（eng E-11）。
 7. 零新增 pip 依赖（pyaudio/pydub/python-socketio runtime312 已具备，实测 2026-09-24）。
 8. 配置迁移：老 config.json 升级后所有新键有默认值，web_captions_printer.enable=false 行为零变化；coordination_program 过期条目清除后启动无报错。
 9. **首日冒烟具名脚本 `Scripts/smoke_builtin_captions.py`（dx 发现6）**：覆盖 builtin 播放+完成回调+停止 / 字幕页连接+推送+config_update / EDTalk 模式字幕偏移实测（R10）——R2/R4/R10 的统一执行入口，登记为验收第 9 条。
@@ -576,3 +580,98 @@ NOT in scope：TTHW 埋点遥测（单机自用无此需求）；开发者文档
 What already exists：config_auto_save 机制、设计令牌、二级列表导航、runtime312 统一环境、migrate/ensure-default——全部复用。
 
 **UNRESOLVED DECISIONS（DX 阶段）**：0（全部义务已落；D10③ 属设计阶段遗留 taste，已在设计记录登记）。
+
+### ENG DUAL VOICES — CONSENSUS TABLE [subagent-only]（Codex 400 不可用，四轮一致）
+
+| 维度 | Claude | Codex | Consensus |
+|---|---|---|---|
+| 1. Architecture sound? | 双进程拓扑/鸭子接入/注册模式实证成立；E-5 loop 提交器已闭合 | N/A | N/A |
+| 2. Test coverage sufficient? | E-10 清单 8 项+冒烟脚本三断言落计划 | N/A | N/A |
+| 3. Performance risks addressed? | 背压链完整（有界队列+阻塞）；E-3 降级节流已登记 | N/A | N/A |
+| 4. Security threats covered? | S3 XSS 转义义务+R12 认证边界登记 | N/A | N/A |
+| 5. Error paths handled? | E-1/E-2 时序缺陷修复+E-5 失败可见性 | N/A | N/A |
+| 6. Deployment risk manageable? | 默认零变化+一行回滚+E-11 停止链路闭合 | N/A | N/A |
+
+单声部 critical 发现：无（2 high 已落义务）。事实核查：抽查的全部行号引用与语义断言无一虚报。
+
+### Eng Step 0 Scope Challenge（复杂度门）
+
+- 已求解映射：播放三分支/门面 6 方法/register 模式/ensure-default/内部 API 路由/设计令牌（§2 表全列，零重建）。
+- 最小变更检验：NOT in scope 8+2 项已剥离桌面窗口/音量/打断恢复/外部模式移除/文档站/遥测——无可再减而不伤目标。
+- 复杂度门（8+ 文件触发）：触及约 13 文件（4 个为静态复制物），移动部件=2 新类+1 socket 挂载+2 tab 改造；较"维持 2 外部服务+3 配置+1 断链"净复杂度下降。**结构裁决：维持原布局（SELECTIVE EXPANSION既定，无 proposed cuts，autoplan P2 never reduce）**。
+- TODOS 交叉：无阻塞项；新增 2 项（外部模式 sunset/EDTalk 回调字幕——条件触发）已在 CEO 阶段落 TODOS.md。
+- 分布检查：单机 Windows 工具，无构建/发布管道需求（NOT in scope 声明）。
+
+### Eng Sections 1-4 主视角发现（2026-09-25）
+
+**Section 1 架构**——C-0 修正后自洽；E-5 loop 提交器有效性检查闭合最后一个静默失败路径；背压链完整：message_queue（Condition）→ voice_tmp_path_queue（有界）→ builtin 50（阻塞）→ pyaudio 流；字幕侧 push→100 有界（丢最旧）。ASCII 依赖图（§3）随 E 系修订保持准确。失败场景逐路径已入 Failure Modes Registry。**0 新增未决**（E-3/E-4/E-5/E-11 已落条目）。
+**Section 2 代码质量**——移植贴合既有模式；E-8 句柄次序写进缺陷修复描述；源 pause/resume 等待结构缺陷（0.2s 轮询退化+误触发回调）随等待逻辑重写一并消掉（已落缺陷 1 行）；上帝文件倾向（builtin_play_center 吸收 5 个 common 函数，~400 行）=low，可接受（单类单一职责，不拆）。DRY：无新违例（get_status 拆名后契约单一）。
+**Section 3 测试**——见测试计划工件（admin-main-eng-review-test-plan-20260925-015023.md）与下方覆盖图。单测清单 8 项（E-10）+冒烟三断言；回归义务：三模式播放路径回归（R9）+老配置迁移回归（E-10-6）——均为 CRITICAL 级（既有行为在变更风险面上），已入计划义务与测试计划。无 LLM/prompt 变更（无 eval 套件需求）。
+**Section 4 性能**——自旋消除后播放等待 0 CPU；E-1 修复顺带消除节流线程 2s/句的无效睡眠；emit 广播 O(n_clients≤3)；变速折算 keep_time 为 O(1)；tmp 清理消除磁盘泄漏。无 N+1（无 DB）。**0 未决问题**。
+
+#### Eng 测试覆盖图（Test Step 4 输出）
+
+```
+CODE PATHS                                            USER FLOWS
+[+] utils/audio/builtin_play_center.py                [+] builtin 播放全链路
+  ├── add_audio_json/priority_insert                    ├── [GAP→单测] 插队三语义（E-10-1）
+  │   ├── [GAP→单测] 优先级序/insert_index/未识别type    ├── [GAP→冒烟] 播放+完成回调+停止
+  │   └── [GAP→单测] 队列满载阻塞（E-10-2）              └── [GAP→单测] 打断无 AttributeError（E-10-7）
+  ├── play_audio() 主循环                              [+] 字幕链路
+  │   ├── [GAP→单测] 设备失败回退（R1）                   ├── [GAP→冒烟] 连接+推送+config_update+D1初始同步
+  │   ├── [GAP→单测] tmp 句柄次序删除（E-8）              ├── [GAP→单测] XSS 转义（E-10-4）
+  │   └── [GAP→单测] 完成回调 run_coroutine_threadsafe    ├── [GAP→单测] keep_time 折算/降级（E-1/E-2/E-10-5）
+  └── pause/resume（重写后 Event 等待）                  └── [GAP→冒烟] EDTalk 偏移<0.5s+降级节流（R10/R11）
+[+] utils/web_captions/captions_manager.py            [+] 配置迁移
+  ├── push（paused 检查/异常隔离/get_status）             └── [GAP→单测] 老配置升级默认值（E-10-6）
+  └── 节流线程（start_delay=0/单源参数）
+[+] playback_manager（C-1 条件+断链修复）
+  └── [GAP→单测] 三模式分发 + builtin→skip_current_stream（F6）
+
+COVERAGE: 0/16 paths tested (0%——全新模块，测试随实施产出)  |  GAPS: 16（4 冒烟+12 单测，全部已入测试计划工件）
+QUALITY: 目标 ★★★（行为+边界+错误）；回归义务：R9 三模式 + E-10-6 迁移 = CRITICAL
+```
+
+### Failure Modes Registry（Eng 更新——在 CEO 9 行基础上追加/修订）
+
+| CODEPATH | FAILURE MODE | RESCUED? | TEST? | USER SEES? | LOGGED? |
+|---|---|---|---|---|---|
+| 节流线程 start_delay | 每句字幕晚 2s（E-1） | Y（align=true 强制 0） | Y（冒烟断言 <0.5s） | 字幕同步 | Y |
+| 变速 × keep_time | 字幕提前 20-23% 消失（E-2） | Y（speed 折算） | Y（单测） | 字幕同步 | Y |
+| EDTalk 降级 | 字幕连发顶掉（E-3） | Y（R11 冒烟把关+条件降级） | Y（冒烟分支） | 字幕正常或暂停推送 | Y |
+| 暂停期间 | 字幕与音频脱节（E-4） | Y（push 查 paused 阻塞） | Y（单测） | 字幕同步暂停 | Y |
+| loop 失效 | 静默丢字幕（E-5） | Y（提交器计数+错误条） | Y（单测） | "字幕推送失败"提示 | Y |
+| tmp 删除 | Windows PermissionError（E-8） | Y（句柄次序） | Y（单测） | 无感 | Y |
+| 停止链路 | 播放器悬挂（E-11） | Y（clear+停流+验收6） | Y（冒烟） | 干净停止 | Y |
+
+CRITICAL GAP = 0（全行 Y/Y/可见/日志）。
+
+### Eng Completion Summary
+
+- Step 0: Scope Challenge — scope accepted as-is（复杂度门触发，结构裁决=维持原布局，无 cuts）
+- Architecture Review: 0 新增未决（E-3/E-4/E-5/E-11 已落条目）
+- Code Quality Review: 2 发现（E-8 句柄次序、源 pause/resume 结构缺陷——均已落义务）
+- Test Review: 覆盖图 produced，16 gaps identified（4 冒烟+12 单测，全部入测试计划工件）
+- Performance Review: 0 未决（E-1 顺带消除节流空睡）
+- NOT in scope: written（§7 8 项+Design 2 项+分布检查 1 项）
+- What already exists: written
+- TODOS.md updates: 2 项已落（CEO 阶段）；Eng 无新增
+- Failure modes: 16 total（CEO 9+Eng 7），0 CRITICAL GAPS
+- Unresolved decisions: 0 in this review
+- Outside voice: codex unavailable（provider 400，四轮一致）
+- Parallelization: Lane A（内置播放器：移植+缺陷修复+单测）∥ Lane B（字幕：CaptionsManager+页面挂载+单测）∥ Lane C（前端两 tab+文档）；shared：config.json schema 与 ensure-default（Lane A/B 均触碰，先后协调）；Execution order: A ∥ B → C → 冒烟脚本集成
+- Lake Score: N/A
+
+### Eng Implementation Tasks（汇总；JSONL 见 tasks-eng-review-*.jsonl）
+
+- [ ] **T1 (P1, human: ~6h / CC: ~30min)** — builtin_play_center — 移植 AUDIO_PLAY_CENTER+4 缺陷修复+pause/resume 等待重写+句柄次序+get_status
+- [ ] **T2 (P1, human: ~4h / CC: ~20min)** — captions_manager — MessageQueueManager 移植+E-1 start_delay=0+E-2 speed 折算+paused 检查+loop 提交器
+- [ ] **T3 (P1, human: ~3h / CC: ~15min)** — playback_manager/audio_core — 断链修复+C-1 条件+builtin 分流+停止链路挂接（E-11 首日定位）
+- [ ] **T4 (P2, human: ~4h / CC: ~20min)** — web_server/main — /captions 路由+/captions_ws 挂载+D1 初始同步+enable 状态
+- [ ] **T5 (P2, human: ~6h / CC: ~30min)** — 前端两 tab — 全部 D 系 UI 义务（设备下拉/控制区/错误条/14 键三组/微指引）
+- [ ] **T6 (P2, human: ~3h / CC: ~15min)** — config/migrate — audio_player 节扩展+web_captions_printer 14 键+queue_max+api_ip_port 移除+coordination 清理
+- [ ] **T7 (P2, human: ~2h / CC: ~10min)** — 单测 12 项（E-10 清单）+ 测试计划工件对照
+- [ ] **T8 (P1, human: ~2h / CC: ~15min)** — Scripts/smoke_builtin_captions.py 冒烟脚本（三断言：<0.5s 同步/降级节流/播放-回调-停止）
+- [ ] **T9 (P3, human: ~2h / CC: ~10min)** — STRUCTURE.md+《字幕与内置播放器接入》短文档+edtalk/README 式登记
+
+**UNRESOLVED DECISIONS（Eng 阶段）**：0。
