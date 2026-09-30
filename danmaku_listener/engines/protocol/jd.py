@@ -30,27 +30,32 @@ PROTOCOL_VERSION = "jd-1"
 
 SILENCE_TIMEOUT = 120.0  # 业务帧静默阈值（京东直播间弹幕稀疏，阈值放宽）
 
+# 2026-09-30 用户实测发现京东直播独立站（游客可看，页面自建 live-ws4 连接）
+LIVE_URL_TEMPLATE = "https://zhibo.jd.com/liveroom?liveId={room_id}"
+
 
 class JDParseError(ValueError):
     """房间参数无法解析"""
 
 
 def extract_room_id(room_spec: str) -> str:
-    """房间参数归一：京东直播间链接原样直达（保留风控参数）/ 纯数字
+    """房间参数归一：zhibo.jd.com/liveroom?liveId= / 各类京东链接 / 纯数字
 
-    京东直播间链接形态多样（live.jd.com/ App 分享短链/带 popId 等）——
-    不做激进正则提取，链接整体作为页面 URL 直达，room 标识取数字特征。
+    2026-09-30 用户实测发现京东直播独立站：zhibo.jd.com/liveroom?liveId=
+    ——游客可看、页面自建 wss://live-ws4.jd.com 连接（免 liveauth 签名）。
+    链接形态整体直达（保留风控参数），room 标识取 liveId/popId/id。
     """
     spec = room_spec.strip()
     if "jd.com" in spec or "jd.hk" in spec or "3.cn" in spec:
-        m = (re.search(r"popId=(\d+)", spec) or re.search(r"liveid=(\d+)", spec)
-             or re.search(r"[\?&]id=(\d+)", spec))
+        m = (re.search(r"liveId=(\d+)", spec) or re.search(r"popId=(\d+)", spec)
+             or re.search(r"liveid=(\d+)", spec) or re.search(r"[\?&]id=(\d+)", spec))
         return m.group(1) if m else spec[:64]  # 无数字特征：链接截断作标识
     m = re.match(r"^(\d{5,25})$", spec)
     if m:
         return m.group(1)
     raise JDParseError(
-        f"无法解析京东直播间参数: {spec[:60]!r}——请使用直播间分享链接或房间数字 ID")
+        f"无法解析京东直播间参数: {spec[:60]!r}——请使用直播间分享链接或房间数字 ID"
+        "（推荐 zhibo.jd.com/liveroom?liveId=xxx）")
 
 
 JD_MSG_TYPES = ("chat_group_message", "join_live_broadcast", "group_message",
@@ -107,25 +112,54 @@ def parse_jd_frame(raw) -> List[Dict[str, Any]]:
     return out
 
 
-def map_jd_message(obj: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str, Any]]:
-    """咚咚 IM 消息 → 契约消息映射（纯函数）；未识别返回 None
+def map_jd_message(frame: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str, Any]]:
+    """咚咚 IM 顶层帧 → 契约消息映射（纯函数）；未识别返回 None
 
-    调研数据点：弹幕含 nickName+content（type=chat_group_message）；
-    进场 type=join_live_broadcast。字段多候选兼容（nickName/nickname、
-    content/msg）——实测后收敛。非业务 type 不映射。
+    2026-09-30 zhibo.jd.com 实测（58 帧）：顶层 type=chat_group_message/
+    get_statistics_result，业务形态在 body.type：
+    - join_live_broadcast_summary → ENTER_ROOM（聚合形态"xx等16人来了"）
+    - thumbs_up → LIKE（body.thumbs_up_num）
+    - get_statistics_result → ROOM_STATS（current_viewer/thumbs_up_num）
+    - viewer_buy_product_summary/user_places_order 等运营形态不映射
+    - 弹幕：body.type=viewer_send_message（nickName+content，实测命中；游客会话即可收他人弹幕，无需登录）
     """
-    msg_type = obj.get("type")
-    user_name = str(obj.get("nickName") or obj.get("nickname") or "")
-    content = str(obj.get("content") or obj.get("msg") or "").strip()
-    if msg_type == "join_live_broadcast":
-        if not user_name:
-            return None
+    top_type = frame.get("type")
+    body = frame.get("body") or {}
+    body_type = body.get("type")
+    user_name = str(body.get("nickName") or body.get("nickname") or "")
+    content = str(body.get("content") or "").strip()
+
+    if top_type == "get_statistics_result":
+        viewer = body.get("current_viewer")
+        if isinstance(viewer, int):
+            return {"category": "business", "type": "ROOM_STATS", "seq": seq,
+                    "timestamp": ts,
+                    "payload": {"type": "ROOM_STATS", "viewer_count": viewer}}
+        return None
+
+    if top_type != "chat_group_message":
+        return None
+    if body_type == "join_live_broadcast_summary" and user_name:
         return {"category": "business", "type": "ENTER_ROOM", "seq": seq,
                 "timestamp": ts,
                 "payload": {"type": "ENTER_ROOM", "user_name": user_name}}
-    # 宽容路径：type 缺失但 nickName+content 齐备（body 特征提取形态）→ 弹幕
-    if (msg_type in ("chat_group_message", "group_message", "live_message")
-            or msg_type is None) and content and user_name:
+    if body_type == "viewer_send_message" and content and user_name:
+        # 2026-09-30 实测：弹幕=body.type=viewer_send_message（带 body.type，
+        # 宽容路径覆盖不到——游客会话即可收其他观众弹幕，无需登录）
+        return {"category": "business", "type": "DANMU", "seq": seq,
+                "timestamp": ts,
+                "payload": {"type": "DANMU", "user_name": user_name,
+                            "content": content,
+                            "user_id": str(frame.get("from", {}).get("pinmd5", ""))}}
+    if body_type == "thumbs_up":
+        count = body.get("thumbs_up_num", 1)
+        if not isinstance(count, int) or count < 1:
+            count = 1
+        return {"category": "business", "type": "LIKE", "seq": seq,
+                "timestamp": ts,
+                "payload": {"type": "LIKE", "count": count}}
+    # 弹幕：body.nickName+content（text 类 body.type 待样本，宽容兼容）
+    if not body_type and content and user_name:
         return {"category": "business", "type": "DANMU", "seq": seq,
                 "timestamp": ts,
                 "payload": {"type": "DANMU", "user_name": user_name,
@@ -193,7 +227,9 @@ class JDProtocolEngine(BaseEngine):
         room_key = extract_room_id(room_id)
         # 链接形态直达（保留风控参数）；纯数字时用户需提供直播间页链接——
         # 京东直播间页 URL 形态多样且需实测，纯数字仅作标识（runbook 说明）
-        goto_url = room_id.strip() if "jd." in room_id else None
+        # 链接形态整体直达（保留风控参数）；纯数字 liveId 拼独立站模板
+        goto_url = (room_id.strip() if room_id.strip().startswith("http")
+                    else LIVE_URL_TEMPLATE.format(room_id=room_key))
         logger.info(f"[jd] room {room_id} connecting (key={room_key})")
         backoff = 15.0
         while not self._stop_flags.get(room_id):

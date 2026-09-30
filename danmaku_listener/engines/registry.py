@@ -21,6 +21,7 @@ from danmaku_listener.engines.protocol.kuaishou import KuaishouProtocolEngine
 from danmaku_listener.engines.protocol.meituan import MeituanPollEngine
 from danmaku_listener.engines.protocol.xiaohongshu import XiaohongshuEngine
 from danmaku_listener.engines.protocol.pdd import PDDProtocolEngine
+from danmaku_listener.engines.protocol.jd import JDProtocolEngine
 from danmaku_listener.engines.wechat_channels import WechatChannelsEngine
 from danmaku_listener.persistence.room_state_store import RoomStateStore
 
@@ -37,6 +38,7 @@ PLATFORM_ENGINES = {
     "meituan": MeituanPollEngine,
     "xiaohongshu": XiaohongshuEngine,
     "pdd": PDDProtocolEngine,
+    "jd": JDProtocolEngine,
     "wechat_channels": WechatChannelsEngine,
 }
 
@@ -52,6 +54,8 @@ PLATFORM_WARNINGS = {
                    "调研资料实现，待在播房间实测校准",
     "pdd": "拼多多受控页面 WS 帧拦截（页面自持连接，引擎四层解码下行帧）；"
            "需直播间页链接；调研实证需扫码登录——未登录行为待实测",
+    "jd": "京东直播独立站（zhibo.jd.com/liveroom，游客可看）受控页面 WS 拦截；"
+          "页面自建 live-ws4 连接免 liveauth 签名；弹幕 body.type 待采样校准",
     "wechat_channels": "后台页面/接口结构待实测校准（微信更新可能变更）",
 }
 
