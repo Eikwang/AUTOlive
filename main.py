@@ -125,6 +125,12 @@ class MainApplication:
             if rvc_svc is not None:
                 threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
                 logger.info("RVC 变声服务拉起已后台启动")
+            # DanmakuListener 弹幕监听（整合计划 P1）：enabled=true 时拉起 serve + WS 消费者
+            from utils.danmaku_consumer import build_danmaku_listener_service
+            danmaku_svc = build_danmaku_listener_service(self.config)
+            if danmaku_svc is not None:
+                threading.Thread(target=danmaku_svc.start, name="svc-start-danmaku", daemon=True).start()
+                logger.info("DanmakuListener 托管服务拉起已后台启动")
         except Exception:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     

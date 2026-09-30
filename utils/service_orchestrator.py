@@ -84,6 +84,8 @@ class ManagedProcess:
         policies: 行为参数（覆盖 DEFAULT_POLICIES，DX-3）
         on_state_change: 状态变化回调（状态条订阅）
         warmup: 就绪后的一次性预热钩子（CEO-S7，如 TTS 预热合成）
+        health_probe: 自定义探活回调（无 HTTP 健康端点的服务用 TCP 探测，
+            如 DanmakuListener WS 服务；传入时优先于 health_url）
     """
 
     def __init__(
@@ -97,6 +99,7 @@ class ManagedProcess:
         policies: Optional[dict] = None,
         on_state_change: Optional[Callable[[str, "ManagedProcess"], None]] = None,
         warmup: Optional[Callable[["ManagedProcess"], None]] = None,
+        health_probe: Optional[Callable[["ManagedProcess"], bool]] = None,
     ):
         self.name = name
         self.command = list(command)
@@ -107,6 +110,7 @@ class ManagedProcess:
         self.policies = {**DEFAULT_POLICIES, **(policies or {})}
         self.on_state_change = on_state_change
         self.warmup = warmup
+        self.health_probe = health_probe
 
         # E-1 硬条款：命令行不得包含非回环绑定地址
         for arg in self.command:
@@ -290,7 +294,12 @@ class ManagedProcess:
     # ---------- 监控 ----------
 
     def _health_once(self) -> bool:
-        """单次健康检查。用 socket 级 TCP 连接 + HTTP GET 最小实现，不引新依赖。"""
+        """单次健康检查。自定义 probe 优先（TCP 探测）；否则 HTTP GET，不引新依赖。"""
+        if self.health_probe is not None:
+            try:
+                return bool(self.health_probe(self))
+            except Exception:
+                return False
         try:
             import urllib.request
             req = urllib.request.Request(self.health_url, method="GET")

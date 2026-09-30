@@ -160,6 +160,28 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "port": 11420,
 }
 
+# DanmakuListener 整合（2026-09-27 计划 G6/DX）：弹幕监听组件配置节
+_DANMAKU_LISTENER_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,                       # 总开关：false 时托管不拉起 serve、消费者不启动
+    "ws_port": 8765,                        # 组件 WS 推送端口（serve --config TOML 的 ws_port 来源）
+    "ws_bind": "127.0.0.1",                 # 绑定地址（E-1 硬条款：仅回环）
+    "require_token": True,                  # 强制 token 注入（false 仅 loopback，限开发态）
+    "token_injection": "env",               # token 注入方式：env（DANMAKU_TOKEN 环境变量）/ file（受限权限文件）
+    "token_file_path": "",                  # file 注入方式的 token 文件路径（env 方式忽略）
+    "platforms": {                          # 平台启用开关（逐平台独立，就绪梯度默认 B站/斗鱼/抖音）
+        "bilibili": True,
+        "douyu": True,
+        "douyin": True,
+        "kuaishou": False,
+        "huya": False,
+        "wechat_channels": False,
+    },
+    "login_entry": True,                    # NEEDS_LOGIN 扫码常驻入口（视频号常规路径）
+    "legacy_adapter_retired": False,        # 旧链路退役开关（G7：Phase 4 已裁决通过，默认关=旧链路保留）
+    "component_root": "danmaku_listener",   # 组件副本目录（G8 复制范式；COPY_MANIFEST.json 版本戳所在）
+    "room_id": "",                          # 监听房间 ID（平台原生 ID 字符串；空=沿用全局 room_id 配置）
+}
+
 # audio_player/captions_printer 整合（2026-09-25 计划 §4.5/§5.4/R7）
 _AUDIO_PLAYER_DEFAULTS: Dict[str, Any] = {
     "device_index": -1,
@@ -227,6 +249,24 @@ def _ensure_defaults(config: "Settings") -> None:
         for key, value in _FASTRAG_DEFAULTS.items():
             if key not in cfg["fastrag"]:
                 cfg["fastrag"][key] = value
+                changed = True
+    if "danmaku_listener" not in cfg:
+        cfg["danmaku_listener"] = dict(_DANMAKU_LISTENER_DEFAULTS)
+        changed = True
+    else:
+        for key, value in _DANMAKU_LISTENER_DEFAULTS.items():
+            if key not in cfg["danmaku_listener"]:
+                cfg["danmaku_listener"][key] = value
+                changed = True
+        # platforms 子字典逐键补齐（新增平台不丢开关）
+        plats = cfg["danmaku_listener"].get("platforms")
+        if not isinstance(plats, dict):
+            plats = {}
+            cfg["danmaku_listener"]["platforms"] = plats
+            changed = True
+        for key, value in _DANMAKU_LISTENER_DEFAULTS["platforms"].items():
+            if key not in plats:
+                plats[key] = value
                 changed = True
     if "audio_player" not in cfg:
         cfg["audio_player"] = dict(_AUDIO_PLAYER_DEFAULTS)

@@ -764,6 +764,19 @@ class DrawerLayout:
                 self._service_strip = ServiceStatusStrip()
                 self._service_strip.mount(self.service_strip_container)
 
+                # DanmakuListener 扫码登录入口 + system 事件通知（整合计划 G4/G5：
+                # NEEDS_LOGIN 队列呈现/QR 安全渲染/恢复自动关闭；事件环 → ui.notify）
+                try:
+                    from frontend.ui.components.danmaku_login import DanmakuLoginDialog, DanmakuEventNotifier
+                    self._danmaku_login_container = ui.column().style('width:100%;gap:4px;')
+                    self._danmaku_login = DanmakuLoginDialog()
+                    self._danmaku_login.mount(self._danmaku_login_container)
+                    self._danmaku_notifier = DanmakuEventNotifier()
+                    self._danmaku_notifier.mount(self._danmaku_login_container)
+                except Exception:
+                    from utils.my_log import logger
+                    logger.error("DanmakuListener 登录/通知组件挂载失败（不阻断）", exc_info=True)
+
                 # 启停控制区（状态条 + 启动系统 + 停止&重启复合按钮）
                 self._create_control_section()
 

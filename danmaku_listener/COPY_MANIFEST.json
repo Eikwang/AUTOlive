@@ -1,0 +1,20 @@
+{
+  "source": "D:\\AI\\DanmakuListener",
+  "copied_at": "2026-09-30T10:31:29",
+  "content_sha256": "099562a8bce72e0d4cb6cf83ae88dab6fde612495a9e5a5ea0f398702f2031b9",
+  "total_files": 87,
+  "total_bytes": 1091258,
+  "items": {
+    "danmaku_listener": {
+      "files": 82,
+      "bytes": 1055795,
+      "note": "组件核心包（engines/adapters/bus/push/contract/config/fixtures/managers/persistence/utils）"
+    },
+    "docs\\danmaku_contract": {
+      "files": 5,
+      "bytes": 35463,
+      "note": "契约文档与机读 Schema（export_contract 漂移检查数据源）"
+    }
+  },
+  "upgrade_flow": "重跑本脚本 → python -m danmaku_listener contract（版本核对）→ 冒烟脚本"
+}

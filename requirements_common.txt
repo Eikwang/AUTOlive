@@ -273,7 +273,7 @@ watchfiles
 wcwidth
 websocket-client
 websocket-client-py3
-websockets
+websockets>=13,<18  # DanmakuListener 消费者：asyncio.client 实现（additional_headers 需 >=13；17.1 实测）
 websockets-proxy
 webuiapi
 wenxinworkshop 

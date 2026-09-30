@@ -211,6 +211,9 @@ cookie/*.json
 
 # 数据库
 data/data.db
+data/data.db-shm
+data/data.db-wal
+tests/_tmp_test_*.wav
 
 webui2.py
 
