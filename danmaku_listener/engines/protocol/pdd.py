@@ -214,17 +214,13 @@ def decode_pdd_frame(raw: Any) -> List[Dict[str, Any]]:
 def map_pdd_message(obj: Dict[str, Any], seq: int, ts: int) -> List[Dict[str, Any]]:
     """业务对象 → 契约消息列表（一条业务对象可能携带 list 多条事件）
 
-    2026-09-30 在播房间 234 条采样实测校准（pdd_raw.jsonl）：
-    - live_audience_num → ROOM_STATS（live_audience_num 观看数）
-    - show_thumb_up_count → ROOM_STATS 附加（total_count 点赞总数）
-    - live_chat_notice.live_chat_notice_list[]：
-      enter → ENTER_ROOM（user_list[].uid/nickname）
-      favorite → SOCIAL(follow)；group_open → 不 emit（开团商品运营位）
-    - live_chat_ext_v2.live_chat_ext_list[]：sub_type 121(thumb_up_chat) → LIKE、
-      116(live_chat_favor_message) → SOCIAL(follow)、120(live_buy_style) →
-      SOCIAL(buy)；body.title/content 组装文案
-    - 普通弹幕（调研 live_chat_list[].chat_message 形态）未见样本——
-      wss 流 240s 无文本弹幕，通道待诊断（可能 HTTP 轮询/DOM/降级推送）
+    2026-09-30 在播房间 450+ 条采样实测 + 用户裁定范围（拼多多无礼物
+    功能，业务消息只监听**入场/弹幕/点赞**三种——关注/购买等 SOCIAL
+    不映射；ROOM_STATS 统计保留供前端展示）：
+    - live_chat → DANMU（message_data.live_chat_list[]，实测命中）
+    - live_chat_notice：enter → ENTER_ROOM；favorite/group_open 不 emit
+    - live_chat_ext_v2：sub_type 121(thumb_up_chat) → LIKE；其余不 emit
+    - live_audience_num / show_thumb_up_count → ROOM_STATS（观看数/点赞总数）
     """
     md = obj.get("message_data") or {}
     out: List[Dict[str, Any]] = []
@@ -255,53 +251,32 @@ def map_pdd_message(obj: Dict[str, Any], seq: int, ts: int) -> List[Dict[str, An
             data = n.get("live_chat_notice_data") or {}
             users = data.get("user_list") or []
             user = users[0] if users and isinstance(users[0], dict) else {}
-            n_type = n.get("live_chat_notice_type")
-            if n_type == "enter":
+            if n.get("live_chat_notice_type") == "enter":
                 out.append({
                     "category": "business", "type": "ENTER_ROOM", "seq": seq,
                     "timestamp": ts,
                     "payload": {"type": "ENTER_ROOM",
                                 "user_name": str(user.get("nickname", "")),
                                 "user_id": str(user.get("uid", ""))}})
-            elif n_type == "favorite":
-                out.append({
-                    "category": "business", "type": "SOCIAL", "seq": seq,
-                    "timestamp": ts,
-                    "payload": {"type": "SOCIAL", "action": "follow",
-                                "user_name": str(user.get("nickname", "")),
-                                "user_id": str(user.get("uid", ""))}})
-            # group_open（开团商品运营位）等不 emit
+            # favorite（关注）/ group_open（开团运营位）→ 用户裁定不监听
         return out
 
     if m_type == "live_chat_ext_v2":
         for n in md.get("live_chat_ext_list") or []:
             if not isinstance(n, dict):
                 continue
-            body = n.get("body") or {}
-            sub_type = n.get("sub_type")
-            title = str(body.get("title", ""))
-            content = str(body.get("content", "")).strip()
-            if sub_type == 121:  # thumb_up_chat 点赞
+            # 用户裁定只监听点赞（sub_type 121）；关注 116/购买 120 不映射
+            if n.get("sub_type") == 121:
+                body = n.get("body") or {}
                 out.append({
                     "category": "business", "type": "LIKE", "seq": seq,
                     "timestamp": ts,
-                    "payload": {"type": "LIKE", "user_name": title, "count": 1}})
-            elif sub_type == 116:  # 关注
-                out.append({
-                    "category": "business", "type": "SOCIAL", "seq": seq,
-                    "timestamp": ts,
-                    "payload": {"type": "SOCIAL", "action": "follow",
-                                "user_name": title}})
-            elif sub_type == 120:  # 购买
-                out.append({
-                    "category": "business", "type": "SOCIAL", "seq": seq,
-                    "timestamp": ts,
-                    "payload": {"type": "SOCIAL", "action": "buy",
-                                "user_name": title,
-                                "content": content}})
+                    "payload": {"type": "LIKE",
+                                "user_name": str(body.get("title", "")),
+                                "count": 1}})
         return out
 
-    # 调研形态保留兼容：live_chat_list[]（弹幕文本，样本未现）
+    # 弹幕（调研形态实测命中）：live_chat_list[] → DANMU
     chat_list = md.get("live_chat_list")
     if isinstance(chat_list, list):
         for chat in chat_list:
