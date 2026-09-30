@@ -20,6 +20,7 @@ from danmaku_listener.engines.protocol.huya import HuyaProtocolEngine
 from danmaku_listener.engines.protocol.kuaishou import KuaishouProtocolEngine
 from danmaku_listener.engines.protocol.meituan import MeituanPollEngine
 from danmaku_listener.engines.protocol.xiaohongshu import XiaohongshuEngine
+from danmaku_listener.engines.protocol.pdd import PDDProtocolEngine
 from danmaku_listener.engines.wechat_channels import WechatChannelsEngine
 from danmaku_listener.persistence.room_state_store import RoomStateStore
 
@@ -35,6 +36,7 @@ PLATFORM_ENGINES = {
     "1688": Live1688Engine,
     "meituan": MeituanPollEngine,
     "xiaohongshu": XiaohongshuEngine,
+    "pdd": PDDProtocolEngine,
     "wechat_channels": WechatChannelsEngine,
 }
 
@@ -48,6 +50,8 @@ PLATFORM_WARNINGS = {
                "开播后重新复制直播间分享链接；1-2s 轮询延迟",
     "xiaohongshu": "小红书受控页面 WS 帧拦截（观众侧无需登录）；帧结构按开源实现/"
                    "调研资料实现，待在播房间实测校准",
+    "pdd": "拼多多受控页面 WS 帧拦截（页面自持连接，引擎四层解码下行帧）；"
+           "需直播间页链接；调研实证需扫码登录——未登录行为待实测",
     "wechat_channels": "后台页面/接口结构待实测校准（微信更新可能变更）",
 }
 
