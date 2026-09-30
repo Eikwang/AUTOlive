@@ -18,6 +18,8 @@ from danmaku_listener.engines.protocol.taobao import TaobaoWebProtocolEngine
 from danmaku_listener.engines.protocol.douyu import DouyuProtocolEngine
 from danmaku_listener.engines.protocol.huya import HuyaProtocolEngine
 from danmaku_listener.engines.protocol.kuaishou import KuaishouProtocolEngine
+from danmaku_listener.engines.protocol.meituan import MeituanPollEngine
+from danmaku_listener.engines.protocol.xiaohongshu import XiaohongshuEngine
 from danmaku_listener.engines.wechat_channels import WechatChannelsEngine
 from danmaku_listener.persistence.room_state_store import RoomStateStore
 
@@ -31,6 +33,8 @@ PLATFORM_ENGINES = {
     "kuaishou": KuaishouProtocolEngine,
     "taobao": TaobaoWebProtocolEngine,
     "1688": Live1688Engine,
+    "meituan": MeituanPollEngine,
+    "xiaohongshu": XiaohongshuEngine,
     "wechat_channels": WechatChannelsEngine,
 }
 
@@ -40,6 +44,10 @@ PLATFORM_WARNINGS = {
     "kuaishou": "快手 web 直播间已强制游客登录（2026-09 实测）——首次添加弹登录窗口，登录后自动监听",
     "douyin": "抖音 Web WS 原生直连（2026-09 T0 冒烟通过：DANMU 实测）——无需外部程序；"
               "签名资产失效或风控升级时报三段式错误",
+    "meituan": "美团 mapi HTTP 轮询直连（无需登录/浏览器）；live_id 场次级——下播失效，"
+               "开播后重新复制直播间分享链接；1-2s 轮询延迟",
+    "xiaohongshu": "小红书受控页面 WS 帧拦截（观众侧无需登录）；帧结构按开源实现/"
+                   "调研资料实现，待在播房间实测校准",
     "wechat_channels": "后台页面/接口结构待实测校准（微信更新可能变更）",
 }
 
