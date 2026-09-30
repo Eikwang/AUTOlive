@@ -21,10 +21,9 @@ storage_state 持久化 → 自动开始监听。有界会话：4h 事件驱动�
 
 import asyncio
 import base64
-import io
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from loguru import logger
 
@@ -35,7 +34,7 @@ from danmaku_listener.contract.models import (
     NeedsLoginPayload,
     UnifiedMessage,
 )
-from danmaku_listener.engines.base import BaseEngine
+from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
 
 BACKEND_URL = "https://channels.weixin.qq.com/platform/live/liveBuild"
 #: 弹幕轮询接口锚点（wxlivespy 同款）
@@ -62,57 +61,25 @@ class NeedLoginVisible(Exception):
     """需要可见窗口扫码登录（内部信号）"""
 
 
-class WechatChannelsEngine(BaseEngine):
+class WechatChannelsEngine(ControlledPageEngine):
     """视频号受控后台引擎（wxlivespy 同构解析 + 登录窗口闭环）"""
 
     platform = "wechat_channels"
-
-    def __init__(self, state_store=None, cookie_dir: str = "./cookie",
-                 session_lifetime: int = SESSION_LIFETIME_SECONDS):
-        super().__init__(state_store=state_store)
-        self._cookie_dir = cookie_dir
-        self._session_lifetime = session_lifetime
-        self._room_tasks: Dict[str, asyncio.Task] = {}
-        self._stop_flags: Dict[str, bool] = {}
+    profile_name = "wxsp_profile"
+    protocol_version = "wxsp-backend-1"
 
     @property
     def engine_id(self) -> str:
-        return "controlled:wechat_channels"
+        return "controlled:wechat_channels"  # 受控后台（非通用 page: 前缀）
 
-    # ---- 公开契约 ----
-
-    async def start(self, room_id: str) -> None:
-        if room_id in self._room_tasks and not self._room_tasks[room_id].done():
-            return
-        self._stop_flags[room_id] = False
-        self._room_tasks[room_id] = asyncio.create_task(
-            self._run_room(room_id), name=f"wxsp-room-{room_id}")
-
-    async def stop(self, room_id: str) -> None:
-        self._stop_flags[room_id] = True
-        task = self._room_tasks.pop(room_id, None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    async def restart(self, room_id: str) -> None:
-        """仅重启该房间任务（契约 I）"""
-        await self.stop(room_id)
-        await self.start(room_id)
+    def __init__(self, state_store=None, cookie_dir: str = "./cookie",
+                 session_lifetime: int = SESSION_LIFETIME_SECONDS):
+        super().__init__(state_store=state_store, cookie_dir=cookie_dir)
+        self._session_lifetime = session_lifetime
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
     #      必须在同一个存活的 context 里完成。wxlivespy 同为常驻浏览器）----
-
-    def _profile_dir(self) -> str:
-        import os
-
-        d = f"{self._cookie_dir}/wxsp_profile"
-        os.makedirs(d, exist_ok=True)
-        return d
 
     @staticmethod
     def _needs_login(url: str) -> bool:
@@ -144,15 +111,9 @@ class WechatChannelsEngine(BaseEngine):
         重建代价=重新扫码，因此只在异常/停止时退出）"""
         from playwright.async_api import async_playwright
 
+        # 登录扫码需可见；中控页保持可见（wxlivespy 同）——单会话长跑
         async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                self._profile_dir(),
-                headless=False,  # 登录扫码需可见；中控页保持可见（wxlivespy 同）
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-setuid-sandbox",
-                      "--hide-crash-restore-bubble"],
-            )
+            context = await self._launch(pw, headless=False)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
 
@@ -428,17 +389,9 @@ class WechatChannelsEngine(BaseEngine):
             "payload": payload,
         })
 
-    async def _emit_system_status(self, room_id: str, detail: str) -> None:
-        seq = self.next_seq(room_id)
-        msg = UnifiedMessage(
-            envelope=Envelope(
-                category=Category.SYSTEM, type=SystemType.ENGINE_STATUS.value,
-                platform=self.platform, room_id=room_id, seq=seq,
-                timestamp=int(time.time()), engine=self.engine_id,
-            ),
-            payload={"type": "ENGINE_STATUS", "engine": self.engine_id, "detail": detail},
-        )
-        await self._emit_message(msg.to_wire())
+    async def _emit_session_event(self, room_id: str, detail: str) -> None:
+        """ENGINE_STATUS 会话事件（有界会话重建对上层可见）"""
+        await self._emit_system_status(room_id, detail)
 
     # ---- NEEDS_LOGIN（契约 Eng Q：interactive_login 载荷）----
 
@@ -460,15 +413,3 @@ class WechatChannelsEngine(BaseEngine):
         )
         await self._emit_message(msg.to_wire())
 
-    async def _emit_session_event(self, room_id: str, detail: str) -> None:
-        """ENGINE_STATUS 会话事件（有界会话重建对上层可见）"""
-        seq = self.next_seq(room_id)
-        msg = UnifiedMessage(
-            envelope=Envelope(
-                category=Category.SYSTEM, type=SystemType.ENGINE_STATUS.value,
-                platform=self.platform, room_id=room_id, seq=seq,
-                timestamp=int(time.time()), engine=self.engine_id,
-            ),
-            payload={"type": "ENGINE_STATUS", "engine": self.engine_id, "detail": detail},
-        )
-        await self._emit_message(msg.to_wire())

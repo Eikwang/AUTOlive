@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
-from danmaku_listener.engines.base import BaseEngine
+from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
 
 PROTOCOL_VERSION = "jd-1"
 
@@ -167,30 +167,17 @@ def map_jd_message(frame: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[st
     return None
 
 
-class JDProtocolEngine(BaseEngine):
+class JDProtocolEngine(ControlledPageEngine):
     """京东直播弹幕引擎（受控页面 WS 帧拦截，独立平台）"""
 
     platform = "jd"
+    profile_name = "jd_profile"
+    protocol_version = "jd-1"
 
     def __init__(self, state_store=None, cookie_dir: str = "./cookie",
                  raw_hook=None):
-        super().__init__(state_store=state_store)
-        self._cookie_dir = cookie_dir
-        self._room_tasks: Dict[str, asyncio.Task] = {}
-        self._stop_flags: Dict[str, bool] = {}
-        self._last_frame_box: Dict[str, Dict[str, float]] = {}
+        super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._raw_hook = raw_hook  # 诊断钩子：全部 JSON 帧（含未映射）回调
-
-    @property
-    def engine_id(self) -> str:
-        return "page:jd"
-
-    def _profile_dir(self) -> str:
-        import os
-
-        d = f"{self._cookie_dir}/jd_profile"
-        os.makedirs(d, exist_ok=True)
-        return d
 
     def validate_room_id(self, room_id: str) -> None:
         try:
@@ -198,46 +185,17 @@ class JDProtocolEngine(BaseEngine):
         except JDParseError as e:
             raise ValueError(str(e)) from e
 
-    # ---- 公开契约 ----
-
-    async def start(self, room_id: str) -> None:
-        if room_id in self._room_tasks and not self._room_tasks[room_id].done():
-            return
-        self._stop_flags[room_id] = False
-        self._room_tasks[room_id] = asyncio.create_task(
-            self._run_room(room_id), name=f"jd-room-{room_id}")
-
-    async def stop(self, room_id: str) -> None:
-        self._stop_flags[room_id] = True
-        task = self._room_tasks.pop(room_id, None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    async def restart(self, room_id: str) -> None:
-        await self.stop(room_id)
-        await self.start(room_id)
-
     # ---- 房间任务主循环 ----
 
     async def _run_room(self, room_id: str) -> None:
         room_key = extract_room_id(room_id)
-        # 链接形态直达（保留风控参数）；纯数字时用户需提供直播间页链接——
-        # 京东直播间页 URL 形态多样且需实测，纯数字仅作标识（runbook 说明）
         # 链接形态整体直达（保留风控参数）；纯数字 liveId 拼独立站模板
         goto_url = (room_id.strip() if room_id.strip().startswith("http")
                     else LIVE_URL_TEMPLATE.format(room_id=room_key))
         logger.info(f"[jd] room {room_id} connecting (key={room_key})")
         backoff = 15.0
-        while not self._stop_flags.get(room_id):
+        while not self._stopped(room_id):
             try:
-                if goto_url is None:
-                    raise JDParseError(
-                        "京东直播间需要页面链接——请使用直播间分享链接"
-                        "（京东直播间页 URL 形态多样，纯数字 ID 无从打开）")
                 await self._run_session(room_id, room_key, goto_url)
                 backoff = 15.0
             except asyncio.CancelledError:
@@ -254,7 +212,7 @@ class JDProtocolEngine(BaseEngine):
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
                 if gap:
                     await self._emit_system(gap)
-                if self._stop_flags.get(room_id):
+                if self._stopped(room_id):
                     return
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 900.0)
@@ -266,39 +224,13 @@ class JDProtocolEngine(BaseEngine):
 
         session_start = int(time.time())
         deadline = time.monotonic() + 14400.0
-        frame_box = self._last_frame_box.setdefault(room_id, {"t": time.monotonic()})
-        frame_box["t"] = time.monotonic()
+        self._touch_frame(room_id)  # 静默计时起点
 
         async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                self._profile_dir(),
-                headless=True,
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/126.0.0.0 Safari/537.36"),
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-setuid-sandbox",
-                      "--hide-crash-restore-bubble"],
-            )
+            context = await self._launch(pw, headless=True)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
-
-                async def on_frame(ws, payload) -> None:
-                    try:
-                        await self._on_ws_frame(room_id, payload)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug(f"[jd] room {room_id} frame parse error: {e}")
-
-                def on_websocket(ws) -> None:
-                    logger.debug(f"[jd] room {room_id} ws open: {str(ws.url)[:80]}")
-                    ws.on(
-                        "framereceived",
-                        lambda p: asyncio.create_task(on_frame(ws, p)))
-
-                page.on("websocket", on_websocket)
+                self._wire_ws_intercept(room_id, page)
 
                 try:
                     await page.goto(goto_url,
@@ -309,9 +241,9 @@ class JDProtocolEngine(BaseEngine):
                 logger.info(f"[jd] room {room_id} live page ready")
                 self._set_status(self.status.__class__.RUNNING)
 
-                while time.monotonic() < deadline and not self._stop_flags.get(room_id):
+                while time.monotonic() < deadline and not self._stopped(room_id):
                     await asyncio.sleep(2)
-                    if time.monotonic() - frame_box["t"] > SILENCE_TIMEOUT:
+                    if self._frame_silent(room_id, SILENCE_TIMEOUT):
                         raise JDParseError(
                             "jd.session.silent: 120s 无业务帧"
                             "（可能未开播/已下播/风控——确认直播中）")
@@ -326,9 +258,8 @@ class JDProtocolEngine(BaseEngine):
         raw = payload.get("payload") if isinstance(payload, dict) else payload
         if raw is None:
             return
-        last_frame = self._last_frame_box.setdefault(room_id, {"t": time.monotonic()})
         for obj in parse_jd_frame(raw):
-            last_frame["t"] = time.monotonic()
+            self._touch_frame(room_id)
             self.mark_received(room_id, int(time.time()))
             if self._raw_hook is not None:
                 try:
@@ -338,42 +269,3 @@ class JDProtocolEngine(BaseEngine):
             mapped = map_jd_message(obj, self.next_seq(room_id), int(time.time()))
             if mapped:
                 await self._emit_message(self._envelope(room_id, mapped))
-
-    # ---- 契约信封与系统消息 ----
-
-    def _envelope(self, room_id: str, mapped: dict) -> dict:
-        """契约信封组装（全键；platform=jd 如实标注）"""
-        return {
-            "contract_version": "1.0.0",
-            "category": mapped["category"],
-            "type": mapped["type"],
-            "platform": self.platform,
-            "room_id": room_id,
-            "seq": mapped["seq"],
-            "timestamp": mapped["timestamp"],
-            "engine": self.engine_id,
-            "protocol_version": PROTOCOL_VERSION,
-            "payload": mapped["payload"],
-        }
-
-    async def _emit_route_failed(self, room_id: str, reason_code: str,
-                                 fix_hint: str, docs_anchor: str) -> None:
-        from danmaku_listener.contract import Category, SystemType
-        from danmaku_listener.contract.models import (
-            Envelope,
-            FailureInfo,
-            RouteFailedPayload,
-            UnifiedMessage,
-        )
-
-        msg = UnifiedMessage(
-            envelope=Envelope(
-                category=Category.SYSTEM, type=SystemType.ROUTE_FAILED.value,
-                platform=self.platform, room_id=room_id, seq=self.next_seq(room_id),
-                timestamp=int(time.time()), engine=self.engine_id,
-            ),
-            payload=RouteFailedPayload(
-                failure=FailureInfo(reason_code=reason_code, fix_hint=fix_hint,
-                                    docs_anchor=docs_anchor)),
-        )
-        await self._emit_message(msg.to_wire())

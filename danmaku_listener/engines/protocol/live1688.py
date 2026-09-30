@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
-from danmaku_listener.engines.base import BaseEngine
+from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
 
 PROTOCOL_VERSION = "1688-1"
 
@@ -109,29 +109,17 @@ def parse_base64_mixed_message(base64_data: str) -> list:
     return json_objects
 
 
-class Live1688Engine(BaseEngine):
+class Live1688Engine(ControlledPageEngine):
     """1688 直播弹幕引擎（受控页面响应拦截，独立平台）"""
 
     platform = "1688"
+    profile_name = "1688_profile"
+    protocol_version = "1688-1"
 
     def __init__(self, state_store=None, cookie_dir: str = "./cookie",
                  session_lifetime: int = 14400):
-        super().__init__(state_store=state_store)
-        self._cookie_dir = cookie_dir
+        super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
-        self._room_tasks: Dict[str, asyncio.Task] = {}
-        self._stop_flags: Dict[str, bool] = {}
-
-    @property
-    def engine_id(self) -> str:
-        return "page:1688"
-
-    def _profile_dir(self) -> str:
-        import os
-
-        d = f"{self._cookie_dir}/1688_profile"
-        os.makedirs(d, exist_ok=True)
-        return d
 
     def validate_room_id(self, room_id: str) -> None:
         """add_room 预校验：feedId 可解析"""
@@ -139,30 +127,6 @@ class Live1688Engine(BaseEngine):
             extract_feed_id(room_id)
         except Live1688ParseError as e:
             raise ValueError(str(e)) from e
-
-    # ---- 公开契约 ----
-
-    async def start(self, room_id: str) -> None:
-        if room_id in self._room_tasks and not self._room_tasks[room_id].done():
-            return
-        self._stop_flags[room_id] = False
-        self._room_tasks[room_id] = asyncio.create_task(
-            self._run_room(room_id), name=f"1688-room-{room_id}")
-
-    async def stop(self, room_id: str) -> None:
-        self._stop_flags[room_id] = True
-        task = self._room_tasks.pop(room_id, None)
-        if task:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    async def restart(self, room_id: str) -> None:
-        """仅重启该房间任务（契约 I）"""
-        await self.stop(room_id)
-        await self.start(room_id)
 
     # ---- 房间任务主循环（有界会话）----
 
@@ -226,17 +190,7 @@ class Live1688Engine(BaseEngine):
 
         deadline = time.monotonic() + self._session_lifetime
         async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                self._profile_dir(),
-                headless=headless,
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/126.0.0.0 Safari/537.36"),
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-setuid-sandbox",
-                      "--hide-crash-restore-bubble"],
-            )
+            context = await self._launch(pw, headless=headless)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
                 last_pull_box = {"t": time.monotonic()}
@@ -383,14 +337,7 @@ class Live1688Engine(BaseEngine):
         from playwright.async_api import async_playwright
 
         async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                self._profile_dir(),
-                headless=False,
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/126.0.0.0 Safari/537.36"),
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"])
+            context = await self._launch(pw, headless=False)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
                 try:
@@ -455,22 +402,6 @@ class Live1688Engine(BaseEngine):
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"[1688] room {room_id} msg parse error: {e}")
 
-    @staticmethod
-    def _envelope(room_id: str, mapped: dict) -> dict:
-        """契约信封组装（全键；platform=1688 如实标注）"""
-        return {
-            "contract_version": "1.0.0",
-            "category": mapped["category"],
-            "type": mapped["type"],
-            "platform": "1688",
-            "room_id": room_id,
-            "seq": mapped["seq"],
-            "timestamp": mapped["timestamp"],
-            "engine": "page:1688",
-            "protocol_version": PROTOCOL_VERSION,
-            "payload": mapped["payload"],
-        }
-
     # ---- 上游消息 → 契约 v1（显式清单，与 test_1688_protocol.py 对齐）----
 
     @staticmethod
@@ -519,40 +450,3 @@ class Live1688Engine(BaseEngine):
         logger.debug(f"[1688] room {room_id} unmapped keys={sorted(obj)[:6]}")
         return None
 
-    # ---- 系统消息 ----
-
-    async def _emit_system_status(self, room_id: str, detail: str) -> None:
-        from danmaku_listener.contract import Category, SystemType
-        from danmaku_listener.contract.models import Envelope, UnifiedMessage
-
-        msg = UnifiedMessage(
-            envelope=Envelope(
-                category=Category.SYSTEM, type=SystemType.ENGINE_STATUS.value,
-                platform=self.platform, room_id=room_id, seq=self.next_seq(room_id),
-                timestamp=int(time.time()), engine=self.engine_id,
-            ),
-            payload={"type": "ENGINE_STATUS", "engine": self.engine_id, "detail": detail},
-        )
-        await self._emit_message(msg.to_wire())
-
-    async def _emit_route_failed(self, room_id: str, reason_code: str,
-                                 fix_hint: str, docs_anchor: str) -> None:
-        from danmaku_listener.contract import Category, SystemType
-        from danmaku_listener.contract.models import (
-            Envelope,
-            FailureInfo,
-            RouteFailedPayload,
-            UnifiedMessage,
-        )
-
-        msg = UnifiedMessage(
-            envelope=Envelope(
-                category=Category.SYSTEM, type=SystemType.ROUTE_FAILED.value,
-                platform=self.platform, room_id=room_id, seq=self.next_seq(room_id),
-                timestamp=int(time.time()), engine=self.engine_id,
-            ),
-            payload=RouteFailedPayload(
-                failure=FailureInfo(reason_code=reason_code, fix_hint=fix_hint,
-                                    docs_anchor=docs_anchor)),
-        )
-        await self._emit_message(msg.to_wire())
