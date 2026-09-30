@@ -58,6 +58,10 @@ MSGTYPE_LIKE = 20006
 MSGTYPE_LEVEL_UP = 20031
 
 
+class NeedLoginVisible(Exception):
+    """需要可见窗口扫码登录（内部信号）"""
+
+
 class WechatChannelsEngine(BaseEngine):
     """视频号受控后台引擎（wxlivespy 同构解析 + 登录窗口闭环）"""
 
@@ -68,10 +72,8 @@ class WechatChannelsEngine(BaseEngine):
         super().__init__(state_store=state_store)
         self._cookie_dir = cookie_dir
         self._session_lifetime = session_lifetime
-        self._headless = True  # 登录窗口期间临时可见
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
-        self._login_flows: Dict[str, asyncio.Task] = {}
 
     @property
     def engine_id(self) -> str:
@@ -80,15 +82,7 @@ class WechatChannelsEngine(BaseEngine):
     # ---- 公开契约 ----
 
     async def start(self, room_id: str) -> None:
-        import os
-
         if room_id in self._room_tasks and not self._room_tasks[room_id].done():
-            return
-        # 无登录态 → 登录闭环（对齐 B站/快手：弹可见浏览器扫码）
-        if not os.path.exists(self._storage_state_path()):
-            self._stop_flags[room_id] = False
-            self._login_flows[room_id] = asyncio.create_task(
-                self._login_then_start(room_id), name=f"wxsp-login-{room_id}")
             return
         self._stop_flags[room_id] = False
         self._room_tasks[room_id] = asyncio.create_task(
@@ -96,63 +90,39 @@ class WechatChannelsEngine(BaseEngine):
 
     async def stop(self, room_id: str) -> None:
         self._stop_flags[room_id] = True
-        for store in (self._room_tasks, self._login_flows):
-            task = store.pop(room_id, None)
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        task = self._room_tasks.pop(room_id, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def restart(self, room_id: str) -> None:
         """仅重启该房间任务（契约 I）"""
         await self.stop(room_id)
         await self.start(room_id)
 
-    # ---- 登录闭环 ----
+    # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
+    #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
+    #      必须在同一个存活的 context 里完成。wxlivespy 同为常驻浏览器）----
 
-    def _storage_state_path(self) -> str:
+    def _profile_dir(self) -> str:
         import os
 
-        os.makedirs(self._cookie_dir, exist_ok=True)
-        return f"{self._cookie_dir}/wechat_channels_state.json"
-
-    async def _login_then_start(self, room_id: str) -> None:
-        """登录窗口闭环：可见浏览器扫码 → storage_state 保存 → 自动开始监听"""
-        from playwright.async_api import async_playwright
-
-        await self._emit_system_status(room_id, "登录窗口已打开，请用微信扫码登录视频号管理后台")
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=False)
-            try:
-                context = await browser.new_context(viewport={"width": 1280, "height": 800})
-                page = await context.new_page()
-                await page.goto(BACKEND_URL, wait_until="domcontentloaded")
-                deadline = time.monotonic() + 300.0
-                logged_in = False
-                while time.monotonic() < deadline:
-                    if not self._needs_login(page.url):
-                        logged_in = True
-                        break
-                    await asyncio.sleep(2)
-                if logged_in:
-                    await context.storage_state(path=self._storage_state_path())
-                    await self._emit_system_status(room_id, "登录成功——开始监听")
-            finally:
-                await browser.close()
-        if not self._stop_flags.get(room_id):
-            self._room_tasks[room_id] = asyncio.create_task(
-                self._run_room(room_id), name=f"wxsp-room-{room_id}")
+        d = f"{self._cookie_dir}/wxsp_profile"
+        os.makedirs(d, exist_ok=True)
+        return d
 
     @staticmethod
     def _needs_login(url: str) -> bool:
         return "login" in url or "scanlogin" in url.lower() or "/login" in url
 
-    # ---- 房间任务：有界会话循环 ----
+    # ---- 房间任务：会话循环 ----
 
     async def _run_room(self, room_id: str) -> None:
-        """有界会话主循环：单页面生命周期到期后事件驱动重建（替代全局定时重启）"""
+        """会话主循环：异常退出后重建（重建时 cookie 若仍有效直接导航，
+        失效则在可见窗口内就地等扫码——同一 context 完成登录与监听）"""
         while not self._stop_flags.get(room_id):
             session_start = int(time.time())
             try:
@@ -169,18 +139,22 @@ class WechatChannelsEngine(BaseEngine):
             await asyncio.sleep(5)
 
     async def _run_session(self, room_id: str) -> None:
-        """单次有界会话：浏览器打开后台 → 拦截弹幕轮询接口 → 生命周期上限退出"""
+        """单会话长跑（可见窗口）：扫码登录（如需）→ 导航进入直播间中控页 →
+        live/msg 轮询拦截读循环（无到期——context 关闭即登录态失效，
+        重建代价=重新扫码，因此只在异常/停止时退出）"""
         from playwright.async_api import async_playwright
 
-        deadline = time.monotonic() + self._session_lifetime
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=self._headless)
+            context = await pw.chromium.launch_persistent_context(
+                self._profile_dir(),
+                headless=False,  # 登录扫码需可见；中控页保持可见（wxlivespy 同）
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled",
+                      "--disable-setuid-sandbox",
+                      "--hide-crash-restore-bubble"],
+            )
             try:
-                context = await browser.new_context(
-                    storage_state=self._storage_state_path(),
-                    viewport={"width": 1280, "height": 800},
-                )
-                page = await context.new_page()
+                page = context.pages[0] if context.pages else await context.new_page()
 
                 async def on_response(response) -> None:
                     try:
@@ -190,22 +164,139 @@ class WechatChannelsEngine(BaseEngine):
 
                 page.on("response", lambda r: asyncio.create_task(on_response(r)))
 
-                await page.goto(BACKEND_URL, wait_until="domcontentloaded")
+                await page.goto(BACKEND_URL, wait_until="domcontentloaded",
+                                timeout=25000)
+                # SPA 登录跳转发生在 domcontentloaded 之后——等稳再判
+                await asyncio.sleep(5)
                 if self._needs_login(page.url):
-                    # 登录态失效：改可见窗口（外层重建会话时用户可扫码）
-                    await self._emit_needs_login(room_id)
-                    self._headless = False
-                    return
-                logger.info(f"[wxsp] room {room_id} backend page ready")
+                    # 就地等扫码（同一 context——登录态由存活页面续命）
+                    await self._emit_system_status(
+                        room_id, "请在弹出的浏览器窗口内用微信扫码登录"
+                                 "视频号管理后台")
+                    logger.info(f"[wxsp] room {room_id} waiting for scan login")
+                    deadline = time.monotonic() + 300.0
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(2)
+                        try:
+                            url = page.url
+                        except Exception:  # noqa: BLE001
+                            continue
+                        if not self._needs_login(url):
+                            break
+                    else:
+                        logger.warning(f"[wxsp] room {room_id} scan login timeout")
+                        return
+                    await asyncio.sleep(3)  # 后台页落地
+                    await self._emit_system_status(room_id, "登录成功——开始导航")
+                logger.info(f"[wxsp] room {room_id} backend page ready "
+                            f"(url={page.url[:70]})")
 
-                # 有界会话读循环：到期/停止信号退出（重建由外层负责）
-                while time.monotonic() < deadline and not self._stop_flags.get(room_id):
+                # 导航：直播 → 直播管理 → 进入直播间（2026-09-30 用户实测
+                # 路径——live/msg 轮询只在进入直播间中控页后启动）
+                await self._navigate_to_live_room(room_id, page)
+
+                # 读循环：无到期（context 关闭=登录态失效，重建代价高）
+                while not self._stop_flags.get(room_id):
                     await asyncio.sleep(2)
                     self.mark_received(room_id, int(time.time()))
             finally:
-                await browser.close()
+                await context.close()
 
     # ---- 网络层拦截（wxlivespy 同构解析）----
+
+    @staticmethod
+    async def _click_text_anywhere(page, texts, timeout_s: float = 6.0) -> bool:
+        """全页面范围点击文本匹配的最小可见元素（不限侧栏）"""
+        import asyncio as _asyncio
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            cands = await page.evaluate(
+                """(texts) => {
+                    const out = [];
+                    document.querySelectorAll('div,li,span,button,a').forEach(el => {
+                        const t = (el.innerText || '').trim();
+                        if (texts.some(x => t === x || t.startsWith(x))
+                                && t.length < 12 && el.children.length <= 1) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0)
+                                out.push({x: r.x + r.width/2, y: r.y + r.height/2});
+                        }
+                    });
+                    return out;
+                }""", list(texts))
+            if cands:
+                c = cands[0]
+                await page.mouse.click(c["x"], c["y"])
+                return True
+            await _asyncio.sleep(0.5)
+        return False
+
+    async def _navigate_to_live_room(self, room_id: str, page) -> bool:
+        """导航：直播图标（侧栏第 4 项，纯图标无文本）→ 直播管理 → 进入直播间
+
+        2026-09-30 用户实测路径：live/msg 轮询只在**进入直播间**后的中控页
+        （URL=liveBuild）启动。侧栏菜单为纯图标（hover 才显名称），按几何
+        位置点击第 4 项；每步失败有文本兜底与日志。
+        """
+        import asyncio as _asyncio
+
+        # 1. 侧栏图标：menu 类容器，x<120，按 y 排序去重 → 第 4 个=直播
+        icons = await page.evaluate(
+            """() => {
+                const raw = [];
+                document.querySelectorAll('div,li').forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    const cls = (el.className || '').toString();
+                    if (r.width > 20 && r.width < 100 && r.height > 20
+                            && r.height < 90 && r.x < 120 && r.y > 50
+                            && r.y < 620 && /menu/i.test(cls)) {
+                        raw.push({x: r.x + r.width/2, y: r.y + r.height/2,
+                                  cls: cls.slice(0, 40)});
+                    }
+                });
+                raw.sort((a, b) => a.y - b.y);
+                const uniq = [];
+                for (const c of raw) {
+                    if (!uniq.length || c.y - uniq[uniq.length - 1].y > 30)
+                        uniq.push(c);
+                }
+                return uniq;
+            }""")
+        logger.debug(f"[wxsp] room {room_id} 侧栏图标数={len(icons)} "
+                     f"{[f"({i['x']:.0f},{i['y']:.0f})" for i in icons]}")
+        clicked_live = False
+        if len(icons) >= 4:
+            c = icons[3]  # 首页/视频/消息/直播
+            await page.mouse.click(c["x"], c["y"])
+            clicked_live = True
+        else:
+            # 兜底：文本点击（某些版本菜单有名称）
+            clicked_live = await self._click_text_anywhere(
+                page, ["直播"], timeout_s=3.0)
+        if not clicked_live:
+            logger.warning(f"[wxsp] room {room_id} 侧栏直播图标未找到")
+            return False
+        await _asyncio.sleep(2.5)
+        logger.info(f"[wxsp] room {room_id} 点直播菜单后 url={page.url[:80]}")
+
+        # 2. 直播管理（菜单展开的子项或页面 tab；可能已在该页）
+        await self._click_text_anywhere(page, ["直播管理"], timeout_s=4.0)
+        await _asyncio.sleep(2.5)
+        logger.info(f"[wxsp] room {room_id} 点直播管理后 url={page.url[:80]}")
+
+        # 3. 进入直播间（进行中场次的入口按钮）
+        ok = await self._click_text_anywhere(page, ["进入直播间"], timeout_s=8.0)
+        if ok:
+            logger.info(f"[wxsp] room {room_id} 已点击进入直播间，"
+                        f"url={page.url[:80]}")
+            await _asyncio.sleep(4)
+        else:
+            await self._emit_system_status(
+                room_id, "未找到'进入直播间'入口——确认直播正在进行"
+                         "（开播后刷新管理页）；也可在弹出的窗口中手动点击"
+                         "进入直播间，引擎会自动开始监听")
+        return ok
 
     @staticmethod
     def _is_feed_api(url: str) -> bool:
