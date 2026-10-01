@@ -81,6 +81,9 @@ class TaobaoWebProtocolEngine(BaseEngine):
         self._cookie_dir = cookie_dir  # profile 持久化目录（wxlivespy 同款 userDataDir）
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
+        # 未映射消息聚合计数（防 debug 刷屏——60s 汇总一次）
+        self._unmapped_stats: Dict[str, dict] = {}
+        self._unmapped_last_flush = time.monotonic()
 
     @property
     def engine_id(self) -> str:
@@ -385,6 +388,23 @@ class TaobaoWebProtocolEngine(BaseEngine):
             mapped = self._map_powermsg(room_id, obj, self.next_seq(room_id), ts)
             if mapped:
                 await self._emit_message(self._envelope(room_id, mapped))
+            else:
+                # 未映射消息聚合计数（2026-10-01 用户实测：运营类消息高频，
+                # 逐条 debug 刷屏——60s 汇总一次）
+                keys_sig = tuple(sorted(obj.keys())[:6])
+                stat = self._unmapped_stats.setdefault(room_id, {})
+                stat[keys_sig] = stat.get(keys_sig, 0) + 1
+                now = time.monotonic()
+                if now - self._unmapped_last_flush > 60.0:
+                    self._unmapped_last_flush = now
+                    for rid, kv in self._unmapped_stats.items():
+                        total = sum(kv.values())
+                        if total:
+                            top = sorted(kv.items(), key=lambda x: -x[1])[:3]
+                            logger.debug(
+                                f"[taobao] room {rid} unmapped {total} msgs "
+                                f"in 60s, top keys: {[list(k) for k, _ in top]}")
+                    self._unmapped_stats = {rid: {} for rid in self._unmapped_stats}
 
     # ---- 评论通道：iliad 轮询 ----
 
@@ -500,7 +520,6 @@ class TaobaoWebProtocolEngine(BaseEngine):
         if "value" in obj and isinstance(obj.get("value"), dict) and "dig" in obj["value"]:
             return {"category": "business", "type": "LIKE", "seq": seq, "timestamp": ts,
                     "payload": {"type": "LIKE", "count": obj["value"].get("dig", 1)}}
-        logger.debug(f"[taobao] room {room_id} unmapped powermsg keys={sorted(obj)[:6]}")
         return None
 
     @staticmethod

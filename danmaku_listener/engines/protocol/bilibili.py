@@ -282,6 +282,7 @@ class BilibiliProtocolEngine(BaseEngine):
         self._cookie_file = cookie_file
         self._login_flow = login_flow  # 登录流程注入（测试用）；默认 bilibili_login.run_login_flow
         self._danmu_info = danmu_info_fetcher or DanmuInfoFetcher(cookie_file=cookie_file)
+        self._unmapped_cmds: Dict[str, dict] = {}  # 未映射 cmd 聚合（30s 汇总）
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._room_ws: Dict[str, Any] = {}
         self._heartbeats: Dict[str, asyncio.Task] = {}
@@ -430,10 +431,18 @@ class BilibiliProtocolEngine(BaseEngine):
                 self._heartbeats.pop(room_id, None)
 
     async def _heartbeat(self, room_id: str, ws) -> None:
-        """平台连接心跳（30s，与引擎存活心跳独立）"""
+        """平台连接心跳（30s，与引擎存活心跳独立）；顺带汇总未映射 cmd"""
         try:
             while True:
                 await ws.send(codec.encode_packet(codec.OP_HEARTBEAT))
+                stat = self._unmapped_cmds.get(room_id)
+                if stat:
+                    total = sum(stat.values())
+                    top = sorted(stat.items(), key=lambda x: -x[1])[:8]
+                    logger.info(
+                        f"[bilibili] room {room_id} unmapped cmds in 30s: "
+                        f"total={total} {top}")
+                    self._unmapped_cmds[room_id] = {}
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
         except asyncio.CancelledError:
             pass
@@ -511,6 +520,12 @@ class BilibiliProtocolEngine(BaseEngine):
             mapped = codec.map_upstream_message(str(doc.get("cmd", "")), doc.get("data"), seq, ts)
         else:
             mapped = None
+        if mapped is None and isinstance(doc, dict):
+            # 未映射 cmd 聚合计数（2026-10-01 用户实测：礼物/点赞缺失——
+            # 怀疑 B站新版 cmd 改名；聚合日志暴露真实 cmd 名供补映射）
+            cmd = str(doc.get("cmd", "?"))[:40]
+            stat = self._unmapped_cmds.setdefault(room_id, {})
+            stat[cmd] = stat.get(cmd, 0) + 1
         if mapped:
             out.append({
                 "contract_version": "1.0.0",

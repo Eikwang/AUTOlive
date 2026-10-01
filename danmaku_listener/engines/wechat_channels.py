@@ -73,9 +73,11 @@ class WechatChannelsEngine(ControlledPageEngine):
         return "controlled:wechat_channels"  # 受控后台（非通用 page: 前缀）
 
     def __init__(self, state_store=None, cookie_dir: str = "./cookie",
-                 session_lifetime: int = SESSION_LIFETIME_SECONDS):
+                 session_lifetime: int = SESSION_LIFETIME_SECONDS,
+                 raw_hook=None):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
+        self._raw_hook = raw_hook  # 诊断钩子：live/msg 响应 body（分析用）
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
@@ -282,6 +284,11 @@ class WechatChannelsEngine(ControlledPageEngine):
             body = await response.json()
         except Exception:
             return
+        if self._raw_hook is not None:
+            try:
+                self._raw_hook(body)
+            except Exception:  # noqa: BLE001
+                pass
         data = (body or {}).get("data") or {}
         ts = int(time.time())
 

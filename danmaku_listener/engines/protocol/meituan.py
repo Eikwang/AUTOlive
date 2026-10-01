@@ -83,8 +83,9 @@ class MeituanPollEngine(BaseEngine):
 
     platform = "meituan"
 
-    def __init__(self, state_store=None):
+    def __init__(self, state_store=None, raw_hook=None):
         super().__init__(state_store=state_store)
+        self._raw_hook = raw_hook  # 诊断钩子：轮询原始快照（分析用）
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
         self._session = requests.Session()
@@ -242,6 +243,11 @@ class MeituanPollEngine(BaseEngine):
         """
         if not isinstance(jsdata, dict):
             return 0
+        if self._raw_hook is not None:
+            try:
+                self._raw_hook(jsdata)
+            except Exception:  # noqa: BLE001
+                pass
         await self._maybe_emit_stats(room_id, jsdata.get("liveInfoVo") or {})
 
         msg_vo = jsdata.get("messageVO") or {}

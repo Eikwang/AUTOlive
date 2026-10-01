@@ -21,6 +21,7 @@ import struct
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from danmaku_listener.engines.protocol.huya_gifts import lookup_gift
 from danmaku_listener.engines.protocol.huya_tars import (
     TarsError,
     TarsInputStream,
@@ -489,7 +490,17 @@ def map_upstream(payload: bytes, uri: int, seq: int, ts: int,
     if uri == URI_SEND_ITEM_SUB_BROADCAST:
         d = decode_send_item(payload)
         item_type = d.get("item_type") or 0
-        gift_name = (gift_items or {}).get(item_type) or str(item_type)
+        # 三级回退：getPropsList 在线礼物表 → 静态对照表（2026-10-01 用户
+        # 实测 189 项，docs/虎牙礼物编号名称对照表.md）→ 编号本身
+        gift_name = (gift_items or {}).get(item_type)
+        gift_value = 0.0
+        if not gift_name:
+            static_name, static_price = lookup_gift(item_type)
+            if static_name:
+                gift_name = static_name
+                gift_value = static_price
+        if not gift_name:
+            gift_name = str(item_type)
         return {
             "category": "business",
             "type": "GIFT",
@@ -501,6 +512,7 @@ def map_upstream(payload: bytes, uri: int, seq: int, ts: int,
                 "user_id": str(d["sender_uid"]) if d.get("sender_uid") else None,
                 "gift_name": gift_name,
                 "gift_count": d.get("item_count", 1),
+                "gift_value": gift_value,
             },
         }
     if uri == URI_VIP_ENTER_BANNER:

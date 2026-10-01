@@ -117,9 +117,10 @@ class Live1688Engine(ControlledPageEngine):
     protocol_version = "1688-1"
 
     def __init__(self, state_store=None, cookie_dir: str = "./cookie",
-                 session_lifetime: int = 14400):
+                 session_lifetime: int = 14400, raw_hook=None):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
+        self._raw_hook = raw_hook  # 诊断钩子：DOM 弹幕条目/pull 原始响应
 
     def validate_room_id(self, room_id: str) -> None:
         """add_room 预校验：feedId 可解析"""
@@ -282,6 +283,11 @@ class Live1688Engine(ControlledPageEngine):
                         return out;
                     }""")
                 ts = int(time.time())
+                if items and self._raw_hook is not None:
+                    try:
+                        self._raw_hook({"source": "dom", "items": items})
+                    except Exception:  # noqa: BLE001
+                        pass
                 for item in items:
                     nick = (item.get("nick") or "").strip()
                     content = (item.get("text") or "").strip()
@@ -385,6 +391,11 @@ class Live1688Engine(ControlledPageEngine):
             result = json.loads(body[s + 1 : e])
         except Exception:  # noqa: BLE001
             return
+        if self._raw_hook is not None:
+            try:
+                self._raw_hook({"source": "pull", "body": result})
+            except Exception:  # noqa: BLE001
+                pass
         tlist = (result.get("data") or {}).get("timestampList") or []
         ts = int(time.time())
         for td in tlist:

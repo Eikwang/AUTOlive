@@ -152,9 +152,13 @@ class DouyinWebProtocolEngine(BaseEngine):
 
     platform = "douyin"
 
-    def __init__(self, state_store=None, signer: Optional[DouyinSigner] = None):
+    def __init__(self, state_store=None, signer: Optional[DouyinSigner] = None,
+                 raw_hook=None):
         super().__init__(state_store=state_store)
         self._signer = signer  # 引擎级单例；默认懒创建（仅 loop 线程）
+        self._raw_hook = raw_hook  # 诊断钩子：messageList 原始 method/payload
+        self._method_stats: Dict[str, dict] = {}  # 未映射 method 聚合（心跳汇总）
+        self._method_stats_seen: Dict[str, dict] = {}  # 全 method 首见记录
         self._room_init = DouyinRoomInit()
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._room_ws: Dict[str, Any] = {}
@@ -390,7 +394,27 @@ class DouyinWebProtocolEngine(BaseEngine):
                 await self._dispatch(room_id, msg, ts)
 
     async def _dispatch(self, room_id: str, msg, ts: int) -> None:
+        # 诊断：全部 method 首见记录 + raw_hook（礼物通道缺失排查——
+        # 2026-10-01 用户实测 Like/Social 有而 Gift 无，需真实 method 样本）
+        method = msg.method
+        if method not in self._method_stats_seen.setdefault(room_id, {}):
+            self._method_stats_seen[room_id][method] = 1
+            logger.info(f"[douyin] room {room_id} first-seen method={method}")
+        if self._raw_hook is not None:
+            try:
+                import base64 as _b64
+                self._raw_hook({"method": method,
+                                "msg_id": msg.msgId or None,
+                                "payload_b64": _b64.b64encode(msg.payload).decode()})
+            except Exception:  # noqa: BLE001
+                pass
         mapped = self._map_message(room_id, msg, self.next_seq(room_id), ts)
+        if mapped is None:
+            stat = self._method_stats.setdefault(room_id, {})
+            stat[method] = stat.get(method, 0) + 1
+            if stat[method] in (1, 50, 200):  # 首次/50/200 次提示
+                logger.info(f"[douyin] room {room_id} unmapped method={method} "
+                            f"count={stat[method]}")
         if mapped:
             mapped["msg_id"] = msg.msgId or None  # Message 层 msgId（去重键）
             await self._emit_message({
