@@ -310,7 +310,11 @@ class WechatChannelsEngine(ControlledPageEngine):
         # liveInfo → ROOM_STATS / 下播事件
         live_info = data.get("liveInfo") or {}
         if live_info:
-            live_status = live_info.get("liveStatus")
+            # 字段名双形态：文档驼峰（liveStatus）vs 2026-10-03 dump 实测小写
+            # （live_status/online_cnt/like_cnt）——逐键回退取值
+            live_status = (live_info.get("liveStatus")
+                           if live_info.get("liveStatus") is not None
+                           else live_info.get("live_status"))
             if live_status is not None:
                 await self._emit_message({
                     "contract_version": "1.0.0",
@@ -326,7 +330,9 @@ class WechatChannelsEngine(ControlledPageEngine):
                                 "live": live_status == 4,  # liveStatus=4 直播中（wxlivespy 实测枚举）
                                 "raw_status": live_status},
                 })
-            online = live_info.get("onlineCnt")
+            online = (live_info.get("onlineCnt")
+                      if live_info.get("onlineCnt") is not None
+                      else live_info.get("online_cnt"))
             if online is not None:
                 await self._emit_message({
                     "contract_version": "1.0.0",
@@ -339,7 +345,9 @@ class WechatChannelsEngine(ControlledPageEngine):
                     "engine": self.engine_id,
                     "protocol_version": "wxsp-backend-1",
                     "payload": {"type": "ROOM_STATS", "viewer_count": online,
-                                "like_count": live_info.get("likeCnt")},
+                                "like_count": (live_info.get("likeCnt")
+                                               if live_info.get("likeCnt") is not None
+                                               else live_info.get("like_cnt"))},
                 })
 
         # msgList：type==1 弹幕 / type==10005 进房
@@ -382,23 +390,50 @@ class WechatChannelsEngine(ControlledPageEngine):
             gift_payload = self._decode_gift_payload(raw_payload) if raw_payload else {}
 
             if msg_type in (MSGTYPE_GIFT, MSGTYPE_COMBO_GIFT):
-                # 礼物名：payload.content 优先（2026-10-02 实测 reward_product_id
-                # 是打赏商品 ID 数字——wxlivespy 同样只取 ID，content 为礼物描述）；
-                # 价格：按名查实测价格表（微信豆，reward_amount 优先）
-                gift_name = (gift_payload.get("content")
-                             or gift_payload.get("reward_product_id", ""))
+                # 礼物名：content 是"xx送了主播N个玫瑰"式描述（2026-10-03 dump
+                # 实证，reward_product_id 为商品 ID）——从描述反查价格表已知
+                # 礼物名（最长匹配），查不到退回描述原文；价格按名查表
+                content = str(gift_payload.get("content", ""))
+                known = [(n, p) for n, p in WXSP_GIFT_PRICE.items() if n in content]
+                if known:
+                    gift_name = max(known, key=lambda x: len(x[0]))[0]
+                    unit_price = max(known, key=lambda x: len(x[0]))[1]
+                else:
+                    gift_name, unit_price = content, 0.0
                 count = gift_payload.get(
                     "combo_product_count",
                     gift_payload.get("reward_product_count", 1))
-                price = lookup_price(gift_name)
                 payload = {"type": "GIFT", "user_name": nick, "user_id": user_id,
                            "gift_name": gift_name,
                            "gift_id": gift_payload.get("reward_product_id", ""),
                            "gift_count": count,
                            "gift_value": gift_payload.get("reward_amount_in_wecoin", 0)
-                                         or price * count,
+                                         or unit_price * count,
                            "raw": gift_payload}
                 await self._emit_business(room_id, "GIFT", payload, msg_id=seq_id, ts=ts)
+            elif msg_type == 20122:
+                # 新版点赞（2026-10-03 dump 实证：payload.wording="赞了直播"，
+                # 昵称在 fromUserContact.contact.nickname——旧 20006 无昵称）
+                try:
+                    pl = json.loads(base64.b64decode(item.get("payload", "")).decode())
+                except Exception:  # noqa: BLE001
+                    pl = {}
+                await self._emit_business(
+                    room_id, "LIKE",
+                    {"type": "LIKE", "count": 1, "user_name": nick, "user_id": user_id,
+                     "content": pl.get("wording", "")},
+                    msg_id=seq_id, ts=ts)
+            elif msg_type == 20078:
+                # 新版关注（2026-10-03 dump 实证：payload.wording="关注了主播"）
+                try:
+                    pl = json.loads(base64.b64decode(item.get("payload", "")).decode())
+                except Exception:  # noqa: BLE001
+                    pl = {}
+                await self._emit_business(
+                    room_id, "SOCIAL",
+                    {"type": "SOCIAL", "action": "follow", "user_name": nick,
+                     "user_id": user_id, "content": pl.get("wording", "")},
+                    msg_id=seq_id, ts=ts)
             elif msg_type == MSGTYPE_LIKE:
                 await self._emit_business(
                     room_id, "LIKE",

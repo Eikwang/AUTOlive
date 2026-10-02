@@ -121,6 +121,8 @@ class Live1688Engine(ControlledPageEngine):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
         self._raw_hook = raw_hook  # 诊断钩子：DOM 弹幕条目/pull 原始响应
+        self._unmapped_pull: Dict[str, dict] = {}  # pull 未映射聚合（60s 汇总降噪）
+        self._last_unmapped_flush = time.monotonic()
 
     def validate_room_id(self, room_id: str) -> None:
         """add_room 预校验：feedId 可解析"""
@@ -316,6 +318,18 @@ class Live1688Engine(ControlledPageEngine):
                                     "content": content},
                     }
                     await self._emit_message(self._envelope(room_id, mapped))
+                # pull 未映射 60s 汇总（2026-10-03 用户实测 DEBUG 刷屏降噪）
+                now = time.monotonic()
+                if self._unmapped_pull and now - self._last_unmapped_flush > 60.0:
+                    self._last_unmapped_flush = now
+                    for rid, kv in self._unmapped_pull.items():
+                        total = sum(kv.values())
+                        if total:
+                            top = sorted(kv.items(), key=lambda x: -x[1])[:3]
+                            logger.debug(
+                                f"[1688] room {rid} unmapped {total} msgs in 60s, "
+                                f"top keys: {[list(k) for k, _ in top]}")
+                    self._unmapped_pull = {rid: {} for rid in self._unmapped_pull}
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -410,6 +424,10 @@ class Live1688Engine(ControlledPageEngine):
                                                self.next_seq(room_id), ts)
                     if mapped:
                         await self._emit_message(self._envelope(room_id, mapped))
+                    else:
+                        stat = self._unmapped_pull.setdefault(room_id, {})
+                        sig = tuple(sorted(obj.keys())[:6])
+                        stat[sig] = stat.get(sig, 0) + 1
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"[1688] room {room_id} msg parse error: {e}")
 
@@ -458,6 +476,5 @@ class Live1688Engine(ControlledPageEngine):
         if "value" in obj and isinstance(obj.get("value"), dict) and "dig" in obj["value"]:
             return {"category": "business", "type": "LIKE", "seq": seq, "timestamp": ts,
                     "payload": {"type": "LIKE", "count": obj["value"].get("dig", 1)}}
-        logger.debug(f"[1688] room {room_id} unmapped keys={sorted(obj)[:6]}")
         return None
 

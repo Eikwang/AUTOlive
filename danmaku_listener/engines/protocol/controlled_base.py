@@ -40,7 +40,7 @@ COMMON_LAUNCH_ARGS = [
 
 COMMON_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
              "AppleWebKit/537.36 (KHTML, like Gecko) "
-             "Chrome/126.0.0.0 Safari/537.36")
+             "Chrome/131.0.0.0 Safari/537.36")  # 126→131（2026-10-03 阿里登录页风控对旧 UA 敏感）
 
 
 class ControlledPageEngine(BaseEngine):

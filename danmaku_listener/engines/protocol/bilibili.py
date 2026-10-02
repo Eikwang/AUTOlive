@@ -526,6 +526,12 @@ class BilibiliProtocolEngine(BaseEngine):
             cmd = str(doc.get("cmd", "?"))[:40]
             stat = self._unmapped_cmds.setdefault(room_id, {})
             stat[cmd] = stat.get(cmd, 0) + 1
+            # 原始 doc 进诊断钩子（--dump-all 抓新版 cmd 的完整结构供补映射）
+            if self._raw_hook is not None:
+                try:
+                    self._raw_hook({"cmd": cmd, "doc": doc})
+                except Exception:  # noqa: BLE001
+                    pass
         if mapped:
             out.append({
                 "contract_version": "1.0.0",

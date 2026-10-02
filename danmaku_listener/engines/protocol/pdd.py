@@ -258,15 +258,39 @@ def map_pdd_message(obj: Dict[str, Any], seq: int, ts: int) -> List[Dict[str, An
                     "payload": {"type": "ENTER_ROOM",
                                 "user_name": str(user.get("nickname", "")),
                                 "user_id": str(user.get("uid", ""))}})
-            # favorite（关注）/ group_open（开团运营位）→ 用户裁定不监听
+            elif n.get("live_chat_notice_type") == "favorite":
+                # 关注（2026-10-03 用户实测直播间明文推送关注，恢复映射——
+                # 上一轮"仅三种"裁定更新为入场/弹幕/点赞/关注四种）
+                out.append({
+                    "category": "business", "type": "SOCIAL", "seq": seq,
+                    "timestamp": ts,
+                    "payload": {"type": "SOCIAL", "action": "follow",
+                                "user_name": str(user.get("nickname", "")),
+                                "user_id": str(user.get("uid", ""))}})
+            # group_open（开团运营位）→ 不 emit
         return out
 
     if m_type == "live_chat_ext_v2":
         for n in md.get("live_chat_ext_list") or []:
             if not isinstance(n, dict):
                 continue
-            # 用户裁定只监听点赞（sub_type 121）；关注 116/购买 120 不映射
-            if n.get("sub_type") == 121:
+            # 点赞 121 + 关注 116（2026-10-03 恢复）；购买 120 不映射
+            if n.get("sub_type") in (121, 116):
+                body = n.get("body") or {}
+                action = "like" if n.get("sub_type") == 121 else "follow"
+                if n.get("sub_type") == 121:
+                    out.append({
+                        "category": "business", "type": "LIKE", "seq": seq,
+                        "timestamp": ts,
+                        "payload": {"type": "LIKE",
+                                    "user_name": str(body.get("title", "")),
+                                    "count": 1}})
+                else:
+                    out.append({
+                        "category": "business", "type": "SOCIAL", "seq": seq,
+                        "timestamp": ts,
+                        "payload": {"type": "SOCIAL", "action": "follow",
+                                    "user_name": str(body.get("title", ""))}})
                 body = n.get("body") or {}
                 out.append({
                     "category": "business", "type": "LIKE", "seq": seq,

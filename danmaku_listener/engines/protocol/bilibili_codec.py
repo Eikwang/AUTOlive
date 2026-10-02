@@ -255,9 +255,9 @@ def map_upstream_message(cmd: str, body: Any, seq: int, ts: int) -> Optional[Dic
         return _map_danmu_msg(body, seq, ts) if isinstance(body, list) else None
     if cmd in ("GIFT", "SEND_TOP_GIFT", "COMBO_SEND"):
         return _map_gift(body, seq, ts) if isinstance(body, dict) else None
-    if cmd == "INTERACT_WORD":
+    if cmd in ("INTERACT_WORD", "INTERACT_WORD_V2"):
         return _map_enter(body, seq, ts) if isinstance(body, dict) else None
-    if cmd == "LIKE_MSG":
+    if cmd in ("LIKE_MSG", "LIKE_CLICK_V3"):
         return _map_like(body, seq, ts) if isinstance(body, dict) else None
     if cmd == "SUPER_CHAT_MESSAGE":
         return _map_super_chat(body, seq, ts) if isinstance(body, dict) else None
