@@ -13,6 +13,8 @@
 import hashlib
 import json
 import struct
+
+from danmaku_listener.engines.protocol.bili_gifts import lookup_gift
 import time
 import zlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -167,13 +169,21 @@ def _map_danmu_msg(info: list, seq: int, ts: int) -> Optional[Dict[str, Any]]:
 
 def _map_gift(data: dict, seq: int, ts: int) -> Optional[Dict[str, Any]]:
     try:
+        gift_id = data.get("giftId")
+        # 礼物名/价格：协议 giftName/price 优先（price/1000=电池），空则查静态
+        # 对照表（2026-10-02 用户实测 69 项，电池计价）
+        gift_name = str(data.get("giftName", "")) or lookup_gift(gift_id)[0]
+        price = data.get("price")
+        gift_value = float(price) / 1000.0 if price else None
+        if gift_value is None and gift_name:
+            gift_value = lookup_gift(gift_id)[1] * int(data.get("num", 1))
         payload = {
             "type": "GIFT",
             "user_name": str(data.get("uname", "")),
-            "gift_name": str(data.get("giftName", "")),
+            "gift_name": gift_name,
             "gift_count": int(data.get("num", 1)),
-            "gift_value": float(data.get("price", 0)) / 1000.0 if data.get("price") else None,
-            "gift_id": str(data.get("giftId")) if data.get("giftId") is not None else None,
+            "gift_value": gift_value,
+            "gift_id": str(gift_id) if gift_id is not None else None,
             "combo_count": int(data["combo_total_num"]) if data.get("combo_total_num") else None,
             "user_id": str(data["uid"]) if data.get("uid") is not None else None,
         }

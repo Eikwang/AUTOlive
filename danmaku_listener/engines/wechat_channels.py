@@ -35,6 +35,7 @@ from danmaku_listener.contract.models import (
     UnifiedMessage,
 )
 from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
+from danmaku_listener.engines.protocol.wxsp_gift_prices import lookup_price
 
 BACKEND_URL = "https://channels.weixin.qq.com/platform/live/liveBuild"
 #: 弹幕轮询接口锚点（wxlivespy 同款）
@@ -301,8 +302,8 @@ class WechatChannelsEngine(ControlledPageEngine):
         if self._raw_hook is not None:
             try:
                 self._raw_hook(body)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[wxsp] room {room_id} raw_hook error: {e}")
         data = (body or {}).get("data") or {}
         ts = int(time.time())
 
@@ -382,16 +383,20 @@ class WechatChannelsEngine(ControlledPageEngine):
 
             if msg_type in (MSGTYPE_GIFT, MSGTYPE_COMBO_GIFT):
                 # 礼物名：payload.content 优先（2026-10-02 实测 reward_product_id
-                # 是打赏商品 ID 数字——wxlivespy 同样只取 ID，content 为礼物描述）
+                # 是打赏商品 ID 数字——wxlivespy 同样只取 ID，content 为礼物描述）；
+                # 价格：按名查实测价格表（微信豆，reward_amount 优先）
                 gift_name = (gift_payload.get("content")
                              or gift_payload.get("reward_product_id", ""))
+                count = gift_payload.get(
+                    "combo_product_count",
+                    gift_payload.get("reward_product_count", 1))
+                price = lookup_price(gift_name)
                 payload = {"type": "GIFT", "user_name": nick, "user_id": user_id,
                            "gift_name": gift_name,
                            "gift_id": gift_payload.get("reward_product_id", ""),
-                           "gift_count": gift_payload.get(
-                               "combo_product_count",
-                               gift_payload.get("reward_product_count", 1)),
-                           "gift_value": gift_payload.get("reward_amount_in_wecoin", 0),
+                           "gift_count": count,
+                           "gift_value": gift_payload.get("reward_amount_in_wecoin", 0)
+                                         or price * count,
                            "raw": gift_payload}
                 await self._emit_business(room_id, "GIFT", payload, msg_id=seq_id, ts=ts)
             elif msg_type == MSGTYPE_LIKE:

@@ -14,6 +14,8 @@
 import struct
 from typing import Any, Dict, List, Optional
 
+from danmaku_listener.engines.protocol.douyu_gifts import lookup_gift
+
 HEADER_SIZE = 8  # 头部除长度重复外的有效字段从第 8 字节起算
 PACKET_HEADER = struct.Struct("<IIHBB")  # 长度 重复 类型 加密 保留
 CLIENT_TYPE = 689
@@ -133,13 +135,19 @@ def map_upstream(fields: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str
             count = int(fields.get("gn", 1))
         except ValueError:
             count = 1
+        # 礼物名/价格：协议 gs 优先，空则查静态对照表
+        # （2026-10-02 用户实测 79 项，鱼翅计价；gfid=礼物 ID）
+        gift_name = fields.get("gs", "") or lookup_gift(fields.get("gfid"))[0]
+        unit_price = lookup_gift(fields.get("gfid"))[1]
         return {
             "category": "business", "type": "GIFT",
             "payload": {
                 "type": "GIFT",
                 "user_name": fields.get("nn", ""),
-                "gift_name": fields.get("gs", ""),
+                "gift_name": gift_name or str(fields.get("gfid", "")),
                 "gift_count": count,
+                "gift_value": unit_price * count,
+                "gift_id": fields.get("gfid"),
                 "user_id": fields.get("uid"),
             },
             "seq": seq, "timestamp": ts,

@@ -33,6 +33,7 @@ import websockets
 from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
+from danmaku_listener.engines.protocol.douyin_gifts import lookup_gift
 from danmaku_listener.engines.base import BaseEngine
 from danmaku_listener.engines.protocol.douyin_assets import douyin_pb2 as dy_pb2
 
@@ -453,18 +454,23 @@ class DouyinWebProtocolEngine(BaseEngine):
         if method == "WebcastGiftMessage":
             g = dy_pb2.GiftMessage()
             g.ParseFromString(msg.payload)
-            if not g.gift.name:
+            # 礼物名/价格：协议 gift.name 优先，空则查静态对照表
+            # （2026-10-02 用户实测 102 项，钻石计价）
+            gift_name = g.gift.name or lookup_gift(g.giftId)[0]
+            if not gift_name:
                 return None
+            unit_price = lookup_gift(g.giftId)[1]
             return {
                 "category": "business", "type": "GIFT", "seq": seq, "timestamp": ts,
                 "payload": {"type": "GIFT",
                             "user_name": g.user.nickName or "",
                             "user_id": str(g.user.id) if g.user.id else None,
-                            "gift_name": g.gift.name,
+                            "gift_name": gift_name,
                             "gift_id": g.giftId,
                             # count 取 totalCount 原样透传（累计值语义，见契约文档——
                             # groupCount/repeatCount/comboCount 不参与，连击合并 defer）
-                            "gift_count": g.totalCount or 1},
+                            "gift_count": g.totalCount or 1,
+                            "gift_value": unit_price * (g.totalCount or 1)},
             }
         if method == "WebcastMemberMessage":
             m = dy_pb2.MemberMessage()

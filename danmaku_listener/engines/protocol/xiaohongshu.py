@@ -29,6 +29,7 @@ from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
 from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
+from danmaku_listener.engines.protocol.xhs_gift_prices import lookup_price
 
 PROTOCOL_VERSION = "xiaohongshu-1"
 
@@ -154,11 +155,14 @@ def map_custom_data(cd: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str,
         count = action.get("count", 1)
         if not isinstance(count, int) or count < 1:
             count = 1
+        # 价格：按名查实测价格表（薯币）；coins（协议自带单价）优先
+        unit = gift.get("coins") or lookup_price(gift_name)
         return {**base, "type": "GIFT",
                 "payload": {"type": "GIFT",
                             "user_name": str(send.get("nick_name", "")),
                             "user_id": str(send.get("id", "")),
-                            "gift_name": gift_name, "gift_count": count}}
+                            "gift_name": gift_name, "gift_count": count,
+                            "gift_value": unit * count}}
     if cd_type == "follow_emcee":
         return {**base, "type": "SOCIAL",
                 "payload": {"type": "SOCIAL", "action": "follow",
