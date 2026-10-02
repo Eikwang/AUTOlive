@@ -1945,6 +1945,7 @@
     "login_entry": true,
     "legacy_adapter_retired": false,
     "component_root": "danmaku_listener",
-    "room_id": ""
+    "room_id": "",
+    "cookie_dir": "D:\\AI\\DanmakuListener\\cookie"
   }
 }

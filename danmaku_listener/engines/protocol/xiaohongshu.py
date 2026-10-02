@@ -138,8 +138,12 @@ def map_custom_data(cd: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str,
         count = (cd.get("praise_info") or {}).get("count", 1)
         if not isinstance(count, int) or count < 1:
             count = 1
+        # praise 帧 profile 无 nickname（协议限制）——透传 user_id 供前端
+        # 展示"用户 xxx 点赞"（2026-10-02 用户实测反馈）
         return {**base, "type": "LIKE",
-                "payload": {"type": "LIKE", "user_name": "", "count": count}}
+                "payload": {"type": "LIKE", "user_name": "",
+                            "user_id": str(profile.get("user_id", "")),
+                            "count": count}}
     if cd_type == "gift_dock_and_effect":
         send = cd.get("send_user_info") or {}
         gift = cd.get("base_gift_info") or {}

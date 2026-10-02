@@ -179,6 +179,8 @@ _DANMAKU_LISTENER_DEFAULTS: Dict[str, Any] = {
     "login_entry": True,                    # NEEDS_LOGIN 扫码常驻入口（视频号常规路径）
     "legacy_adapter_retired": False,        # 旧链路退役开关（G7：Phase 4 已裁决通过，默认关=旧链路保留）
     "component_root": "danmaku_listener",   # 组件副本目录（G8 复制范式；COPY_MANIFEST.json 版本戳所在）
+    "cookie_dir": "",                       # 受控页面引擎 cookie/profile 目录（空=组件默认 ./cookie；
+                                            # 可指向源仓库共享登录态目录——脚本扫码后系统通道免登录）
     "room_id": "",                          # 监听房间 ID（平台原生 ID 字符串；空=沿用全局 room_id 配置）
 }
 

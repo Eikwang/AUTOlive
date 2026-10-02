@@ -85,4 +85,13 @@ def build_engine(platform: str, state_store: Optional[RoomStateStore] = None, **
             kwargs.setdefault("cookie_file", DEFAULT_STATE_PATH)
         except Exception:
             pass
+    if platform in ("1688", "xiaohongshu", "jd", "pdd", "wechat_channels"):
+        # 受控页面引擎 cookie/profile 目录（2026-10-02 用户实测：AUTOlive serve
+        # cwd=AUTOlive 根，相对 ./cookie 解析到空目录 → 拼多多登录限定弹幕
+        # 缺失）——settings.cookie_dir 统一配置，部署方可指向共享登录态目录
+        try:
+            from danmaku_listener.config.settings import get_settings
+            kwargs.setdefault("cookie_dir", get_settings().cookie_dir)
+        except Exception:
+            pass
     return PLATFORM_ENGINES[platform](state_store=state_store, **kwargs)

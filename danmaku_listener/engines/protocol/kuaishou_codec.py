@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from danmaku_listener.engines.protocol import ks_pb2
+from danmaku_listener.engines.protocol.kuaishou_gifts import lookup_gift
 
 CONTRACT_VERSION = "1.0.0"
 PROTOCOL_VERSION = "kuaishou-1"
@@ -126,13 +127,19 @@ def map_feed_push(payload: bytes, seq_start: int, ts: int) -> List[Dict[str, Any
     for gift in push.giftFeeds:
         seq += 1
         fields = _user_fields(gift.user)
+        # 礼物名/价格：静态映射表（2026-10-02 用户实测 92 项）——
+        # SCWebFeedPush 推流只含 giftId，名称需查表（此前前端显示 undefined）
+        gift_name, gift_price = lookup_gift(gift.giftId)
         results.append({
             "category": "business", "type": "GIFT",
             "payload": {
                 "type": "GIFT", "user_name": fields["user_name"] or "",
+                "gift_name": gift_name or str(gift.giftId),
                 "gift_id": str(gift.giftId), "gift_count": gift.batchSize * max(1, gift.comboCount)
                 if gift.comboCount else gift.batchSize,
                 "combo_count": gift.comboCount or None,
+                "gift_value": gift_price * (gift.batchSize * max(1, gift.comboCount)
+                                            if gift.comboCount else gift.batchSize),
                 "user_id": fields["user_id"],
             },
             "seq": seq, "timestamp": ts, "msg_id": gift.id or None,

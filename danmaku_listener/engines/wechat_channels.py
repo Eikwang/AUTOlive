@@ -78,6 +78,7 @@ class WechatChannelsEngine(ControlledPageEngine):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
         self._raw_hook = raw_hook  # 诊断钩子：live/msg 响应 body（分析用）
+        self._msglist_types: Dict[str, dict] = {}  # 未处理 msgList type 聚合
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
@@ -99,8 +100,21 @@ class WechatChannelsEngine(ControlledPageEngine):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"[wxsp] room {room_id} session error: {e}")
-                await self._emit_session_event(room_id, detail=f"session error: {e}")
+                # 浏览器窗口被手动关闭（用户点 X）→ playwright 报 TargetClosed/
+                # Connection closed——明确提示自动重启（2026-10-02 用户实测
+                # "关闭网页就无法监听"：窗口=登录态载体，关闭即断，需重启窗口）
+                msg = str(e)
+                if ("Target closed" in msg or "Connection closed" in msg
+                        or "browser has been closed" in msg):
+                    logger.warning(f"[wxsp] room {room_id} 浏览器窗口被关闭——"
+                                   f"5s 后自动重启（登录态热则直接恢复，"
+                                   f"冷则需重新扫码）")
+                    await self._emit_session_event(
+                        room_id, detail="浏览器窗口被关闭——自动重启中；"
+                                        "窗口将重新弹出，若要求扫码请重新扫码")
+                else:
+                    logger.warning(f"[wxsp] room {room_id} session error: {e}")
+                    await self._emit_session_event(room_id, detail=f"session error: {e}")
             if self._stop_flags.get(room_id):
                 return
             elapsed = int(time.time()) - session_start
@@ -342,22 +356,38 @@ class WechatChannelsEngine(ControlledPageEngine):
                 ctype = "ENTER_ROOM"
                 payload = {"type": "ENTER_ROOM", "user_name": nick, "user_id": user_id}
             else:
-                logger.debug(f"[wxsp] room {room_id} msgList type={msg_type} dropped")
+                # 未处理 msgList type 聚合（2026-10-02 用户实测关注明文推送
+                # 未监听到——关注可能在 msgList 其他 type，样本确认后补映射）
+                stat = self._msglist_types.setdefault(room_id, {})
+                stat[msg_type] = stat.get(msg_type, 0) + 1
+                if stat[msg_type] in (1, 20):
+                    logger.info(f"[wxsp] room {room_id} unhandled msgList "
+                                f"type={msg_type!r} count={stat[msg_type]}")
                 continue
             await self._emit_business(room_id, ctype, payload, msg_id=seq_id, ts=ts)
 
         # appMsgList：礼物/点赞/等级
         for item in data.get("appMsgList") or []:
             msg_type = item.get("msgType")
-            nick = (item.get("fromUserContact") or {}).get("contact", {}).get("nickname", "")
-            user_id = (item.get("fromUserContact") or {}).get("contact", {}).get("username")
+            # 昵称三级备选（2026-10-02 用户实测点赞无用户名——wxlivespy
+            # 注释里 displayNickname 为备选；部分版本 contact 缺失）
+            _fc = item.get("fromUserContact") or {}
+            nick = (_fc.get("contact", {}).get("nickname")
+                    or _fc.get("displayNickname")
+                    or _fc.get("nickname") or "")
+            user_id = _fc.get("contact", {}).get("username")
             seq_id = item.get("seq") or item.get("clientMsgId")
             raw_payload = item.get("payload") or ""
             gift_payload = self._decode_gift_payload(raw_payload) if raw_payload else {}
 
             if msg_type in (MSGTYPE_GIFT, MSGTYPE_COMBO_GIFT):
+                # 礼物名：payload.content 优先（2026-10-02 实测 reward_product_id
+                # 是打赏商品 ID 数字——wxlivespy 同样只取 ID，content 为礼物描述）
+                gift_name = (gift_payload.get("content")
+                             or gift_payload.get("reward_product_id", ""))
                 payload = {"type": "GIFT", "user_name": nick, "user_id": user_id,
-                           "gift_name": gift_payload.get("reward_product_id", ""),
+                           "gift_name": gift_name,
+                           "gift_id": gift_payload.get("reward_product_id", ""),
                            "gift_count": gift_payload.get(
                                "combo_product_count",
                                gift_payload.get("reward_product_count", 1)),

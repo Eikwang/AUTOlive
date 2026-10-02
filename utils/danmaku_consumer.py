@@ -99,6 +99,10 @@ def _write_serve_toml(path: str, section: dict) -> None:
     ]
     if section.get("token_injection") == "file" and section.get("token_file_path"):
         lines.append(f'ws_token_file = "{section["token_file_path"]}"')
+    if section.get("cookie_dir"):
+        # 受控页面引擎 cookie/profile 目录（空则组件默认 ./cookie）——
+        # 可指向共享登录态目录，脚本侧扫码后系统通道免登录
+        lines.append(f'cookie_dir = "{section["cookie_dir"]}"')
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
