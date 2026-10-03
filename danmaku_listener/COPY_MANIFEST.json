@@ -1,13 +1,13 @@
 {
   "source": "D:\\AI\\DanmakuListener",
-  "copied_at": "2026-10-03T11:31:10",
-  "content_sha256": "79fa92c751216de234c9ba758facd3125480c3a99f9d394576819b08de60c544",
+  "copied_at": "2026-10-03T11:53:17",
+  "content_sha256": "493d8a776eb05c2202b6bd5b330db575356c0eda8f4c8939bc510ad48417080a",
   "total_files": 99,
-  "total_bytes": 1205788,
+  "total_bytes": 1207643,
   "items": {
     "danmaku_listener": {
       "files": 94,
-      "bytes": 1170325,
+      "bytes": 1172180,
       "note": "组件核心包（engines/adapters/bus/push/contract/config/fixtures/managers/persistence/utils）"
     },
     "docs\\danmaku_contract": {

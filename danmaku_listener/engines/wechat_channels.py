@@ -83,7 +83,8 @@ class WechatChannelsEngine(ControlledPageEngine):
         self._session_lifetime = session_lifetime
         self._raw_hook = raw_hook  # 诊断钩子：live/msg 响应 body（分析用）
         self._msglist_types: Dict[str, dict] = {}  # 未处理 msgList type 聚合
-        self._last_live_sig: Dict[str, tuple] = {}  # liveInfo 值签名（变化才 emit）
+        self._last_live_status: Dict[str, Any] = {}  # live_status（状态变化才发 LIVE_STATUS_CHANGE）
+        self._last_stats_vals: Dict[str, tuple] = {}  # (online, like_cnt)（值变化才发 ROOM_STATS）
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
@@ -240,6 +241,34 @@ class WechatChannelsEngine(ControlledPageEngine):
             logger.debug(f"[wxsp] 最小化失败（不影响监听）: {e}")
 
     @staticmethod
+    async def _click_any_frame(page, texts, timeout_s: float = 6.0,
+                               exact: bool = True) -> bool:
+        """跨 frame 文本点击（2026-10-03 终极根因：中控页内容在 iframe
+        /micro/live/liveBuild 里——主 document 的 querySelector 永远找不到
+        iframe 内按钮；Playwright frame locator 自动处理 iframe 定位与偏移）"""
+        import asyncio as _asyncio
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for fr in page.frames:
+                for text in texts:
+                    try:
+                        loc = fr.get_by_text(text, exact=exact)
+                        cnt = await loc.count()
+                        # 遍历全部候选：第一个可能不可见（hover 菜单/隐藏态），
+                        # click 抛异常时继续试下一个（v3 实证 clicked[-1] 可见）
+                        for i in range(cnt):
+                            try:
+                                await loc.nth(i).click(timeout=2000)
+                                return True
+                            except Exception:  # noqa: BLE001
+                                continue
+                    except Exception:  # noqa: BLE001
+                        continue
+            await _asyncio.sleep(0.5)
+        return False
+
+    @staticmethod
     async def _click_text_anywhere(page, texts, timeout_s: float = 6.0) -> bool:
         """全页面范围点击文本匹配的最小可见元素（不限侧栏）"""
         import asyncio as _asyncio
@@ -315,13 +344,13 @@ class WechatChannelsEngine(ControlledPageEngine):
         await _asyncio.sleep(2.5)
         logger.info(f"[wxsp] room {room_id} 点直播菜单后 url={page.url[:80]}")
 
-        # 2. 直播管理（菜单展开的子项或页面 tab；可能已在该页）
-        await self._click_text_anywhere(page, ["直播管理"], timeout_s=4.0)
+        # 2. 直播管理（子菜单；跨 frame 文本点击）
+        await self._click_any_frame(page, ["直播管理"], timeout_s=4.0)
         await _asyncio.sleep(2.5)
         logger.info(f"[wxsp] room {room_id} 点直播管理后 url={page.url[:80]}")
 
         # 3. 进入直播间（进行中场次的入口按钮）
-        ok = await self._click_text_anywhere(page, ["进入直播间"], timeout_s=8.0)
+        ok = await self._click_any_frame(page, ["进入直播间"], timeout_s=10.0)
         if ok:
             logger.info(f"[wxsp] room {room_id} 已点击进入直播间，"
                         f"url={page.url[:80]}")
@@ -381,12 +410,15 @@ class WechatChannelsEngine(ControlledPageEngine):
             like_cnt = (live_info.get("likeCnt")
                         if live_info.get("likeCnt") is not None
                         else live_info.get("like_cnt"))
-            sig = (live_status, online, like_cnt)
-            live_changed = sig != self._last_live_sig.get(room_id)
-            self._last_live_sig[room_id] = sig
+            # 状态变化签名只含 live_status（2026-10-03 用户实测：观看数波动
+            # 0→1→2 会让含 online 的签名频繁变化 → LIVE_STATUS_CHANGE 重复刷）
+            live_changed = live_status != self._last_live_status.get(room_id)
+            self._last_live_status[room_id] = live_status
+            stats_changed = (online, like_cnt) != self._last_stats_vals.get(room_id)
+            self._last_stats_vals[room_id] = (online, like_cnt)
             # 注意：不可 return——同一响应还携带 msgList/appMsgList（弹幕/礼物）
             # 只跳过 liveInfo 部分的 emit
-            if live_changed and live_status is not None:
+            if live_changed and live_status is not None:  # 状态切换才发
                 # 枚举实测（2026-10-03）：开播期间 live_status 恒为 1——
                 # wxlivespy 的 ==4 枚举过时；live=True 判定按 1/4（后续新状态样本再校准）
                 await self._emit_message({
@@ -403,7 +435,7 @@ class WechatChannelsEngine(ControlledPageEngine):
                                 "live": live_status in (1, 4),
                                 "raw_status": live_status},
                 })
-            if live_changed and online is not None:
+            if stats_changed and online is not None:  # 观看/点赞值变化才发
                 await self._emit_message({
                     "contract_version": "1.0.0",
                     "category": Category.BUSINESS.value,
