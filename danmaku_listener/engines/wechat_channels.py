@@ -83,6 +83,7 @@ class WechatChannelsEngine(ControlledPageEngine):
         self._session_lifetime = session_lifetime
         self._raw_hook = raw_hook  # 诊断钩子：live/msg 响应 body（分析用）
         self._msglist_types: Dict[str, dict] = {}  # 未处理 msgList type 聚合
+        self._last_live_sig: Dict[str, tuple] = {}  # liveInfo 值签名（变化才 emit）
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听
@@ -356,11 +357,27 @@ class WechatChannelsEngine(ControlledPageEngine):
         live_info = data.get("liveInfo") or {}
         if live_info:
             # 字段名双形态：文档驼峰（liveStatus）vs 2026-10-03 dump 实测小写
-            # （live_status/online_cnt/like_cnt）——逐键回退取值
+            # （live_status/online_cnt/like_cnt）——逐键回退取值。
+            # 变化去重（2026-10-03 用户实测：liveInfo 每次轮询都在，无条件
+            # emit 致 LIVE_STATUS_CHANGE/ROOM_STATS 刷屏——前端报
+            # "未知系统消息"；只在值变化时 emit）
             live_status = (live_info.get("liveStatus")
                            if live_info.get("liveStatus") is not None
                            else live_info.get("live_status"))
-            if live_status is not None:
+            online = (live_info.get("onlineCnt")
+                      if live_info.get("onlineCnt") is not None
+                      else live_info.get("online_cnt"))
+            like_cnt = (live_info.get("likeCnt")
+                        if live_info.get("likeCnt") is not None
+                        else live_info.get("like_cnt"))
+            sig = (live_status, online, like_cnt)
+            live_changed = sig != self._last_live_sig.get(room_id)
+            self._last_live_sig[room_id] = sig
+            # 注意：不可 return——同一响应还携带 msgList/appMsgList（弹幕/礼物）
+            # 只跳过 liveInfo 部分的 emit
+            if live_changed and live_status is not None:
+                # 枚举实测（2026-10-03）：开播期间 live_status 恒为 1——
+                # wxlivespy 的 ==4 枚举过时；live=True 判定按 1/4（后续新状态样本再校准）
                 await self._emit_message({
                     "contract_version": "1.0.0",
                     "category": Category.SYSTEM.value,
@@ -372,13 +389,10 @@ class WechatChannelsEngine(ControlledPageEngine):
                     "engine": self.engine_id,
                     "protocol_version": "wxsp-backend-1",
                     "payload": {"type": "LIVE_STATUS_CHANGE",
-                                "live": live_status == 4,  # liveStatus=4 直播中（wxlivespy 实测枚举）
+                                "live": live_status in (1, 4),
                                 "raw_status": live_status},
                 })
-            online = (live_info.get("onlineCnt")
-                      if live_info.get("onlineCnt") is not None
-                      else live_info.get("online_cnt"))
-            if online is not None:
+            if live_changed and online is not None:
                 await self._emit_message({
                     "contract_version": "1.0.0",
                     "category": Category.BUSINESS.value,
@@ -390,9 +404,7 @@ class WechatChannelsEngine(ControlledPageEngine):
                     "engine": self.engine_id,
                     "protocol_version": "wxsp-backend-1",
                     "payload": {"type": "ROOM_STATS", "viewer_count": online,
-                                "like_count": (live_info.get("likeCnt")
-                                               if live_info.get("likeCnt") is not None
-                                               else live_info.get("like_cnt"))},
+                                "like_count": like_cnt},
                 })
 
         # msgList：type==1 弹幕 / type==10005 进房
