@@ -35,7 +35,10 @@ from danmaku_listener.contract.models import (
     UnifiedMessage,
 )
 from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
-from danmaku_listener.engines.protocol.wxsp_gift_prices import lookup_price
+from danmaku_listener.engines.protocol.wxsp_gift_prices import (
+    WXSP_GIFT_PRICE,
+    lookup_price,
+)
 
 BACKEND_URL = "https://channels.weixin.qq.com/platform/live/liveBuild"
 #: 弹幕轮询接口锚点（wxlivespy 同款）
@@ -173,6 +176,10 @@ class WechatChannelsEngine(ControlledPageEngine):
                 # 路径——live/msg 轮询只在进入直播间中控页后启动）
                 await self._navigate_to_live_room(room_id, page)
 
+                # 登录/导航完成 → 窗口最小化（2026-10-03 用户反馈"关闭网页
+                # 就失效"——最小化降低误关概率；窗口=登录态载体不可关）
+                await self._minimize_window(context, page)
+
                 # 读循环：无到期（context 关闭=登录态失效，重建代价高）
                 while not self._stop_flags.get(room_id):
                     await asyncio.sleep(2)
@@ -181,6 +188,20 @@ class WechatChannelsEngine(ControlledPageEngine):
                 await context.close()
 
     # ---- 网络层拦截（wxlivespy 同构解析）----
+
+    @staticmethod
+    async def _minimize_window(context, page) -> None:
+        """CDP 最小化浏览器窗口（扫码/导航交互完成后调用——窗口=登录态
+        载体，最小化降低误关概率；用户可从任务栏恢复查看）"""
+        try:
+            session = await context.new_cdp_session(page)
+            win = await session.send("Browser.getWindowForTarget")
+            await session.send("Browser.setWindowBounds", {
+                "windowId": win["windowId"],
+                "bounds": {"windowState": "minimized"}})
+            logger.info("[wxsp] 窗口已最小化（监听持续中——请勿关闭任务栏图标）")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[wxsp] 最小化失败（不影响监听）: {e}")
 
     @staticmethod
     async def _click_text_anywhere(page, texts, timeout_s: float = 6.0) -> bool:
