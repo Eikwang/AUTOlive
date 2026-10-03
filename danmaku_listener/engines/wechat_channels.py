@@ -393,23 +393,26 @@ class WechatChannelsEngine(ControlledPageEngine):
         data = (body or {}).get("data") or {}
         ts = int(time.time())
 
-        # liveInfo → ROOM_STATS / 下播事件
+        # liveInfo → ROOM_STATS / 下播事件。
+        # 多形态（2026-10-03 用户实测两种并存于不同响应）：
+        # a) data.liveInfo 驼峰键 {liveStatus/onlineCnt/likeCnt}
+        # b) data.live_info 小写键 {live_status/online_cnt/like_cnt}
+        # 字段级逐键回退（驼峰→小写），三值独立变化独立 emit
         live_info = data.get("liveInfo") or {}
-        if live_info:
-            # 字段名双形态：文档驼峰（liveStatus）vs 2026-10-03 dump 实测小写
-            # （live_status/online_cnt/like_cnt）——逐键回退取值。
-            # 变化去重（2026-10-03 用户实测：liveInfo 每次轮询都在，无条件
-            # emit 致 LIVE_STATUS_CHANGE/ROOM_STATS 刷屏——前端报
-            # "未知系统消息"；只在值变化时 emit）
-            live_status = (live_info.get("liveStatus")
-                           if live_info.get("liveStatus") is not None
-                           else live_info.get("live_status"))
-            online = (live_info.get("onlineCnt")
-                      if live_info.get("onlineCnt") is not None
-                      else live_info.get("online_cnt"))
-            like_cnt = (live_info.get("likeCnt")
-                        if live_info.get("likeCnt") is not None
-                        else live_info.get("like_cnt"))
+        live_info_lc = data.get("live_info") or {}
+
+        def _g(*keys):
+            for k in keys:
+                for src in (live_info, live_info_lc):
+                    v = src.get(k)
+                    if v is not None:
+                        return v
+            return None
+
+        live_status = _g("liveStatus", "live_status")
+        online = _g("onlineCnt", "online_cnt")
+        like_cnt = _g("likeCnt", "like_cnt")
+        if live_info or live_info_lc:
             # 状态变化签名只含 live_status（2026-10-03 用户实测：观看数波动
             # 0→1→2 会让含 online 的签名频繁变化 → LIVE_STATUS_CHANGE 重复刷）
             live_changed = live_status != self._last_live_status.get(room_id)
@@ -435,7 +438,7 @@ class WechatChannelsEngine(ControlledPageEngine):
                                 "live": live_status in (1, 4),
                                 "raw_status": live_status},
                 })
-            if stats_changed and online is not None:  # 观看/点赞值变化才发
+            if stats_changed and (online is not None or like_cnt is not None):  # 观看/点赞值变化才发
                 await self._emit_message({
                     "contract_version": "1.0.0",
                     "category": Category.BUSINESS.value,
@@ -446,8 +449,8 @@ class WechatChannelsEngine(ControlledPageEngine):
                     "timestamp": ts,
                     "engine": self.engine_id,
                     "protocol_version": "wxsp-backend-1",
-                    "payload": {"type": "ROOM_STATS", "viewer_count": online,
-                                "like_count": like_cnt},
+                    "payload": {"type": "ROOM_STATS", "viewer_count": online or 0,
+                                "like_count": like_cnt or 0},
                 })
 
         # msgList：type==1 弹幕 / type==10005 进房
