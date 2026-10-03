@@ -103,6 +103,11 @@ class WechatChannelsEngine(ControlledPageEngine):
                 await self._run_session(room_id)
             except asyncio.CancelledError:
                 raise
+            except NeedLoginVisible:
+                if self._stop_flags.get(room_id):
+                    return
+                await self._wait_login_visible(room_id)
+                continue  # cookie 热切换（2026-10-03 实测）→ 无头重开
             except Exception as e:
                 # 浏览器窗口被手动关闭（用户点 X）→ playwright 报 TargetClosed/
                 # Connection closed——明确提示自动重启（2026-10-02 用户实测
@@ -126,14 +131,14 @@ class WechatChannelsEngine(ControlledPageEngine):
             await asyncio.sleep(5)
 
     async def _run_session(self, room_id: str) -> None:
-        """单会话长跑（可见窗口）：扫码登录（如需）→ 导航进入直播间中控页 →
-        live/msg 轮询拦截读循环（无到期——context 关闭即登录态失效，
-        重建代价=重新扫码，因此只在异常/停止时退出）"""
+        """无头会话长跑（2026-10-03 实测转向）：无头实例的页面同样是登录态
+        载体（cookie 热切换验证通过——实例 A 关闭后实例 B 立即重开登录态
+        保持），且无窗口可关/可误关 = "系统运行即监听"。登录态过期时抛
+        NeedLoginVisible → 可见窗口扫码 → 回无头继续。"""
         from playwright.async_api import async_playwright
 
-        # 登录扫码需可见；中控页保持可见（wxlivespy 同）——单会话长跑
         async with async_playwright() as pw:
-            context = await self._launch(pw, headless=False)
+            context = await self._launch(pw, headless=True)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
 
@@ -150,25 +155,12 @@ class WechatChannelsEngine(ControlledPageEngine):
                 # SPA 登录跳转发生在 domcontentloaded 之后——等稳再判
                 await asyncio.sleep(5)
                 if self._needs_login(page.url):
-                    # 就地等扫码（同一 context——登录态由存活页面续命）
-                    await self._emit_system_status(
-                        room_id, "请在弹出的浏览器窗口内用微信扫码登录"
-                                 "视频号管理后台")
-                    logger.info(f"[wxsp] room {room_id} waiting for scan login")
-                    deadline = time.monotonic() + 300.0
-                    while time.monotonic() < deadline:
-                        await asyncio.sleep(2)
-                        try:
-                            url = page.url
-                        except Exception:  # noqa: BLE001
-                            continue
-                        if not self._needs_login(url):
-                            break
-                    else:
-                        logger.warning(f"[wxsp] room {room_id} scan login timeout")
-                        return
-                    await asyncio.sleep(3)  # 后台页落地
-                    await self._emit_system_status(room_id, "登录成功——开始导航")
+                    # 无头无交互面 → 抛信号弹可见窗口扫码（NEEDS_LOGIN 同步
+                    # 透出前端，AUTOlive 扫码面板/浏览器窗口二选一呈现）
+                    logger.info(f"[wxsp] room {room_id} not logged in — "
+                                f"visible window for scan")
+                    await self._emit_needs_login(room_id)
+                    raise NeedLoginVisible()
                 logger.info(f"[wxsp] room {room_id} backend page ready "
                             f"(url={page.url[:70]})")
 
@@ -176,9 +168,6 @@ class WechatChannelsEngine(ControlledPageEngine):
                 # 路径——live/msg 轮询只在进入直播间中控页后启动）
                 await self._navigate_to_live_room(room_id, page)
 
-                # 登录/导航完成 → 窗口最小化（2026-10-03 用户反馈"关闭网页
-                # 就失效"——最小化降低误关概率；窗口=登录态载体不可关）
-                await self._minimize_window(context, page)
 
                 # 读循环：无到期（context 关闭=登录态失效，重建代价高）
                 while not self._stop_flags.get(room_id):
@@ -188,6 +177,41 @@ class WechatChannelsEngine(ControlledPageEngine):
                 await context.close()
 
     # ---- 网络层拦截（wxlivespy 同构解析）----
+
+    async def _wait_login_visible(self, room_id: str) -> None:
+        """可见窗口扫码登录（300s）→ 关可见窗 → 回无头（cookie 热切换）"""
+        from playwright.async_api import async_playwright
+
+        await self._emit_system_status(
+            room_id, "视频号需要登录——已弹出浏览器窗口，请用微信扫码登录管理后台")
+        async with async_playwright() as pw:
+            context = await self._launch(pw, headless=False)
+            try:
+                page = context.pages[0] if context.pages else await context.new_page()
+                try:
+                    await page.goto(BACKEND_URL, wait_until="domcontentloaded",
+                                    timeout=25000)
+                except Exception:  # noqa: BLE001
+                    pass
+                deadline = time.monotonic() + 300.0
+                logged = False
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(2)
+                    try:
+                        url = page.url
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if not self._needs_login(url):
+                        logged = True
+                        break
+                if logged:
+                    await asyncio.sleep(3)  # 后台页落地，cookie 写盘
+                    await self._emit_system_status(room_id, "登录成功——恢复无头监听")
+                    logger.info(f"[wxsp] room {room_id} login ok (visible→headless)")
+                else:
+                    logger.warning(f"[wxsp] room {room_id} scan login timeout")
+            finally:
+                await context.close()
 
     @staticmethod
     async def _minimize_window(context, page) -> None:
