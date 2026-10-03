@@ -167,13 +167,24 @@ class WechatChannelsEngine(ControlledPageEngine):
 
                 # 导航：直播 → 直播管理 → 进入直播间（2026-09-30 用户实测
                 # 路径——live/msg 轮询只在进入直播间中控页后启动）
-                await self._navigate_to_live_room(room_id, page)
+                in_live_room = await self._navigate_to_live_room(room_id, page)
 
 
-                # 读循环：无到期（context 关闭=登录态失效，重建代价高）
+                # 读循环：无到期（context 关闭=登录态失效，重建代价高）。
+                # 导航失败（未开播/场次列表空）时每 60s 重试——开播后自动接管
+                # （2026-10-03 用户实测：引擎启动早于开播，一次导航失败后
+                # 停在 live/home 导致数据不完整）
+                last_nav_retry = time.monotonic()
                 while not self._stop_flags.get(room_id):
                     await asyncio.sleep(2)
                     self.mark_received(room_id, int(time.time()))
+                    if not in_live_room and \
+                            time.monotonic() - last_nav_retry > 60.0:
+                        last_nav_retry = time.monotonic()
+                        logger.info(f"[wxsp] room {room_id} 重试导航"
+                                    f"（等待开播后自动进入直播间）")
+                        if await self._navigate_to_live_room(room_id, page):
+                            in_live_room = True
             finally:
                 await context.close()
 
