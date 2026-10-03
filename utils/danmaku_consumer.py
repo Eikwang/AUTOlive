@@ -64,7 +64,7 @@ CONTRACT_VERSION_MAJOR = 1       # 兼容断言：1.x 接受，2.x 拒绝
 # 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性义务）
 _DROP_ORDER = {"LIKE": 0, "ENTER_ROOM": 1, "DANMU": 2, "SOCIAL": 3, "ROOM_STATS": 4, "GIFT": 5, "SUPER_CHAT": 6}
 # 计数快路径集合：不进主队列、不进对话链（B-2 路由分类）
-_FASTPATH_BUSINESS = {"LIKE", "ENTER_ROOM", "ROOM_STATS"}
+_FASTPATH_BUSINESS = {"ENTER_ROOM", "ROOM_STATS"}  # LIKE 移出：2026-10-03 用户需求"监听到谁点赞"——点赞走对话链聚合（_LikeAggregator）
 
 
 # ---------- 全局单例桥（前端组件轮询用；main.py 挂钩创建时注入） ----------
@@ -561,20 +561,45 @@ class _ConsumerLoop:
 
     def _worker_loop(self) -> None:
         agg = _DanmuAggregator(on_flush=self._dispatch_agg)
+        like_agg = _LikeAggregator(on_flush=self._dispatch_like_agg)
         while not self._stop.is_set():
             try:
                 mtype, msg = self._work_queue.get(timeout=0.5)
             except queue.Empty:
                 agg.maybe_flush()
+                like_agg.maybe_flush()
                 continue
             if mtype == "DANMU":
                 agg.add(msg)   # B-1：窗口聚合限速进对话链
+            elif mtype == "LIKE":
+                like_agg.add(msg)  # 点赞聚合进对话链（2026-10-03 用户需求）
             else:
                 self._dispatch(mtype, msg)
         agg.flush()
+        like_agg.flush()
 
     def _dispatch_agg(self, merged: dict) -> None:
         self._dispatch("DANMU", merged)
+
+    def _dispatch_like_agg(self, merged: dict) -> None:
+        """聚合点赞 → 交互链（like_handle 优先；comment 兜底）。"""
+        try:
+            from utils import my_global
+            handle = getattr(my_global, "my_handle", None)
+            if handle is None:
+                return
+            env = merged.get("envelope") or {}
+            platform = str(env.get("platform", ""))
+            data = {"platform": platform,
+                    "username": merged.get("like_user_summary") or "有人",
+                    "count": merged.get("like_count", 1)}
+            if hasattr(handle, "like_handle"):
+                handle.like_handle(data)
+            else:
+                data["content"] = f"点赞了直播 x{data['count']}"
+                handle.process_data(data, "comment")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[danmaku_consumer] like 派发失败: {e}")
 
     def _dispatch(self, mtype: str, msg: dict) -> None:
         """business 消息映射进 my_handle 交互链（G3：复用不重建）。"""
@@ -699,6 +724,46 @@ def build_danmaku_listener_service(config) -> Optional[DanmakuListenerService]:
         logger.info("[danmaku_listener] enabled=false，托管服务不构建")
         return None
     return DanmakuListenerService(cfg_getter)
+
+
+class _LikeAggregator:
+    """LIKE 窗口聚合：窗内点赞合并为"张三、李四 等 N 人点赞"摘要进对话链
+    （2026-10-03 用户需求：监听到谁点赞——原计数快路径不进对话链致点赞不可见；
+    聚合防高频刷屏，模式同 _DanmuAggregator）。"""
+
+    def __init__(self, on_flush: Callable[[dict], None]):
+        self._on_flush = on_flush
+        self._buf: list[dict] = []
+        self._window_start = time.time()
+
+    def add(self, msg: dict) -> None:
+        payload = msg.get("payload") or {}
+        self._buf.append(payload)
+        if (len(self._buf) >= DANMU_AGG_MAX
+                or time.time() - self._window_start >= DANMU_AGG_WINDOW_S):
+            self.flush()
+
+    def maybe_flush(self) -> None:
+        if self._buf and time.time() - self._window_start >= DANMU_AGG_WINDOW_S:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._buf:
+            return
+        names = [str(p.get("user_name") or "") for p in self._buf]
+        named = [n for n in names if n]
+        shown = "、".join(named[:3])
+        if len(named) > 3:
+            shown += f" 等{len(named)}人"
+        elif not named:
+            shown = "有人"
+        head, rest = self._buf[0], self._buf[1:]
+        merged = dict(head)
+        merged["like_user_summary"] = shown
+        merged["like_count"] = len(self._buf)
+        self._on_flush(merged)
+        self._buf = []
+        self._window_start = time.time()
 
 
 class _DanmuAggregator:
