@@ -86,6 +86,13 @@ class HuyaProtocolEngine(BaseEngine):
         )
         resp.raise_for_status()
         body = resp.text
+        # 房间状态判定（2026-10-06 用户实测：未开播房间 tid 字段全 0/缺失——
+        # 原"房间不存在或页面结构变更"误导；区分未开播与不存在）
+        m_state = re.search(
+            r'TT_ROOM_DATA\s*=\s*\{[^}]*"isOn"\s*:\s*(true|false)', body)
+        if m_state and m_state.group(1) == "false":
+            raise ValueError(
+                f"虎牙房间 {room_id} 未开播——开播后引擎将自动开始监听（持续重试中）")
         m = re.search(r'"tid"\s*:\s*(\d+)', body) or re.search(
             r'"lChannelId"\s*:\s*"?(\d+)', body
         )

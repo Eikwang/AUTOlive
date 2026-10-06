@@ -373,6 +373,10 @@ class BilibiliProtocolEngine(BaseEngine):
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
+                        if self._is_stopping(room_id):
+                            # 停止中的 sent 1000 关闭属预期（2026-10-06 用户实测：
+                            # 内层逐 URL WARNING 噪音）——静默结束任务
+                            return
                         last_err = e
                         logger.warning(
                             f"[bilibili] room {room_id} ws {ws_url} failed: "

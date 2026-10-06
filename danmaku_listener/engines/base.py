@@ -316,6 +316,28 @@ class BaseEngine(ABC):
         """以线格式发射 SYSTEM_STATUS 消息（type 字段与旧 ad-hoc 事件兼容）"""
         await self._emit_message(message.to_wire())
 
+    async def _emit_system_status(self, room_id: str, detail: str) -> None:
+        """ENGINE_STATUS 快捷广播（2026-10-06 平台登录计划——douyu/huya 等直连
+        引擎的登录门槛透出通道；taobao/controlled_base 原有同名实现形状一致，
+        后续可统一收敛到此处）
+
+        Raises 内部异常不向上传播（_emit_message 已兜底）——登录门槛故障
+        不得阻塞监听主流程。
+        """
+        from danmaku_listener.contract.models import Category, Envelope, SystemType
+
+        msg = UnifiedMessage(
+            envelope=Envelope(
+                category=Category.SYSTEM, type=SystemType.ENGINE_STATUS.value,
+                platform=getattr(self, "platform", "unknown"),
+                room_id=room_id, seq=self.next_seq(room_id),
+                timestamp=int(time.time()), engine=self.engine_id,
+            ),
+            payload={"type": "ENGINE_STATUS", "engine": self.engine_id,
+                     "detail": detail},
+        )
+        await self._emit_message(msg.to_wire())
+
     async def _emit_error(self, error: Exception) -> None:
         """触发错误事件
 

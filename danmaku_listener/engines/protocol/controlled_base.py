@@ -116,13 +116,15 @@ class ControlledPageEngine(BaseEngine):
                         logger.debug(f"[{self.platform}] room {room_id} login page "
                                      f"goto warning: {e}")
 
-                    def _cookies():
-                        if cookies_fn is not None:  # Eng F6 seam
-                            return cookies_fn()
-                        return context.cookies()
+                    async def _cookies():
+                        # Eng F6 seam：cookie 读取可注入（同步 list 或 coroutine 均兼容）
+                        if cookies_fn is not None:
+                            r = cookies_fn()
+                            return await r if asyncio.iscoroutine(r) else r
+                        return await context.cookies()
 
                     try:
-                        baseline_names = {c.get("name") for c in _cookies() or []}
+                        baseline_names = {c.get("name") for c in await _cookies() or []}
                     except Exception as e:  # noqa: BLE001
                         logger.info(f"[{self.platform}] room {room_id} login window "
                                     f"closed before baseline ({type(e).__name__})")
@@ -134,7 +136,7 @@ class ControlledPageEngine(BaseEngine):
                                         f"login wait stopped by user")
                             return "stopped"
                         try:
-                            cookies = _cookies() or []
+                            cookies = await _cookies() or []
                         except Exception as e:  # noqa: BLE001
                             logger.info(f"[{self.platform}] room {room_id} login window "
                                         f"closed by user ({type(e).__name__})")

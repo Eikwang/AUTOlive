@@ -36,8 +36,11 @@ LOGIN_COOKIE_NAMES = {
     "taobao": ("unb",),                      # 阿里系统一账号标识（live1688 同源）
     "1688": ("unb",),
     "jd": ("pt_key", "pt_pin"),              # 京东账号对（pt_key 为会话、pt_pin 为账号）
-    "xiaohongshu": ("web_session",),         # 小红书登录会话
-    "douyu": ("dedeuserid",),                # 斗鱼账号 uid（cookie 文件形态）
+    "xiaohongshu": ("id_token",),            # 小红书登录凭证（2026-10-06 实机 probe
+                                             # 实证：游客态就带 web_session 匿名会话——
+                                             # 用它判定即虚假登录；登录后才新增 id_token JWT）
+    "douyu": ("acf_uid", "acf_auth"),        # 斗鱼账号 UID/auth（2026-10-06 实机 probe
+                                             # 实证 36 cookie 无 dedeuserid——acf_* 家族）
     # huya：登录 cookie 名待 spike 期确认（2026-10-06 计划 T9）——多候选+日志校准
     "huya": ("yyuid", "hiido_ui", "u_db_uid"),
 }
@@ -107,18 +110,23 @@ async def ensure_cookie_file_login(
         return "budget_exhausted"
     budgets[room_id] = budget - 1
 
-    # 3. 可见窗口（普通 context——协议直连引擎无 persistent profile 约定）
+    # 3. 可见窗口（**非持久 browser+context**——2026-10-06 用户实测：persistent
+    #    profile 会恢复上次会话标签页（旧房间页）且 goto 失败被吞——登录窗无需
+    #    持久 profile，cookie 文件才是持久层；每次全新 context 无会话恢复）
     await emit_status(
         f"{LOGIN_EVENT_FIRST_LOGIN}: {platform} 登录增强——已弹出浏览器，"
         "请登录账号（当前协议直连不使用登录态，登录凭证存档备用）")
     baseline_names: set = set()
     async with async_playwright() as pw:
         try:
-            context = await pw.chromium.launch_persistent_context(
-                str(cookie_file.parent / f"{platform}_login_profile"),
+            browser = await pw.chromium.launch(
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+                args=["--disable-blink-features=AutomationControlled",
+                      "--hide-crash-restore-bubble"])
+            context = await browser.new_context(
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/131.0.0.0 Safari/537.36"))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[{platform}] room {room_id} login window launch failed: "
                            f"{type(e).__name__}: {str(e)[:80]}")
@@ -136,6 +144,7 @@ async def ensure_cookie_file_login(
                             f"baseline ({type(e).__name__})")
                 return "window_closed"
             deadline = clock() + LOGIN_WAIT_TIMEOUT
+            last_cookies = []
             while clock() < deadline:
                 if stop_flags.get(room_id):  # Eng F3
                     return "stopped"
@@ -144,7 +153,24 @@ async def ensure_cookie_file_login(
                 except Exception as e:  # noqa: BLE001  # Eng F4
                     logger.info(f"[{platform}] room {room_id} login window closed "
                                 f"by user ({type(e).__name__})")
+                    # 登录后直接关窗（2026-10-06 用户实测：轮询 2s 间隔可能没
+                    # 抓到登录 cookie 就关窗）——用最后已知 cookie 判定+存档，
+                    # 登录态不丢，避免重复弹窗
+                    cookies = last_cookies
+                    if has_login_cookie(cookies, names):
+                        names_all = sorted(c.get("name", "") for c in cookies if c.get("name"))
+                        hit = next((c for c in cookies if c.get("name") in names
+                                    and (c.get("value") or "").strip()), None)
+                        logger.info(f"[{platform}] room {room_id} login ok (recovered "
+                                    f"from window close): cookies={names_all} "
+                                    f"hit_mask={mask_cookie((hit or {}).get('value', ''))}")
+                        cookie_file.parent.mkdir(parents=True, exist_ok=True)
+                        cookie_file.write_text(
+                            json.dumps({"cookies": cookies}, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+                        return "logged_in"
                     return "window_closed"
+                last_cookies = cookies
                 if has_login_cookie(cookies, names):
                     # 存档（Eng F2：日志只打名+掩码）
                     names_all = sorted(c.get("name", "") for c in cookies if c.get("name"))
@@ -163,6 +189,7 @@ async def ensure_cookie_file_login(
         finally:
             try:
                 await context.close()
+                await browser.close()  # 非持久 browser——连同浏览器进程关闭
             except Exception:  # noqa: BLE001
                 pass
     return "timeout"

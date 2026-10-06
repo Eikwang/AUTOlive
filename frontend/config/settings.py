@@ -56,23 +56,31 @@ class Settings:
         E-F6：写失败时调用方（开关处理器）需要感知以回滚 UI 状态，
         静默吞异常会造成「开关已翻转 + 假成功提示 + 重启回滚」事故。
 
-        写者分配矩阵（Eng F-ENG-2 critical，2026-10-06）：danmaku_listener 节
-        在 main.py 运行期由窄端点写盘（磁盘 RMW + 内存节刷新）——本进程
-        全量 dump 会用启动时旧快照覆盖回滚。dump 前先从磁盘读回该节，
-        替换内存快照中的对应节（其他节维持本进程内存——无跨进程写者）。
+        写者分配矩阵（Eng F-ENG-2 critical，2026-10-06；R2 实测修正）：danmaku_listener 节
+        的磁盘回读**仅在 main.py 可达时执行**（运行期窄端点是该节的活跃写者——防本进程
+        旧快照覆盖其写入）。main.py 不可达时本进程是该节唯一写者——直接 dump 内存
+        （R2 首版无条件回读会把 set_config 刚写入内存的新值用磁盘旧值覆盖回滚——
+        实测导致房间/关键词/开关全部"保存后消失"）。
         """
         if not self._config:
             raise RuntimeError("内存配置为空，拒绝落盘（防止覆盖既有配置）")
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                disk = json.load(f)
-            if isinstance(disk, dict) and isinstance(disk.get("danmaku_listener"), dict):
-                self._config["danmaku_listener"] = disk["danmaku_listener"]
-        except FileNotFoundError:
-            pass
-        except Exception:
-            from utils.my_log import logger
-            logger.warning("danmaku_listener 节磁盘回读失败——按内存快照落盘", exc_info=True)
+        # 写者分配矩阵（Eng F-ENG-2；R2 实测修正）：danmaku_listener 节磁盘回读
+        # 仅在 main.py 可达时执行（运行期窄端点是该节活跃写者——防旧快照覆盖）。
+        # main.py 不可达时本进程是该节唯一写者——直接 dump 内存。
+        # （首版无条件回读会把 set_config 刚写入内存的新值用磁盘旧值覆盖——
+        #   实测导致房间/关键词/开关全部"保存后消失"；第二版缩进错位使 dump
+        #   整体丢失、save 变 no-op——本版为最终形态，含回归测试双用例。）
+        if self._main_reachable():
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    disk = json.load(f)
+                if isinstance(disk, dict) and isinstance(disk.get("danmaku_listener"), dict):
+                    self._config["danmaku_listener"] = disk["danmaku_listener"]
+            except FileNotFoundError:
+                pass
+            except Exception:
+                from utils.my_log import logger
+                logger.warning("danmaku_listener 节磁盘回读失败——按内存快照落盘", exc_info=True)
         tmp_path = self.config_path.with_suffix(
             self.config_path.suffix + f".tmp{os.getpid()}"
         )
@@ -83,11 +91,24 @@ class Settings:
         except Exception:
             try:
                 if tmp_path.exists():
-                    os.remove(tmp_path)
-            except Exception:
+                    os.unlink(tmp_path)
+            except OSError:
                 pass
             raise
-    
+
+    def _main_reachable(self) -> bool:
+        """main.py 控制面可达性探测（TCP 10ms；无 HTTP 依赖）。api_port 为 main.py FastAPI 端口。"""
+        import socket
+        try:
+            port = int(self.get("api_port", default=8000))
+        except Exception:
+            port = 8000
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return True
+        except OSError:
+            return False
+
     def get(self, *keys: str, default: Any = None) -> Any:
         """
         获取配置值

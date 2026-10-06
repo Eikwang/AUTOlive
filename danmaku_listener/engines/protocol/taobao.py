@@ -394,14 +394,15 @@ class TaobaoWebProtocolEngine(BaseEngine):
                     except Exception as e:  # noqa: BLE001
                         logger.debug(f"[taobao] room {room_id} login page goto warning: {e}")
 
-                    def _cookies():
-                        # Eng F6 seam：cookie 读取可注入
+                    async def _cookies():
+                        # Eng F6 seam：cookie 读取可注入（同步 list 或 coroutine 均兼容）
                         if cookies_fn is not None:
-                            return cookies_fn()
-                        return context.cookies()
+                            r = cookies_fn()
+                            return await r if asyncio.iscoroutine(r) else r
+                        return await context.cookies()
 
                     try:
-                        baseline_names = {c.get("name") for c in _cookies() or []}
+                        baseline_names = {c.get("name") for c in await _cookies() or []}
                     except Exception as e:  # noqa: BLE001
                         # Eng F4：窗口在基线读取前已被用户关闭 → 按关窗分支
                         logger.info(f"[taobao] room {room_id} login window closed before "
@@ -413,7 +414,7 @@ class TaobaoWebProtocolEngine(BaseEngine):
                             logger.info(f"[taobao] room {room_id} login wait stopped by user")
                             return "stopped"
                         try:
-                            cookies = _cookies() or []
+                            cookies = await _cookies() or []
                         except Exception as e:  # noqa: BLE001
                             # Eng F4：窗口被用户直接关闭 → cookies() 抛 TargetClosedError
                             # → 按关窗分支计数，不冒泡成 topic_failed

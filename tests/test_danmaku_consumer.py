@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 from collections import OrderedDict
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -319,40 +320,57 @@ class TestConfigRmw(unittest.TestCase):
 
 
 class TestConfigWriterMatrix(unittest.TestCase):
-    """写者分配矩阵（Eng F-ENG-2 critical 回归）：webui save 不回滚 main.py 写入。"""
+    """写者分配矩阵（Eng F-ENG-2 critical 回归，R2 实测修正后语义）：
+    main.py 可达 → danmaku_listener 节磁盘回读保护（防覆盖窄端点写入）；
+    main.py 不可达 → webui 是唯一写者，直接 dump 内存（配置期直写语义——
+    首版无条件回读会覆盖 set_config 新值，实测房间/关键词"保存后消失"）。"""
 
-    def test_save_preserves_danmaku_section(self):
-        """磁盘上 danmaku_listener 节（main.py 窄端点写入）在 webui 全量 save 后保留。"""
+    def _make(self, tmpdir: str, danmaku_sec: dict) -> Any:
         import json
-        import tempfile
         from frontend.config import settings as fs
-
-        orig_path = fs.Settings.__init__  # 探测类签名用
-        tmpdir = tempfile.mkdtemp()
         cfg_file = os.path.join(tmpdir, "config.json")
-        disk_cfg = {
-            "webui": {"port": 8086},
-            "danmaku_listener": {"rooms": [{"platform": "douyu", "room_id": "9",
-                                            "enabled": True, "active": True}],
-                                 "keywords": ["窄端点写入词"]},
-            "other": {"keep": 1},
-        }
+        disk_cfg = {"webui": {"port": 8086},
+                    "danmaku_listener": danmaku_sec, "other": {"keep": 1}}
         with open(cfg_file, "w", encoding="utf-8") as f:
             json.dump(disk_cfg, f, ensure_ascii=False)
-
         st = fs.Settings(cfg_file)
-        # webui 内存快照里 danmaku_listener 是启动时旧值（空）
-        st._config["danmaku_listener"] = {}
-        st._config["webui"]["port"] = 9090  # webui 自己的改动
-        st.save()
+        return st
 
-        after = json.load(open(cfg_file, encoding="utf-8"))
-        # danmaku_listener 节保留磁盘版本（main.py 写入不丢）
+    def test_main_reachable_preserves_section(self):
+        """main.py 可达：磁盘节（窄端点写入）保留，webui 旧快照不覆盖。"""
+        import json
+        import tempfile
+        from unittest.mock import patch
+        from frontend.config import settings as fs
+        tmpdir = tempfile.mkdtemp()
+        st = self._make(tmpdir, {"rooms": [{"platform": "douyu", "room_id": "9",
+                                            "enabled": True, "active": True}],
+                                 "keywords": ["窄端点写入词"]})
+        st._config["danmaku_listener"] = {}  # webui 内存旧值
+        st._config["webui"]["port"] = 9090
+        with patch.object(fs.Settings, "_main_reachable", return_value=True):
+            st.save()
+        after = json.load(open(os.path.join(tmpdir, "config.json"), encoding="utf-8"))
         self.assertEqual(after["danmaku_listener"]["rooms"][0]["room_id"], "9")
         self.assertEqual(after["danmaku_listener"]["keywords"], ["窄端点写入词"])
-        # webui 自己的节正常保存
         self.assertEqual(after["webui"]["port"], 9090)
-        self.assertEqual(after["other"]["keep"], 1)
+
+    def test_main_unreachable_dumps_memory(self):
+        """main.py 不可达：webui 唯一写者——set_config 新值正常落盘（配置期直写语义）。"""
+        import json
+        import tempfile
+        from unittest.mock import patch
+        from frontend.config import settings as fs
+        tmpdir = tempfile.mkdtemp()
+        st = self._make(tmpdir, {"rooms": [], "keywords": []})  # 磁盘旧值（空）
+        st._config["danmaku_listener"] = {
+            "rooms": [{"platform": "bilibili", "room_id": "77", "enabled": True, "active": True}],
+            "keywords": ["新词"]}
+        with patch.object(fs.Settings, "_main_reachable", return_value=False):
+            st.save()
+        after = json.load(open(os.path.join(tmpdir, "config.json"), encoding="utf-8"))
+        self.assertEqual(after["danmaku_listener"]["rooms"][0]["room_id"], "77")  # 新值落盘
+        self.assertEqual(after["danmaku_listener"]["keywords"], ["新词"])
 
 
 class TestQrSafety(unittest.TestCase):

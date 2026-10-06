@@ -136,7 +136,7 @@ class DouyuProtocolEngine(BaseEngine):
             cookie_path = os.path.join(get_settings().cookie_dir,
                                        f"{self.platform}_login_cookies.json")
             outcome = await LOGIN_GATE.ensure_cookie_file_login(
-                room_id, self.platform, "https://www.douyu.com/login",
+                room_id, self.platform, "https://passport.douyu.com/",
                 cookie_path,
                 self._stop_flags, self._login_budgets, self._budget_warned,
                 lambda detail: self._emit_system_status(room_id, detail))
