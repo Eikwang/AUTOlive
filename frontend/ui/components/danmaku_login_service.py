@@ -52,7 +52,9 @@ class DanmakuLoginService:
     """配置期登录服务（模块级单例；串行队列；每状态迁移结构化日志）。"""
 
     def __init__(self):
-        self._lock = threading.Lock()
+        # RLock（可重入）：request_login 持锁后调 _set_state（同线程再取锁）——
+        # threading.Lock 不可重入会自死锁，冻结 NiceGUI 事件循环（investigate 实测栈）
+        self._lock = threading.RLock()
         self._queue: list[dict] = []          # 待处理登录请求（串行）
         self._state: dict = {"platform": None, "status": "idle", "detail": "",
                              "ts": 0.0}
