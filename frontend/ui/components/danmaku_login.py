@@ -8,14 +8,41 @@ DanmakuListener 扫码登录对话框（整合计划 G5）
 - 过期态：expires_at 到期呈现"已过期"，引擎重发新 NEEDS_LOGIN 自动刷新；UI 提供手动关闭出口
 - 自动关闭：组件内恢复检测（engine=recovered / connected 事件）→ 关闭对话框并弹出队列下一项
 
-数据源：utils.danmaku_consumer.get_service_instance()（轮询，不反向依赖服务模块）。
+数据源（整合计划 P2-3/S5 修复）：main.py 进程控制面 API /danmaku/*（webui 进程轮询）——
+原 get_service_instance() 进程内轮询在双进程架构下恒为 None（服务挂 main.py 进程），
+登录弹窗数据源已断裂；本版经 /danmaku/login_state 与 /danmaku/events 恢复数据流。
 """
+import threading
 from typing import Optional
 
+import requests
 from nicegui import ui
 
-from utils.danmaku_consumer import get_service_instance
 from utils.my_log import logger
+
+
+def _api_base() -> str:
+    try:
+        from frontend.config.settings import get_config
+        return f"http://127.0.0.1:{int(get_config().get('api_port', default=8000))}"
+    except Exception:
+        return "http://127.0.0.1:8000"
+
+
+def _api_get(path: str, timeout: float = 5.0) -> Optional[dict]:
+    try:
+        r = requests.get(f"{_api_base()}{path}", timeout=timeout)
+        return r.json()
+    except Exception:
+        return None
+
+
+def _api_post(path: str, body: Optional[dict] = None, timeout: float = 8.0) -> Optional[dict]:
+    try:
+        r = requests.post(f"{_api_base()}{path}", json=body or {}, timeout=timeout)
+        return r.json()
+    except Exception:
+        return None
 
 # QR 渲染安全钳制（义务块"扫码 UI 安全与状态"）
 _ALLOWED_MIME = {"image/png", "image/jpeg", "image/gif"}
@@ -68,17 +95,15 @@ class DanmakuLoginDialog:
     def _build_entry(self):
         """常驻入口按钮（login_entry 开关控制显示）。"""
         self._entry_row.clear()
-        svc = get_service_instance()
-        cfg = {}
+        login_on = True
         try:
-            cfg = svc._section() if svc else {}
+            from frontend.config.settings import get_config
+            login_on = bool(get_config().get("danmaku_listener", "login_entry", default=True))
         except Exception:
             pass
         with self._entry_row:
-            if cfg.get("login_entry", True):
-                pending = len(svc.login_queue) if svc else 0
-                active = 1 if (svc and svc.login_active) else 0
-                badge = pending + active
+            if login_on:
+                badge = getattr(self, "_last_badge", 0)
                 ui.button(
                     "平台登录" + (f" ({badge})" if badge else ""),
                     icon="qr_code_2",
@@ -103,14 +128,14 @@ class DanmakuLoginDialog:
 
     def _open_dialog(self):
         self._ensure_dialog()
-        self._render_content(force=True)
+        st = _api_get("/danmaku/login_state") or {}
+        self._render_content(st.get("active"), force=True)
         self._dialog.open()
 
     def _close(self, manual: bool = False):
         """关闭对话框；手动关闭=确认当前请求处理完毕，弹出队列下一项。"""
-        svc = get_service_instance()
-        if svc and manual and svc.login_active:
-            svc.ack_login_done()
+        if manual:
+            _api_post("/danmaku/login/ack")
         if self._dialog:
             self._dialog.close()
 
@@ -125,8 +150,11 @@ class DanmakuLoginDialog:
 
     def _refresh_entry(self):
         """入口徽标随队列变化；常驻入口开关变更时重建。"""
-        svc = get_service_instance()
-        badge = (len(svc.login_queue) + (1 if svc and svc.login_active else 0)) if svc else 0
+        st = _api_get("/danmaku/login_state")
+        badge = 0
+        if isinstance(st, dict):
+            badge = int(st.get("queue") or 0) + (1 if st.get("active") else 0)
+        self._last_badge = badge
         want = f"平台登录" + (f" ({badge})" if badge else "")
         current = self._entry_row
         # 简单策略：徽标数变化即重建入口行（构建成本低）
@@ -138,17 +166,17 @@ class DanmakuLoginDialog:
         """对话框开着时：呈现激活的登录请求；恢复/清空自动关闭。"""
         if not (self._dialog and self._dialog.visible):
             return
-        svc = get_service_instance()
-        if svc is None or svc.login_active is None:
+        st = _api_get("/danmaku/login_state")
+        item = (st or {}).get("active")
+        if item is None:
             self._close(manual=False)
             return
-        self._render_content()
+        self._render_content(item)
 
-    def _render_content(self, force: bool = False):
-        svc = get_service_instance()
-        item = svc.login_active if svc else None
+    def _render_content(self, item: Optional[dict], force: bool = False):
         if item is None:
             return
+        st = _api_get("/danmaku/login_state") or {}
         if not force and self._shown_for_ts == item.get("ts"):
             return  # 内容未变化（timer 重绘节流）
         self._shown_for_ts = item.get("ts", 0)
@@ -179,7 +207,7 @@ class DanmakuLoginDialog:
                         "text-body2").style("color:var(--color-warning)")
                 else:
                     ui.label(f"有效期剩余约 {remain // 60} 分 {remain % 60} 秒").classes("text-caption")
-            remaining = len(svc.login_queue)
+            remaining = int((st or {}).get('queue') or 0)
             if remaining:
                 ui.label(f"队列中还有 {remaining} 个登录请求").classes("text-caption")
             ui.label("完成扫码后引擎将自动恢复，本窗口自动关闭").classes("text-caption").style("opacity:0.7")
@@ -230,11 +258,11 @@ class DanmakuEventNotifier:
         self._container = container
 
     def refresh(self):
-        svc = get_service_instance()
-        if svc is None:
+        data = _api_get(f"/danmaku/events?since={self._last_seq}")
+        if not isinstance(data, dict):
             return
-        for event in svc.events_since(self._last_seq):
-            self._last_seq = max(self._last_seq, event["seq"])
+        for event in (data.get("events") or []):
+            self._last_seq = max(self._last_seq, int(event.get("seq") or 0))
             kind = event["kind"]
             ntype = self._NOTIFY_TYPE.get(kind)
             if ntype is None:

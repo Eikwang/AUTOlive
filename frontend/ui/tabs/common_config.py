@@ -38,39 +38,14 @@ def create_common_config_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="common_config")
 
-    # 平台选项
-    platform_options = {
-        'talk': '聊天模式',
-        'bilibili': '哔哩哔哩',
-        'bilibili2': '哔哩哔哩2',
-        'dy': '抖音',
-        'dy2': '抖音2',
-        'ks': '快手',
-        'ks2': '快手2',
-        'pdd': '拼多多',
-        'wxlive': '微信视频号',
-        'taobao': '淘宝',
-        '1688': '1688',
-        'douyu': '斗鱼',
-        'ordinaryroad_barrage_fly': '让弹幕飞',
-        'youtube': 'YouTube',
-        'twitch': 'twitch',
-        'tiktok': 'tiktok',
-    }
-
     chat_type_options = {'custom_llm': '自定义LLM'}
     visual_body_options = {'metahuman_stream': 'metahuman_stream'}
     audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS'}
 
     # 基础配置（3列网格）
     with ui.grid(columns=3):
-        _auto_save(ui.select(
-            label='平台',
-            options=platform_options,
-            value=get_nested_value(config, "platform")
-        ).style("width:100%;"), ("platform",))
-
-        _auto_save(ui.input(label='直播间号', placeholder='一般为直播间URL最后/后面的字母或数字', value=get_nested_value(config, "room_display_id")).style("width:100%;").tooltip('一般为直播间URL最后/后面的字母或数字'), ("room_display_id",))
+        # 旧架构 platform 16 选 1 与 room_display_id 已退役（整合计划 P2-4）：
+        # 监听房间/活跃指定统一在"平台配置"页（DanmakuListener 进程内模块）
 
         _auto_save(ui.select(
             label='大语言模型',
