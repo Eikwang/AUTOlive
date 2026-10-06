@@ -89,16 +89,29 @@ class AutoliveApp:
     """AUTOlive 应用程序类"""
     
     def __init__(self):
-        """初始化应用程序"""
+        """初始化应用程序
+
+        NiceGUI 3.x script mode（整合修复 2026-10-06）：顶层构建 UI 的主脚本被注册为
+        root page——每个浏览器连接都会 runpy 重跑本模块与 main()（__name__='__main__'）。
+        重入（server 已启动）时跳过 Audio/数据库/目录等重活，仅保留 config 与状态字段
+        ——重活每次执行就是"前端不断重启"现象的根因（Audio init 约 12s）。
+        """
         # 初始化基础路径
         self.base_path = get_base_path()
-        
-        # 初始化配置（必须在 _init_directories 之前）
+
+        # 初始化配置（必须在 _init_directories 之前；webui 进程内单例，重入幂等）
         config_path = get_config_path()
         self.config = init_config(str(config_path))
-        
-        # 初始化目录
-        self._init_directories()
+
+        # NiceGUI 3.x 重入判定：server 已启动 = 本次为 root page 重跑（非首次启动）
+        from nicegui import core as _nicegui_core
+        self._reentry = bool(getattr(_nicegui_core.app, "is_started", False))
+        if self._reentry:
+            logger.debug("AutoliveApp 重入（script mode root page）——跳过重活初始化")
+
+        # 初始化目录（重活，仅首次）
+        if not self._reentry:
+            self._init_directories()
         
         # 初始化主题管理器
         self.theme_manager = init_theme_manager(self.config._config)
@@ -123,23 +136,29 @@ class AutoliveApp:
             get_nested_value(self.config._config, "webui", "dark_mode", default=False)
         )
 
-        # 初始化Audio类（与原文件 webui-bak.py L141 一致）
-        try:
-            from utils.audio import Audio
-            self.audio = Audio(str(get_config_path()), type=2)
-            logger.info("Audio初始化完成")
-        except Exception as e:
-            logger.warning(f"Audio初始化失败: {e}")
+        # 初始化Audio类（与原文件 webui-bak.py L141 一致；重活，重入跳过）
+        if self._reentry:
             self.audio = None
+        else:
+            try:
+                from utils.audio import Audio
+                self.audio = Audio(str(get_config_path()), type=2)
+                logger.info("Audio初始化完成")
+            except Exception as e:
+                logger.warning(f"Audio初始化失败: {e}")
+                self.audio = None
 
-        # 初始化数据分析模块（与原文件 webui-bak.py L4939-4941 一致）
-        try:
-            from utils.data_analysis import Data_Analysis
-            self.data_analysis = Data_Analysis(str(get_config_path()))
-            logger.info("数据分析模块初始化完成")
-        except Exception as e:
-            logger.warning(f"数据分析模块初始化失败: {e}")
+        # 初始化数据分析模块（与原文件 webui-bak.py L4939-4941 一致；重活，重入跳过）
+        if self._reentry:
             self.data_analysis = None
+        else:
+            try:
+                from utils.data_analysis import Data_Analysis
+                self.data_analysis = Data_Analysis(str(get_config_path()))
+                logger.info("数据分析模块初始化完成")
+            except Exception as e:
+                logger.warning(f"数据分析模块初始化失败: {e}")
+                self.data_analysis = None
 
         logger.info("AUTOlive 应用程序初始化完成")
     
@@ -1050,6 +1069,13 @@ class AutoliveApp:
         # 发送心跳包（与原文件 webui-bak.py L5127 一致）
         # 注意：心跳包功能需要common模块支持，暂时用日志替代
         ui.timer(9 * 60, lambda: logger.debug("发送心跳包"))
+
+        # NiceGUI 3.x script mode 重入防护：server 已启动时（root page 重跑），
+        # UI 构建已完成（本方法前段），绝不能再 ui.run()——否则端口/事件循环冲突。
+        from nicegui import core as _nicegui_core
+        if getattr(_nicegui_core.app, "is_started", False):
+            logger.debug("AutoliveApp.run() 重入——跳过 ui.run（server 已运行）")
+            return
 
         # 启动应用
         ui.run(
