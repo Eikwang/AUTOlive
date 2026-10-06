@@ -21,6 +21,7 @@ from typing import Dict, Any, Callable
 import requests
 
 from frontend.ui.components.config_helper import get_nested_value
+from utils.my_log import logger
 from frontend.ui.components.danmaku_login_service import get_login_service
 
 # 平台元数据（中文名 / 分组——Design D-2：常用前置+分组下拉）
@@ -256,6 +257,7 @@ def create_platform_config_tab(
                                        "fix_hint": "检查磁盘/权限后重试（状态未翻转）"})
                     return
                 room_input.value = ""
+                _render_rooms()  # 即时渲染（不依赖 3s 轮询——用户问题"添加后不显示列表"）
                 await _toast(f"房间已保存：{_PLATFORM_LABELS[platform]} {spec}")
                 # onboard_room 编排（CEO F2 单入口）：登录检测 → 自动弹窗
                 await _onboard_login(platform)
@@ -296,21 +298,36 @@ def create_platform_config_tab(
             await _toast("关键词已存在", "warning")
             return
         state["kw"] = state["kw"] + [kw]
-        _write_keywords()
+        if not _write_keywords_wrap():
+            await _err_notify({"error": "配置保存失败", "fix_hint": "检查磁盘/权限（状态未翻转）"})
+            return
         kw_input.value = ""
-        _render_kw()
+        _render_kw()  # 即时渲染（DX 发现 2：不依赖轮询）
         if state["mode"] == "running":  # M-1 ③ 热生效
             await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
             await _toast("关键词已保存并即时生效")
 
+    def _write_keywords_wrap() -> bool:
+        """关键词写盘（失败返回 False——DX 发现 5 调用方感知）。"""
+        try:
+            _write_keywords()
+            return True
+        except Exception:
+            logger.error("[platform_config] 关键词写盘失败", exc_info=True)
+            return False
+
     async def _rm_kw(kw: str):
         state["kw"] = [k for k in state["kw"] if k != kw]
-        _write_keywords()
+        if not _write_keywords_wrap():
+            await _err_notify({"error": "配置保存失败", "fix_hint": "词条未删除"})
+            _render_kw()
+            return
         _render_kw()
         if state["mode"] == "running":
             await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
 
     def _render_kw():
+        """关键词词条（NiceGUI 3.16 ui.chip 无 on_removal 参数——badge+close 组合）。"""
         kw_chips.clear()
         with kw_chips:
             if not state["kw"]:
@@ -320,7 +337,10 @@ def create_platform_config_tab(
 
                 async def _rm(k=kw):
                     await _rm_kw(k)
-                ui.chip(kw, removable=True, on_removal=_rm).props("outline")
+                with ui.row().classes("items-center q-px-sm q-py-xs").style(
+                        "border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px);gap:4px"):
+                    ui.label(kw).style("font-size:var(--font-size-small,12px)")
+                    ui.button(icon="close", on_click=_rm).props("flat dense size=xs")
 
     # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
 
@@ -461,6 +481,12 @@ def create_platform_config_tab(
     # ---------- 轮询（3s） ----------
 
     async def _poll():
+        try:
+            await _poll_inner()
+        except Exception:
+            logger.error("[platform_config] 轮询渲染异常（下轮重试）", exc_info=True)
+
+    async def _poll_inner():
         sec = get_nested_value(config, "danmaku_listener", default={}) or {}
         state["rooms_cfg"] = list(sec.get("rooms") or [])
         state["kw"] = list(sec.get("keywords") or [])
