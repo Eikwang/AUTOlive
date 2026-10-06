@@ -207,6 +207,9 @@ class JDProtocolEngine(ControlledPageEngine):
                 return  # 参数问题：重试无意义，等用户改参数
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[jd] room {room_id} error: {type(e).__name__}: {str(e)[:90]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)

@@ -44,8 +44,9 @@ class DouyuProtocolEngine(BaseEngine):
 
     platform = "douyu"
 
-    def __init__(self, state_store=None):
+    def __init__(self, state_store=None, raw_hook=None):
         super().__init__(state_store=state_store)
+        self._raw_hook = raw_hook  # 诊断钩子：未映射 STT type 原始 fields（补映射用）
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._room_writers: Dict[str, asyncio.StreamWriter] = {}
         self._heartbeats: Dict[str, asyncio.Task] = {}
@@ -148,6 +149,9 @@ class DouyuProtocolEngine(BaseEngine):
                 raise
             except Exception as e:
                 logger.warning(f"[douyu] room {room_id} error: {e}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -251,6 +255,13 @@ class DouyuProtocolEngine(BaseEngine):
         """单包分发：标记接收 → 契约映射 → pingreq 应答 → 风控告警"""
         self.mark_received(room_id, ts)
         mapped = codec.map_upstream(fields, self.next_seq(room_id), ts)
+        if mapped is None and self._raw_hook is not None:
+            # 未映射 STT type 原始 fields 落盘（诊断钩子——点赞/关注/人数
+            # 等候选 type 的采样通道，2026-10-05 用户需求）
+            try:
+                self._raw_hook({"type": fields.get("type"), "fields": fields})
+            except Exception:  # noqa: BLE001
+                pass
         if mapped:
             await self._emit_message({
                 "contract_version": "1.0.0",

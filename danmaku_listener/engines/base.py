@@ -87,6 +87,36 @@ class BaseEngine(ABC):
         """
         return None
 
+    async def normalize_room_id(self, room_id: str) -> str:
+        """房间参数归一（add_room 时调用，2026-10-05）
+
+        链接/短链形态的房间参数解析为**安全的规范化 id** 后入库——
+        注册表 room_id 若含 ``:``/``/``（如美团 dpurl.cn 短链），拼进
+        REST 路径会被斜杠打散致启停/删除全部 404（实测 bug）。
+
+        默认原样返回；平台引擎覆写（网络解析须带超时，失败抛 ValueError）。
+        """
+        return room_id
+
+    def _is_stopping(self, room_id: str) -> bool:
+        """房间是否处于主动停止中（2026-10-05 停止语义修复）
+
+        兼容两种停止接口：手写引擎的 ``_stop_flags`` dict 与
+        受控页面基类的 ``_stopped()`` 方法。停止中的连接关闭
+        （``sent 1000 (OK); no close frame received``）是预期行为，
+        _run_room 异常路径据此静默退出——不发 GAP、不标 ERROR、不退避重试。
+        """
+        flags = getattr(self, "_stop_flags", None)
+        if isinstance(flags, dict) and flags.get(room_id):
+            return True
+        meth = getattr(self, "_stopped", None)
+        if callable(meth):
+            try:
+                return bool(meth(room_id))
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
     @property
     def status(self) -> EngineStatus:
         """获取当前状态"""

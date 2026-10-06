@@ -40,6 +40,10 @@ from danmaku_listener.engines.protocol.douyin_assets import douyin_pb2 as dy_pb2
 PROTOCOL_VERSION = "douyin-2"
 
 WEB_SOCKET_URIS = [
+    # 2026-10-03 页面 WS 实证端点（webcast100 集群与页面一致，消息集合完整）
+    "wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/",
+    "wss://webcast100-ws-web-lf.douyin.com/webcast/im/push/v2/",
+    "wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/",
     "wss://webcast5-ws-web-lq.douyin.com/webcast/im/push/v2/",
     "wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/",
     "wss://webcast5-ws-web-hl.douyin.com/webcast/im/push/v2/",
@@ -96,8 +100,10 @@ class DouyinSigner:
                 "barrage-fly 上游 release 重新提取（provenance 见引擎 docstring）")
 
     def sign(self, room_id: str, user_unique_id: str) -> str:
+        # webcast_sdk_version 必须与 URL 查询参数逐字一致（服务端按 URL 参数
+        # 重算 MD5 对比签名——2026-10-03 参数对齐 1.0.15 时不同步即 HTTP 200 拒绝）
         param = ("live_id=1,aid=6383,version_code=180800,"
-                 "webcast_sdk_version=1.0.14-beta.0,"
+                 "webcast_sdk_version=1.0.15,"
                  f"room_id={room_id},sub_room_id=,sub_channel_id=,did_rule=3,"
                  f"user_unique_id={user_unique_id},device_platform=web,device_type=,"
                  "ac=,identity=audience")
@@ -105,14 +111,25 @@ class DouyinSigner:
 
 
 class DouyinRoomInit:
-    """roomInit（游客 HTTP；T2）"""
+    """roomInit（游客 HTTP；T2）；登录态可用时合并登录 cookie"""
 
-    def __init__(self, user_agent: str = UA):
+    def __init__(self, user_agent: str = UA, login_cookies: Optional[Dict[str, str]] = None):
         self._session = requests.Session()
         self._session.headers.update(_HTTP_HEADERS)
+        self._login_cookies = login_cookies or {}
 
     def fetch(self, rid: str) -> Dict[str, Any]:
         """返回 {ttwid, ms_token, real_room, uid}；失败抛 DouyinRoomInitError"""
+        if self._login_cookies:
+            # 只注入身份 cookie；排除 ttwid/msToken（会话级，由 Session 自获——
+            # 2026-10-03 用户实测：登录文件里的 ttwid 与自获 ttwid 域属性不同，
+            # jar 同名共存 → CookieConflictError）。同名残留先删（del 删全部同名）
+            login = {k: v for k, v in self._login_cookies.items()
+                     if k not in ("ttwid", "msToken")}
+            for name in list(login):
+                if name in self._session.cookies:
+                    del self._session.cookies[name]
+            self._session.cookies.update(login)
         try:
             self._session.get("https://live.douyin.com/", timeout=10)
         except Exception as e:  # noqa: BLE001
@@ -154,17 +171,25 @@ class DouyinWebProtocolEngine(BaseEngine):
     platform = "douyin"
 
     def __init__(self, state_store=None, signer: Optional[DouyinSigner] = None,
-                 raw_hook=None):
+                 raw_hook=None, cookie_file: Optional[str] = None):
         super().__init__(state_store=state_store)
         self._signer = signer  # 引擎级单例；默认懒创建（仅 loop 线程）
         self._raw_hook = raw_hook  # 诊断钩子：messageList 原始 method/payload
         self._method_stats: Dict[str, dict] = {}  # 未映射 method 聚合（心跳汇总）
         self._method_stats_seen: Dict[str, dict] = {}  # 全 method 首见记录
-        self._room_init = DouyinRoomInit()
+        # 登录 cookie（2026-10-03 实证：礼物事件只推给登录观众——游客连接
+        # 缺失；sessionid 注入 roomInit 与 WS 握手后消息集合完整）
+        self._cookie_file = cookie_file
+        self._login_cookies: Dict[str, str] = {}
+        if cookie_file:
+            from danmaku_listener.engines.douyin_login import load_login_cookies
+            self._login_cookies = load_login_cookies(cookie_file)
+        self._room_init = DouyinRoomInit(login_cookies=self._login_cookies)
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._room_ws: Dict[str, Any] = {}
         self._heartbeats: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
+        self._last_room_stats: Dict[str, tuple] = {}  # ROOM_STATS 值去重（在线/累计共用）
 
     @property
     def engine_id(self) -> str:
@@ -240,6 +265,9 @@ class DouyinWebProtocolEngine(BaseEngine):
                 backoff = min(backoff * 2, 900.0)
             except Exception as e:
                 logger.warning(f"[douyin] room {room_id} error: {type(e).__name__}: {str(e)[:80]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -288,39 +316,52 @@ class DouyinWebProtocolEngine(BaseEngine):
         from urllib.parse import urlencode
 
         now = int(time.time() * 1000)
+        # 2026-10-03 页面 WS 参数对齐（SDK 1.0.15 实证）：
+        # 1) cursor/internal_ext 大数 = uid 派生（页面实测 r/h/wrds_v 与
+        #    user_unique_id 同前缀——同一基数的 ±10^10 偏移变体，纯随机
+        #    19 位仍被降级：Member/Like/Social 恢复但 RoomStats/Gift 缺失）
+        # 2) 页面 URL 无 web_rid/msToken 参数（msToken 仅在握手 Cookie）
+        try:
+            uid_base = int(ctx["uid"])
+        except (KeyError, ValueError):
+            uid_base = random.randint(10**18, 10**19 - 1)
+
+        def uid_derived() -> str:
+            return str(uid_base + random.randint(-10**11, 10**11))
         qp = [
             ("app_name", "douyin_web"), ("version_code", "180800"),
-            ("webcast_sdk_version", "1.0.14-beta.0"),
-            ("update_version_code", "1.0.14-beta.0"),
+            ("webcast_sdk_version", "1.0.15"),
+            ("update_version_code", "1.0.15"),
             ("compress", "gzip"), ("device_platform", "web"),
             ("cookie_enabled", "true"), ("screen_width", "1280"),
             ("screen_height", "800"), ("browser_language", "zh-CN"),
             ("browser_platform", "Win32"), ("browser_name", "Mozilla"),
             ("browser_version", UA.replace("Mozilla/", "")),
             ("browser_online", "true"), ("tz_name", "Asia/Shanghai"),
-            ("cursor", f"t-{now}_r-1_d-1_u-1_fh-743192"
-                       f"{random.randint(10**12, 10**13 - 1)}"),
+            ("cursor", f"t-{now}_r-{uid_derived()}_d-1_u-1_h-{uid_derived()}"),
             ("internal_ext",
              "internal_src:dim|wss_push_room_id:" + ctx["real_room"] +
              "|wss_push_did:" + ctx["uid"] +
              "|first_req_ms:" + str(now) + "|fetch_time:" + str(now) +
-             "|seq:1|wss_info:0-" + str(now) + "-0-0|wrds_v:743192" +
-             "".join(random.choices("0123456789", k=13))),
+             "|seq:1|wss_info:0-" + str(now) + "-0-0|wrds_v:" + uid_derived()),
             ("host", "https://live.douyin.com"), ("aid", "6383"),
             ("live_id", "1"), ("did_rule", "3"), ("endpoint", "live_pc"),
             ("support_wrds", "1"), ("user_unique_id", ctx["uid"]),
             ("im_path", "/webcast/im/fetch/"), ("identity", "audience"),
             ("need_persist_msg_count", "15"), ("insert_task_id", ""),
             ("live_reason", ""), ("room_id", ctx["real_room"]),
-            ("heartbeatDuration ", "0"), ("signature", sig),
-            ("web_rid", ctx.get("web_rid", "")), ("msToken", ctx["ms_token"]),
+            ("heartbeatDuration", "0"), ("signature", sig),
         ]
         return WEB_SOCKET_URIS[0] + "?" + urlencode(qp)
 
     async def _serve_room(self, room_id: str, ws_url: str, ctx: Dict[str, Any]) -> None:
+        cookie_pairs = [f"ttwid={ctx['ttwid']}", f"msToken={ctx['ms_token']}"]
+        # 登录 cookie 并入握手（礼物事件只推登录观众——2026-10-03 实证）
+        cookie_pairs += [f"{k}={v}" for k, v in self._login_cookies.items()
+                         if k not in ("ttwid",)]
         headers = {
             "User-Agent": UA,
-            "Cookie": f"ttwid={ctx['ttwid']}; msToken={ctx['ms_token']}",
+            "Cookie": "; ".join(cookie_pairs),
             "Origin": "https://live.douyin.com",
         }
         try:
@@ -409,6 +450,21 @@ class DouyinWebProtocolEngine(BaseEngine):
                                 "payload_b64": _b64.b64encode(msg.payload).decode()})
             except Exception:  # noqa: BLE001
                 pass
+        # RoomUserSeq（在线人数）值去重：在 next_seq 之前——seq 只在确认
+        # emit 时消耗（跳号会触发 consumer 侧 GAP 等待）。sig 带 "u" 来源
+        # 标记，与 RoomStatsMessage 的去重键空间隔离
+        if method == "WebcastRoomUserSeqMessage":
+            try:
+                rs = dy_pb2.RoomUserSeqMessage()
+                rs.ParseFromString(msg.payload)
+            except Exception:  # noqa: BLE001
+                return
+            if not rs.total:
+                return
+            sig = ("u", rs.total, rs.totalUser)
+            if sig == self._last_room_stats.get(room_id):
+                return
+            self._last_room_stats[room_id] = sig
         mapped = self._map_message(room_id, msg, self.next_seq(room_id), ts)
         if mapped is None:
             stat = self._method_stats.setdefault(room_id, {})
@@ -433,9 +489,9 @@ class DouyinWebProtocolEngine(BaseEngine):
             })
 
     # ---- 上游消息 → 契约 v1（显式清单，与 test_douyin_protocol.py 对齐）----
+    # 实例方法（RoomUserSeq 在线去重需访问 _last_room_stats 实例状态）
 
-    @staticmethod
-    def _map_message(room_id: str, msg, seq: int,
+    def _map_message(self, room_id: str, msg, seq: int,
                      ts: int) -> Optional[Dict[str, Any]]:
         method = msg.method
         if method == "WebcastChatMessage":
@@ -510,21 +566,37 @@ class DouyinWebProtocolEngine(BaseEngine):
         if method == "WebcastRoomStatsMessage":
             st = dy_pb2.RoomStatsMessage()
             st.ParseFromString(msg.payload)
-            if st.displayType != 0:  # 仅 total 类（displayType 语义未实测前保守过滤）
+            # displayType 语义（2026-10-03 页面 WS 实证 12 例）：1=累计观看
+            # total 类（total=9410 与页面显示一致）——旧过滤"!=0 丢弃"实测
+            # 把全部真实统计滤掉（观看 0 根因）。仅拒已知非 total 变体
+            if st.displayType not in (0, 1):
                 logger.debug(f"[douyin] room {room_id} stats displayType={st.displayType} dropped")
                 return None
             return {
                 "category": "business", "type": "ROOM_STATS", "seq": seq, "timestamp": ts,
-                "payload": {"type": "ROOM_STATS", "total": st.total,
+                "payload": {"type": "ROOM_STATS",
+                            # viewer_count 对齐前端契约键（观看 X 显示）
+                            "viewer_count": st.total,
                             "display_value": st.displayValue,
                             "display_short": st.displayShort},
+            }
+        if method == "WebcastRoomUserSeqMessage":
+            # 房间用户序列（2026-10-03 解码实证：每 2-6s 推送）——
+            # total=当前在线人数、totalUser=累计观看 UV、ranksList=贡献榜
+            rs = dy_pb2.RoomUserSeqMessage()
+            rs.ParseFromString(msg.payload)
+            if not rs.total:
+                return None
+            return {
+                "category": "business", "type": "ROOM_STATS", "seq": seq, "timestamp": ts,
+                "payload": {"type": "ROOM_STATS",
+                            "online_count": rs.total,
+                            "total_user": rs.totalUser},
             }
         if method == "WebcastControlMessage":
             ct = dy_pb2.ControlMessage()
             ct.ParseFromString(msg.payload)
             if ct.status == 3:  # 下播（proto 注释：status = 3 下播）
-                import time as _time
-
                 from danmaku_listener.contract import Category
 
                 return {

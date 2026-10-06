@@ -55,7 +55,11 @@ async def api_get_rooms(request: web.Request) -> web.Response:
 
 
 async def api_add_room(request: web.Request) -> web.Response:
-    """添加房间并启动监听 → AC-002, AC-003"""
+    """添加房间并启动监听 → AC-002, AC-003
+
+    2026-10-05 R2 选项模式：body 可为 {"platform": "douyin", "room": "<房号或链接>"}
+    或旧格式 {"room": "douyin:123"}（兼容保留）。
+    """
     bridge = request.app.get("bridge") or get_bridge()
     try:
         data = await request.json()
@@ -63,11 +67,44 @@ async def api_add_room(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
 
     room = data.get("room", "")
+    platform = data.get("platform", "")
     if not room:
         return web.json_response({"success": False, "error": "Missing 'room' field"}, status=400)
 
     try:
-        result = await bridge.add_room(room)
+        result = await bridge.add_room(room, platform=platform)
+        return web.json_response(result)
+    except Exception as e:
+        from danmaku_listener.web.bridge import RoomError
+        if isinstance(e, RoomError):
+            return web.json_response({"success": False, "error": e.message}, status=e.status)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def api_start_room(request: web.Request) -> web.Response:
+    """启动已保存房间的监听（2026-10-05 R3 按需启动）"""
+    bridge = request.app.get("bridge") or get_bridge()
+    platform = request.match_info["platform"]
+    room_id = request.match_info["room_id"]
+
+    try:
+        result = await bridge.start_room(platform, room_id)
+        return web.json_response(result)
+    except Exception as e:
+        from danmaku_listener.web.bridge import RoomError
+        if isinstance(e, RoomError):
+            return web.json_response({"success": False, "error": e.message}, status=e.status)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def api_stop_room(request: web.Request) -> web.Response:
+    """停止单房间监听（列表保留，2026-10-05 R3）"""
+    bridge = request.app.get("bridge") or get_bridge()
+    platform = request.match_info["platform"]
+    room_id = request.match_info["room_id"]
+
+    try:
+        result = await bridge.stop_room(platform, room_id)
         return web.json_response(result)
     except Exception as e:
         from danmaku_listener.web.bridge import RoomError
@@ -296,6 +333,8 @@ def create_app() -> web.Application:
     cors.add(app.router.add_post("/api/rooms", api_add_room))
     cors.add(app.router.add_delete("/api/rooms/{platform}/{room_id}", api_remove_room))
     cors.add(app.router.add_post("/api/rooms/stop-all", api_stop_all))
+    cors.add(app.router.add_post("/api/rooms/{platform}/{room_id}/start", api_start_room))
+    cors.add(app.router.add_post("/api/rooms/{platform}/{room_id}/stop", api_stop_room))
 
     # 配置参数 API（S2 设置面板）
     cors.add(app.router.add_get("/api/config", api_get_config))

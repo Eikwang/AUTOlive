@@ -32,6 +32,9 @@ LIVE_URL_TEMPLATE = "https://live.1688.com/zb/play.html?feedId={feed_id}"
 PULL_API_ANCHOR = "pullnativemsg"
 SILENCE_TIMEOUT = 90.0  # 弹幕接口响应静默阈值（页面统计约 30s 一条）
 
+# 入场横幅文本形态（2026-10-03 探测实证 3 例）："{脱敏昵称} 进入直播间"
+_BANNER_RE = re.compile(r"^(.{1,30}?)\s*进入直播间$")
+
 HEARTBEAT_FRAME = b"\x3a\x02hb"
 
 
@@ -123,6 +126,7 @@ class Live1688Engine(ControlledPageEngine):
         self._raw_hook = raw_hook  # 诊断钩子：DOM 弹幕条目/pull 原始响应
         self._unmapped_pull: Dict[str, dict] = {}  # pull 未映射聚合（60s 汇总降噪）
         self._last_unmapped_flush = time.monotonic()
+        self._last_room_stats: Dict[str, tuple] = {}  # ROOM_STATS 值去重（值变化才发）
 
     def validate_room_id(self, room_id: str) -> None:
         """add_room 预校验：feedId 可解析"""
@@ -163,6 +167,9 @@ class Live1688Engine(ControlledPageEngine):
                 backoff = min(backoff * 2, 900.0)
             except Exception as e:
                 logger.warning(f"[1688] room {room_id} error: {type(e).__name__}: {str(e)[:90]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -264,14 +271,20 @@ class Live1688Engine(ControlledPageEngine):
         - .msg-text = 内容（恒为纯内容，不含昵称前缀）
         每 2s 全量读取，新指纹条目 emit DANMU。昵称缺失时置空——
         绝不复用内容当昵称（用户实测教训：fallback 曾致 user_name==content）。
+
+        入场横幅（2026-10-03 MutationObserver 探测实证）：pull 通道无入场
+        消息，唯一载体 = DIV.biz-info-message-container（400ms 滑入横幅），
+        文本 `{脱敏昵称} 进入直播间`——解析昵称 emit ENTER_ROOM。
         """
         seen: set = set()  # 已见弹幕指纹（昵称+内容 hash；有界防内存涨）
         seen_list: list = []
+        banner_seen: set = set()  # 已见横幅文本指纹（同一套有界策略）
+        banner_seen_list: list = []
         while not self._stop_flags.get(room_id):
             try:
-                items = await page.evaluate(
+                data = await page.evaluate(
                     """() => {
-                        const out = [];
+                        const danmu = [];
                         document.querySelectorAll(
                             '.pc-living-room-message .comment-message-list .comment-message'
                         ).forEach(el => {
@@ -280,10 +293,18 @@ class Live1688Engine(ControlledPageEngine):
                             const nick = (((fromEl && fromEl.textContent) || '')
                                           .trim().replace(/:$/, '')).trim();
                             const text = (textEl.textContent || '').trim();
-                            if (text) out.push({nick: nick, text: text});
+                            if (text) danmu.push({nick: nick, text: text});
                         });
-                        return out;
+                        const banners = [];
+                        document.querySelectorAll(
+                            '.biz-info-message-container'
+                        ).forEach(el => {
+                            const t = (el.textContent || '').trim();
+                            if (t) banners.push(t);
+                        });
+                        return {danmu: danmu, banners: banners};
                     }""")
+                items = data.get("danmu") or []
                 ts = int(time.time())
                 if items and self._raw_hook is not None:
                     try:
@@ -318,6 +339,30 @@ class Live1688Engine(ControlledPageEngine):
                                     "content": content},
                     }
                     await self._emit_message(self._envelope(room_id, mapped))
+                # 入场横幅 → ENTER_ROOM（文本指纹去重；昵称脱敏形态与弹幕一致）
+                for text in data.get("banners") or []:
+                    if text in banner_seen:
+                        continue
+                    banner_seen.add(text)
+                    banner_seen_list.append(text)
+                    if len(banner_seen_list) > 200:
+                        banner_seen.discard(banner_seen_list.pop(0))
+                    m = _BANNER_RE.match(text)
+                    if not m:
+                        continue
+                    self.mark_received(room_id, ts)
+                    if self._raw_hook is not None:
+                        try:
+                            self._raw_hook({"source": "banner", "text": text})
+                        except Exception:  # noqa: BLE001
+                            pass
+                    mapped = {
+                        "category": "business", "type": "ENTER_ROOM",
+                        "seq": self.next_seq(room_id), "timestamp": ts,
+                        "payload": {"type": "ENTER_ROOM",
+                                    "user_name": m.group(1).strip()},
+                    }
+                    await self._emit_message(self._envelope(room_id, mapped))
                 # pull 未映射 60s 汇总（2026-10-03 用户实测 DEBUG 刷屏降噪）
                 now = time.monotonic()
                 if self._unmapped_pull and now - self._last_unmapped_flush > 60.0:
@@ -326,7 +371,7 @@ class Live1688Engine(ControlledPageEngine):
                         total = sum(kv.values())
                         if total:
                             top = sorted(kv.items(), key=lambda x: -x[1])[:3]
-                            logger.debug(
+                            logger.info(
                                 f"[1688] room {rid} unmapped {total} msgs in 60s, "
                                 f"top keys: {[list(k) for k, _ in top]}")
                     self._unmapped_pull = {rid: {} for rid in self._unmapped_pull}
@@ -420,6 +465,18 @@ class Live1688Engine(ControlledPageEngine):
                 for obj in parse_base64_mixed_message(b64):
                     if not isinstance(obj, dict):
                         continue
+                    # ROOM_STATS 值去重（在 next_seq 之前——seq 只在确认
+                    # emit 时消耗，跳号会触发 consumer 侧 GAP 等待）
+                    if ("subType" not in obj
+                            and ("viewCountFormat" in obj
+                                 or "pageViewCount" in obj
+                                 or "totalCount" in obj)):
+                        sig = (obj.get("onlineCount") or 0,
+                               obj.get("totalCount") or 0,
+                               obj.get("pageViewCount") or 0)
+                        if sig == self._last_room_stats.get(room_id):
+                            continue
+                        self._last_room_stats[room_id] = sig
                     mapped = self._map_message(room_id, obj,
                                                self.next_seq(room_id), ts)
                     if mapped:
@@ -455,12 +512,16 @@ class Live1688Engine(ControlledPageEngine):
                                 "gift_name": gift_name,
                                 "gift_count": obj.get("count", obj.get("num", 1))}}
         if "viewCountFormat" in obj or "pageViewCount" in obj or "totalCount" in obj:
-            current = obj.get("onlineCount", obj.get("current_viewers", 0))
-            total = obj.get("totalCount", obj.get("total_viewers", 0))
+            # 语义校准（2026-10-03 用户实测"观看 0"根因）：onlineCount 恒 0
+            # （阿里不暴露在线数）——观看人数回退 totalCount（观看人数 UV），
+            # 累计浏览用 pageViewCount（PV）；两种精简/完整形态实测并存
+            online = obj.get("onlineCount") or 0
+            uv = obj.get("totalCount") or 0
+            pv = obj.get("pageViewCount") or uv or 0
             return {"category": "business", "type": "ROOM_STATS", "seq": seq,
                     "timestamp": ts,
-                    "payload": {"type": "ROOM_STATS", "viewer_count": current,
-                                "total_view_count": total}}
+                    "payload": {"type": "ROOM_STATS", "viewer_count": online or uv,
+                                "total_view_count": pv}}
         if "nick" in obj and "flowSourceText" in obj:
             identify = obj.get("identify") or {}
             fan_level = identify.get("fanLevel", 0)

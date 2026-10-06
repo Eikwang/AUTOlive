@@ -47,6 +47,11 @@ class DanmakuBridge:
         # 房间状态跟踪
         self._rooms: Dict[str, Dict[str, Any]] = {}
 
+        # 房间注册表持久化（2026-10-05 R3：重启后列表恢复、按需启动）
+        import os
+        self._rooms_file = os.path.join("persistence_data", "rooms.json")
+        self._load_rooms_registry()
+
         # 关键词屏蔽
         self._blocked_keywords: List[str] = []
         self._keyword_filter_enabled: bool = True
@@ -131,6 +136,92 @@ class DanmakuBridge:
         except Exception as e:
             logger.error(f"[kuaishou] start after login failed: {e}")
             await self._broadcast_system_status(room_key, f"登录成功但启动失败: {e}")
+
+    async def _douyin_login_then_start(self, room_key: str, room_id: str, engine: Any, cookie_path: str) -> None:
+        """douyin 受控登录闭环：弹窗口→用户扫码→cookie 保存→自动开始监听
+
+        2026-10-03 五轮采样实证：礼物事件（WebcastGiftMessage）只推给登录
+        观众——游客连接缺失全部礼物消息。登录 cookie 注入 roomInit 与
+        WS 握手后消息集合完整。
+        """
+        from danmaku_listener.engines.douyin_login import run_login_flow
+
+        async def status_cb(status: str) -> None:
+            await self._broadcast_system_status(room_key, f"douyin 登录流程: {status}")
+
+        await self._broadcast_system_status(room_key, "登录窗口已打开，请在浏览器中登录抖音账号")
+        result = await run_login_flow(
+            room_id=room_id, cookie_path=cookie_path, headless=False,
+            on_status=lambda s: status_cb(s),
+        )
+        if result.get("status") != "ok":
+            await self._broadcast_system_status(room_key, "登录未完成——抖音礼物监听需要登录态，请重试")
+            self._rooms[room_key]["status"] = "login_failed"
+            return
+
+        # 登录 cookie 热注入引擎（登录窗口保存的 cookie 即时生效）
+        engine._login_cookies = result.get("cookies", {})
+        engine._room_init._login_cookies = engine._login_cookies
+
+        await self._broadcast_system_status(room_key, "登录成功——开始监听")
+        try:
+            await engine.start(room_id)
+            self._rooms[room_key]["status"] = "running"
+        except Exception as e:
+            logger.error(f"[douyin] start after login failed: {e}")
+            await self._broadcast_system_status(room_key, f"登录成功但启动失败: {e}")
+
+    async def _login_gate(self, room_key: str, platform: str, room_id: str,
+                          engine: Any) -> bool:
+        """平台登录门槛检查（bilibili/kuaishou/douyin 三分支收口，2026-10-05）
+
+        Returns:
+            True = 已进入登录闭环（调用方直接 return，登录完成自动 start）
+            False = 无需登录，调用方继续常规 start 流程
+        """
+        if platform == "bilibili":
+            from danmaku_listener.config.settings import get_settings as _gs
+            from danmaku_listener.engines.bilibili_login import has_login_cookie
+            state_path = _gs().bilibili_cookie_file.replace(
+                "bilibili_cookies.txt", "bilibili_storage_state.json")
+            if not has_login_cookie(state_path):
+                self._rooms[room_key] = {
+                    "platform": platform, "room_id": room_id,
+                    "status": "login_required", "engine_type": "protocol:bilibili",
+                }
+                self._save_rooms_registry()
+                asyncio.create_task(self._bilibili_login_then_start(
+                    room_key, room_id, engine, state_path))
+                return True
+        elif platform == "kuaishou":
+            from danmaku_listener.engines.kuaishou_login import has_login_cookie
+            state_path = getattr(engine, "_cookie_file", None) or \
+                "cookie/kuaishou_storage_state.json"
+            if not has_login_cookie(state_path):
+                self._rooms[room_key] = {
+                    "platform": platform, "room_id": room_id,
+                    "status": "login_required", "engine_type": "protocol:kuaishou",
+                }
+                self._save_rooms_registry()
+                asyncio.create_task(self._kuaishou_login_then_start(
+                    room_key, room_id, engine, state_path))
+                return True
+        elif platform == "douyin":
+            # 礼物事件只推登录观众（2026-10-03 五轮采样实证）——
+            # 游客可收弹幕/进场/点赞/统计，完整消息流需登录 cookie
+            from danmaku_listener.engines.douyin_login import has_login_cookie
+            cookie_path = getattr(engine, "_cookie_file", None) or \
+                "cookie/douyin_cookies.json"
+            if not has_login_cookie(cookie_path):
+                self._rooms[room_key] = {
+                    "platform": platform, "room_id": room_id,
+                    "status": "login_required", "engine_type": "webws:douyin",
+                }
+                self._save_rooms_registry()
+                asyncio.create_task(self._douyin_login_then_start(
+                    room_key, room_id, engine, cookie_path))
+                return True
+        return False
 
     async def _broadcast_system_status(self, room_key: str, detail: str) -> None:
         """ENGINE_STATUS 快捷广播（平台/房间从 room_key 解析）"""
@@ -244,6 +335,49 @@ class DanmakuBridge:
             self._ws_clients -= dead_clients
             logger.debug(f"Removed {len(dead_clients)} dead WS clients")
 
+    # ---- 房间注册表持久化（2026-10-05 R3）----
+
+    def _load_rooms_registry(self) -> None:
+        """启动时恢复房间注册表——全部按 stopped 恢复（按需启动，防重连风暴）"""
+        import os
+
+        try:
+            with open(self._rooms_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            for item in saved:
+                key = f"{item['platform']}:{item['room_id']}"
+                self._rooms[key] = {
+                    "platform": item["platform"],
+                    "room_id": item["room_id"],
+                    "status": "stopped",
+                    "engine_type": item.get("engine_type", ""),
+                }
+            if saved:
+                logger.info(f"Room registry restored: {len(saved)} rooms (all stopped)")
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, KeyError, TypeError, OSError) as e:
+            # 注册表损坏不阻塞启动：回退空列表并告警（用户可重新添加）
+            logger.warning(f"Room registry load failed (fallback empty): {e}")
+
+    def _save_rooms_registry(self) -> None:
+        """原子写房间注册表（tmp + os.replace）"""
+        import os
+
+        try:
+            os.makedirs(os.path.dirname(self._rooms_file) or ".", exist_ok=True)
+            data = [
+                {"platform": r["platform"], "room_id": r["room_id"],
+                 "engine_type": r.get("engine_type", "")}
+                for r in self._rooms.values()
+            ]
+            tmp = self._rooms_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._rooms_file)
+        except OSError as e:
+            logger.error(f"Room registry save failed: {e}")
+
     def _load_blocked_keywords(self) -> None:
         """从文件加载屏蔽关键词"""
         import os
@@ -336,87 +470,89 @@ class DanmakuBridge:
             },
         }
 
-    async def add_room(self, room_spec: str) -> dict:
+    def _get_or_build_engine(self, platform: str) -> Any:
+        """获取/构造 registry 引擎实例（粒度：协议每平台一实例；视频号每房间一实例）"""
+        from danmaku_listener.engines.registry import build_engine
+
+        engine = self._engine_instances.get(platform)
+        if engine is None or platform == "wechat_channels":
+            engine = build_engine(platform)
+            engine.on_message(self._on_engine_message)
+            self._engine_instances[platform] = engine
+        return engine
+
+    async def add_room(self, room_spec: str, platform: str = "") -> dict:
         """添加房间并启动监听（契约 v1：registry 引擎路由全切换）
+
+        Args:
+            room_spec: 房间标识。选项模式下传纯房间号或直播间链接；
+                       未传 platform 时为旧格式 "platform:room_id"
+            platform: 平台标识（选项模式，2026-10-05 R2；空串走旧格式解析）
 
         Returns:
             操作结果字典，包含 room 信息与引擎可用性 warnings
 
         Raises:
-            RoomError: 格式错误(400)、平台不支持(400)、重复(409)、
-                       douyin 单进程 501、启动失败(500)
+            RoomError: 格式错误(400)、平台不支持(400)、运行中重复(409)、
+                       链接提取失败(400)、启动失败(500)
         """
-        from danmaku_listener.utils.platform_parser import parse_room_spec
-        from danmaku_listener.engines.registry import build_engine, PLATFORM_WARNINGS
+        from danmaku_listener.utils.platform_parser import (
+            RoomSpec, extract_from_link, parse_room_spec,
+        )
+        from danmaku_listener.engines.registry import PLATFORM_WARNINGS
 
-        # 1. 校验格式
-        try:
-            spec = parse_room_spec(room_spec)
-        except ValueError as e:
-            raise RoomError(str(e), status=400)
+        # 1. 解析平台与房间号（选项模式 / 旧格式）
+        if platform:
+            platform = platform.strip().lower()
+            text = (room_spec or "").strip()
+            if "://" in text:
+                # 直播间链接：优先静态正则提取房号（六平台）
+                link_spec = extract_from_link(text)
+                if link_spec is not None:
+                    spec = RoomSpec(platform=platform, room_id=link_spec.room_id)
+                else:
+                    # 未知链接形态：整链交引擎归一（2026-10-05 按钮失效修复——
+                    # 美团 dpurl.cn 短链 302 归一为 live_id 后入库，注册表
+                    # room_id 永不含 ://；引擎不认的链接仍由 validate 报 400）
+                    engine = self._get_or_build_engine(platform)
+                    try:
+                        text = await engine.normalize_room_id(text)
+                    except ValueError as e:
+                        raise RoomError(str(e), status=400)
+                    except Exception as e:  # noqa: BLE001
+                        raise RoomError(f"链接解析失败: {str(e)[:80]}", status=400)
+                    spec = RoomSpec(platform=platform, room_id=text)
+            else:
+                if not text:
+                    raise RoomError("房间号不能为空", status=400)
+                spec = RoomSpec(platform=platform, room_id=text)
+        else:
+            # 旧格式（兼容 ws_listen.py 等消费方）
+            try:
+                spec = parse_room_spec(room_spec)
+            except ValueError as e:
+                raise RoomError(str(e), status=400)
 
-        # 2. 检查重复 → AC-013
+        # 2. 检查重复 → AC-013（运行中才拒绝；stopped/待登录可重新走启动流程——
+        #    2026-10-05 R3：注册表恢复后重添加同一房间应视为重新启动）
         room_key = f"{spec.platform}:{spec.room_id}"
-        if room_key in self._rooms:
+        if room_key in self._rooms and self._rooms[room_key].get("status") == "running":
             raise RoomError(f"Room already exists: {room_key}", status=409)
 
-        # 3. douyin：原生 Web WS 直连（2026-09-29 registry 切换）——无特判，
-        #    前置条件（无外部程序）经 PLATFORM_WARNINGS 透出
+        # 3. 构造/复用引擎实例
+        engine = self._get_or_build_engine(spec.platform)
 
-        # 4. 构造/复用 registry 引擎实例（粒度：协议每平台一实例；视频号每房间一实例）
-        engine = self._engine_instances.get(spec.platform)
-        if engine is None or spec.platform == "wechat_channels":
-            engine = build_engine(spec.platform)
-            engine.on_message(self._on_engine_message)
-            self._engine_instances[spec.platform] = engine
+        # 4. 平台自动登录闭环（用户裁定：cookie 获取自动化；三分支见 _login_gate）
+        if await self._login_gate(room_key, spec.platform, spec.room_id, engine):
+            return {
+                "success": True,
+                "status": "login_required",
+                "room": self._rooms[room_key],
+                "message": "需要登录：登录窗口已打开，请在弹出的浏览器中"
+                           "扫码/登录；登录后自动开始监听",
+            }
 
-        # 4.5 平台自动登录闭环（用户裁定：cookie 获取自动化）
-        # bilibili：游客被限流，完整弹幕流需登录态
-        if spec.platform == "bilibili":
-            from danmaku_listener.config.settings import get_settings as _gs
-            from danmaku_listener.engines.bilibili_login import has_login_cookie
-            state_path = _gs().bilibili_cookie_file.replace(
-                "bilibili_cookies.txt", "bilibili_storage_state.json")
-            if not has_login_cookie(state_path):
-                self._rooms[room_key] = {
-                    "platform": spec.platform,
-                    "room_id": spec.room_id,
-                    "status": "login_required",
-                    "engine_type": "protocol:bilibili",
-                }
-                asyncio.create_task(self._bilibili_login_then_start(
-                    room_key, spec.room_id, engine, state_path))
-                return {
-                    "success": True,
-                    "status": "login_required",
-                    "room": self._rooms[room_key],
-                    "message": "需要登录 B站账号（完整弹幕流）：登录窗口已打开，"
-                               "请在弹出的浏览器中扫码/登录；登录后自动开始监听",
-                }
-
-        # kuaishou：游客已被强制登录（2026-09 实测），登录态浏览器承担 token 获取
-        if spec.platform == "kuaishou":
-            from danmaku_listener.engines.kuaishou_login import has_login_cookie
-            state_path = getattr(engine, "_cookie_file", None) or \
-                "cookie/kuaishou_storage_state.json"
-            if not has_login_cookie(state_path):
-                self._rooms[room_key] = {
-                    "platform": spec.platform,
-                    "room_id": spec.room_id,
-                    "status": "login_required",
-                    "engine_type": "protocol:kuaishou",
-                }
-                asyncio.create_task(self._kuaishou_login_then_start(
-                    room_key, spec.room_id, engine, state_path))
-                return {
-                    "success": True,
-                    "status": "login_required",
-                    "room": self._rooms[room_key],
-                    "message": "需要登录快手账号（web 直播间已强制登录）：登录窗口已打开，"
-                               "请在弹出的浏览器中扫码/登录；登录后自动开始监听",
-                }
-
-        # 4.8 房间参数预校验（引擎可解析性——错误前缀立即 400 而非静默循环）
+        # 4.5 房间参数预校验（引擎可解析性——错误前缀立即 400 而非静默循环）
         if hasattr(engine, "validate_room_id"):
             try:
                 engine.validate_room_id(spec.room_id)
@@ -431,13 +567,14 @@ class DanmakuBridge:
         except Exception as e:
             raise RoomError(str(e), status=500)
 
-        # 6. 记录房间状态
+        # 6. 记录房间状态 + 持久化
         self._rooms[room_key] = {
             "platform": spec.platform,
             "room_id": spec.room_id,
             "status": "running",
             "engine_type": engine.engine_id,
         }
+        self._save_rooms_registry()
 
         logger.info(f"*Room added: {room_key} ({engine.engine_id})")
 
@@ -445,6 +582,69 @@ class DanmakuBridge:
         if spec.platform in PLATFORM_WARNINGS:
             result["warnings"] = [PLATFORM_WARNINGS[spec.platform]]
         return result
+
+    async def start_room(self, platform: str, room_id: str) -> dict:
+        """启动已保存房间的监听（注册表保留，2026-10-05 R3 按需启动）
+
+        Raises:
+            RoomError: 房间不存在(404)、启动失败(500)
+        """
+        room_key = f"{platform}:{room_id}"
+        if room_key not in self._rooms:
+            raise RoomError(f"Room not found: {room_key}", status=404)
+
+        if self._rooms[room_key].get("status") == "running":
+            return {"success": True, "room": self._rooms[room_key],
+                    "message": "已在监听中"}
+
+        engine = self._get_or_build_engine(platform)
+
+        # 登录类平台：登录态可能已过期/首次未完成——走同一登录门槛
+        if await self._login_gate(room_key, platform, room_id, engine):
+            return {"success": True, "status": "login_required",
+                    "room": self._rooms[room_key]}
+
+        if hasattr(engine, "validate_room_id"):
+            try:
+                engine.validate_room_id(room_id)
+            except ValueError as e:
+                raise RoomError(str(e), status=400)
+
+        try:
+            await engine.start(room_id)
+        except RoomError:
+            raise
+        except Exception as e:
+            raise RoomError(str(e), status=500)
+
+        self._rooms[room_key]["status"] = "running"
+        self._rooms[room_key]["engine_type"] = engine.engine_id
+        self._save_rooms_registry()
+        logger.info(f"Room started: {room_key}")
+        return {"success": True, "room": self._rooms[room_key]}
+
+    async def stop_room(self, platform: str, room_id: str) -> dict:
+        """停止单房间监听（注册表保留，状态转 stopped，2026-10-05 R3）
+
+        Raises:
+            RoomError: 房间不存在(404)
+        """
+        room_key = f"{platform}:{room_id}"
+        if room_key not in self._rooms:
+            raise RoomError(f"Room not found: {room_key}", status=404)
+
+        engine = self._engine_instances.get(platform)
+        try:
+            if engine is not None:
+                await engine.stop(room_id)
+        except Exception as e:
+            logger.error(f"Error stopping engine for {room_key}: {e}")
+
+        if self._rooms[room_key].get("status") != "stopped":
+            self._rooms[room_key]["status"] = "stopped"
+            self._save_rooms_registry()
+        logger.info(f"Room stopped: {room_key}")
+        return {"success": True, "room": self._rooms[room_key]}
 
     async def remove_room(self, platform: str, room_id: str) -> dict:
         """停止并移除房间
@@ -466,6 +666,7 @@ class DanmakuBridge:
 
         # 从状态中移除
         self._rooms.pop(room_key)
+        self._save_rooms_registry()
 
         # 停止对应 registry 引擎实例的该房间（视频号随房间销毁实例）
         engine = self._engine_instances.get(platform)
@@ -485,7 +686,10 @@ class DanmakuBridge:
         }
 
     async def stop_all(self) -> dict:
-        """停止所有房间监听并恢复系统代理 → AC-006, BR-006
+        """全部暂停：停止所有房间监听但保留列表（2026-10-05 R3 语义变化）
+
+        原语义为清空列表；对齐"按需启动&停止"后改为全部转 stopped，
+        注册表保留，用户可在房间列表逐个重新启动。
 
         Returns:
             操作结果字典
@@ -494,11 +698,9 @@ class DanmakuBridge:
             return {"success": True, "message": "No rooms to stop"}
 
         room_count = len(self._rooms)
-        rooms_snapshot = dict(self._rooms)
-        self._rooms.clear()
 
         # 停止全部 registry 引擎实例的对应房间（视频号随房间销毁实例）
-        for room_key in rooms_snapshot:
+        for room_key in list(self._rooms):
             platform, _, room_id = room_key.partition(":")
             engine = self._engine_instances.get(platform)
             try:
@@ -508,12 +710,14 @@ class DanmakuBridge:
                     self._engine_instances.pop(platform, None)
             except Exception as e:
                 logger.error(f"Error stopping {room_key}: {e}")
+            self._rooms[room_key]["status"] = "stopped"
 
-        logger.info(f"All rooms stopped ({room_count})")
+        self._save_rooms_registry()
+        logger.info(f"All rooms stopped ({room_count}), list preserved")
 
         return {
             "success": True,
-            "message": f"All rooms stopped ({room_count}), proxy restored",
+            "message": f"All rooms stopped ({room_count}), list preserved",
         }
 
     async def _on_danmaku_handler(self, msg: Any) -> None:

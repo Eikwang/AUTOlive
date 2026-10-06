@@ -28,7 +28,7 @@ from danmaku_listener.persistence.room_state_store import RoomStateStore
 PLATFORM_ENGINES = {
     "bilibili": BilibiliProtocolEngine,
     # ADR-001 修订（2026-09-29）：抖音原生 Web WS 直连（T0 冒烟 PASS）——
-    # BarrageGrab 桥接按用户裁定撤销（douyin_grab.py 待 §4C 验证后删除）
+    # BarrageGrab 桥接方案已撤销，douyin_grab.py 已删除（2026-10-05 清理确认）
     "douyin": DouyinWebProtocolEngine,
     "douyu": DouyuProtocolEngine,
     "huya": HuyaProtocolEngine,
@@ -46,16 +46,22 @@ PLATFORM_ENGINES = {
 PLATFORM_WARNINGS = {
     "huya": "虎牙 Tars 协议直连（2026-09-28 实测打通：DANMU/GIFT）；礼物名暂为类型编号",
     "kuaishou": "快手 web 直播间已强制游客登录（2026-09 实测）——首次添加弹登录窗口，登录后自动监听",
-    "douyin": "抖音 Web WS 原生直连（2026-09 T0 冒烟通过：DANMU 实测）——无需外部程序；"
-              "签名资产失效或风控升级时报三段式错误",
+    "douyin": "抖音 Web WS 直连（游客可收弹幕/进场/点赞/关注/房间统计）；礼物事件只推"
+              "登录观众（2026-10-03 实证）——首次添加弹登录窗口扫码一次（cookie 持久化）",
+    "bilibili": "B站 WS 直连——游客可收全部六类消息（2026-10-04 实证：弹幕/进场/"
+                "点赞/礼物/关注/在线；uid=0 为正常游客路径）；登录态为可选增强。"
+                "comet 服务端会定期轮换连接（ConnectionClosed 1000 属正常，自动重连）",
     "meituan": "美团 mapi HTTP 轮询直连（无需登录/浏览器）；live_id 场次级——下播失效，"
-               "开播后重新复制直播间分享链接；1-2s 轮询延迟",
+               "开播后重新复制直播间分享链接（支持 dpurl.cn 短链）；1-2s 轮询延迟。"
+               "进场消息为协议边界（走 Pike WS 签名保护，轮询接口无此数据，2026-10-05 实证）",
     "xiaohongshu": "小红书受控页面 WS 帧拦截（观众侧无需登录）；帧结构按开源实现/"
                    "调研资料实现，待在播房间实测校准",
-    "pdd": "拼多多受控页面 WS 帧拦截（页面自持连接，引擎四层解码下行帧）；"
-           "需直播间页链接；调研实证需扫码登录——未登录行为待实测",
+    "pdd": "拼多多受控页面 WS 帧拦截（页面自持连接，titan 四层解码）——"
+           "2026-10-03 验收通过：入场/点赞/关注/弹幕/房间信息；需直播间"
+           "分享链接，首次添加弹扫码登录",
     "jd": "京东直播独立站（zhibo.jd.com/liveroom，游客可看）受控页面 WS 拦截；"
-          "页面自建 live-ws4 连接免 liveauth 签名；弹幕 body.type 待采样校准",
+          "页面自建 live-ws4 连接免 liveauth 签名——2026-10-03 验收通过："
+          "入场/弹幕（点赞帧为聚合形态无昵称）",
     "wechat_channels": "后台页面/接口结构待实测校准（微信更新可能变更）",
 }
 
@@ -83,6 +89,14 @@ def build_engine(platform: str, state_store: Optional[RoomStateStore] = None, **
         try:
             from danmaku_listener.engines.kuaishou_login import DEFAULT_STATE_PATH
             kwargs.setdefault("cookie_file", DEFAULT_STATE_PATH)
+        except Exception:
+            pass
+    if platform == "douyin":
+        # 登录 cookie（2026-10-03 实证：礼物事件只推登录观众——登录闭环
+        # douyin_login 保存路径，与引擎 WS 握手/roomInit 注入衔接）
+        try:
+            from danmaku_listener.engines.douyin_login import DEFAULT_COOKIE_FILE
+            kwargs.setdefault("cookie_file", DEFAULT_COOKIE_FILE)
         except Exception:
             pass
     if platform in ("1688", "xiaohongshu", "jd", "pdd", "wechat_channels"):

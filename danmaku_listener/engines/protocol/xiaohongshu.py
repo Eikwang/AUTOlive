@@ -105,25 +105,41 @@ def parse_ws_frame(raw) -> List[Dict[str, Any]]:
     return out
 
 
-def map_custom_data(cd: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str, Any]]:
-    """customData → 契约消息映射（纯函数）；未识别类型返回 None
+def map_custom_data(cd: Dict[str, Any], seq: int, ts: int,
+                    nick_cache: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+    """customData → 契约消息映射；未识别类型返回 None
 
     2026-09-30 在播房间实测校准（xhs_raw.jsonl 696 条采样）：
     - 点赞 type=praise（调研推断的 "like" 实测不存在），count 在
       praise_info.count（本次点赞事件聚合数，非累计）；praise 的 profile
-      无 nickname → user_name 置空
+      无 nickname → 查 nick_cache 反查（2026-10-03 用户需求"点赞显示
+      实际用户名"）
     - 礼物 type=gift_dock_and_effect（"gift" 不存在）：send_user_info.nick_name
       （下划线命名）/ base_gift_info.name / gift_action_info.count（本次）；
       gift_comment/gift_settle 为同一次送礼的重复视图（时序实证）——
       跳过防重复计数
     - share → SOCIAL(action=share)；light 为进场来源路径（语义待定，不映射）
+
+    nick_cache（会话内 user_id→nickname 学习表，引擎持有跨帧复用）：
+    - refresh 帧的 room_data.viewers[] 为在线观众全量名单（user_id+nickname）
+    - text/audience_join_v2/follow_emcee/share 的 profile 均带双字段
+    - gift_dock_and_effect 的 send_user_info（id/nick_name）同样入表
     """
+    cache = nick_cache if nick_cache is not None else {}
     cd_type = cd.get("type", "")
     profile = cd.get("profile") or {}
     user_name = str(profile.get("nickname", ""))
     user_id = str(profile.get("user_id", ""))
     base = {"category": "business", "seq": seq, "timestamp": ts}
 
+    if cd_type == "refresh":
+        for v in ((cd.get("room_data") or {}).get("viewers") or []):
+            vid, vnick = str(v.get("user_id", "")), str(v.get("nickname", ""))
+            if vid and vnick:
+                cache[vid] = vnick
+        return None
+    if user_id and user_name:
+        cache[user_id] = user_name
     if cd_type == "text":
         content = (cd.get("desc") or "").strip()
         if not content:
@@ -139,11 +155,11 @@ def map_custom_data(cd: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str,
         count = (cd.get("praise_info") or {}).get("count", 1)
         if not isinstance(count, int) or count < 1:
             count = 1
-        # praise 帧 profile 无 nickname（协议限制）——透传 user_id 供前端
-        # 展示"用户 xxx 点赞"（2026-10-02 用户实测反馈）
+        # praise 帧 profile 无 nickname——按 user_id 查会话学习表（观众名单/
+        # 弹幕/进场/关注帧学到的昵称），未命中置空（前端回退"有人"）
         return {**base, "type": "LIKE",
-                "payload": {"type": "LIKE", "user_name": "",
-                            "user_id": str(profile.get("user_id", "")),
+                "payload": {"type": "LIKE", "user_name": cache.get(user_id, ""),
+                            "user_id": user_id,
                             "count": count}}
     if cd_type == "gift_dock_and_effect":
         send = cd.get("send_user_info") or {}
@@ -155,12 +171,15 @@ def map_custom_data(cd: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str,
         count = action.get("count", 1)
         if not isinstance(count, int) or count < 1:
             count = 1
+        send_id, send_nick = str(send.get("id", "")), str(send.get("nick_name", ""))
+        if send_id and send_nick:
+            cache[send_id] = send_nick
         # 价格：按名查实测价格表（薯币）；coins（协议自带单价）优先
         unit = gift.get("coins") or lookup_price(gift_name)
         return {**base, "type": "GIFT",
                 "payload": {"type": "GIFT",
-                            "user_name": str(send.get("nick_name", "")),
-                            "user_id": str(send.get("id", "")),
+                            "user_name": send_nick,
+                            "user_id": send_id,
                             "gift_name": gift_name, "gift_count": count,
                             "gift_value": unit * count}}
     if cd_type == "follow_emcee":
@@ -187,6 +206,9 @@ class XiaohongshuEngine(ControlledPageEngine):
                  raw_hook=None):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._raw_hook = raw_hook  # 诊断钩子：每个解析出的 customData（含未映射）回调
+        # 会话内 user_id→nickname 学习表（refresh 观众名单/弹幕/进场/关注/
+        # 礼物帧学习；praise 帧无昵称靠它反查——2026-10-03 用户需求）
+        self._nick_cache: Dict[str, str] = {}
 
     def validate_room_id(self, room_id: str) -> None:
         try:
@@ -220,6 +242,9 @@ class XiaohongshuEngine(ControlledPageEngine):
                 backoff = min(backoff * 2, 900.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[xhs] room {room_id} error: {type(e).__name__}: {str(e)[:90]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -280,6 +305,7 @@ class XiaohongshuEngine(ControlledPageEngine):
                     self._raw_hook(cd)
                 except Exception:  # noqa: BLE001
                     pass
-            mapped = map_custom_data(cd, self.next_seq(room_id), int(time.time()))
+            mapped = map_custom_data(cd, self.next_seq(room_id), int(time.time()),
+                                     self._nick_cache)
             if mapped:
                 await self._emit_message(self._envelope(room_id, mapped))

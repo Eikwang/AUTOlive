@@ -437,6 +437,33 @@ def decode_send_item(data: bytes) -> Dict[str, Any]:
     }
 
 
+def decode_vip_enter_banner(data: bytes) -> Dict[str, Any]:
+    """VipEnterBanner（uri 6110）→ 贵宾进场字段
+
+    布局（2026-10-04 dump_tars 递归解析实证，房间 29330704）：
+    tag0/tag3.tag11 为时间戳类值，tag1=昵称、tag2=**会话 tid（非用户 uid，
+    三条不同昵称样本同值实证）**、tag3=struct{tag3=贵族称号（如"剑士"）、
+    tag8=等级}、tag6=头像 URL、tag15=struct{tag1=坐骑名、tag2=前缀文案
+    （"骑着"→"骑着烽烟战马驾临!"）}。用户 uid 字段待再采样确认——不传。
+    """
+    is_ = TarsInputStream(data)
+    nick = is_.read_string(1, "")
+    noble = ""
+    if is_.skip_to_tag(3) and is_.enter_struct():
+        noble = is_.read_string(3, "")
+        is_.skip_to_struct_end()
+    avatar = is_.read_string(6, "")
+    mount = ""
+    if is_.skip_to_tag(15) and is_.enter_struct():
+        mount = is_.read_string(1, "")
+    return {
+        "user_name": nick,
+        "noble": noble,
+        "avatar": avatar,
+        "mount": mount,
+    }
+
+
 # ---- 上游消息 → 契约 v1 ----
 
 def decode_gift_list(payload: bytes) -> Dict[int, str]:
@@ -516,6 +543,20 @@ def map_upstream(payload: bytes, uri: int, seq: int, ts: int,
             },
         }
     if uri == URI_VIP_ENTER_BANNER:
-        # VipEnterBanner 结构未移植（进场横幅，可选映射）——v1 暂略
-        return None
+        # 贵宾进场横幅（2026-10-04 布局实证 + 用户需求"监听驾临直播间"）
+        d = decode_vip_enter_banner(payload)
+        if not d.get("user_name"):
+            return None
+        return {
+            "category": "business",
+            "type": "ENTER_ROOM",
+            "seq": seq,
+            "timestamp": ts,
+            "payload": {
+                "type": "ENTER_ROOM",
+                "user_name": d["user_name"],
+                "noble": d.get("noble") or "",
+                "mount": d.get("mount") or "",
+            },
+        }
     return None

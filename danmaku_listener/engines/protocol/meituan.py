@@ -15,7 +15,16 @@ messageVO.msgs[]，按 commentId 去重后增量 emit。弹幕读取无需登录
 消息映射（一期按实测样本最小集）：
 - imUserDTO+imMsgDTO → DANMU（userName/userId/content/commentId）
 - liveInfoVo.beginTime → 历史场次一次性提示（SYSTEM_STATUS）
-- 其余形态（进入/点赞等 msgType）debug 丢弃——实测样本后校准（TODOS）
+- 其余形态（点赞等 msgType）debug 丢弃——实测样本后校准（TODOS）
+
+**协议边界（2026-10-05 四轮采样实证）：进场消息不进本引擎。**
+用户实测进出直播间（raw_hook 落盘 1630+ 条消息 + 页面 CDP 抓帧）：
+①轮询响应 messageVO.msgs 全部为 msgType=2（聊天，快照恒 10 条增量），
+无任何进场形态；②页面进场横幅"XXX 进入直播间"走独立 Pike IM 长连接
+（wss://pike-room-webhl.meituan.com/pike/?bizId=dzu_live_pike，engine.io
+v3），登录帧含 H5guard signature 风控签名——纯 Python 直连需复现签名
+（treadmill 风险，用户裁定按协议边界申报不做，见 TODOS.md 美团条目）。
+弹幕/房间统计（点赞/热度）不受影响。
 """
 
 import asyncio
@@ -106,6 +115,18 @@ class MeituanPollEngine(BaseEngine):
         except MeituanParseError as e:
             raise ValueError(str(e)) from e
 
+    async def normalize_room_id(self, room_id: str) -> str:
+        """短链/链接归一为 live_id（2026-10-05 按钮失效修复——注册表
+        room_id 含 :// 会让 REST 路径匹配失败，启停/删除全部 404）"""
+        try:
+            spec = extract_live_id(room_id)
+        except MeituanParseError as e:
+            raise ValueError(str(e)) from e
+        try:
+            return await asyncio.wait_for(self._resolve_live_id(spec), timeout=12.0)
+        except MeituanParseError as e:
+            raise ValueError(str(e)) from e
+
     # ---- 公开契约 ----
 
     async def start(self, room_id: str) -> None:
@@ -169,6 +190,9 @@ class MeituanPollEngine(BaseEngine):
                 logger.warning(f"[meituan] room {room_id} poll error: "
                                f"{type(e).__name__}: {str(e)[:80]}")
                 if fail_count == FAIL_THRESHOLD:
+                    if self._is_stopping(room_id):
+                        return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                     self._set_status(self.status.__class__.ERROR)
                     self.mark_gap_start(room_id)
                     gap = self.build_gap_message(room_id, GapReason.NETWORK)

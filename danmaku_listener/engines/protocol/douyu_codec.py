@@ -173,4 +173,18 @@ def map_upstream(fields: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str
             "payload": {"type": "ROOM_STATS", "viewer_count": viewer},
             "seq": seq, "timestamp": ts,
         }
+    if msg_type == "oun":
+        # 在线人数（2026-10-05 dump 实证：un=当前在线数，每数秒推送，
+        # 值随观众进出实时变化——用户需求"在线人数"的真实载体）
+        try:
+            online = int(fields.get("un", 0))
+        except (TypeError, ValueError):
+            return None
+        if online <= 0:
+            return None
+        return {
+            "category": "business", "type": "ROOM_STATS",
+            "payload": {"type": "ROOM_STATS", "online_count": online},
+            "seq": seq, "timestamp": ts,
+        }
     return None

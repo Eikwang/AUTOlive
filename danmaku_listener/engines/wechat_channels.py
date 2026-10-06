@@ -22,6 +22,7 @@ storage_state 持久化 → 自动开始监听。有界会话：4h 事件驱动�
 import asyncio
 import base64
 import json
+import os
 import time
 from typing import Any, Dict
 
@@ -81,10 +82,32 @@ class WechatChannelsEngine(ControlledPageEngine):
                  raw_hook=None):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._session_lifetime = session_lifetime
+        if raw_hook is None:
+            # WXSP_RAW_DUMP=path：serve 通道诊断开关（脚本通道用构造传参；
+            # serve 构造不带 raw_hook，环境变量兜底——系统端 live/msg 原始样本）
+            raw_hook = self._make_env_dump_hook()
         self._raw_hook = raw_hook  # 诊断钩子：live/msg 响应 body（分析用）
         self._msglist_types: Dict[str, dict] = {}  # 未处理 msgList type 聚合
         self._last_live_status: Dict[str, Any] = {}  # live_status（状态变化才发 LIVE_STATUS_CHANGE）
         self._last_stats_vals: Dict[str, tuple] = {}  # (online, like_cnt)（值变化才发 ROOM_STATS）
+
+    @staticmethod
+    def _make_env_dump_hook():
+        """WXSP_RAW_DUMP=path → 自动 raw_hook（追加写 jsonl；未设置返回 None）"""
+        path = os.environ.get("WXSP_RAW_DUMP")
+        if not path:
+            return None
+        try:
+            fh = open(path, "a", encoding="utf-8")  # noqa: SIM115 — 引擎生命周期同进程
+        except OSError as e:
+            logger.warning(f"[wxsp] WXSP_RAW_DUMP 打开失败（诊断 dump 关闭）: {e}")
+            return None
+
+        def hook(body):
+            fh.write(json.dumps({"ts": time.time(), "kind": "raw", "data": body},
+                                ensure_ascii=False, default=str) + "\n")
+            fh.flush()
+        return hook
 
     # ---- 登录与会话（单会话长跑模式——2026-09-30 实测：视频号后台登录态
     #      不支持静置恢复，关闭浏览器后 cookie 快速失效；登录、导航、监听

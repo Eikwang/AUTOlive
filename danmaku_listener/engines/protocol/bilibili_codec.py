@@ -246,6 +246,180 @@ def _map_social(data: dict, seq: int, ts: int, action: str = "follow") -> Option
     return {"category": "business", "type": "SOCIAL", "payload": payload, "seq": seq, "timestamp": ts}
 
 
+# ============ V2 protobuf 消息（2026-10-04 SEND_GIFT_V2/INTERACT_WORD_V2） ============
+
+def _pb_read_varint(buf: bytes, i: int) -> tuple:
+    v = shift = 0
+    while True:
+        b = buf[i]
+        v |= (b & 0x7F) << shift
+        i += 1
+        if not (b & 0x80):
+            return v, i
+        shift += 7
+        if shift > 63:
+            raise ValueError("varint too long")
+
+
+def _pb_decode_raw(buf: bytes, depth: int = 0) -> list:
+    """无 schema protobuf 递归解码：[(field_no, value)]（LEN 型文本优先，嵌套次之）"""
+    out = []
+    i = 0
+    n = len(buf)
+    while i < n:
+        try:
+            key, i = _pb_read_varint(buf, i)
+        except (IndexError, ValueError):
+            break
+        fno, wt = key >> 3, key & 7
+        if wt == 0:
+            try:
+                v, i = _pb_read_varint(buf, i)
+            except (IndexError, ValueError):
+                break
+            out.append((fno, v))
+        elif wt == 2:
+            try:
+                ln, i = _pb_read_varint(buf, i)
+            except (IndexError, ValueError):
+                break
+            if i + ln > n:
+                break
+            chunk = buf[i:i + ln]
+            i += ln
+            try:
+                t = chunk.decode("utf-8")
+                if all(31 < ord(c) or c in "\n\t" for c in t):
+                    out.append((fno, t))
+                    continue
+            except (UnicodeDecodeError, ValueError):
+                pass
+            if depth < 6:
+                try:
+                    sub = _pb_decode_raw(chunk, depth + 1)
+                    if sub:
+                        out.append((fno, sub))
+                        continue
+                except Exception:
+                    pass
+            out.append((fno, chunk.hex()[:48]))
+        elif wt == 5:
+            i += 4
+        elif wt == 1:
+            i += 8
+        else:
+            break
+    return out
+
+
+def _pb_flatten(fields: list, prefix: str = "") -> dict:
+    """拍平嵌套字段 → {"f10.f2": value}"""
+    d = {}
+    for fno, val in fields:
+        k = f"{prefix}f{fno}"
+        if isinstance(val, list):
+            d.update(_pb_flatten(val, k + "."))
+        else:
+            d[k] = val
+    return d
+
+
+def _map_send_gift_v2(pb_b64: str, seq: int, ts: int) -> Optional[Dict[str, Any]]:
+    """SEND_GIFT_V2（pb）→ GIFT——字段布局 2026-10-04 dump 14 条样本实证"""
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(pb_b64 + "=" * (-len(pb_b64) % 4))
+        d = _pb_flatten(_pb_decode_raw(raw))
+    except Exception:
+        return None
+    uname = str(d.get("f2", ""))
+    gift_name = str(d.get("f10.f2", ""))
+    gift_id = d.get("f10.f1")
+    count = d.get("f10.f3") or 1
+    if not gift_name or not uname:
+        return None
+    return {
+        "category": "business",
+        "type": "GIFT",
+        "payload": {
+            "type": "GIFT",
+            "user_name": uname,
+            "user_id": None,
+            "gift_name": gift_name,
+            "gift_id": str(gift_id) if gift_id else "",
+            "gift_count": int(count),
+            "gift_value": 0,  # V2 pb 未暴露价格字段——待价格源补充
+        },
+        "seq": seq,
+        "timestamp": ts,
+    }
+
+
+def _map_interact_word_v2(pb_b64: str, seq: int, ts: int) -> Optional[Dict[str, Any]]:
+    """INTERACT_WORD_V2（pb）→ ENTER_ROOM / SOCIAL——f2=昵称、f5=msg_type
+    （V1 JSON 语义：1=进场、2=关注、3=分享——2026-10-04 用户实测关注被
+    误报进场，f5 分发修正）、f6=房间号、f22.f4.f1=粉丝牌等级"""
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(pb_b64 + "=" * (-len(pb_b64) % 4))
+        d = _pb_flatten(_pb_decode_raw(raw))
+    except Exception:
+        return None
+    uname = str(d.get("f2", ""))
+    if not uname:
+        return None
+    payload = {"type": "ENTER_ROOM", "user_name": uname}
+    medal = d.get("f22.f4.f1")
+    if medal:
+        payload["fan_level"] = int(medal)
+    if d.get("f5") in (2, 3):
+        # 关注/分享统一识别为 follow（2026-10-04 用户裁定：监听侧不区分）
+        return {
+            "category": "business",
+            "type": "SOCIAL",
+            "payload": {"type": "SOCIAL", "action": "follow",
+                        "user_name": uname},
+            "seq": seq,
+            "timestamp": ts,
+        }
+    return {
+        "category": "business",
+        "type": "ENTER_ROOM",
+        "payload": payload,
+        "seq": seq,
+        "timestamp": ts,
+    }
+
+
+def _map_entry_effect(data: dict, seq: int, ts: int) -> Optional[Dict[str, Any]]:
+    """ENTRY_EFFECT（JSON）→ ENTER_ROOM——copy_writing="<%昵称%> 来了"
+    （昵称全名不打码；与 INTERACT_WORD_V2 对同一观众会产生两条进场，接受）"""
+    copy_writing = str(data.get("copy_writing") or "")
+    uid = data.get("uid")
+    nick = ""
+    tail = copy_writing
+    if "<%" in copy_writing and "%>" in copy_writing:
+        try:
+            nick = copy_writing.split("<%", 1)[1].split("%>", 1)[0]
+            tail = copy_writing.split("%>", 1)[1].strip()
+        except IndexError:
+            nick = ""
+    if not nick:
+        return None
+    payload = {"type": "ENTER_ROOM", "user_name": nick}
+    if tail:
+        payload["content"] = tail
+    if uid:
+        payload["user_id"] = str(uid)
+    return {
+        "category": "business",
+        "type": "ENTER_ROOM",
+        "payload": payload,
+        "seq": seq,
+        "timestamp": ts,
+    }
+
+
 def map_upstream_message(cmd: str, body: Any, seq: int, ts: int) -> Optional[Dict[str, Any]]:
     """上游消息 → 契约 v1 线格式片段（category/type/payload/seq/timestamp）
 
@@ -255,10 +429,26 @@ def map_upstream_message(cmd: str, body: Any, seq: int, ts: int) -> Optional[Dic
         return _map_danmu_msg(body, seq, ts) if isinstance(body, list) else None
     if cmd in ("GIFT", "SEND_TOP_GIFT", "COMBO_SEND"):
         return _map_gift(body, seq, ts) if isinstance(body, dict) else None
-    if cmd in ("INTERACT_WORD", "INTERACT_WORD_V2"):
+    if cmd == "SEND_GIFT_V2":
+        # 2026-10-04 pb 结构 decode_raw 实证（14 条样本对照）：f2=送礼者
+        # （服务端打码形态"天***"）、f10{f1=gift_id,f2=礼物名(协议自带),
+        # f3=本次数量}；价格字段未暴露——gift_value 暂 0
+        return (_map_send_gift_v2(body.get("pb"), seq, ts)
+                if isinstance(body, dict) and body.get("pb") else None)
+    if cmd in ("INTERACT_WORD",):
         return _map_enter(body, seq, ts) if isinstance(body, dict) else None
-    if cmd in ("LIKE_MSG", "LIKE_CLICK_V3"):
+    if cmd == "INTERACT_WORD_V2":
+        # V2 数据体为 pb（2026-10-04 实证：f2=昵称、f6=房间号、
+        # f22.f4.f1=粉丝牌等级）；旧 JSON 体走 _map_enter 兼容
+        if isinstance(body, dict) and body.get("pb"):
+            return _map_interact_word_v2(body.get("pb"), seq, ts)
+        return _map_enter(body, seq, ts) if isinstance(body, dict) else None
+    if cmd == "ENTRY_EFFECT":
+        # 进场横幅（JSON；昵称全名不打码——"<%昵称%> 来了"）
+        return _map_entry_effect(body, seq, ts) if isinstance(body, dict) else None
+    if cmd in ("LIKE_MSG", "LIKE_CLICK_V3", "LIKE_INFO_V3_CLICK"):
         return _map_like(body, seq, ts) if isinstance(body, dict) else None
+    # LIKE_INFO_V3_UPDATE：总赞数变化（无昵称/无点击事件）——不映射防噪音
     if cmd == "SUPER_CHAT_MESSAGE":
         return _map_super_chat(body, seq, ts) if isinstance(body, dict) else None
     if cmd == "GUARD_BUY":

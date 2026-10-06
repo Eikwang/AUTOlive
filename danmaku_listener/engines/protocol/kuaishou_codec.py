@@ -10,6 +10,7 @@
 """
 
 import gzip
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -146,26 +147,41 @@ def map_feed_push(payload: bytes, seq_start: int, ts: int) -> List[Dict[str, Any
         })
 
     if push.displayWatchingCount or push.displayLikeCount:
+        viewer = _parse_display(push.displayWatchingCount)
+        like = _parse_display(push.displayLikeCount)
+        if viewer is None and like is None:
+            # 解析全失败（脏格式，如非纯数字后缀）——不 emit 空统计帧
+            # （2026-10-05 用户实测：前端出现空 [快手] 行的根因之一）
+            return results
         seq += 1
         results.append({
             "category": "business", "type": "ROOM_STATS",
-            "payload": {"type": "ROOM_STATS", "viewer_count": _parse_display(push.displayWatchingCount),
-                        "total_likes": _parse_display(push.displayLikeCount)},
+            "payload": {"type": "ROOM_STATS", "viewer_count": viewer,
+                        "total_likes": like},
             "seq": seq, "timestamp": ts,
         })
     return results
 
 
 def _parse_display(display: str) -> Optional[int]:
-    """展示计数（如 "1.2万"）→ 整数；无法解析返回 None"""
+    """展示计数（如 "1.3万"）→ 整数；无法解析返回 None
+
+    2026-10-05 增强：宽松匹配数字+万/亿单位（脏后缀如 "1.3万人" 兼容），
+    千分位逗号剥离；完全无法解析返回 None（调用方决定是否 emit）。
+    """
     if not display:
         return None
     try:
-        if display.endswith("万"):
-            return int(float(display[:-1]) * 10000)
-        if display.endswith("亿"):
-            return int(float(display[:-1]) * 100000000)
-        return int(display)
+        m = re.search(r"([\d.]+)\s*万", display)
+        if m:
+            return int(float(m.group(1)) * 10000)
+        m = re.search(r"([\d.]+)\s*亿", display)
+        if m:
+            return int(float(m.group(1)) * 100000000)
+        m = re.search(r"\d[\d,]*", display)
+        if m:
+            return int(m.group().replace(",", ""))
+        return None
     except ValueError:
         return None
 

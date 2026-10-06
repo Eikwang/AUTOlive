@@ -35,6 +35,36 @@ PROTOCOL_VERSION = "pdd-1"
 
 SILENCE_TIMEOUT = 120.0  # 业务帧静默阈值（拼多多弹幕可能稀疏）
 
+# 游客降级检测（2026-10-05 实证：登录会话失效后服务端仍推 live_audience_num/
+# live_chat_notice(enter)，但 live_chat/live_chat_ext_v2/show_thumb_up_count
+# 全部停推——cookie 文件在而服务端会话已失效时，登录判定（查 cookie 存在性）
+# 检测不到，前端表现"只有观看量和入场"）。窗口判定：观众活跃（notice 多、
+# 观众数达标）且弹幕/点赞类帧为零 → 判定降级，触发重登闭环。
+DEGRADE_WINDOW = 90.0        # 判定窗口（秒）
+DEGRADE_MIN_NOTICE = 3       # 窗口内入场通知最少条数（观众活跃证据）
+DEGRADE_MIN_AUDIENCE = 100   # 观众数下限（冷清房间不判定）
+
+
+def is_degraded_window(elapsed: float, notice_count: int, audience_num: int,
+                       chat_count: int, ext_count: int) -> bool:
+    """会话降级判定（纯函数，供单测）
+
+    Args:
+        elapsed: 会话运行秒数
+        notice_count: live_chat_notice 帧数（enter 等通知）
+        audience_num: 最近一次观看数
+        chat_count: live_chat（弹幕）帧数
+        ext_count: live_chat_ext_v2（点赞/关注）帧数
+    """
+    if elapsed < DEGRADE_WINDOW:
+        return False
+    if notice_count < DEGRADE_MIN_NOTICE:
+        return False
+    if audience_num < DEGRADE_MIN_AUDIENCE:
+        return False
+    # 观众活跃但互动消息全无 → 降级
+    return chat_count == 0 and ext_count == 0
+
 
 class PDDParseError(ValueError):
     """房间参数无法解析"""
@@ -275,29 +305,22 @@ def map_pdd_message(obj: Dict[str, Any], seq: int, ts: int) -> List[Dict[str, An
             if not isinstance(n, dict):
                 continue
             # 点赞 121 + 关注 116（2026-10-03 恢复）；购买 120 不映射
-            if n.get("sub_type") in (121, 116):
-                body = n.get("body") or {}
-                action = "like" if n.get("sub_type") == 121 else "follow"
-                if n.get("sub_type") == 121:
-                    out.append({
-                        "category": "business", "type": "LIKE", "seq": seq,
-                        "timestamp": ts,
-                        "payload": {"type": "LIKE",
-                                    "user_name": str(body.get("title", "")),
-                                    "count": 1}})
-                else:
-                    out.append({
-                        "category": "business", "type": "SOCIAL", "seq": seq,
-                        "timestamp": ts,
-                        "payload": {"type": "SOCIAL", "action": "follow",
-                                    "user_name": str(body.get("title", ""))}})
-                body = n.get("body") or {}
+            # （2026-10-05 修编辑事故：原先 121 走完 if 又无条件再 append
+            # 一次 LIKE → 点赞双条；116 会 SOCIAL+LIKE 双发）
+            body = n.get("body") or {}
+            if n.get("sub_type") == 121:
                 out.append({
                     "category": "business", "type": "LIKE", "seq": seq,
                     "timestamp": ts,
                     "payload": {"type": "LIKE",
                                 "user_name": str(body.get("title", "")),
                                 "count": 1}})
+            elif n.get("sub_type") == 116:
+                out.append({
+                    "category": "business", "type": "SOCIAL", "seq": seq,
+                    "timestamp": ts,
+                    "payload": {"type": "SOCIAL", "action": "follow",
+                                "user_name": str(body.get("title", ""))}})
         return out
 
     # 弹幕（调研形态实测命中）：live_chat_list[] → DANMU
@@ -330,6 +353,8 @@ class PDDProtocolEngine(ControlledPageEngine):
         super().__init__(state_store=state_store, cookie_dir=cookie_dir)
         self._raw_hook = raw_hook  # 诊断钩子：解码出的业务对象（含未映射）回调
         self._http_hook = http_hook  # 诊断钩子：页面 HTTP 响应 URL（弹幕通道定位）
+        # 游客降级窗口计数（per-room：{start, notice, chat, ext, audience}）
+        self._degrade: Dict[str, Dict[str, Any]] = {}
 
     def validate_room_id(self, room_id: str) -> None:
         try:
@@ -370,6 +395,9 @@ class PDDProtocolEngine(ControlledPageEngine):
                 return
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[pdd] room {room_id} error: {type(e).__name__}: {str(e)[:90]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -388,6 +416,19 @@ class PDDProtocolEngine(ControlledPageEngine):
             return {c.get("name") for c in await context.cookies()}
         except Exception:  # noqa: BLE001
             return set()
+
+    @staticmethod
+    async def _login_cookie_values(context) -> Dict[str, str]:
+        """候选登录 cookie 的 name→value（2026-10-05 重登检测改为值变化——
+        会话失效时 cookie 仍在，重登后 token 值必然刷新，"有值"判定失真）"""
+        try:
+            out: Dict[str, str] = {}
+            for c in await context.cookies():
+                if c.get("name") in LOGIN_COOKIE_CANDIDATES and c.get("value"):
+                    out[c["name"]] = str(c["value"])
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
 
     @classmethod
     async def _has_login_cookie(cls, context) -> bool:
@@ -422,8 +463,10 @@ class PDDProtocolEngine(ControlledPageEngine):
                 except Exception:  # noqa: BLE001
                     pass
                 baseline = await self._login_cookie_names(context)
+                baseline_values = await self._login_cookie_values(context)
                 logger.info(f"[pdd] room {room_id} login window open "
-                            f"(baseline cookies={len(baseline)})")
+                            f"(baseline cookies={len(baseline)}, "
+                            f"login cookies={sorted(baseline_values)})")
                 deadline = time.monotonic() + 300.0
                 logged = False
                 while time.monotonic() < deadline:
@@ -432,11 +475,13 @@ class PDDProtocolEngine(ControlledPageEngine):
                     if not logged and names - baseline:
                         logger.info(f"[pdd] room {room_id} new cookies after "
                                     f"login action: {sorted(names - baseline)}")
-                    for c in await context.cookies():
-                        if (c.get("name") in LOGIN_COOKIE_CANDIDATES
-                                and c.get("value")):
-                            logged = True
-                            break
+                    # 登录判定（2026-10-05）：候选 cookie 值变化或新出现——
+                    # 覆盖"cookie 在但会话失效→重登刷新 token"场景
+                    current = await self._login_cookie_values(context)
+                    if any(current.get(k) != v for k, v in baseline_values.items()) \
+                            or any(k not in baseline_values for k in current):
+                        logged = True
+                        break
                     if logged:
                         break
                 if logged:
@@ -460,6 +505,7 @@ class PDDProtocolEngine(ControlledPageEngine):
         session_start = int(time.time())
         deadline = time.monotonic() + 14400.0
         self._touch_frame(room_id)  # 静默计时起点
+        self._degrade.pop(room_id, None)  # 降级窗口计数重开归零
 
         async with async_playwright() as pw:
             context = await self._launch(pw, headless=headless)
@@ -506,6 +552,24 @@ class PDDProtocolEngine(ControlledPageEngine):
                             "pdd.session.silent: 120s 无业务帧"
                             "（可能未开播/已下播/需登录/风控——确认直播中，"
                             "必要时用可见窗口登录后重试）")
+                    # 游客降级检测（2026-10-05）：观众活跃但弹幕/点赞类帧
+                    # 全无 → 登录会话已被服务端作废（cookie 文件仍在）→
+                    # 弹可见窗口重登
+                    st = self._degrade.get(room_id) or {}
+                    if is_degraded_window(
+                            time.monotonic() - st.get("start", time.monotonic()),
+                            st.get("notice", 0), st.get("audience", 0),
+                            st.get("chat", 0), st.get("ext", 0)):
+                        logger.warning(
+                            f"[pdd] room {room_id} degraded session detected "
+                            f"(notice={st.get('notice')} audience={st.get('audience')} "
+                            f"chat=0 ext=0) — 需要重新登录")
+                        await self._emit_system_status(
+                            room_id, "拼多多登录会话已失效（服务端按游客处理，"
+                                     "弹幕/点赞/关注停推）——已弹出浏览器，"
+                                     "请重新登录（扫码）")
+                        self._degrade.pop(room_id, None)
+                        raise NeedLoginVisible()
             finally:
                 await context.close()
         elapsed = int(time.time()) - session_start
@@ -520,6 +584,21 @@ class PDDProtocolEngine(ControlledPageEngine):
         for obj in decode_pdd_frame(raw):
             self._touch_frame(room_id)
             self.mark_received(room_id, int(time.time()))
+            # 降级窗口统计（游客会话：弹幕/点赞类帧为零，见 is_degraded_window）
+            st = self._degrade.setdefault(
+                room_id, {"start": time.monotonic(), "notice": 0,
+                          "chat": 0, "ext": 0, "audience": 0})
+            m_type = obj.get("message_type")
+            if m_type == "live_chat_notice":
+                st["notice"] += 1
+            elif m_type == "live_chat":
+                st["chat"] += 1
+            elif m_type == "live_chat_ext_v2":
+                st["ext"] += 1
+            elif m_type == "live_audience_num":
+                num = (obj.get("message_data") or {}).get("live_audience_num")
+                if isinstance(num, int):
+                    st["audience"] = num
             if self._raw_hook is not None:
                 try:
                     self._raw_hook(obj)

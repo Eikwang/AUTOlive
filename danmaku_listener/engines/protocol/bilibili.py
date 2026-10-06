@@ -275,6 +275,7 @@ class BilibiliProtocolEngine(BaseEngine):
         danmu_info_fetcher: Optional[Callable[[int], Dict[str, Any]]] = None,
         cookie_file: Optional[str] = None,
         login_flow: Optional[Any] = None,
+        raw_hook=None,
     ):
         super().__init__(state_store=state_store)
         if reconnect_manager:
@@ -283,6 +284,8 @@ class BilibiliProtocolEngine(BaseEngine):
         self._login_flow = login_flow  # 登录流程注入（测试用）；默认 bilibili_login.run_login_flow
         self._danmu_info = danmu_info_fetcher or DanmuInfoFetcher(cookie_file=cookie_file)
         self._unmapped_cmds: Dict[str, dict] = {}  # 未映射 cmd 聚合（30s 汇总）
+        self._raw_hook = raw_hook  # 诊断钩子：未映射 cmd 原始 doc（2026-10-04 补初始化——
+        # 使用点早已存在但构造器漏声明，首次未映射 cmd 即 AttributeError 炸会话）
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._room_ws: Dict[str, Any] = {}
         self._heartbeats: Dict[str, asyncio.Task] = {}
@@ -384,6 +387,9 @@ class BilibiliProtocolEngine(BaseEngine):
                 logger.warning(
                     f"[bilibili] room {room_id} error: {type(e).__name__}: {e}"
                 )
+                if self._is_stopping(room_id):
+                    return  # 主动停止中的连接关闭属预期（sent 1000）——不发 GAP/不标 ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 handled = await self._handle_error_with_reconnect(room_id, e)
@@ -419,6 +425,9 @@ class BilibiliProtocolEngine(BaseEngine):
             await ws.send(codec.encode_packet(codec.OP_AUTH, auth_body))
             logger.info(f"[bilibili] room {room_id} auth sent to {ws_url} "
                         f"(uid={ctx.get('uid', 0)} buvid={'yes' if ctx.get('buvid') else 'no'})")
+            # uid=0 为正常游客路径（DanmuInfoFetcher 游客 buvid 分支）——
+            # 2026-10-04 实证：游客连接可收全部六类消息（弹幕/进场/点赞/
+            # 礼物/关注/在线）；登录态为可选增强而非必需
 
             hb_task = asyncio.create_task(self._heartbeat(room_id, ws))
             self._heartbeats[room_id] = hb_task

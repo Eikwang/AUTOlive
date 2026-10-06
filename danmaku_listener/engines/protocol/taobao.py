@@ -20,6 +20,7 @@ import json
 import re
 import time
 
+import random
 import requests
 from typing import Any, Dict, Optional
 
@@ -84,6 +85,7 @@ class TaobaoWebProtocolEngine(BaseEngine):
         # 未映射消息聚合计数（防 debug 刷屏——60s 汇总一次）
         self._unmapped_stats: Dict[str, dict] = {}
         self._unmapped_last_flush = time.monotonic()
+        self._last_room_stats: Dict[str, tuple] = {}  # ROOM_STATS 值去重（同 1688）
 
     @property
     def engine_id(self) -> str:
@@ -304,6 +306,9 @@ class TaobaoWebProtocolEngine(BaseEngine):
                 raise
             except Exception as e:
                 logger.warning(f"[taobao] room {room_id} error: {type(e).__name__}: {str(e)[:90]}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
@@ -385,6 +390,16 @@ class TaobaoWebProtocolEngine(BaseEngine):
         for obj in json_objects:
             if not isinstance(obj, dict):
                 continue
+            # ROOM_STATS 值去重（在 next_seq 之前——seq 只在确认 emit 时消耗，
+            # 跳号会触发 consumer 侧 GAP 等待；同 1688）
+            if ("subType" not in obj
+                    and ("viewCountFormat" in obj
+                         or "pageViewCount" in obj or "totalCount" in obj)):
+                sig = (obj.get("onlineCount") or 0, obj.get("totalCount") or 0,
+                       obj.get("pageViewCount") or 0)
+                if sig == self._last_room_stats.get(room_id):
+                    continue
+                self._last_room_stats[room_id] = sig
             mapped = self._map_powermsg(room_id, obj, self.next_seq(room_id), ts)
             if mapped:
                 await self._emit_message(self._envelope(room_id, mapped))
@@ -496,12 +511,16 @@ class TaobaoWebProtocolEngine(BaseEngine):
                                 "gift_count": obj.get("count", obj.get("num", 1))}}
         # 统计：viewCountFormat/pageViewCount/totalCount 单键（1688 形态）
         if "viewCountFormat" in obj or "pageViewCount" in obj or "totalCount" in obj:
-            current = obj.get("onlineCount", obj.get("current_viewers", 0))
-            total = obj.get("totalCount", obj.get("total_viewers", 0))
+            # 语义校准（2026-10-03 用户实测"观看 0"，同 1688 根因）：
+            # onlineCount 恒 0（平台不暴露在线数）——观看人数回退
+            # totalCount（UV），累计浏览 pageViewCount（PV）
+            online = obj.get("onlineCount") or 0
+            uv = obj.get("totalCount") or 0
+            pv = obj.get("pageViewCount") or uv or 0
             return {"category": "business", "type": "ROOM_STATS", "seq": seq,
                     "timestamp": ts,
-                    "payload": {"type": "ROOM_STATS", "viewer_count": current,
-                                "total_view_count": total}}
+                    "payload": {"type": "ROOM_STATS", "viewer_count": online or uv,
+                                "total_view_count": pv}}
         # 进场：nick + flowSourceText（subType 已在上方处理）
         if "nick" in obj and "flowSourceText" in obj:
             identify = obj.get("identify") or {}

@@ -118,6 +118,9 @@ class HuyaProtocolEngine(BaseEngine):
                 raise
             except Exception as e:
                 logger.warning(f"[huya] room {room_id} error: {e}")
+                if self._is_stopping(room_id):
+                    return  # stop-in-progress close is expected (sent 1000) - no GAP/ERROR
+
                 self._set_status(self.status.__class__.ERROR)
                 self.mark_gap_start(room_id)
                 gap = self.build_gap_message(room_id, GapReason.NETWORK)
