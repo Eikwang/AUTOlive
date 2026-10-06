@@ -12,13 +12,20 @@ DanmakuListener 扫码登录对话框（整合计划 G5）
 原 get_service_instance() 进程内轮询在双进程架构下恒为 None（服务挂 main.py 进程），
 登录弹窗数据源已断裂；本版经 /danmaku/login_state 与 /danmaku/events 恢复数据流。
 """
-import threading
+import asyncio
 from typing import Optional
 
 import requests
 from nicegui import ui
 
 from utils.my_log import logger
+
+# 本机控制面专用 Session：trust_env=False + 禁代理——系统代理（如 Clash 7897）
+# 会让 127.0.0.1 请求耗时 2s+，同步阻塞 NiceGUI 事件循环饿死 socket.io 心跳，
+# 触发页面 reload 死循环（investigate 2026-10-06 根因）。
+_LOCAL_SESSION = requests.Session()
+_LOCAL_SESSION.trust_env = False
+_LOCAL_SESSION.proxies = {"http": None, "https": None}
 
 
 def _api_base() -> str:
@@ -29,17 +36,20 @@ def _api_base() -> str:
         return "http://127.0.0.1:8000"
 
 
-def _api_get(path: str, timeout: float = 5.0) -> Optional[dict]:
+async def _api_get(path: str, timeout: float = 3.0) -> Optional[dict]:
+    """轮询请求（async：requests 移入线程池，绝不阻塞事件循环）。"""
     try:
-        r = requests.get(f"{_api_base()}{path}", timeout=timeout)
+        r = await asyncio.to_thread(
+            _LOCAL_SESSION.get, f"{_api_base()}{path}", timeout=timeout)
         return r.json()
     except Exception:
         return None
 
 
-def _api_post(path: str, body: Optional[dict] = None, timeout: float = 8.0) -> Optional[dict]:
+async def _api_post(path: str, body: Optional[dict] = None, timeout: float = 6.0) -> Optional[dict]:
     try:
-        r = requests.post(f"{_api_base()}{path}", json=body or {}, timeout=timeout)
+        r = await asyncio.to_thread(
+            _LOCAL_SESSION.post, f"{_api_base()}{path}", json=body or {}, timeout=timeout)
         return r.json()
     except Exception:
         return None
@@ -126,31 +136,31 @@ class DanmakuLoginDialog:
                 ui.button("关闭", on_click=lambda: self._close(manual=True)).props("flat dense")
         self._dialog_built = True
 
-    def _open_dialog(self):
+    async def _open_dialog(self):
         self._ensure_dialog()
-        st = _api_get("/danmaku/login_state") or {}
-        self._render_content(st.get("active"), force=True)
+        st = await _api_get("/danmaku/login_state") or {}
+        await self._render_content(st.get("active"), force=True)
         self._dialog.open()
 
-    def _close(self, manual: bool = False):
+    async def _close(self, manual: bool = False):
         """关闭对话框；手动关闭=确认当前请求处理完毕，弹出队列下一项。"""
         if manual:
-            _api_post("/danmaku/login/ack")
+            await _api_post("/danmaku/login/ack")
         if self._dialog:
             self._dialog.close()
 
     # ---------- 轮询刷新 ----------
 
-    def refresh(self):
+    async def refresh(self):
         try:
-            self._refresh_entry()
+            await self._refresh_entry()
             self._refresh_dialog()
         except Exception:
             logger.error("[danmaku-login] 刷新异常", exc_info=True)
 
-    def _refresh_entry(self):
+    async def _refresh_entry(self):
         """入口徽标随队列变化；常驻入口开关变更时重建。"""
-        st = _api_get("/danmaku/login_state")
+        st = await _api_get("/danmaku/login_state")
         badge = 0
         if isinstance(st, dict):
             badge = int(st.get("queue") or 0) + (1 if st.get("active") else 0)
@@ -162,21 +172,21 @@ class DanmakuLoginDialog:
             self._last_badge_text = want
             self._build_entry()
 
-    def _refresh_dialog(self):
+    async def _refresh_dialog(self):
         """对话框开着时：呈现激活的登录请求；恢复/清空自动关闭。"""
         if not (self._dialog and self._dialog.visible):
             return
-        st = _api_get("/danmaku/login_state")
+        st = await _api_get("/danmaku/login_state")
         item = (st or {}).get("active")
         if item is None:
             self._close(manual=False)
             return
-        self._render_content(item)
+        await self._render_content(item)
 
-    def _render_content(self, item: Optional[dict], force: bool = False):
+    async def _render_content(self, item: Optional[dict], force: bool = False):
         if item is None:
             return
-        st = _api_get("/danmaku/login_state") or {}
+        st = await _api_get("/danmaku/login_state") or {}
         if not force and self._shown_for_ts == item.get("ts"):
             return  # 内容未变化（timer 重绘节流）
         self._shown_for_ts = item.get("ts", 0)
@@ -257,8 +267,8 @@ class DanmakuEventNotifier:
         ui.timer(2.0, self.refresh)
         self._container = container
 
-    def refresh(self):
-        data = _api_get(f"/danmaku/events?since={self._last_seq}")
+    async def refresh(self):
+        data = await _api_get(f"/danmaku/events?since={self._last_seq}")
         if not isinstance(data, dict):
             return
         for event in (data.get("events") or []):

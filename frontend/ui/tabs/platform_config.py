@@ -10,6 +10,8 @@
 - 通道：webui 进程 → fetch http://127.0.0.1:{api_port}/danmaku/*（跨进程唯一通道）
 - 乐观更新：启停/删除/关键词/平台开关（5s 超时报错回滚提示）；login_required 不适用
 """
+import asyncio
+
 from nicegui import ui
 from typing import Dict, Any, Callable
 
@@ -50,14 +52,24 @@ def _api_base(config: Dict[str, Any]) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, Any] = None,
-         timeout: float = 35.0) -> Dict[str, Any]:
-    """控制面调用（跨进程 HTTP；5s 内常规操作超时即报错——乐观回滚触发条件 P2-2）。"""
+# 本机控制面专用 Session：trust_env=False + 禁代理（同 danmaku_login.py——
+# 系统代理让 127.0.0.1 请求耗时 2s+，同步阻塞事件循环触发页面 reload 死循环）
+_LOCAL_SESSION = requests.Session()
+_LOCAL_SESSION.trust_env = False
+_LOCAL_SESSION.proxies = {"http": None, "https": None}
+
+
+async def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, Any] = None,
+               timeout: float = 35.0) -> Dict[str, Any]:
+    """控制面调用（async：requests 移入线程池，绝不阻塞 NiceGUI 事件循环）。"""
     try:
         if method == "GET":
-            r = requests.get(f"{_api_base(config)}{path}", timeout=timeout)
+            r = await asyncio.to_thread(
+                _LOCAL_SESSION.get, f"{_api_base(config)}{path}", timeout=timeout)
         else:
-            r = requests.request(method, f"{_api_base(config)}{path}", json=body or {}, timeout=timeout)
+            r = await asyncio.to_thread(
+                _LOCAL_SESSION.request, method, f"{_api_base(config)}{path}",
+                json=body or {}, timeout=timeout)
         return r.json()
     except requests.Timeout:
         return {"success": False, "error": "控制面响应超时", "reason_code": "api.timeout",
@@ -104,7 +116,7 @@ def create_platform_config_tab(
 
             async def _toggle_service(_e=None, val: bool = None):
                 target = val if val is not None else head_switch.value
-                r = _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
+                r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
                 if not r.get("success"):
                     _error_notify(r)
                     head_switch.value = not target
@@ -154,7 +166,7 @@ def create_platform_config_tab(
 
             def _mk_plat_toggle(p: str):
                 async def _toggle(_e=None):
-                    r = _api(config, "POST", f"/danmaku/platform/{p}/toggle",
+                    r = await _api(config, "POST", f"/danmaku/platform/{p}/toggle",
                              {"enabled": plat_switches[p].value})
                     if not r.get("success"):
                         _error_notify(r)
@@ -189,7 +201,7 @@ def create_platform_config_tab(
                 if not p or not spec:
                     await _toast("请选择平台并填写房间号", "warning")
                     return
-                r = _api(config, "POST", "/danmaku/rooms", {"platform": p, "room_spec": spec})
+                r = await _api(config, "POST", "/danmaku/rooms", {"platform": p, "room_spec": spec})
                 if r.get("status") == "login_required":
                     await _toast(r.get("message") or "需要登录：请在弹出的浏览器中扫码", "info")
                     room_input.value = ""
@@ -224,7 +236,7 @@ def create_platform_config_tab(
             kw = (kw_input.value or "").strip()
             if not kw:
                 return
-            r = _api(config, "POST", "/danmaku/keywords", {"keyword": kw})
+            r = await _api(config, "POST", "/danmaku/keywords", {"keyword": kw})
             if not r.get("success"):
                 _error_notify(r)
             else:
@@ -233,7 +245,7 @@ def create_platform_config_tab(
         kw_chips = ui.row().classes("w-full flex-wrap gap-1")
 
         async def _toggle_kw_filter(_e=None):
-            r = _api(config, "POST", "/danmaku/keywords/toggle", {"enabled": kw_switch.value})
+            r = await _api(config, "POST", "/danmaku/keywords/toggle", {"enabled": kw_switch.value})
             if not r.get("success"):
                 _error_notify(r)
                 kw_switch.value = not kw_switch.value
@@ -307,7 +319,7 @@ def create_platform_config_tab(
     # ---------- 操作（乐观更新 P2-2） ----------
 
     async def _start_room(p, rid):
-        r = _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/start")
+        r = await _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/start")
         if r.get("status") == "login_required":
             await _toast("需要登录：请在弹出的浏览器中扫码", "info")
         elif not r.get("success"):
@@ -316,14 +328,14 @@ def create_platform_config_tab(
             await _toast(f"{p}:{rid} 已启动")
 
     async def _stop_room(p, rid):
-        r = _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/stop")
+        r = await _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/stop")
         if not r.get("success"):
             _error_notify(r)
         else:
             await _toast(f"{p}:{rid} 已停止（重启后按启用配置恢复）")
 
     async def _remove_room(p, rid):
-        r = _api(config, "DELETE", f"/danmaku/rooms/{p}/{rid}")
+        r = await _api(config, "DELETE", f"/danmaku/rooms/{p}/{rid}")
         if not r.get("success"):
             _error_notify(r)
         else:
@@ -348,7 +360,7 @@ def create_platform_config_tab(
         await _toast(f"活跃房间已设为 {p}:{rid}（该房间消息将进对话链）")
 
     async def _refresh_keywords():
-        r = _api(config, "GET", "/danmaku/keywords")
+        r = await _api(config, "GET", "/danmaku/keywords")
         if isinstance(r, dict) and "keywords" in r:
             kw_state["list"] = r.get("keywords") or []
             kw_state["enabled"] = bool(r.get("enabled", True))
@@ -363,7 +375,7 @@ def create_platform_config_tab(
             for kw in kw_state["list"]:
 
                 async def _rm(k=kw):
-                    r = _api(config, "DELETE", f"/danmaku/keywords/{k}")
+                    r = await _api(config, "DELETE", f"/danmaku/keywords/{k}")
                     if not r.get("success"):
                         _error_notify(r)
                     else:
@@ -386,7 +398,7 @@ def create_platform_config_tab(
     async def _poll():
         sec = get_nested_value(config, "danmaku_listener", default={}) or {}
         enabled = bool(sec.get("enabled"))
-        st = _api(config, "GET", "/danmaku/status", timeout=5)
+        st = await _api(config, "GET", "/danmaku/status", timeout=5)
         if isinstance(st, dict) and ("enabled" in st):
             state["enabled"] = bool(st.get("enabled"))
             state["running"] = bool(st.get("running"))
@@ -395,17 +407,17 @@ def create_platform_config_tab(
             state["last_msg_age_s"] = st.get("last_msg_age_s")
             state["stall"] = float(st.get("stall_threshold_s") or 60)
             state["active"] = str(st.get("active_room") or "")
-        ev = _api(config, "GET", f"/danmaku/events?since={state['evt_seq']}", timeout=5)
+        ev = await _api(config, "GET", f"/danmaku/events?since={state['evt_seq']}", timeout=5)
         if isinstance(ev, dict) and ev.get("events"):
             for e in ev["events"]:
                 if e.get("kind") == "login_request":
                     pass  # 登录请求经 login_badge 计数呈现（danmaku_login.py 弹窗独立轮询）
             state["evt_seq"] = int(ev.get("last_seq") or state["evt_seq"])
-        rooms_r = _api(config, "GET", "/danmaku/rooms", timeout=5)
+        rooms_r = await _api(config, "GET", "/danmaku/rooms", timeout=5)
         if isinstance(rooms_r, dict) and "rooms" in rooms_r:
             state["rooms"] = rooms_r.get("rooms") or []
             state["running"] = bool(rooms_r.get("running", state["running"]))
-        login_r = _api(config, "GET", "/danmaku/login_state", timeout=5)
+        login_r = await _api(config, "GET", "/danmaku/login_state", timeout=5)
         if isinstance(login_r, dict):
             state["login_queue"] = int(login_r.get("queue") or 0) + (1 if login_r.get("active") else 0)
         _sync_platform_switches(sec.get("platforms") or {})
