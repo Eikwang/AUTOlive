@@ -294,6 +294,7 @@ coverage.xml
 .pytest_cache/
 docs/*
 !docs/danmaku_contract/
+!docs/upstream/
 !docs/danmaku_module.md
 
 # === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===

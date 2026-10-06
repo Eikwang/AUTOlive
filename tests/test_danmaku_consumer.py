@@ -318,6 +318,43 @@ class TestConfigRmw(unittest.TestCase):
             dc._config_path = orig_path
 
 
+class TestConfigWriterMatrix(unittest.TestCase):
+    """写者分配矩阵（Eng F-ENG-2 critical 回归）：webui save 不回滚 main.py 写入。"""
+
+    def test_save_preserves_danmaku_section(self):
+        """磁盘上 danmaku_listener 节（main.py 窄端点写入）在 webui 全量 save 后保留。"""
+        import json
+        import tempfile
+        from frontend.config import settings as fs
+
+        orig_path = fs.Settings.__init__  # 探测类签名用
+        tmpdir = tempfile.mkdtemp()
+        cfg_file = os.path.join(tmpdir, "config.json")
+        disk_cfg = {
+            "webui": {"port": 8086},
+            "danmaku_listener": {"rooms": [{"platform": "douyu", "room_id": "9",
+                                            "enabled": True, "active": True}],
+                                 "keywords": ["窄端点写入词"]},
+            "other": {"keep": 1},
+        }
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(disk_cfg, f, ensure_ascii=False)
+
+        st = fs.Settings(cfg_file)
+        # webui 内存快照里 danmaku_listener 是启动时旧值（空）
+        st._config["danmaku_listener"] = {}
+        st._config["webui"]["port"] = 9090  # webui 自己的改动
+        st.save()
+
+        after = json.load(open(cfg_file, encoding="utf-8"))
+        # danmaku_listener 节保留磁盘版本（main.py 写入不丢）
+        self.assertEqual(after["danmaku_listener"]["rooms"][0]["room_id"], "9")
+        self.assertEqual(after["danmaku_listener"]["keywords"], ["窄端点写入词"])
+        # webui 自己的节正常保存
+        self.assertEqual(after["webui"]["port"], 9090)
+        self.assertEqual(after["other"]["keep"], 1)
+
+
 class TestQrSafety(unittest.TestCase):
     def test_raw_b64_wrapped_as_png(self):
         from frontend.ui.components.danmaku_login import _safe_qr_data_url

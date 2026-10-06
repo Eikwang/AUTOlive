@@ -173,10 +173,21 @@ def _write_config_section(mutator: Callable[[dict], None]) -> bool:
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
             os.replace(tmp, _config_path())
+            _refresh_memory_section(sec)  # Eng F-ENG-1：内存节同步刷新（写者分配矩阵）
             return True
         except Exception:
             logger.error("[danmaku_listener] config.json 写回失败", exc_info=True)
             return False
+
+
+def _refresh_memory_section(new_sec: dict) -> None:
+    """写者分配矩阵（Eng F-ENG-1）：窄端点写盘后同步刷新 main.py 内存节。"""
+    try:
+        from utils.config import Config
+        if isinstance(Config.config, dict):
+            Config.config["danmaku_listener"] = dict(new_sec)
+    except Exception:
+        logger.error("[danmaku_listener] 内存节刷新失败", exc_info=True)
 
 
 # ---------- AutoliveBridge：组件 Bridge 的 AUTOlive 子类（副本纯净——仅覆写） ----------
@@ -551,34 +562,48 @@ class DanmakuListenerService:
 
     # ---- 房间 ----
 
-    def add_room(self, room_spec: str, platform: str = "", start: bool = True) -> dict:
-        """添加房间（持久操作：写回 config；start=False 仅预配置不启动——DX 2.2 逃生门）。"""
-        if not self._platform_enabled(platform):
-            return {"success": False,
-                    "error": f"平台 {platform} 未启用",
-                    "reason_code": "room.platform_disabled",
-                    "fix_hint": "在平台配置页打开该平台开关后重试",
-                    "docs_anchor": "docs/danmaku_module.md"}
-        result = {"success": True}
-        if start:
-            result = self._submit_room_op(lambda: self._bridge.add_room(room_spec, platform))
-            if not result.get("success") and result.get("status") != "login_required":
-                return result
-        self._persist_room(room_spec, platform, result)
-        return result
+    def set_room_enabled(self, platform: str, room_id: str, enabled: bool) -> dict:
+        """窄端点（F1 config-first）：磁盘 RMW 写 rooms[].enabled + 联动该房间启停
+        + 内存节刷新（Eng F-ENG-1）；幂等（重复同值返回当前态）。"""
+        key = f"{platform}:{room_id}"
+        found = {"found": False}
 
-    def _persist_room(self, room_spec: str, platform: str, result: dict) -> None:
-        """房间写回 config.rooms（原子 RMW）；room_id 取操作结果或链接归一。"""
-        room_id = str(((result.get("room") or {}).get("room_id")) or room_spec)
         def mut(sec):
-            rooms = [r for r in (sec.get("rooms") or [])
-                     if not (isinstance(r, dict) and r.get("platform") == platform
-                             and str(r.get("room_id")) == room_id)]
-            rooms.append({"platform": platform, "room_id": room_id, "enabled": True,
-                          "active": not any(r.get("active") for r in rooms)})
-            sec["rooms"] = rooms
-        if _write_config_section(mut):
-            self.push_event("config_saved", {"what": "room_added", "room_id": room_id})
+            rooms = sec.setdefault("rooms", [])
+            for r in rooms:
+                if isinstance(r, dict) and r.get("platform") == platform and                         str(r.get("room_id")) == room_id:
+                    r["enabled"] = bool(enabled)
+                    found["found"] = True
+                    break
+        if not _write_config_section(mut) or not found["found"]:
+            return {"success": False, "error": f"房间不存在：{key}", "status": 404,
+                    "reason_code": "room.not_found",
+                    "fix_hint": "刷新平台配置页后重试", "docs_anchor": "docs/danmaku_module.md"}
+        if self._bridge is not None and self._loop and not self._loop.is_closed():
+            if enabled:
+                result = self._submit_room_op(lambda: self._bridge.start_room(platform, room_id))
+                if result.get("status") == "login_required":
+                    return {"success": True, "listening": False,
+                            "status": "login_required", "room_id": room_id}
+                return {"success": result.get("success", False),
+                        "listening": result.get("success", False),
+                        "room": result.get("room"), "error": result.get("error")}
+            self._submit_room_op(lambda: self._bridge.stop_room(platform, room_id))
+            return {"success": True, "listening": False}
+        return {"success": True, "listening": False}  # Bridge 未起——配置已写，启动时注入
+
+    def reload_keywords(self) -> dict:
+        """窄端点（M-1 ③）：磁盘 config.keywords 热载 Bridge 内存态（单向流契约
+        Eng F-ENG-4：禁止 body 传词表——一律从磁盘读；外置文件以 config 覆写）。"""
+        sec = self._section()
+        kws = [str(k) for k in (sec.get("keywords") or [])]
+        kw_on = bool(sec.get("keyword_filter_enabled", True))
+        if self._bridge is None:
+            return {"success": False, "error": "服务未运行", "reason_code": "service.not_running"}
+        self._bridge._blocked_keywords = kws
+        self._bridge._keyword_filter_enabled = kw_on
+        self._bridge._save_blocked_keywords()  # 外置文件缓存覆写（约定固化）
+        return {"success": True, "count": len(kws), "enabled": kw_on}
 
     def remove_room(self, platform: str, room_id: str) -> dict:
         result = self._submit_room_op(lambda: self._bridge.remove_room(platform, room_id))
@@ -625,34 +650,6 @@ class DanmakuListenerService:
 
     # ---- 关键词 ----
 
-    def add_keyword(self, keyword: str) -> dict:
-        kw = str(keyword or "").strip()
-        if not kw or len(kw) > 50:
-            return {"success": False, "error": "关键词须为 1-50 字符",
-                    "reason_code": "keyword.invalid", "fix_hint": "输入 1-50 字符", "docs_anchor": ""}
-        r = self._bridge.add_keyword(kw)
-        if r.get("success"):
-            self._persist_keywords()
-        return r
-
-    def remove_keyword(self, keyword: str) -> dict:
-        r = self._bridge.remove_keyword(keyword)
-        if r.get("success"):
-            self._persist_keywords()
-        return r
-
-    def set_keyword_filter(self, enabled: bool) -> dict:
-        r = self._bridge.toggle_keyword_filter(bool(enabled))
-        if r.get("success"):
-            self._persist_keywords()
-        return r
-
-    def _persist_keywords(self) -> None:
-        def mut(sec):
-            sec["keywords"] = list(self._bridge._blocked_keywords)
-            sec["keyword_filter_enabled"] = bool(self._bridge._keyword_filter_enabled)
-        _write_config_section(mut)
-
     # ---- 服务/平台开关 ----
 
     def set_service_enabled(self, enabled: bool) -> dict:
@@ -666,21 +663,6 @@ class DanmakuListenerService:
         self._service_on = False
         self.push_event("service_state", {"running": False})
         return {"success": True, "enabled": False}
-
-    def set_platform_enabled(self, platform: str, enabled: bool) -> dict:
-        """平台开关（持久写回；置 false 联动 stop 该平台运行中房间——P1-3 义务）。"""
-        _write_config_section(lambda sec: (sec.setdefault("platforms", {}).__setitem__(platform, bool(enabled))))
-        if not enabled and self._bridge is not None and self._loop and not self._loop.is_closed():
-            rooms = (self._bridge.get_status() or {}).get("rooms") or {}
-            for key, r in list(rooms.items()):
-                if r.get("platform") == platform and r.get("status") == "running":
-                    self._submit_room_op(lambda p=platform, rid=r.get("room_id"): self._bridge.stop_room(p, rid))
-        self.push_event("platform_toggled", {"platform": platform, "enabled": bool(enabled)},
-                        dedup_key=f"pt:{platform}:{enabled}")
-        return {"success": True, "platform": platform, "enabled": bool(enabled)}
-
-    def _platform_enabled(self, platform: str) -> bool:
-        return bool((self._section().get("platforms") or {}).get(platform, False))
 
     def request_restart(self) -> bool:
         """手动重启（守护置红出路）：清防护计数并重建。"""
@@ -787,7 +769,6 @@ class DanmakuListenerService:
     async def _inject_rooms(self) -> None:
         """config.rooms 权威源注入：enabled 且平台启用 → add（自动 start）；ghost 对账（Eng A5）。"""
         sec = self._section()
-        platforms = sec.get("platforms") or {}
         config_keys = set()
         for r in (sec.get("rooms") or []):
             if not isinstance(r, dict):
@@ -797,14 +778,6 @@ class DanmakuListenerService:
             if not p or not rid:
                 continue
             if not r.get("enabled"):
-                continue
-            if not bool(platforms.get(p, False)):
-                self.push_event("room_skip_disabled_platform",
-                                {"room": f"{p}:{rid}",
-                                 "reason_code": "room.platform_disabled",
-                                 "fix_hint": "该平台未启用——在平台配置页打开开关",
-                                 "docs_anchor": "docs/danmaku_module.md"},
-                                dedup_key=f"skip:{p}:{rid}")
                 continue
             try:
                 res = await self._bridge.add_room(rid, p)

@@ -1,13 +1,13 @@
 {
   "source": "D:\\AI\\DanmakuListener",
-  "copied_at": "2026-10-05T17:12:28",
-  "content_sha256": "7a41d3977de0a66081f27bd23a6a00c5794b40004e5f64d209e1ad2845f2992e",
-  "total_files": 99,
-  "total_bytes": 1267341,
+  "copied_at": "2026-10-06T13:43:45",
+  "content_sha256": "098435b441903c7742ca3d7b4987956db50db93b4b6ef64b19b684e4fa5402e0",
+  "total_files": 100,
+  "total_bytes": 1306228,
   "items": {
     "danmaku_listener": {
-      "files": 94,
-      "bytes": 1231878,
+      "files": 95,
+      "bytes": 1270765,
       "note": "组件核心包（engines/adapters/bus/push/contract/config/fixtures/managers/persistence/utils）"
     },
     "docs\\danmaku_contract": {
@@ -16,5 +16,8 @@
       "note": "契约文档与机读 Schema（export_contract 漂移检查数据源）"
     }
   },
-  "upgrade_flow": "重跑本脚本 → python -m danmaku_listener contract（版本核对）→ 冒烟脚本"
+  "upgrade_flow": "重跑本脚本 → python -m danmaku_listener contract（版本核对）→ 冒烟脚本",
+  "upstream_baseline_commit": "af9124c",
+  "upstream_dirty_patch": "docs/upstream/danmaku-listener-login-gate-patch-af9124c-20261006.patch",
+  "upstream_review_doc": "docs/plans/2026-10-06-platform-login-gate-review.md（上游工作区归档）"
 }

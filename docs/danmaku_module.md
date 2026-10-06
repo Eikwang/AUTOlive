@@ -109,6 +109,29 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 
 登录态文件统一在 `cookie_dir`（默认仓库根 `cookie/`）。**注意**：同步/备份工具会把该目录的登录凭据带出机器——请勿将其纳入网盘/git。
 
+## 控制面 API 与端点退役对照（R2 配置运行分离）
+
+**写者分配矩阵**：配置期（main.py 未运行）→ webui 直写 config.json；运行期（running）→ 房间开关/关键词经窄端点（main.py 磁盘 RMW + 内存节刷新 + 联动启停，即时生效）。
+
+| 旧端点 | 状态 | 替代路径 |
+|---|---|---|
+| `POST /danmaku/rooms` | **410 Gone** | webui 平台配置页直写 config.rooms |
+| `DELETE /danmaku/rooms/{p}/{r}` | **410 Gone** | webui 删除（运行期自动先停监听） |
+| `POST /danmaku/keywords` / `DELETE /danmaku/keywords/{kw}` / `POST /danmaku/keywords/toggle` | **410 Gone** | webui 直写 config.keywords（运行期自动热生效） |
+| `POST /danmaku/platform/{p}/toggle` | **410 Gone** | platforms 节=可添加平台白名单；监听启停走房间级开关 |
+| `POST /danmaku/rooms/{p}/{r}/enabled` | **新增（窄端点）** | 请求 `{enabled: bool}` → 响应 `{success, listening, room?, status?, error?}`；404 房间不存在；幂等 |
+| `POST /danmaku/keywords/reload` | **新增（窄端点）** | 无请求体——一律从磁盘 config 读（防注入）；响应 `{success, count, enabled}` |
+| `POST /danmaku/service/toggle` | 增强 | enabled=true 且服务未构建时在线构建启动（503 死路修复） |
+
+410 响应体为 RFC 9457 problem+json：`{type, title, status, detail, cause, fix, instance}`。
+
+## 配置期登录（webui 进程登录服务）
+
+- **支持平台**：哔哩哔哩 / 快手 / 抖音（组件 *_login.py 可 import 闭环）
+- **其余平台**：启动系统后首次监听时按引导自动登录（运行期 login_gate 全平台覆盖）
+- 登录态判定为**首登引导**；运行期以引擎事件为唯一真相源
+- 同平台多房间共享登录态；登录窗口 300s（可在 danmaku_listener.login_wait_timeout 配置）
+
 ## 商用前置警示
 
 进程内形态**仅限个人使用**。商用前必须重新评估隔离形态（回退方案 B：修复 serve 接线的托管子进程，见整合计划第 3 节 A/B/C 决策记录）与监听账号隔离（专用监听账号，严禁客户主账号）——见 TODOS.md S9。

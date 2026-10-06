@@ -1,14 +1,17 @@
 # -*- coding: UTF-8 -*-
 """
-平台配置标签页——DanmakuListener 进程内模块控制面（整合计划 P2-0~P2-3，已批准）
+平台配置标签页——配置面与运行面分离（整合第二轮 R2，autoplan 已批准）
 
-布局规范（P2-0 八项状态呈现规范为实施权威依据）：
-- 页头：监听总开关 + 服务胶囊四态（绿=运行/灰=禁用/红=守护置红/黄=重建中）+ 登录请求数
-- 卡①：房间管理（首屏主导）——平台开关独立区 / 添加行 / 房间列表（七态状态机）
-- 卡②：关键词屏蔽（固定文案"仅屏蔽弹幕内容，不影响礼物与进场"）
-- 设计令牌：宽度三档 / 间距 / 色值一律 var(--...) 语义变量（禁硬编码）
-- 通道：webui 进程 → fetch http://127.0.0.1:{api_port}/danmaku/*（跨进程唯一通道）
-- 乐观更新：启停/删除/关键词/平台开关（5s 超时报错回滚提示）；login_required 不适用
+核心语义（specs/integration/DanmakuListener配置运行分离优化计划.md）：
+- **配置面直写**：房间/关键词操作 set_config_callback 直写 config.json——
+  配置期（main.py 未运行）完整可用，不经 /danmaku 运行时 API
+- **写者分配矩阵**（Eng F-ENG-1/2）：服务运行中（running）→ 房间开关/关键词
+  走窄端点（main.py 磁盘 RMW+内存节刷新+联动启停，即时生效）；离线/未构建 →
+  直写 config（下次启动生效）；TOCTOU 回退链防静默
+- **登录态平台级**（Design S-1）：cookie 同平台多房间共享，徽章按平台缓存
+- **配置期登录**（Eng F-ENG-13）：仅 bilibili/kuaishou/douyin（登录服务）；
+  其余平台"启动系统后首次监听时登录"（运行期 login_gate 覆盖）
+- 写前校验（CEO F5）：重复/平台枚举/非空/长度≤200/链接试解析提示
 """
 import asyncio
 
@@ -18,29 +21,35 @@ from typing import Dict, Any, Callable
 import requests
 
 from frontend.ui.components.config_helper import get_nested_value
+from frontend.ui.components.danmaku_login_service import get_login_service
 
-# 七态状态机（P2-0 ①）：state → (行内文案, 颜色语义变量, 可用操作集)
-_ROOM_STATES = {
-    "running": ("监听中", "var(--color-positive, #21ba45)"),
-    "stopped": ("已停止", "var(--text-hint, #9e9e9e)"),
-    "login_required": ("待登录", "var(--color-warning, #f2c037)"),
-    "login_failed": ("登录失败", "var(--color-warning, #f2c037)"),
-    "login": ("登录中", "var(--color-info, #31ccec)"),
-    "stalled": ("收流停滞", "var(--color-negative, #c10015)"),
-    "platform_disabled": ("平台已禁用", "var(--text-hint, #9e9e9e)"),
-}
-
-# 12 平台登录要求标注（J1：数据源 = P1-5 登录态矩阵）
-_PLATFORM_LOGIN_HINT = {
-    "bilibili": "需扫码登录", "kuaishou": "需扫码登录", "douyin": "需扫码登录",
-    "douyu": "免登录", "huya": "免登录", "taobao": "免登录", "meituan": "免登录",
-    "1688": "浏览器登录态", "xiaohongshu": "浏览器登录态", "pdd": "浏览器登录态",
-    "jd": "浏览器登录态", "wechat_channels": "需扫码登录",
-}
+# 平台元数据（中文名 / 分组——Design D-2：常用前置+分组下拉）
+_PLATFORM_GROUPS = [
+    ("常用", ["bilibili", "douyu", "douyin"]),
+    ("游戏与娱乐", ["huya", "kuaishou", "pdd"]),
+    ("电商与购物", ["taobao", "1688", "jd", "meituan"]),
+    ("其他", ["xiaohongshu", "wechat_channels"]),
+]
 _PLATFORM_LABELS = {
     "bilibili": "哔哩哔哩", "douyin": "抖音", "douyu": "斗鱼", "huya": "虎牙",
     "kuaishou": "快手", "taobao": "淘宝", "1688": "1688", "meituan": "美团",
     "xiaohongshu": "小红书", "pdd": "拼多多", "jd": "京东", "wechat_channels": "视频号",
+}
+_ALL_PLATFORMS = list(_PLATFORM_LABELS.keys())
+# 配置期登录支持范围（Eng F-ENG-13 裁决）
+_CONFIG_LOGIN_PLATFORMS = {"bilibili", "kuaishou", "douyin"}
+_ROOM_SPEC_MAX = 200  # Eng F-ENG-9
+
+# 状态中文文案表（Design S-2；动词统一：启动系统/开始·停止监听）
+_ROOM_STATE_TEXT = {
+    "running": ("监听中", "var(--color-positive, #21ba45)"),
+    "saved_pending": ("已保存·待启动", "var(--text-hint, #9e9e9e)"),
+    "stalled": ("收流停滞", "var(--color-negative, #c10015)"),
+    "disabled": ("已停用", "var(--text-hint, #9e9e9e)"),
+}
+_LOGIN_BADGE = {  # J-3 三级视觉
+    "none": ("未登录", "grey-6"),
+    "confirmed": ("已登录", "positive"),
 }
 
 
@@ -52,16 +61,15 @@ def _api_base(config: Dict[str, Any]) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-# 本机控制面专用 Session：trust_env=False + 禁代理（同 danmaku_login.py——
-# 系统代理让 127.0.0.1 请求耗时 2s+，同步阻塞事件循环触发页面 reload 死循环）
+# 本机控制面专用 Session（trust_env=False——同 danmaku_login_service.py 根因注记）
 _LOCAL_SESSION = requests.Session()
 _LOCAL_SESSION.trust_env = False
 _LOCAL_SESSION.proxies = {"http": None, "https": None}
 
 
 async def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, Any] = None,
-               timeout: float = 35.0) -> Dict[str, Any]:
-    """控制面调用（async：requests 移入线程池，绝不阻塞 NiceGUI 事件循环）。"""
+               timeout: float = 35.0) -> Any:
+    """运行面调用（async 线程池；仅 running 态使用）。"""
     try:
         if method == "GET":
             r = await asyncio.to_thread(
@@ -71,23 +79,32 @@ async def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, A
                 _LOCAL_SESSION.request, method, f"{_api_base(config)}{path}",
                 json=body or {}, timeout=timeout)
         return r.json()
-    except requests.Timeout:
-        return {"success": False, "error": "控制面响应超时", "reason_code": "api.timeout",
-                "fix_hint": "主程序可能忙——稍后重试或查看 logs/", "docs_anchor": ""}
-    except requests.ConnectionError:
-        return {"success": False, "error": "无法连接主程序控制面", "reason_code": "api.unreachable",
-                "fix_hint": "确认主程序（运行系统）已启动", "docs_anchor": ""}
-    except Exception as e:  # noqa: BLE001
-        return {"success": False, "error": str(e)[:120], "reason_code": "api.error",
-                "fix_hint": "查看日志", "docs_anchor": ""}
+    except Exception:
+        return None
 
 
-def _error_notify(result: Dict[str, Any]) -> None:
-    """三段式错误呈现（P2-0 ③：错误类 toast + fix_hint/docs_anchor）。"""
-    msg = f"{result.get('error', '操作失败')}"
-    if result.get("fix_hint"):
-        msg += f"｜{result['fix_hint']}"
-    ui.notify(position="top", type="negative", message=msg[:180])
+def _validate_room(platform: str, room_spec: str, rooms: list) -> Dict[str, Any]:
+    """写前校验（CEO F5 + DX 发现 6）：返回 {"ok": bool, "error": str, "confirm": str|None}。"""
+    spec = (room_spec or "").strip()
+    if not platform or platform not in _ALL_PLATFORMS:
+        return {"ok": False, "error": "请选择有效平台"}
+    if not spec:
+        return {"ok": False, "error": "房间号或链接不能为空"}
+    if len(spec) > _ROOM_SPEC_MAX:
+        return {"ok": False, "error": f"房间标识过长（>{_ROOM_SPEC_MAX} 字符）"}
+    for r in rooms:
+        if isinstance(r, dict) and r.get("platform") == platform and \
+                str(r.get("room_id")) == spec:
+            return {"ok": False, "error": f"该平台已存在相同房间：{spec}"}
+    confirm = None
+    if "://" in spec:
+        try:
+            from danmaku_listener.utils.platform_parser import extract_from_link
+            if extract_from_link(spec) is None:
+                confirm = "无法识别的链接格式，将按原文保存，运行时可能无法监听——确认添加？"
+        except Exception:
+            confirm = "链接解析不可用，将按原文保存——确认添加？"
+    return {"ok": True, "error": "", "confirm": confirm}
 
 
 def create_platform_config_tab(
@@ -95,18 +112,51 @@ def create_platform_config_tab(
     theme_config: Dict[str, str],
     set_config_callback: Callable
 ):
-    """创建平台配置标签页（DanmakuListener 进程内模块控制面）"""
+    """创建平台配置标签页（配置面直写 + 登录服务 + 运行态叠加）"""
     card_css = theme_config.get("card", "")
 
-    # 事件消费指针（增量拉取——P2-2 状态实时性）
-    state = {"evt_seq": 0, "rooms": [], "running": False, "red": False, "enabled": False,
-             "last_msg_age_s": None, "stall": 60, "active": "", "login_queue": 0, "streak": 0}
-    timers: list = []
+    state: Dict[str, Any] = {
+        "mode": "main_down",       # main_down / service_disabled / running（三态分流 Eng F-ENG-5）
+        "rooms_cfg": [],           # 配置真相（config.rooms）
+        "run_status": {},          # 运行态叠加（/danmaku/status）
+        "run_rooms": {},           # 运行态房间映射（join 用）
+        "kw": [], "kw_on": True,
+        "confirm_pending": None,   # 链接确认挂起（DX 发现 6）
+    }
+    login_svc = get_login_service()
 
     async def _toast(msg: str, kind: str = "positive"):
         ui.notify(position="top", type=kind, message=msg[:180])
 
-    # ---------- 页头：总开关 + 胶囊四态 + 登录请求数（P2-0 ④⑤） ----------
+    async def _err_notify(result: Dict[str, Any]):
+        msg = result.get("error", "操作失败")
+        if result.get("fix_hint"):
+            msg += f"｜{result['fix_hint']}"
+        await _toast(msg, "negative")
+
+    def _rooms() -> list:
+        return [r for r in state["rooms_cfg"] if isinstance(r, dict)]
+
+    def _write_rooms(rooms: list) -> bool:
+        """config.rooms 直写（set_config 通道双回滚；失败时调用方保持 UI 不翻转——DX 发现 5）。"""
+        return set_config_callback("danmaku_listener", "rooms", value=rooms, _notify=False) is not False
+
+    def _write_keywords():
+        set_config_callback("danmaku_listener", "keywords",
+                            value=list(state["kw"]), _notify=False)
+        set_config_callback("danmaku_listener", "keyword_filter_enabled",
+                            value=state["kw_on"], _notify=False)
+
+    # ---------- 三态判定（Eng F-ENG-5） ----------
+
+    def _mode_from_status(st: Any) -> str:
+        if not isinstance(st, dict) or "enabled" not in st:
+            return "main_down"
+        if not st.get("enabled"):
+            return "service_disabled"
+        return "running"
+
+    # ---------- 页头：总开关 + 胶囊 + 登录进度 chip ----------
 
     with ui.row().classes("w-full items-center justify-between q-py-sm"):
         with ui.row().classes("items-center gap-2"):
@@ -114,321 +164,334 @@ def create_platform_config_tab(
                 "font-size:var(--font-size-page-title,16px);font-weight:600;color:var(--text-primary)")
             head_switch = ui.switch("启用监听", value=False)
 
-            async def _toggle_service(_e=None, val: bool = None):
-                target = val if val is not None else head_switch.value
+            async def _toggle_service(_e=None):
+                target = head_switch.value
                 r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
-                if not r.get("success"):
-                    _error_notify(r)
-                    head_switch.value = not target
+                if r is None or not isinstance(r, dict) or not r.get("success"):
+                    if r is None:
+                        await _toast("主程序未运行——总开关将在「启动系统」后生效（选择已保存）", "info")
+                        set_config_callback("danmaku_listener", "enabled", value=target, _notify=False)
+                    else:
+                        await _err_notify(r)
+                        head_switch.value = not target
                 else:
                     await _toast("监听已开启" if target else "监听已关闭")
             head_switch.on("update:model-value", _toggle_service)
 
         with ui.row().classes("items-center gap-2"):
             pill = ui.badge("未启用").props("outline")
-            login_badge = ui.badge("0").props("outline color=warning")
-            ui.label("登录请求").style("font-size:var(--font-size-small,12px);color:var(--text-hint)")
+            login_chip = ui.chip("登录：空闲", icon="qr_code_2").props("outline").style(
+                "font-size:var(--font-size-tiny,11px)")
 
     def _render_pill():
-        if not state["enabled"]:
-            pill.text = "未启用"
-            pill._props["color"] = "grey-6"
-        elif state["red"]:
-            pill.text = "异常（守护置红）"
-            pill._props["color"] = "negative"
-        elif state["running"]:
-            pill.text = "运行中"
-            pill._props["color"] = "positive"
-        elif state["streak"]:
-            pill.text = "重建中"
-            pill._props["color"] = "warning"
+        mode = state["mode"]
+        st = state["run_status"]
+        if mode == "main_down":
+            pill.text, c = "主程序未运行", "grey-6"
+        elif mode == "service_disabled":
+            pill.text, c = "未启用", "grey-6"
+        elif st.get("red"):
+            pill.text, c = "异常（守护置红）", "negative"
+        elif st.get("running"):
+            pill.text, c = "运行中", "positive"
         else:
-            pill.text = "已就绪"
-            pill._props["color"] = "grey-8"
+            pill.text, c = "已就绪", "grey-8"
+        pill._props["color"] = c
         pill.update()
-        login_badge.text = str(state["login_queue"])
-        login_badge.update()
 
-    # ---------- 卡①：房间管理（首屏主导） ----------
+    def _render_login_chip():
+        ls = login_svc.get_state()
+        status = ls.get("status", "idle")
+        plat = ls.get("platform")
+        text = {"idle": "登录：空闲", "queued": f"登录排队：{plat}", "launching": f"浏览器启动中：{plat}",
+                "waiting_scan": f"等待扫码：{plat}", "saving": f"保存中：{plat}",
+                "success": f"登录成功：{plat}", "failed": f"登录失败：{plat}",
+                "timeout": f"登录超时：{plat}"}.get(status, "登录：空闲")
+        login_chip.text = text
+        login_chip._props["color"] = {"success": "positive", "failed": "negative",
+                                      "timeout": "warning"}.get(status, "info")
+        login_chip.update()
+
+    # ---------- 卡①：房间管理（首屏主对象——Design D-1） ----------
 
     with ui.card().style(card_css):
         ui.label("房间管理").style("font-size:var(--font-size-card-title,16px);font-weight:600")
+        # 活跃警示条（Design D-1：无活跃常驻警示）
+        warn_banner_host = ui.column().classes("w-full")
 
-        # 活跃房间常驻状态行 + 无活跃警示条（P2-0 ⑦）
-        active_row = ui.row().classes("w-full items-center gap-2")
-        warn_banner = ui.row().classes("w-full q-pa-sm items-center").style(
-            "background:var(--color-warning, #f2c037);border-radius:var(--radius-md,8px);display:none")
-
-        # 平台启用开关独立区（P2-0 ⑥）：12 平台紧凑开关行
-        ui.label("平台启用").style("font-size:var(--font-size-field-label,14px);color:var(--text-secondary)")
-        plat_switches: Dict[str, ui.switch] = {}
-        with ui.row().classes("w-full flex-wrap gap-1"):
-
-            def _mk_plat_toggle(p: str):
-                async def _toggle(_e=None):
-                    r = await _api(config, "POST", f"/danmaku/platform/{p}/toggle",
-                             {"enabled": plat_switches[p].value})
-                    if not r.get("success"):
-                        _error_notify(r)
-                        plat_switches[p].value = not plat_switches[p].value
-                    else:
-                        # 破坏性确认已由后端联动 stop 承担（Eng 义务）；关闭平台时提示
-                        if not plat_switches[p].value:
-                            await _toast(f"{_PLATFORM_LABELS.get(p, p)} 已禁用——运行中房间已联动停止", "warning")
-                return _toggle
-
-            for p in _PLATFORM_LABELS:
-                sw = ui.switch(_PLATFORM_LABELS[p], value=False)
-                sw.on("update:model-value", _mk_plat_toggle(p))
-                sw.style("font-size:var(--font-size-small,12px)")
-                plat_switches[p] = sw
-
-        # 添加行：平台下拉（未启用禁用标灰 + 登录标注 tooltip）+ 输入 + 添加
+        # 添加表单（Design D-2：分组下拉，白名单平台）
         with ui.row().classes("w-full items-end gap-2"):
-            platform_sel = ui.select(
-                {p: f"{label}（{_PLATFORM_LOGIN_HINT[p]}）" for p, label in _PLATFORM_LABELS.items()},
-                label="平台", value="bilibili", with_input=True,
-            ).style("width:var(--input-width-md,250px)")
+            plat_options: Dict[str, str] = {}
+            for gname, plats in _PLATFORM_GROUPS:
+                for p in plats:
+                    plat_options[p] = f"{gname}｜{_PLATFORM_LABELS[p]}"
+            plat_sel = ui.select(plat_options, label="平台", value="bilibili",
+                                 with_input=True).style("width:var(--input-width-md,250px)")
             room_input = ui.input(label="房间号或直播间链接",
-                                  placeholder="例：12345 或 https://live.bilibili.com/12345",
-                                  ).style("width:var(--input-width-lg,400px)").tooltip(
-                "支持直播间链接自动识别；未启用平台先在上方打开开关")
-            warn_label = ui.label("").style("font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
+                                  placeholder="例：12345 或直播间分享链接").style(
+                "width:var(--input-width-lg,400px)").tooltip(
+                "支持直播间链接自动识别；配置期即可登录保存")
+            login_hint = ui.label("").style(
+                "font-size:var(--font-size-tiny,11px);color:var(--color-info, #31ccec)")
 
             async def _add_room():
-                p = platform_sel.value
+                platform = plat_sel.value
                 spec = (room_input.value or "").strip()
-                if not p or not spec:
-                    await _toast("请选择平台并填写房间号", "warning")
+                v = _validate_room(platform, spec, _rooms())
+                if not v["ok"]:
+                    await _err_notify({"error": v["error"],
+                                       "fix_hint": "检查平台选择与房间号输入"})
                     return
-                r = await _api(config, "POST", "/danmaku/rooms", {"platform": p, "room_spec": spec})
-                if r.get("status") == "login_required":
-                    await _toast(r.get("message") or "需要登录：请在弹出的浏览器中扫码", "info")
-                    room_input.value = ""
-                elif not r.get("success"):
-                    _error_notify(r)
-                else:
-                    for w in (r.get("warnings") or []):
-                        await _toast(f"平台提示：{w}", "warning")
-                    await _toast("房间已添加并开始监听")
-                    room_input.value = ""
+                if v["confirm"] and state.get("confirm_pending") != spec:
+                    state["confirm_pending"] = spec
+                    await _toast(v["confirm"], "warning")
+                    return
+                state["confirm_pending"] = None
+                rooms = _rooms()
+                rooms.append({"platform": platform, "room_id": spec,
+                              "enabled": True,  # DX 发现 1：添加即启用
+                              "active": not any(r.get("active") for r in rooms)})  # 首个自动活跃
+                if not _write_rooms(rooms):
+                    await _err_notify({"error": "配置保存失败",
+                                       "fix_hint": "检查磁盘/权限后重试（状态未翻转）"})
+                    return
+                room_input.value = ""
+                await _toast(f"房间已保存：{_PLATFORM_LABELS[platform]} {spec}")
+                # onboard_room 编排（CEO F2 单入口）：登录检测 → 自动弹窗
+                await _onboard_login(platform)
             ui.button("添加", icon="add", on_click=_add_room).props("unelevated color=primary")
 
-        # 房间列表（表格：P2-0 ①七态 + ②生命信号 + 活跃徽章 + 仅监听不互动）
-        table_host = ui.column().classes("w-full")
+        login_progress = ui.label("").style(
+            "font-size:var(--font-size-tiny,11px);color:var(--color-info, #31ccec);display:none")
+        list_host = ui.column().classes("w-full")
 
-    # ---------- 卡②：关键词屏蔽（J2 固定文案） ----------
-
-    kw_state = {"list": [], "enabled": True}
+    # ---------- 卡②：关键词屏蔽（J2 固定文案；运行期热生效 M-1 ③） ----------
 
     with ui.card().style(card_css):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("关键词屏蔽").style("font-size:var(--font-size-card-title,16px);font-weight:600")
             kw_switch = ui.switch("过滤开关", value=True)
-        ui.label("仅屏蔽弹幕内容，不影响礼物与进场").style(
+
+            async def _toggle_kw(_e=None):
+                state["kw_on"] = kw_switch.value
+                _write_keywords()
+                if state["mode"] == "running":  # M-1 ③：运行期 reload 热生效
+                    await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
+                    await _toast("过滤开关已保存并即时生效")
+            kw_switch.on("update:model-value", _toggle_kw)
+        ui.label("仅屏蔽弹幕内容，不影响礼物与进场；运行中修改即时生效").style(
             "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
         with ui.row().classes("w-full items-center gap-2"):
             kw_input = ui.input(label="添加屏蔽关键词").style("width:var(--input-width-md,250px)") \
                 .on("keydown.enter", lambda: _add_kw())
             ui.button("添加", on_click=lambda: _add_kw()).props("unelevated color=primary outline")
-
-        async def _add_kw():
-            kw = (kw_input.value or "").strip()
-            if not kw:
-                return
-            r = await _api(config, "POST", "/danmaku/keywords", {"keyword": kw})
-            if not r.get("success"):
-                _error_notify(r)
-            else:
-                kw_input.value = ""
-                await _refresh_keywords()
         kw_chips = ui.row().classes("w-full flex-wrap gap-1")
 
-        async def _toggle_kw_filter(_e=None):
-            r = await _api(config, "POST", "/danmaku/keywords/toggle", {"enabled": kw_switch.value})
-            if not r.get("success"):
-                _error_notify(r)
-                kw_switch.value = not kw_switch.value
+    async def _add_kw():
+        kw = (kw_input.value or "").strip()
+        if not kw or len(kw) > 50:
+            await _toast("关键词须为 1-50 字符", "warning")
+            return
+        if kw in state["kw"]:
+            await _toast("关键词已存在", "warning")
+            return
+        state["kw"] = state["kw"] + [kw]
+        _write_keywords()
+        kw_input.value = ""
+        _render_kw()
+        if state["mode"] == "running":  # M-1 ③ 热生效
+            await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
+            await _toast("关键词已保存并即时生效")
 
-        kw_switch.on("update:model-value", _toggle_kw_filter)
+    async def _rm_kw(kw: str):
+        state["kw"] = [k for k in state["kw"] if k != kw]
+        _write_keywords()
+        _render_kw()
+        if state["mode"] == "running":
+            await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
 
-    # ---------- 渲染函数 ----------
-
-    def _room_state_of(r: Dict[str, Any]) -> str:
-        st = r.get("status") or "stopped"
-        if st == "running":
-            age = state.get("last_msg_age_s")
-            if age is not None and age > state.get("stall", 60):
-                return "stalled"
-        return st
-
-    def _render_rooms():
-        table_host.clear()
-        with table_host:
-            if not state["rooms"]:
-                ui.label("暂无监听房间——选择平台 → 填房间号或粘贴直播间链接 → 添加") \
-                    .style("color:var(--text-hint);font-size:var(--font-size-body,14px)")
-                return
-            with ui.row().classes("w-full items-center gap-2 q-py-xs"):
-                ui.label(f"当前互动房间：{state['active'] or '未指定'}") \
-                    .style("font-size:var(--font-size-field-label,14px);font-weight:500")
-            if state["rooms"] and not state["active"] and state["running"]:
-                warn_banner.style("display:flex")
-                with warn_banner:
-                    ui.icon("warning", color="black")
-                    ui.label("有房间在监听但未指定活跃房间——数字人不会互动。请在下方点选「设为活跃」") \
-                        .style("color:black;font-size:var(--font-size-small,12px)")
-            else:
-                warn_banner.style("display:none")
-            with ui.column().classes("w-full gap-1"):
-                for r in state["rooms"]:
-                    p, rid = str(r.get("platform")), str(r.get("room_id"))
-                    st = _room_state_of(r)
-                    label, color = _ROOM_STATES.get(st, (st, "var(--text-hint)"))
-                    is_active = bool(r.get("active"))
-                    with ui.row().classes("w-full items-center q-py-xs q-px-sm gap-2").style(
-                            f"border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px)"
-                            + (";background:var(--color-primary-opacity, rgba(41,121,255,0.06))" if is_active else "")):
-                        ui.badge(_PLATFORM_LABELS.get(p, p)).props("outline")
-                        ui.label(rid).style("font-size:var(--font-size-body,14px)")
-                        ui.label(label).style(f"color:{color};font-size:var(--font-size-small,12px);font-weight:500")
-                        if is_active:
-                            ui.badge("活跃").props("color=primary")
-                        if st == "running" and not is_active:
-                            ui.label("仅监听不互动").style(
-                                "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
-                        if st == "stalled":
-                            ui.label(f"最近消息 {state['last_msg_age_s']}s 前——检查直播间是否开播或查看日志") \
-                                .style("font-size:var(--font-size-tiny,11px);color:var(--color-negative,#c10015)")
-                        if st in ("login_required", "login_failed"):
-                            ui.button("去登录", on_click=lambda p=p, rid=rid: _start_room(p, rid)) \
-                                .props("flat dense color=warning")
-                        ui.element("div").classes("col")
-                        with ui.row().classes("gap-1"):
-                            if st == "running":
-                                ui.button("停止", on_click=lambda p=p, rid=rid: _stop_room(p, rid)) \
-                                    .props("flat dense")
-                            else:
-                                ui.button("启动", on_click=lambda p=p, rid=rid: _start_room(p, rid)) \
-                                    .props("flat dense color=primary")
-                            ui.button("设为活跃", on_click=lambda p=p, rid=rid: _set_active(p, rid)) \
-                                .props("flat dense color=primary" if not is_active else "flat dense disabled")
-                            ui.button("删除", on_click=lambda p=p, rid=rid: _remove_room(p, rid)) \
-                                .props("flat dense color=negative")
-
-    # ---------- 操作（乐观更新 P2-2） ----------
-
-    async def _start_room(p, rid):
-        r = await _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/start")
-        if r.get("status") == "login_required":
-            await _toast("需要登录：请在弹出的浏览器中扫码", "info")
-        elif not r.get("success"):
-            _error_notify(r)
-        else:
-            await _toast(f"{p}:{rid} 已启动")
-
-    async def _stop_room(p, rid):
-        r = await _api(config, "POST", f"/danmaku/rooms/{p}/{rid}/stop")
-        if not r.get("success"):
-            _error_notify(r)
-        else:
-            await _toast(f"{p}:{rid} 已停止（重启后按启用配置恢复）")
-
-    async def _remove_room(p, rid):
-        r = await _api(config, "DELETE", f"/danmaku/rooms/{p}/{rid}")
-        if not r.get("success"):
-            _error_notify(r)
-        else:
-            await _toast("房间已删除")
-
-    async def _set_active(p, rid):
-        # 活跃指定写回 config.rooms[].active（P1-3 显式指定；经平台开关通道风格——走 config 回调）
-        rooms = list(get_nested_value(config, "danmaku_listener", "rooms", default=[]) or [])
-        found = False
-        for r in rooms:
-            if isinstance(r, dict):
-                was = bool(r.get("active"))
-                r["active"] = (r.get("platform") == p and str(r.get("room_id")) == rid)
-                if r["active"]:
-                    r["enabled"] = True
-                    found = True
-                if was and not r["active"] and not any(x.get("active") for x in rooms):
-                    pass
-        if not found:
-            rooms.append({"platform": p, "room_id": rid, "enabled": True, "active": True})
-        set_config_callback("danmaku_listener", "rooms", value=rooms, _notify=False)
-        await _toast(f"活跃房间已设为 {p}:{rid}（该房间消息将进对话链）")
-
-    async def _refresh_keywords():
-        r = await _api(config, "GET", "/danmaku/keywords")
-        if isinstance(r, dict) and "keywords" in r:
-            kw_state["list"] = r.get("keywords") or []
-            kw_state["enabled"] = bool(r.get("enabled", True))
-            kw_switch.value = kw_state["enabled"]
-            _render_keywords()
-
-    def _render_keywords():
+    def _render_kw():
         kw_chips.clear()
         with kw_chips:
-            if not kw_state["list"]:
-                ui.label("暂无屏蔽关键词").style("color:var(--text-hint);font-size:var(--font-size-small,12px)")
-            for kw in kw_state["list"]:
+            if not state["kw"]:
+                ui.label("暂无屏蔽关键词——添加后弹幕中出现该词将被过滤").style(
+                    "color:var(--text-hint);font-size:var(--font-size-small,12px)")
+            for kw in state["kw"]:
 
                 async def _rm(k=kw):
-                    r = await _api(config, "DELETE", f"/danmaku/keywords/{k}")
-                    if not r.get("success"):
-                        _error_notify(r)
-                    else:
-                        await _refresh_keywords()
+                    await _rm_kw(k)
                 ui.chip(kw, removable=True, on_removal=_rm).props("outline")
 
-    # ---------- 平台开关同步（下拉禁用态联动） ----------
+    # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
 
-    def _sync_platform_switches(platforms: Dict[str, bool]):
-        for p, sw in plat_switches.items():
-            enabled = bool((platforms or {}).get(p, False))
-            if sw.value != enabled:
-                sw.value = enabled
-            plat = platform_sel.options.get(p)
-            # 下拉项不禁用（NiceGUI select 单值禁用复杂），以 tooltip + 添加时后端拒绝兜底
-            sw.style("opacity:1" if enabled else "opacity:0.5")
+    async def _onboard_login(platform: str):
+        """添加→检测→自动弹窗→列表刷新（CEO F2 编排接缝；Eng F-ENG-13 三平台）。"""
+        if platform not in _CONFIG_LOGIN_PLATFORMS:
+            login_hint.text = "该平台在启动系统后首次监听时按引导登录"
+            return
+        if login_svc.check_login(platform):
+            login_hint.text = "登录态正常"
+            return
+        r = login_svc.request_login(platform)
+        if r.get("success"):
+            login_hint.text = "登录窗口已弹出——请完成扫码，登录后自动保存"
+            await _toast("检测到未登录——登录窗口已弹出（完成后自动保存）", "info")
 
-    # ---------- 轮询（P2-2：3s，对齐 service_status） ----------
+    async def _retry_login(platform: str):
+        await _onboard_login(platform)
+
+    # ---------- 房间列表（config 真相 + 运行态叠加；Eng F-ENG-6 join 规则） ----------
+
+    def _room_run_state(r: Dict[str, Any]) -> str:
+        """行内运行态（Design D-3 视觉位）：enabled 是配置裁决，运行态只读叠加。"""
+        if not r.get("enabled"):
+            return "disabled"
+        key = f"{r.get('platform')}:{r.get('room_id')}"
+        rr = state["run_rooms"].get(key)
+        if state["mode"] == "running" and rr is not None:
+            if rr.get("status") == "running":
+                age = state["run_status"].get("last_msg_age_s")
+                if age is not None and age > state["run_status"].get("stall_threshold_s", 60):
+                    return "stalled"
+                return "running"
+        return "saved_pending"
+
+    def _render_rooms():
+        list_host.clear()
+        rooms = _rooms()
+        with list_host:
+            active_key = next((f"{r['platform']}:{r['room_id']}" for r in rooms
+                               if r.get("active")), "")
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label(f"当前互动房间：{active_key or '未指定'}").style(
+                    "font-size:var(--font-size-field-label,14px);font-weight:500")
+            if rooms and not active_key:
+                with ui.row().classes("w-full q-pa-sm items-center").style(
+                        "background:var(--color-warning, #f2c037);border-radius:var(--radius-md,8px)"):
+                    ui.icon("warning", color="black")
+                    ui.label("未指定活跃房间——数字人不会互动。请在下方点选「设为活跃」") \
+                        .style("color:black;font-size:var(--font-size-small,12px)")
+            if not rooms:
+                ui.label("还没有监听房间——① 选择平台 → ② 填房间号或粘贴链接 → ③ 添加并扫码登录") \
+                    .style("color:var(--text-hint);font-size:var(--font-size-body,14px)")
+                return
+            for r in rooms:
+                p, rid = str(r.get("platform")), str(r.get("room_id"))
+                run_state = _room_run_state(r)
+                text, color = _ROOM_STATE_TEXT[run_state]
+                enabled = bool(r.get("enabled"))
+                with ui.row().classes("w-full items-center q-py-xs q-px-sm gap-2").style(
+                        "border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px)"
+                        + (";background:var(--color-primary-opacity, rgba(41,121,255,0.06))" if r.get("active") else "")):
+                    ui.badge(_PLATFORM_LABELS.get(p, p)).props("outline")
+                    ui.label(rid).style("font-size:var(--font-size-body,14px)")
+                    ui.label(text).style(f"color:{color};font-size:var(--font-size-small,12px);font-weight:500")
+                    if r.get("active"):
+                        ui.badge("活跃").props("color=primary")
+                    if run_state == "stalled":
+                        ui.label(f"最近消息 {state['run_status'].get('last_msg_age_s')}s 前——确认开播或查日志") \
+                            .style("font-size:var(--font-size-tiny,11px);color:var(--color-negative,#c10015)")
+                    ui.element("div").classes("col")
+                    # 登录徽章（平台级——Design S-1；J-3 三级灰/绿）
+                    if p in _CONFIG_LOGIN_PLATFORMS:
+                        logged = login_svc.check_login(p)
+                        lb_text, lb_color = _LOGIN_BADGE["confirmed" if logged else "none"]
+                        ui.badge(lb_text).props(f"outline color={lb_color}").tooltip(
+                            "同平台共享登录态；运行期以引擎实际验证为准")
+                        if not logged:
+                            ui.button("登录", on_click=lambda pp=p: _retry_login(pp)) \
+                                .props("flat dense color=warning")
+                    else:
+                        ui.badge("运行期登录").props("outline color=info").tooltip(
+                            "该平台在启动系统后首次监听时按引导自动登录")
+                    # 启用开关（行内——问题 3 根治；三态分流 F1）
+                    room_switch = ui.switch("监听", value=enabled)
+
+                    async def _toggle_room(_e=None, rr=rooms, idx=rooms.index(r), sw=room_switch):
+                        target = sw.value
+                        rr[idx]["enabled"] = target
+                        if state["mode"] == "running":  # F1 窄端点（config-first 联动启停）
+                            resp = await _api(config, "POST",
+                                              f"/danmaku/rooms/{rr[idx]['platform']}/{rr[idx]['room_id']}/enabled",
+                                              {"enabled": target}, timeout=10)
+                            if resp is None or not isinstance(resp, dict) or not resp.get("success"):
+                                st2 = await _api(config, "GET", "/danmaku/status", timeout=5)
+                                if not isinstance(st2, dict) or "enabled" not in st2:
+                                    pass  # TOCTOU：确认离线 → 降级直写（已写）
+                                else:
+                                    sw.value = not target
+                                    await _err_notify({"error": "运行面切换失败",
+                                                       "fix_hint": "服务仍在线——请重试"})
+                                    return
+                        if not _write_rooms(rr):  # DX 发现 5：失败不翻转
+                            sw.value = not target
+                            await _err_notify({"error": "配置保存失败", "fix_hint": "状态未翻转"})
+                            return
+                        await _toast(f"{p}:{rid} {'开始监听' if target else '已停止监听'}"
+                                     + ("" if state["mode"] == "running" else "（下次启动系统后生效）"))
+                    room_switch.on("update:model-value", _toggle_room)
+
+                    # 删除（运行态两步走——M-1 ②：先窄端点停再删配置）
+                    async def _remove(_e=None, pp=p, rd=rid):
+                        if state["mode"] == "running":
+                            await _api(config, "POST", f"/danmaku/rooms/{pp}/{rd}/enabled",
+                                       {"enabled": False}, timeout=10)
+                        kept = [x for x in _rooms()
+                                if not (x.get("platform") == pp and str(x.get("room_id")) == rd)]
+                        if not _write_rooms(kept):
+                            await _err_notify({"error": "删除保存失败", "fix_hint": "房间列表未变更"})
+                            return
+                        await _toast("房间已删除")
+                    ui.button("删除", on_click=_remove).props("flat dense color=negative")
+
+                    # 设为活跃（写回 config——显式指定，Eng F-ENG-3 语义）
+                    if not r.get("active"):
+
+                        async def _set_active(_e=None, rr=rooms, idx=rooms.index(r)):
+                            for x in rr:
+                                x["active"] = False
+                            rr[idx]["active"] = True
+                            rr[idx]["enabled"] = True
+                            if _write_rooms(rr):
+                                await _toast(f"活跃房间已设为 {rr[idx]['platform']}:{rr[idx]['room_id']}"
+                                             + ("" if state["mode"] != "running"
+                                                else "（运行中新增互动房间——下次启动完全生效）"))
+                        ui.button("设为活跃", on_click=_set_active).props("flat dense color=primary")
+
+    # ---------- 轮询（3s） ----------
 
     async def _poll():
         sec = get_nested_value(config, "danmaku_listener", default={}) or {}
-        enabled = bool(sec.get("enabled"))
-        st = await _api(config, "GET", "/danmaku/status", timeout=5)
-        if isinstance(st, dict) and ("enabled" in st):
-            state["enabled"] = bool(st.get("enabled"))
-            state["running"] = bool(st.get("running"))
-            state["red"] = bool(st.get("red"))
-            state["streak"] = int(st.get("rebuild_count") or 0)
-            state["last_msg_age_s"] = st.get("last_msg_age_s")
-            state["stall"] = float(st.get("stall_threshold_s") or 60)
-            state["active"] = str(st.get("active_room") or "")
-        ev = await _api(config, "GET", f"/danmaku/events?since={state['evt_seq']}", timeout=5)
-        if isinstance(ev, dict) and ev.get("events"):
-            for e in ev["events"]:
-                if e.get("kind") == "login_request":
-                    pass  # 登录请求经 login_badge 计数呈现（danmaku_login.py 弹窗独立轮询）
-            state["evt_seq"] = int(ev.get("last_seq") or state["evt_seq"])
-        rooms_r = await _api(config, "GET", "/danmaku/rooms", timeout=5)
-        if isinstance(rooms_r, dict) and "rooms" in rooms_r:
-            state["rooms"] = rooms_r.get("rooms") or []
-            state["running"] = bool(rooms_r.get("running", state["running"]))
-        login_r = await _api(config, "GET", "/danmaku/login_state", timeout=5)
-        if isinstance(login_r, dict):
-            state["login_queue"] = int(login_r.get("queue") or 0) + (1 if login_r.get("active") else 0)
-        _sync_platform_switches(sec.get("platforms") or {})
-        head_switch.value = state["enabled"]
+        state["rooms_cfg"] = list(sec.get("rooms") or [])
+        state["kw"] = list(sec.get("keywords") or [])
+        state["kw_on"] = bool(sec.get("keyword_filter_enabled", True))
+        if kw_switch.value != state["kw_on"]:
+            kw_switch.value = state["kw_on"]
+        # 三态判定（Eng F-ENG-5）
+        st = await _api(config, "GET", "/danmaku/status", timeout=3)
+        state["mode"] = _mode_from_status(st)
+        if state["mode"] == "running":
+            state["run_status"] = st if isinstance(st, dict) else {}
+            rr = await _api(config, "GET", "/danmaku/rooms", timeout=5)
+            if isinstance(rr, dict):
+                state["run_rooms"] = {f"{x.get('platform')}:{x.get('room_id')}": x
+                                      for x in (rr.get("rooms") or []) if isinstance(x, dict)}
+        head_switch.value = bool(sec.get("enabled", False))
         _render_pill()
+        _render_login_chip()
         _render_rooms()
+        _render_kw()
+        # 登录进度行内呈现（Design A-1 非模态）
+        ls = login_svc.get_state()
+        if ls.get("status") in ("queued", "launching", "waiting_scan", "saving"):
+            login_progress.text = f"登录进度：{login_chip.text}"
+            login_progress.style("display:block")
+        else:
+            login_progress.style("display:none")
 
-    timer = ui.timer(3.0, _poll)
-    timers.append(timer)
+    ui.timer(3.0, _poll)
 
-    # 首次渲染
     _render_rooms()
-    _render_keywords()
+    _render_kw()
     _render_pill()
+    _render_login_chip()

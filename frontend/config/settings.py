@@ -55,9 +55,24 @@ class Settings:
 
         E-F6：写失败时调用方（开关处理器）需要感知以回滚 UI 状态，
         静默吞异常会造成「开关已翻转 + 假成功提示 + 重启回滚」事故。
+
+        写者分配矩阵（Eng F-ENG-2 critical，2026-10-06）：danmaku_listener 节
+        在 main.py 运行期由窄端点写盘（磁盘 RMW + 内存节刷新）——本进程
+        全量 dump 会用启动时旧快照覆盖回滚。dump 前先从磁盘读回该节，
+        替换内存快照中的对应节（其他节维持本进程内存——无跨进程写者）。
         """
         if not self._config:
             raise RuntimeError("内存配置为空，拒绝落盘（防止覆盖既有配置）")
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                disk = json.load(f)
+            if isinstance(disk, dict) and isinstance(disk.get("danmaku_listener"), dict):
+                self._config["danmaku_listener"] = disk["danmaku_listener"]
+        except FileNotFoundError:
+            pass
+        except Exception:
+            from utils.my_log import logger
+            logger.warning("danmaku_listener 节磁盘回读失败——按内存快照落盘", exc_info=True)
         tmp_path = self.config_path.with_suffix(
             self.config_path.suffix + f".tmp{os.getpid()}"
         )

@@ -12,6 +12,7 @@
 
 import asyncio
 import json
+import os
 import struct
 import time
 from typing import Any, Dict, List, Tuple
@@ -20,6 +21,7 @@ import websockets
 from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
+from danmaku_listener.engines import login_gate as LOGIN_GATE
 from danmaku_listener.engines.base import BaseEngine
 from danmaku_listener.engines.protocol import douyu_codec as codec
 
@@ -51,6 +53,9 @@ class DouyuProtocolEngine(BaseEngine):
         self._room_writers: Dict[str, asyncio.StreamWriter] = {}
         self._heartbeats: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
+        # 登录闭环状态（2026-10-06 平台登录计划；cookie 文件形态——login_gate）
+        self._login_budgets: Dict[str, int] = {}
+        self._budget_warned: set = set()
 
     @property
     def engine_id(self) -> str:
@@ -124,6 +129,24 @@ class DouyuProtocolEngine(BaseEngine):
     # ---- 房间任务主循环 ----
 
     async def _run_room(self, room_id: str) -> None:
+        # 登录门槛（2026-10-06 平台登录计划，用户裁定 B）：cookie 文件登录态
+        # 判定→弹窗→存档。诚实边界：登录态不进当前 TCP 协议连接（协议无注入路径）。
+        try:
+            from danmaku_listener.config.settings import get_settings
+            cookie_path = os.path.join(get_settings().cookie_dir,
+                                       f"{self.platform}_login_cookies.json")
+            outcome = await LOGIN_GATE.ensure_cookie_file_login(
+                room_id, self.platform, "https://www.douyu.com/login",
+                cookie_path,
+                self._stop_flags, self._login_budgets, self._budget_warned,
+                lambda detail: self._emit_system_status(room_id, detail))
+            if outcome == "stopped":
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001  登录门槛故障不阻塞监听（降级游客）
+            logger.warning(f"[douyu] room {room_id} login gate error: "
+                           f"{type(e).__name__}: {str(e)[:80]}")
         logger.info(f"[douyu] room {room_id} connecting (tcp)")
         while not self._stop_flags.get(room_id):
             try:

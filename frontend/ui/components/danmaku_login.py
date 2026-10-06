@@ -103,25 +103,12 @@ class DanmakuLoginDialog:
         ui.timer(1.0, self.refresh)
 
     def _build_entry(self):
-        """常驻入口按钮（login_entry 开关控制显示）。"""
+        """侧边栏入口已移除（R2 用户裁定：登录入口统一为"添加房间后自动弹窗"）。
+
+        弹窗本体保留供运行期 NEEDS_LOGIN 自动呈现（_refresh_dialog 检测
+        active 自动开）；本方法保留以兼容既有 mount() 调用链。
+        """
         self._entry_row.clear()
-        login_on = True
-        try:
-            from frontend.config.settings import get_config
-            login_on = bool(get_config().get("danmaku_listener", "login_entry", default=True))
-        except Exception:
-            pass
-        with self._entry_row:
-            if login_on:
-                badge = getattr(self, "_last_badge", 0)
-                ui.button(
-                    "平台登录" + (f" ({badge})" if badge else ""),
-                    icon="qr_code_2",
-                    on_click=self._open_dialog,
-                ).props("flat dense size=sm").tooltip("弹幕监听平台登录态处理（扫码）")
-                self._badge_label = None
-            else:
-                ui.label("").style("display:none")
 
     # ---------- 对话框 ----------
 
@@ -159,18 +146,8 @@ class DanmakuLoginDialog:
             logger.error("[danmaku-login] 刷新异常", exc_info=True)
 
     async def _refresh_entry(self):
-        """入口徽标随队列变化；常驻入口开关变更时重建。"""
-        st = await _api_get("/danmaku/login_state")
-        badge = 0
-        if isinstance(st, dict):
-            badge = int(st.get("queue") or 0) + (1 if st.get("active") else 0)
-        self._last_badge = badge
-        want = f"平台登录" + (f" ({badge})" if badge else "")
-        current = self._entry_row
-        # 简单策略：徽标数变化即重建入口行（构建成本低）
-        if getattr(self, "_last_badge_text", None) != want:
-            self._last_badge_text = want
-            self._build_entry()
+        """侧边栏入口已移除（R2 用户裁定）——保留空实现兼容 mount() 轮询链。"""
+        return
 
     async def _refresh_dialog(self):
         """对话框开着时：呈现激活的登录请求；恢复/清空自动关闭。"""

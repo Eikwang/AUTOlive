@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from danmaku_listener.contract.models import GapReason
+from danmaku_listener.engines import login_gate as LOGIN_GATE
 from danmaku_listener.engines.protocol.controlled_base import ControlledPageEngine
 
 PROTOCOL_VERSION = "jd-1"
@@ -198,6 +199,22 @@ class JDProtocolEngine(ControlledPageEngine):
             try:
                 await self._run_session(room_id, room_key, goto_url)
                 backoff = 15.0
+            except self.NeedLoginVisible as sig:
+                # 登录闭环（2026-10-06 平台登录计划，用户裁定 B）：撕裂会话弹可见
+                # 窗口（live1688 NeedLoginVisible 同款时序）；预算在检测点扣减
+                logger.info(f"[jd] room {room_id} login gate triggered")
+                await self._emit_system_status(
+                    room_id,
+                    f"{LOGIN_GATE.LOGIN_EVENT_FIRST_LOGIN}: 京东直播间登录增强——"
+                    "已弹出浏览器，请登录京东账号（可跳过，游客可收弹幕）")
+                outcome = await self._wait_login_visible(
+                    room_id, sig.goto_url, LOGIN_GATE.LOGIN_COOKIE_NAMES["jd"])
+                if outcome == "logged_in":
+                    self._login_budgets[room_id] = LOGIN_GATE.LOGIN_BUDGET  # 成功清零
+                    self._budget_warned.discard(room_id)
+                    await self._emit_system_status(room_id, "登录成功——恢复监听")
+                backoff = 15.0
+                continue  # 重开会话（登录态已入 profile / 或降级游客继续）
             except asyncio.CancelledError:
                 raise
             except JDParseError as e:
@@ -242,6 +259,22 @@ class JDProtocolEngine(ControlledPageEngine):
                     logger.debug(f"[jd] room {room_id} goto warning: {e}")
 
                 logger.info(f"[jd] room {room_id} live page ready")
+
+                # 登录门槛（2026-10-06 用户裁定 B：pt_key/pt_pin 判定→弹窗；
+                # 预算在弹出前扣减——taobao 同款语义；预算未尽才撕裂会话）
+                cookies = await context.cookies()
+                if not LOGIN_GATE.has_login_cookie(
+                        cookies, LOGIN_GATE.LOGIN_COOKIE_NAMES["jd"]):
+                    if self._consume_login_budget(room_id):
+                        raise self.NeedLoginVisible(goto_url)
+                    if room_id not in self._budget_warned:
+                        self._budget_warned.add(room_id)
+                        await self._emit_system_status(
+                            room_id,
+                            f"{LOGIN_GATE.LOGIN_EVENT_BUDGET_EXHAUSTED}: 登录未完成——"
+                            "已按游客模式继续（游客可收弹幕）；停止该房间后重新添加"
+                            "可再次触发登录窗口")
+
                 self._set_status(self.status.__class__.RUNNING)
 
                 while time.monotonic() < deadline and not self._stopped(room_id):

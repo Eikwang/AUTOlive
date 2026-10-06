@@ -8,6 +8,8 @@ DanmakuListener 控制面 FastAPI 路由（前端 webui → main.py 进程唯一
 """
 from __future__ import annotations
 
+import json
+import threading
 from typing import Optional
 
 from utils.my_log import logger
@@ -48,13 +50,22 @@ def register_danmaku_routes(app, config) -> None:
             logger.error("[danmaku_api] rooms 查询失败", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e)[:200])
 
+    def _gone(old_endpoint: str, replacement: str):
+        """RFC 9457 problem+json（DX 发现 7）：410 防复活 + 修复指引。"""
+        from fastapi import Response
+        return Response(
+            content=json.dumps({
+                "type": "https://AUTOlive.local/errors/endpoint-retired",
+                "title": "Endpoint Retired", "status": 410,
+                "detail": old_endpoint + " 已随配置面/运行面分离退役",
+                "cause": "配置期操作由 webui 直写 config.json；运行期操作走窄端点",
+                "fix": replacement, "instance": old_endpoint,
+            }, ensure_ascii=False),
+            status_code=410, media_type="application/problem+json")
+
     @app.post("/danmaku/rooms")
-    def danmaku_add_room(body: dict):
-        return _unwrap(_svc().add_room(
-            str(body.get("room_spec") or body.get("room") or ""),
-            str(body.get("platform") or ""),
-            start=bool(body.get("start", True)),
-        ))
+    def danmaku_add_room_gone(body: dict):
+        return _gone("POST /danmaku/rooms", "webui 平台配置页直写 config.json")
 
     @app.post("/danmaku/rooms/{platform}/{room_id}/start")
     def danmaku_start_room(platform: str, room_id: str):
@@ -68,6 +79,21 @@ def register_danmaku_routes(app, config) -> None:
     def danmaku_remove_room(platform: str, room_id: str):
         return _unwrap(_svc().remove_room(platform, room_id))
 
+    @app.delete("/danmaku/rooms/{platform}/{room_id}")
+    def danmaku_remove_room_gone(platform: str, room_id: str):
+        return _gone("DELETE /danmaku/rooms/{platform}/{room_id}",
+                     "webui 平台配置页删除（配置期直写）；运行期先 enabled=false 停监听")
+
+    @app.post("/danmaku/rooms/{platform}/{room_id}/enabled")
+    def danmaku_room_enabled(platform: str, room_id: str, body: dict):
+        """窄端点（CEO F1 config-first）：写 config + 联动该房间启停（Eng F-ENG-1 内存节刷新）。"""
+        return _unwrap(_svc().set_room_enabled(platform, room_id, bool(body.get("enabled", True))))
+
+    @app.post("/danmaku/keywords/reload")
+    def danmaku_keywords_reload():
+        """窄端点（M-1 ③）：磁盘 config.keywords 热载 Bridge（禁 body 传词表）。"""
+        return _unwrap(_svc().reload_keywords())
+
     @app.get("/danmaku/keywords")
     def danmaku_keywords():
         svc = _svc()
@@ -78,24 +104,39 @@ def register_danmaku_routes(app, config) -> None:
                 "enabled": bool(bridge._keyword_filter_enabled)}
 
     @app.post("/danmaku/keywords")
-    def danmaku_add_keyword(body: dict):
-        return _unwrap(_svc().add_keyword(str(body.get("keyword") or "")))
-
     @app.delete("/danmaku/keywords/{keyword}")
-    def danmaku_remove_keyword(keyword: str):
-        return _unwrap(_svc().remove_keyword(keyword))
-
     @app.post("/danmaku/keywords/toggle")
-    def danmaku_toggle_keywords(body: dict):
-        return _unwrap(_svc().set_keyword_filter(bool(body.get("enabled", True))))
+    def danmaku_keywords_write_retired(keyword: str = "", body: dict = None):
+        return _gone("关键词写端点", "webui 平台配置页直写 config.json；运行期热生效自动触发 reload")
 
     @app.post("/danmaku/platform/{platform}/toggle")
     def danmaku_platform_toggle(platform: str, body: dict):
-        return _unwrap(_svc().set_platform_enabled(platform, bool(body.get("enabled", True))))
+        return _gone("/danmaku/platform/{platform}/toggle",
+                     "platforms 节=可添加平台白名单（Eng F-ENG-3）；监听启停走房间级 enabled 窄端点")
 
     @app.post("/danmaku/service/toggle")
     def danmaku_service_toggle(body: dict):
-        return _unwrap(_svc().set_service_enabled(bool(body.get("enabled", True))))
+        """F-ENG-5 503 死路修复：enabled=true 且服务未构建时在线 build+start。"""
+        target = bool(body.get("enabled", True))
+        svc = get_service_instance()
+        if svc is None and target:
+            try:
+                from utils.danmaku_consumer import DanmakuListenerService
+                from utils.config import Config
+                cfg = Config.config or {}
+                sec = cfg.get("danmaku_listener") or {}
+                if not sec.get("enabled"):
+                    sec["enabled"] = True
+                    cfg["danmaku_listener"] = sec
+                svc = DanmakuListenerService(lambda: dict(sec))
+                threading.Thread(target=svc.start, name="svc-start-danmaku-api", daemon=True).start()
+                return {"success": True, "enabled": True, "started": True}
+            except Exception:
+                logger.error("[danmaku_api] 服务在线构建失败", exc_info=True)
+                return {"success": False, "error": "服务在线构建失败",
+                        "reason_code": "service.build_failed",
+                        "fix_hint": "重启系统后重试", "docs_anchor": "docs/danmaku_module.md"}
+        return _unwrap(svc.set_service_enabled(target))
 
     @app.get("/danmaku/events")
     def danmaku_events(since: int = 0):

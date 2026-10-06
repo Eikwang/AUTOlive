@@ -53,6 +53,81 @@ NO_MESSAGE_TIMEOUT = 30.0
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
 
+# ---- 登录闭环（2026-10-06 平台登录门槛计划，切片 1）----
+
+#: ENGINE_STATUS 登录生命周期事件词表（CEO F1——taobao 首用，后续平台复用）
+LOGIN_EVENT_FIRST_LOGIN = "login.first_login"
+LOGIN_EVENT_RELOGIN_TRIGGERED = "login.relogin_triggered"
+LOGIN_EVENT_BUDGET_EXHAUSTED = "login.timeout_budget_exhausted"
+LOGIN_EVENT_DEGRADED_DETECTED = "login.degraded_detected"
+
+#: 登录窗口等待上限（独立 deadline——不套 attempt 的 45s/240s 档位，Eng F8）
+LOGIN_WAIT_TIMEOUT = 300.0
+#: 每房间超时预算（首登/重登共用；内存态、App 重启清零——CEO F5）
+LOGIN_BUDGET = 2
+#: 登录窗口 cookie 轮询间隔
+LOGIN_POLL_INTERVAL = 2.0
+
+
+def _has_login_cookie(cookies) -> bool:
+    """首登判定：unb cookie 存在且有值（阿里系统一账号标识，live1688 同判定）。
+
+    判定边界（spec 审查 1.1）：unb 是账号标识而非会话令牌——仅用于**首次登录
+    检测**，不得用于会话失效重登判定（pdd 2026-10-05 实证：会话作废后 cookie
+    存在性判定失真）。
+    """
+    return any(c.get("name") == "unb" and (c.get("value") or "").strip()
+               for c in cookies or [])
+
+
+def _mask_cookie(value: str) -> str:
+    """cookie 值日志掩码（Eng F2）：长度 + sha256 前 8 位，不打明文。"""
+    import hashlib
+
+    if not value:
+        return "(empty)"
+    return f"len={len(value)} sha256={hashlib.sha256(value.encode()).hexdigest()[:8]}"
+
+
+# ---- 会话失效重登（切片 2——spike 驱动定型，2026-10-06 平台登录计划）----
+# T0 spike 三臂结论决定 RELOGIN_MODE：
+#   "enter_alive"  臂 2 实证 enter/统计存活、弹幕/礼物停推（pdd 同构预期）
+#                  → 证据窗口判定（evidence_window_degraded）
+#   "all_stopped"  臂 2 实证全停推 → 重建轮失败计数（rebuild_failures 判定）
+#   None（默认）   spike 未完成——重登检测禁用，仅日志提示（不弹窗）
+RELOGIN_MODE: Optional[str] = None
+
+#: 证据窗口时长（对齐 pdd is_degraded_window 观测窗）
+RELOGIN_EVIDENCE_WINDOW = 90.0
+#: 连续命中窗口数（Eng F5：第一窗口命中后的重建轮即无头复验，连续 2 个才弹）
+RELOGIN_REQUIRED_HITS = 2
+#: 触发重登确认的重建轮间隔（全停推型：连续 N 轮无任何帧）
+RELOGIN_REBUILD_FAILURES = 2
+
+
+def evidence_window_degraded(
+    window: dict, *, min_active_business: int = 1,
+) -> bool:
+    """enter 存活型降级判定（纯函数，Eng F6 seam 可单测）。
+
+    Args:
+        window: 90s 证据窗口帧计数 {"danmu": n, "gift": n, "enter": n,
+                "stats": n, "had_business": bool（窗口前弹幕/礼物曾流入）}
+    判定（计划 §1 分支 (i)）：窗口内弹幕/礼物完全静默 + enter/统计仍存活
+    + 业务帧证据门槛（窗口前弹幕/礼物曾流入——杜绝冷清房间误弹，统计不参与）。
+    """
+    if not window.get("had_business", False):
+        return False  # 业务帧从未流入——冷清房间，不判定（防误弹）
+    business_silent = (window.get("danmu", 0) == 0 and window.get("gift", 0) == 0)
+    active_alive = (window.get("enter", 0) >= min_active_business
+                    or window.get("stats", 0) > 0)
+    return business_silent and active_alive
+
+
+def rebuild_failures_degraded(failures: int) -> bool:
+    """全停推型降级判定（纯函数）：连续 N 轮凭证重建后无任何帧"""
+    return failures >= RELOGIN_REBUILD_FAILURES
+
 
 class TaobaoWebProtocolEngine(BaseEngine):
     """淘宝直播 mtop 双通道引擎（每平台一实例、每房间独立任务）"""
@@ -86,6 +161,19 @@ class TaobaoWebProtocolEngine(BaseEngine):
         self._unmapped_stats: Dict[str, dict] = {}
         self._unmapped_last_flush = time.monotonic()
         self._last_room_stats: Dict[str, tuple] = {}  # ROOM_STATS 值去重（同 1688）
+        # ---- 登录闭环状态（切片 1）----
+        # per-profile 并发协调（Eng F1）：persistent context 单实例——全部 context
+        # 启动（无头提取/可见窗口）在此锁内串行化
+        self._profile_lock = asyncio.Lock()
+        # 每房间超时预算（首登/重登共用；内存态、重启清零——CEO F5）
+        self._login_budgets: Dict[str, int] = {}
+        # 预算耗尽锁存提示键（锁存粒度=room_id，Eng F8——不吞其他房间提示）
+        self._budget_warned: set = set()
+        # ---- 会话失效重登（切片 2——RELOGIN_MODE 由 spike 臂 2 定型）----
+        self._evidence_windows: Dict[str, dict] = {}   # 90s 证据窗口帧分类计数
+        self._had_business: Dict[str, bool] = {}       # 业务帧证据门槛（曾流入弹幕/礼物）
+        self._relogin_hits: Dict[str, int] = {}        # 连续命中窗口数（Eng F5）
+        self._rebuild_failures: Dict[str, int] = {}    # 全停推型重建失败计数
 
     @property
     def engine_id(self) -> str:
@@ -134,6 +222,10 @@ class TaobaoWebProtocolEngine(BaseEngine):
         （error rTVSNv）。对策：launch_persistent_context（profile 持久化）
         + 反检测注入 + AutomationControlled 禁用；首次验证通过后 profile
         保存，后续启动免验证。等待事件驱动（headless 45s / 可见 240s）。
+
+        登录门槛（2026-10-06 平台登录计划，切片 1）：页面打开后检测 unb
+        登录态；未登录且预算未尽 → 可见窗口登录（Eng F1：锁内串行化）；
+        预算耗尽 → 降级游客模式继续提凭证（保持既有行为）。
         """
         from playwright.async_api import async_playwright
 
@@ -141,71 +233,215 @@ class TaobaoWebProtocolEngine(BaseEngine):
         live_url = self.LIVE_URL_TEMPLATE.format(live_id=live_id)
 
         async def attempt(wait_limit: float) -> Optional[Dict[str, Any]]:
-            """单轮 headless 凭证提取：page 级请求捕获（context 级实测拿不到）"""
-            state: Dict[str, Any] = {"topic": None, "cookies": {}}
-            async with async_playwright() as pw:
-                context = await pw.chromium.launch_persistent_context(
-                    self._profile_dir(),
-                    headless=True,
-                    user_agent=UA,
-                    viewport={"width": 1280, "height": 800},
-                    args=["--disable-blink-features=AutomationControlled",
-                          "--disable-setuid-sandbox",
-                          "--hide-crash-restore-bubble"],
-                )
-                try:
-                    await context.add_init_script(
-                        "Object.defineProperty(navigator, 'webdriver', "
-                        "{get: () => undefined});")
-                    page = context.pages[0] if context.pages else await context.new_page()
+            """单轮 headless 凭证提取：page 级请求捕获（context 级实测拿不到）
 
-                    def on_request(request) -> None:
-                        if state["topic"]:
-                            return
-                        u = request.url
-                        if any(a in u for a in self.TOPIC_ANCHORS):
-                            m = re.search(r"[?&]data=([^&]+)", u)
-                            raw = m.group(1) if m else request.post_data
-                            if raw:
-                                try:
-                                    from urllib.parse import unquote
-                                    data = json.loads(unquote(raw))
-                                    if data.get("topic"):
-                                        state["topic"] = data["topic"]
-                                except json.JSONDecodeError:
-                                    pass
-
-                    page.on("request", on_request)
+            持 profile_lock（Eng F1：persistent context 单实例——与可见
+            登录窗口互斥）。
+            """
+            state: Dict[str, Any] = {"topic": None, "cookies": {},
+                                     "login_detected": False}
+            async with self._profile_lock:
+                async with async_playwright() as pw:
+                    context = await pw.chromium.launch_persistent_context(
+                        self._profile_dir(),
+                        headless=True,
+                        user_agent=UA,
+                        viewport={"width": 1280, "height": 800},
+                        args=["--disable-blink-features=AutomationControlled",
+                              "--disable-setuid-sandbox",
+                              "--hide-crash-restore-bubble"],
+                    )
                     try:
-                        await page.goto(live_url, timeout=30000)
-                    except Exception as e:  # noqa: BLE001
-                        logger.debug(f"[taobao] room {room_id} page goto warning: {e}")
+                        await context.add_init_script(
+                            "Object.defineProperty(navigator, 'webdriver', "
+                            "{get: () => undefined});")
+                        page = context.pages[0] if context.pages else await context.new_page()
 
-                    deadline = time.monotonic() + wait_limit
-                    while state["topic"] is None and time.monotonic() < deadline:
-                        await asyncio.sleep(1)
-                    # 全量 cookie（1688 网关要求 isg 等安全 cookie 齐全；
-                    # 淘宝网关仅 _m_h5_tk 必需——全量兼容两者）
-                    state["cookies"] = {c["name"]: c["value"]
-                                        for c in await context.cookies()
-                                        if c.get("value")}
-                finally:
-                    await context.close()
+                        def on_request(request) -> None:
+                            if state["topic"]:
+                                return
+                            u = request.url
+                            if any(a in u for a in self.TOPIC_ANCHORS):
+                                m = re.search(r"[?&]data=([^&]+)", u)
+                                raw = m.group(1) if m else request.post_data
+                                if raw:
+                                    try:
+                                        from urllib.parse import unquote
+                                        data = json.loads(unquote(raw))
+                                        if data.get("topic"):
+                                            state["topic"] = data["topic"]
+                                    except json.JSONDecodeError:
+                                        pass
+
+                        page.on("request", on_request)
+                        try:
+                            await page.goto(live_url, timeout=30000)
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug(f"[taobao] room {room_id} page goto warning: {e}")
+
+                        # 登录检测（先于 topic 等待——未登录也要触发门槛）
+                        state["cookies"] = {c["name"]: c["value"]
+                                            for c in await context.cookies()
+                                            if c.get("value")}
+                        state["login_detected"] = _has_login_cookie(
+                            [{"name": n, "value": v} for n, v in state["cookies"].items()])
+
+                        deadline = time.monotonic() + wait_limit
+                        while state["topic"] is None and time.monotonic() < deadline:
+                            await asyncio.sleep(1)
+                        # 全量 cookie（1688 网关要求 isg 等安全 cookie 齐全；
+                        # 淘宝网关仅 _m_h5_tk 必需——全量兼容两者）
+                        state["cookies"] = {c["name"]: c["value"]
+                                            for c in await context.cookies()
+                                            if c.get("value")}
+                    finally:
+                        await context.close()
             return state
 
-        state = await attempt(wait_limit=45.0)
+        # 登录门槛循环（防御上限 = 预算 + 1 轮常规提取）
+        for _ in range(LOGIN_BUDGET + 1):
+            state = await attempt(wait_limit=45.0)
+            if self._stop_flags.get(room_id):
+                raise RuntimeError("taobao.stopped: 房间已停止")
+            if state["login_detected"]:
+                break
+            budget = self._login_budgets.get(room_id, LOGIN_BUDGET)
+            if budget <= 0:
+                # 预算耗尽：降级游客模式继续提凭证（CEO F5——每会话一次锁存提示，
+                # 锁存键=room_id，Eng F8）
+                if room_id not in self._budget_warned:
+                    self._budget_warned.add(room_id)
+                    await self._emit_system_status(
+                        room_id,
+                        f"{LOGIN_EVENT_BUDGET_EXHAUSTED}: 登录未完成——已按游客模式尝试，"
+                        "可停止该房间后重新添加以再次触发登录窗口")
+                break
+            # 未登录且预算未尽 → 可见窗口登录（Eng F1：先关无头 context 再弹窗——
+            # attempt 已 close，锁已释放，窗口内重新持锁）
+            self._login_budgets[room_id] = budget - 1
+            await self._emit_system_status(
+                room_id,
+                f"{LOGIN_EVENT_FIRST_LOGIN}: 淘宝直播间需要登录——已弹出浏览器，"
+                "请登录淘宝/阿里账号（扫码）")
+            outcome = await self._wait_login_visible(room_id, live_url)
+            if outcome == "logged_in":
+                self._login_budgets[room_id] = LOGIN_BUDGET  # 登录成功清零
+                self._budget_warned.discard(room_id)
+                continue  # 重试凭证提取（此时 profile 已带登录态）
+            if outcome == "stopped":
+                raise RuntimeError("taobao.stopped: 房间已停止")
+            # timeout / window_closed：预算已在弹出前扣减；回循环重查
+            # （预算未尽且仍未登录会再弹；耗尽则降级提示后 break）
+        else:
+            state = await attempt(wait_limit=45.0)
+
         if not state["topic"]:
             # 二次尝试（页面偶发加载慢/轮询冷启动）
             state = await attempt(wait_limit=45.0)
 
         if not state["topic"]:
+            hint = ("未登录——请停止该房间后重新添加以触发登录窗口；"
+                    if not state["login_detected"] else "")
             raise RuntimeError(
-                "taobao.credential.topic_failed: 未能获取 topic（未开播/风控/页面加载慢——"
-                "持续失败可稍后重试）")
+                "taobao.credential.topic_failed: 未能获取 topic（"
+                f"{hint}未开播/风控/页面加载慢——持续失败可稍后重试）")
         if not state["cookies"].get("_m_h5_tk"):
             raise RuntimeError("taobao.credential.token_failed: 未获取 _m_h5_tk（风控升级特征）")
         logger.info(f"[taobao] room {room_id} credentials ready (topic={state['topic'][:24]}...)")
         return state["topic"], MtopCredential(state["cookies"])
+
+    async def _wait_login_visible(
+        self, room_id: str, live_url: str, *,
+        clock=None, sleep_fn=None, cookies_fn=None, poll_interval: float = LOGIN_POLL_INTERVAL,
+    ) -> str:
+        """可见窗口登录（≤300s）：打开直播间页，用户登录（unb 出现）→ 登录态入 profile。
+
+        Returns:
+            "logged_in"    登录成功（unb 出现）
+            "timeout"      等待超时（预算已在调用方扣减）
+            "window_closed" 用户直接关窗（Eng F4：按关窗分支，不冒泡异常）
+            "stopped"      用户停止房间（Eng F3：立即关窗中断）
+
+        Eng F6 seam：clock/sleep_fn/cookies_fn 可注入（单测打在等待循环上，
+        不起真实浏览器）。
+        """
+        from playwright.async_api import async_playwright
+
+        clock = clock or time.monotonic
+        sleep_fn = sleep_fn or asyncio.sleep
+        baseline_names: set = set()
+        logged = False
+        async with self._profile_lock:
+            async with async_playwright() as pw:
+                try:
+                    context = await pw.chromium.launch_persistent_context(
+                        self._profile_dir(),
+                        headless=False,
+                        user_agent=UA,
+                        viewport={"width": 1280, "height": 800},
+                        args=["--disable-blink-features=AutomationControlled",
+                              "--disable-setuid-sandbox",
+                              "--hide-crash-restore-bubble"],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[taobao] room {room_id} login window launch failed: "
+                                   f"{type(e).__name__}: {str(e)[:80]}")
+                    return "window_closed"
+                try:
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    try:
+                        await page.goto(live_url, timeout=30000)
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"[taobao] room {room_id} login page goto warning: {e}")
+
+                    def _cookies():
+                        # Eng F6 seam：cookie 读取可注入
+                        if cookies_fn is not None:
+                            return cookies_fn()
+                        return context.cookies()
+
+                    try:
+                        baseline_names = {c.get("name") for c in _cookies() or []}
+                    except Exception as e:  # noqa: BLE001
+                        # Eng F4：窗口在基线读取前已被用户关闭 → 按关窗分支
+                        logger.info(f"[taobao] room {room_id} login window closed before "
+                                    f"baseline ({type(e).__name__})")
+                        return "window_closed"
+                    deadline = clock() + LOGIN_WAIT_TIMEOUT
+                    while clock() < deadline:
+                        if self._stop_flags.get(room_id):  # Eng F3：stop 立即中断
+                            logger.info(f"[taobao] room {room_id} login wait stopped by user")
+                            return "stopped"
+                        try:
+                            cookies = _cookies() or []
+                        except Exception as e:  # noqa: BLE001
+                            # Eng F4：窗口被用户直接关闭 → cookies() 抛 TargetClosedError
+                            # → 按关窗分支计数，不冒泡成 topic_failed
+                            logger.info(f"[taobao] room {room_id} login window closed by user "
+                                        f"({type(e).__name__})")
+                            return "window_closed"
+                        if _has_login_cookie(cookies):
+                            logged = True
+                            # Eng F2：只打名与变更布尔，不打值
+                            names = {c.get("name") for c in cookies}
+                            new_names = sorted(n for n in names
+                                               if n and n not in baseline_names)
+                            unb = next((c for c in cookies if c.get("name") == "unb"), None)
+                            logger.info(
+                                f"[taobao] room {room_id} login ok: new_cookies={new_names} "
+                                f"unb_changed=True unb_mask={_mask_cookie((unb or {}).get('value', ''))}")
+                            return "logged_in"
+                        await sleep_fn(poll_interval)
+                    logger.info(f"[taobao] room {room_id} login wait timeout "
+                                f"({LOGIN_WAIT_TIMEOUT:.0f}s)")
+                    return "timeout"
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:  # noqa: BLE001  窗口已被用户关闭——清理失败可忽略
+                        pass
+        # 不可达（所有分支在 try 内 return）；保守返回
+        return "logged_in" if logged else "timeout"
 
     @staticmethod
     async def _try_auto_slide(page) -> bool:
@@ -291,6 +527,7 @@ class TaobaoWebProtocolEngine(BaseEngine):
                         await asyncio.sleep(2)
                         # 30s 无消息 → 凭证过期/风控 → 整轮重建（Eng：主通道断流检测）
                         if time.monotonic() - last_msg_box["t"] > NO_MESSAGE_TIMEOUT:
+                            await self._maybe_relogin(room_id)  # 切片 2 接入点
                             raise RuntimeError(
                                 "taobao.no_message_timeout: 30s 无消息（凭证过期/风控）")
                 finally:
@@ -378,6 +615,65 @@ class TaobaoWebProtocolEngine(BaseEngine):
             except asyncio.CancelledError:
                 raise
 
+    # ---- 会话失效重登（切片 2——RELOGIN_MODE 由 spike 臂 2 定型）----
+
+    async def _maybe_relogin(self, room_id: str) -> None:
+        """30s 断流时的重登检测入口（切片 2）。
+
+        RELOGIN_MODE=None（spike 未完成）→ 仅日志，不弹窗；
+        "enter_alive" → 证据窗口判定连续命中（Eng F5：第一窗口命中后的重建轮
+        即无头复验）；
+        "all_stopped" → 重建失败计数。
+        触发时弹出可见窗口（首登/重登共用预算——CEO F5；锁存键=room_id——F8）。
+        """
+        # 窗口评估后立即重置（下一个窗口从零计数）
+        window = self._evidence_windows.pop(room_id, None) or {}
+        if RELOGIN_MODE is None:
+            logger.debug(f"[taobao] room {room_id} relogin gate pending spike "
+                         f"(RELOGIN_MODE=None) window={window}")
+            return
+        if self._stop_flags.get(room_id):
+            return
+        if RELOGIN_MODE == "enter_alive":
+            if evidence_window_degraded({**window, "had_business":
+                                         self._had_business.get(room_id, False)}):
+                self._relogin_hits[room_id] = self._relogin_hits.get(room_id, 0) + 1
+            else:
+                self._relogin_hits[room_id] = 0
+            if self._relogin_hits.get(room_id, 0) < RELOGIN_REQUIRED_HITS:
+                return
+        elif RELOGIN_MODE == "all_stopped":
+            self._rebuild_failures[room_id] = self._rebuild_failures.get(room_id, 0) + 1
+            if self._rebuild_failures.get(room_id, 0) < RELOGIN_REBUILD_FAILURES:
+                return
+        else:
+            logger.warning(f"[taobao] room {room_id} unknown RELOGIN_MODE={RELOGIN_MODE}")
+            return
+        # 触发重登（预算共用——CEO F5；锁存键=room_id——Eng F8）
+        budget = self._login_budgets.get(room_id, LOGIN_BUDGET)
+        if budget <= 0:
+            if room_id not in self._budget_warned:
+                self._budget_warned.add(room_id)
+                await self._emit_system_status(
+                    room_id,
+                    f"{LOGIN_EVENT_BUDGET_EXHAUSTED}: 消息中断疑似登录过期——"
+                    "停止该房间后重新添加可重新触发登录窗口")
+            return
+        self._login_budgets[room_id] = budget - 1
+        self._relogin_hits[room_id] = 0
+        self._rebuild_failures[room_id] = 0
+        live_id = self._extract_live_id(room_id)
+        await self._emit_system_status(
+            room_id,
+            f"{LOGIN_EVENT_RELOGIN_TRIGGERED}: 消息中断——如登录已过期"
+            "请在弹出窗口重新登录")
+        outcome = await self._wait_login_visible(
+            room_id, self.LIVE_URL_TEMPLATE.format(live_id=live_id))
+        if outcome == "logged_in":
+            self._login_budgets[room_id] = LOGIN_BUDGET  # 成功清零
+            self._budget_warned.discard(room_id)
+            await self._emit_system_status(room_id, "登录成功——恢复监听")
+
     async def _parse_powermsg_item(self, room_id: str, td: Dict[str, Any], ts: int) -> None:
         data_b64 = td.get("data", "")
         if not data_b64:
@@ -402,6 +698,20 @@ class TaobaoWebProtocolEngine(BaseEngine):
                 self._last_room_stats[room_id] = sig
             mapped = self._map_powermsg(room_id, obj, self.next_seq(room_id), ts)
             if mapped:
+                # 切片 2：证据窗口帧分类计数（enter_alive 判定输入）
+                box = self._evidence_windows.setdefault(
+                    room_id, {"danmu": 0, "gift": 0, "enter": 0, "stats": 0})
+                mtype = mapped["type"]
+                if mtype == "DANMU":
+                    box["danmu"] += 1
+                    self._had_business[room_id] = True
+                elif mtype == "GIFT":
+                    box["gift"] += 1
+                    self._had_business[room_id] = True
+                elif mtype == "ENTER_ROOM":
+                    box["enter"] += 1
+                elif mtype == "ROOM_STATS":
+                    box["stats"] += 1
                 await self._emit_message(self._envelope(room_id, mapped))
             else:
                 # 未映射消息聚合计数（2026-10-01 用户实测：运营类消息高频，

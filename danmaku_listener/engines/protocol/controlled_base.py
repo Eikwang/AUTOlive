@@ -18,7 +18,7 @@
 
 import asyncio
 import time
-from typing import Dict
+from typing import Dict, Iterable
 
 from loguru import logger
 
@@ -30,6 +30,7 @@ from danmaku_listener.contract.models import (
     UnifiedMessage,
 )
 from danmaku_listener.engines.base import BaseEngine
+from danmaku_listener.engines import login_gate as LOGIN_GATE
 
 #: 统一反检测/稳定化启动参数（五引擎实测一致）
 COMMON_LAUNCH_ARGS = [
@@ -56,6 +57,111 @@ class ControlledPageEngine(BaseEngine):
         self._room_tasks: Dict[str, asyncio.Task] = {}
         self._stop_flags: Dict[str, bool] = {}
         self._last_frame_box: Dict[str, Dict[str, float]] = {}
+        # ---- 登录闭环状态（2026-10-06 平台登录计划；jd/xiaohongshu 首用）----
+        # per-profile 并发协调（Eng F1）：persistent context 单实例串行化
+        self._profile_lock = asyncio.Lock()
+        # 每房间超时预算（首登/重登共用；内存态、重启清零——CEO F5）
+        self._login_budgets: Dict[str, int] = {}
+        # 预算耗尽锁存提示键（锁存粒度=room_id，Eng F8）
+        self._budget_warned: set = set()
+
+    # ---- 登录闭环（2026-10-06 平台登录计划）----
+
+    class NeedLoginVisible(Exception):
+        """需要可见窗口登录（内部信号——对齐 live1688 撕裂会话时序）"""
+
+        def __init__(self, goto_url: str):
+            super().__init__(goto_url)
+            self.goto_url = goto_url
+
+    def _consume_login_budget(self, room_id: str) -> bool:
+        """扣减登录窗口预算；未尽返回 True（弹出前扣减——taobao 同款语义）"""
+        budget = self._login_budgets.get(room_id, LOGIN_GATE.LOGIN_BUDGET)
+        if budget <= 0:
+            return False
+        self._login_budgets[room_id] = budget - 1
+        return True
+
+    async def _wait_login_visible(
+        self, room_id: str, goto_url: str, cookie_names: Iterable[str], *,
+        clock=None, sleep_fn=None, cookies_fn=None,
+        poll_interval: float = LOGIN_GATE.LOGIN_POLL_INTERVAL,
+    ) -> str:
+        """可见窗口登录（≤300s）：打开页面，用户登录（判定 cookie 出现）→ 入 profile。
+
+        Returns:
+            "logged_in" | "timeout" | "window_closed"（Eng F4）| "stopped"（Eng F3）
+
+        Eng F6 seam：clock/sleep_fn/cookies_fn 可注入（单测不起真实浏览器）。
+        """
+        from playwright.async_api import async_playwright
+
+        clock = clock or time.monotonic
+        sleep_fn = sleep_fn or asyncio.sleep
+        logged = False
+        async with self._profile_lock:
+            async with async_playwright() as pw:
+                try:
+                    context = await self._launch(pw, headless=False)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[{self.platform}] room {room_id} login window "
+                                   f"launch failed: {type(e).__name__}: {str(e)[:80]}")
+                    return "window_closed"
+                try:
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    try:
+                        await page.goto(goto_url, timeout=30000,
+                                        wait_until="domcontentloaded")
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"[{self.platform}] room {room_id} login page "
+                                     f"goto warning: {e}")
+
+                    def _cookies():
+                        if cookies_fn is not None:  # Eng F6 seam
+                            return cookies_fn()
+                        return context.cookies()
+
+                    try:
+                        baseline_names = {c.get("name") for c in _cookies() or []}
+                    except Exception as e:  # noqa: BLE001
+                        logger.info(f"[{self.platform}] room {room_id} login window "
+                                    f"closed before baseline ({type(e).__name__})")
+                        return "window_closed"
+                    deadline = clock() + LOGIN_GATE.LOGIN_WAIT_TIMEOUT
+                    while clock() < deadline:
+                        if self._stopped(room_id):  # Eng F3：stop 立即中断
+                            logger.info(f"[{self.platform}] room {room_id} "
+                                        f"login wait stopped by user")
+                            return "stopped"
+                        try:
+                            cookies = _cookies() or []
+                        except Exception as e:  # noqa: BLE001
+                            logger.info(f"[{self.platform}] room {room_id} login window "
+                                        f"closed by user ({type(e).__name__})")
+                            return "window_closed"
+                        if LOGIN_GATE.has_login_cookie(cookies, cookie_names):
+                            logged = True
+                            names = {c.get("name") for c in cookies}
+                            new_names = sorted(n for n in names
+                                               if n and n not in baseline_names)
+                            hit = next((c for c in cookies
+                                        if c.get("name") in cookie_names
+                                        and (c.get("value") or "").strip()), None)
+                            logger.info(
+                                f"[{self.platform}] room {room_id} login ok: "
+                                f"new_cookies={new_names} "
+                                f"hit_mask={LOGIN_GATE.mask_cookie((hit or {}).get('value', ''))}")
+                            return "logged_in"
+                        await sleep_fn(poll_interval)
+                    logger.info(f"[{self.platform}] room {room_id} login wait timeout "
+                                f"({LOGIN_GATE.LOGIN_WAIT_TIMEOUT:.0f}s)")
+                    return "timeout"
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:  # noqa: BLE001  窗口已被用户关闭
+                        pass
+        return "logged_in" if logged else "timeout"
 
     @property
     def engine_id(self) -> str:
