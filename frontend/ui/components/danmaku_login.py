@@ -141,7 +141,7 @@ class DanmakuLoginDialog:
     async def refresh(self):
         try:
             await self._refresh_entry()
-            self._refresh_dialog()
+            await self._refresh_dialog()
         except Exception:
             logger.error("[danmaku-login] 刷新异常", exc_info=True)
 
