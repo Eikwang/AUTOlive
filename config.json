@@ -1929,23 +1929,29 @@
   },
   "danmaku_listener": {
     "enabled": false,
-    "ws_port": 8765,
-    "ws_bind": "127.0.0.1",
-    "require_token": true,
-    "token_injection": "env",
-    "token_file_path": "",
+    "component_root": "danmaku_listener",
+    "login_entry": true,
+    "web_console": false,
+    "web_console_port": 8080,
+    "queue_maxsize": 500,
+    "stall_threshold_seconds": 60,
+    "cookie_dir": "cookie",
     "platforms": {
       "bilibili": true,
       "douyu": true,
       "douyin": true,
-      "kuaishou": false,
       "huya": false,
+      "kuaishou": false,
+      "taobao": false,
+      "1688": false,
+      "meituan": false,
+      "xiaohongshu": false,
+      "pdd": false,
+      "jd": false,
       "wechat_channels": false
     },
-    "login_entry": true,
-    "legacy_adapter_retired": false,
-    "component_root": "danmaku_listener",
-    "room_id": "",
-    "cookie_dir": "D:\\AI\\DanmakuListener\\cookie"
+    "rooms": [],
+    "keywords": [],
+    "keyword_filter_enabled": true
   }
 }

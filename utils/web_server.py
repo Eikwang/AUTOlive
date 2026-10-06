@@ -165,6 +165,14 @@ class WebServer:
         """注册API路由"""
         if not self.app:
             return
+
+        # DanmakuListener 控制面（整合计划 P1-3：前端 webui → 本进程唯一通道；
+        # 挂接失败不阻断主 API——danmaku 模块异常隔离）
+        try:
+            from utils.danmaku_api import register_danmaku_routes
+            register_danmaku_routes(self.app, self.config)
+        except Exception:
+            logger.error("DanmakuListener 控制面路由挂载失败（不影响其他 API）", exc_info=True)
             
         @self.app.post("/send")
         async def send(msg: SendMessage):

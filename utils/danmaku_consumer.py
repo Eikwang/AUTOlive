@@ -1,74 +1,63 @@
 # -*- coding: utf-8 -*-
 """
-DanmakuListener WS 消费者与 serve 托管（DanmakuListener 整合计划 G1/G2/G3/G6）
+DanmakuListener 进程内托管层（整合计划第二阶段：进程内化与全面替换）
 
-架构（义务块"整合形态/消费者并发与队列/双通道"）：
+架构（specs/integration/DanmakuListener系统模块整合计划.md 第 3 节，已批准）：
 
-    DanmakuListener serve（独立进程，ManagedProcess 托管 + TCP 探活）
-      └─ ws://127.0.0.1:<port>/ws（Bearer token，loopback）
-           └─ _ConsumerLoop（独立线程 asyncio 事件循环）
-                ├─ system 快路径：HEARTBEAT 计时 / GAP / NEEDS_LOGIN / ENGINE_STATUS /
-                │   ROOM_STATUS / BACKPRESSURE / RECOVERED / ROUTE_FAILED（不进主队列）
-                └─ business → _WORK_QUEUE（有界 500，线程安全）→ _WorkerThread
-                     └─ 映射进 my_handle.process_data（对话链复用，不重建）
+    AUTOlive main.py 进程
+     ├─ 托管层 utils/danmaku_consumer.py（本模块）
+     │   ├─ 专用 asyncio daemon 线程（_loop_main）
+     │   │    └─ AutoliveBridge(DanmakuBridge) 子类实例
+     │   │         ├─ 12 平台引擎 + 登录门 + 房间注册表（组件库，副本零改动）
+     │   │         └─ 消息 hook（重写 _broadcast）→ _BoundedDropQueue（线程安全）
+     │   ├─ 消费线程：队列 → 契约线格式解析 → 活跃路由 → _dispatch → my_handle
+     │   └─ 控制面：FastAPI /danmaku/*（utils/web_server.py 通道）→ 同步方法
+     │        → asyncio.run_coroutine_threadsafe → Bridge 协程（Eng A1）
+     └─ 前端（webui 进程）→ fetch /danmaku/*（跨进程边界唯一通道）
 
-关键语义（对应义务块条款）：
-- token 生命周期：托管层生成（secrets.token_urlsafe≥32B），每次重拉轮换；
-  消费者每次重连前读当前 token；401 触发一次刷新重试；轮换即世代信号。
-- 世代重置：token 变化 → seq 期待与 my_handle 去重窗口清空（重拉=新 serve 进程）。
-- 重拉归口：消费者只上报连接失败，重拉裁决唯一归口 ManagedProcess（T-3 计数器）。
-- 优先级表：服务端丢弃序 = 消费端溢出序 = 队列路由分类（LIKE/ENTER_ROOM/ROOM_STATS 走计数快路径）。
-- DANMU 聚合限速：窗口合并进对话链，GIFT/SUPER_CHAT FIFO（SUPER_CHAT 可插队）。
+关键语义（对应计划义务块 autoplan-accepted:ceo/dx/eng）：
+- 线程亲和（Eng A1 高危）：Bridge 控制方法均为协程，UI/FastAPI 线程直调只会得到
+  未执行的 coroutine 对象——所有控制面调用统一经 _submit()（future+超时+异常转换）。
+- 丢弃结构（Eng E1）：queue.Queue 无删除 API，排空-回灌与消费 get() 并发交错会
+  乱序竞态——自实现 deque+Condition 有界结构，按可丢类型扫描淘汰，下播裁剪同构。
+- 停机顺序（Eng T4）：先提交 stop_all 并等待 future 完成，再停事件循环，再 join。
+- 数据落点纪律：cookie_dir/房间注册表/关键词文件全部显式外置仓库根
+  persistence_data/ 与 cookie/——danmaku_listener/ 会被 copy_danmaku.py 重跑 rmtree。
+- 副本纯净：对组件的全部集成走子类覆写与组合调用，零组件源码改动；
+  升级流程含 hook 存在性断言（_broadcast/_rooms_file/_load_blocked_keywords 等）。
+- 抖音 GIFT 增量换算：组件 TODOS"GIFT.count 是 totalCount 累计值透传"——按
+  (room_id, user_id, gift_id) 维护上次值，首见视为 1，LRU 5000 键。
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import queue
-from collections import deque
-import secrets
 import socket
-import sys
 import threading
 import time
+from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
-
-import websockets
-from websockets.asyncio.client import connect as ws_connect  # S-4：显式 asyncio.client 实现路径
-
-
-_DC_FIRST_LOG = {'done': False}
-def dc_debug_first_log() -> bool:
-    if _DC_FIRST_LOG['done']:
-        return False
-    _DC_FIRST_LOG['done'] = True
-    return True
 
 from utils.my_log import logger
 
-# ---------- 运行时阈值（义务块：首版命名常量不进配置，调参见 utils/danmaku_consumer.py 本节） ----------
-HEARTBEAT_INTERVAL_S = 10        # 组件心跳周期（契约 engine_heartbeat_seconds 同值）
-HEARTBEAT_LOST_PERIODS = 3       # 3 周期未收 → 失联告警
-ZOMBIE_TIMEOUT_S = 60            # 失联持续 60s → 上报托管判僵死（重拉由 ManagedProcess 裁决）
-SEQ_WAIT_TIMEOUT_S = 10          # seq 跳跃等待 GAP 超时（1 个心跳周期）后 approx 降级放行
-SEQ_BUFFER_MAX = 1000            # seq 等待缓冲上限（条/房间）
-QUEUE_MAX = 500                  # business 主队列上限
-RECONNECT_BACKOFF_MIN_S = 1.0    # 重连退避下限
-RECONNECT_BACKOFF_MAX_S = 30.0   # 重连退避上限
-CONNECT_FAIL_HANDOFF = 3         # 连续 3 次连接失败移交托管层（与防护计数对齐）
-DANMU_AGG_WINDOW_S = 5.0         # DANMU 聚合时间窗
-DANMU_AGG_MAX = 5                # 聚合条数上限（窗内达到即合并下发）
-CONTRACT_VERSION_MAJOR = 1       # 兼容断言：1.x 接受，2.x 拒绝
+# ---------- 运行时阈值（默认值；queue_maxsize/web_console_port/stall_threshold_seconds 可经 config 覆盖——DX 5.1） ----------
+QUEUE_MAX_DEFAULT = 500            # 业务队列上限（可覆盖：danmaku_listener.queue_maxsize）
+WEB_CONSOLE_PORT_DEFAULT = 8080    # web_console 调试通道端口（可覆盖）
+STALL_THRESHOLD_S_DEFAULT = 60     # 收流停滞判定阈值（可覆盖）
+DANMU_AGG_WINDOW_S = 5.0           # DANMU 聚合时间窗
+DANMU_AGG_MAX = 5                  # 聚合条数上限
+CONTRACT_VERSION_MAJOR = 1         # 兼容断言：1.x 接受，2.x 拒绝
+CONTROL_TIMEOUT_S = 30             # 控制面协程等待超时（登录门启动等合法耗时最长）
+REBUILD_GUARD_MAX = 3              # 守护重建失控防护（连续 3 次停止重建、置红）
+GIFT_LRU_MAX = 5000                # 抖音 GIFT 换算映射上限（Section 7 闭环）
 
-# 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性义务）
+# 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性）
 _DROP_ORDER = {"LIKE": 0, "ENTER_ROOM": 1, "DANMU": 2, "SOCIAL": 3, "ROOM_STATS": 4, "GIFT": 5, "SUPER_CHAT": 6}
-# 计数快路径集合：不进主队列、不进对话链（B-2 路由分类）
-_FASTPATH_BUSINESS = {"ENTER_ROOM", "ROOM_STATS"}  # LIKE 移出：2026-10-03 用户需求"监听到谁点赞"——点赞走对话链聚合（_LikeAggregator）
+_FASTPATH_BUSINESS = {"ENTER_ROOM", "ROOM_STATS"}  # 计数快路径（LIKE 走对话链聚合——用户需求）
 
-
-# ---------- 全局单例桥（前端组件轮询用；main.py 挂钩创建时注入） ----------
 _SERVICE_INSTANCE: Optional["DanmakuListenerService"] = None
+_CONFIG_LOCK = threading.Lock()    # config.json danmaku_listener 节 RMW 锁（main.py 进程内）
 
 
 def set_service_instance(svc: Optional["DanmakuListenerService"]) -> None:
@@ -80,517 +69,385 @@ def get_service_instance() -> Optional["DanmakuListenerService"]:
     return _SERVICE_INSTANCE
 
 
+# ---------- 有界丢弃队列（Eng E1：deque+Condition 原子结构） ----------
 
-def _tcp_probe(mproc) -> bool:
-    """ManagedProcess health_probe：TCP 连通即视为健康（组件 serve 无 HTTP 健康端点）。"""
-    host = "127.0.0.1"
+class _BoundedDropQueue:
+    """有界消息队列：满载按背压同序扫描淘汰，支持按类型批量裁剪。
+
+    替代 queue.Queue 的排空-回灌（racy）模式；put/get 全程持锁，
+    消费侧 get(timeout) 用 Condition 等待，任何路径不 busy-wait。
+    """
+
+    def __init__(self, maxsize: int):
+        self._max = max(1, int(maxsize))
+        self._items: deque = deque()
+        self._cond = threading.Condition()
+        self.dropped_count = 0
+
+    def put(self, item) -> None:
+        with self._cond:
+            if len(self._items) >= self._max:
+                if not self._drop_one_locked():
+                    # 可丢类型穷尽 → 丢最新（本条）并入计数；不阻塞（Eng E1/R3-2）
+                    self.dropped_count += 1
+                    return
+            self._items.append(item)
+            self._cond.notify()
+
+    _DROPPABLE = {"LIKE", "ENTER_ROOM", "DANMU", "SOCIAL", "ROOM_STATS"}
+    """可淘汰类型集合：GIFT/SUPER_CHAT 为保类型（背压语义——满载且仅剩保类型时丢最新）。"""
+
+    def _drop_one_locked(self) -> bool:
+        if not self._items:
+            return False
+        worst_idx, worst_pri = None, -1
+        for i, (mtype, _msg) in enumerate(self._items):
+            if mtype not in self._DROPPABLE:
+                continue
+            pri = _DROP_ORDER.get(mtype, 99)
+            if worst_idx is None or pri < worst_pri:
+                worst_idx, worst_pri = i, pri
+        if worst_idx is None:
+            return False
+        del self._items[worst_idx]
+        self.dropped_count += 1
+        return True
+
+    def get(self, timeout: float = 0.5):
+        with self._cond:
+            if not self._items:
+                self._cond.wait(timeout)
+            if self._items:
+                return self._items.popleft()
+        return None
+
+    def prune_keep(self, keep_types: set) -> int:
+        """下播裁剪：仅保留 keep_types 中的类型（Eng E1：同构原子操作）。"""
+        with self._cond:
+            before = len(self._items)
+            kept = [it for it in self._items if it[0] in keep_types]
+            dropped = before - len(kept)
+            self._items.clear()
+            self._items.extend(kept)
+            return dropped
+
+    def qsize(self) -> int:
+        with self._cond:
+            return len(self._items)
+
+    def drain(self) -> int:
+        with self._cond:
+            n = len(self._items)
+            self._items.clear()
+            return n
+
+
+# ---------- 配置 RMW（main.py 进程内原子写回；前端写盘通道独立——低频短窗口） ----------
+
+def _config_path() -> str:
+    return "config.json"
+
+
+def _read_config_file() -> dict:
     try:
-        with socket.create_connection((host, mproc.port), timeout=3):
+        with open(_config_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.error("[danmaku_listener] config.json 读取失败", exc_info=True)
+        return {}
+
+
+def _write_config_section(mutator: Callable[[dict], None]) -> bool:
+    """原子改写 config.json 的 danmaku_listener 节（tmp+os.replace，模块级锁）。
+
+    mutator(section) 在锁内修改节字典（原地）；写失败返回 False。
+    """
+    with _CONFIG_LOCK:
+        try:
+            cfg = _read_config_file()
+            sec = cfg.setdefault("danmaku_listener", {})
+            mutator(sec)
+            tmp = _config_path() + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, _config_path())
             return True
-    except OSError:
-        return False
+        except Exception:
+            logger.error("[danmaku_listener] config.json 写回失败", exc_info=True)
+            return False
 
 
-def _write_serve_toml(path: str, section: dict) -> None:
-    """把 AUTOlive config 节映射为组件 serve 的 TOML 配置文件。"""
-    lines = [
-        f'ws_port = {int(section["ws_port"])}',
-        f'ws_bind = "{section["ws_bind"]}"',
-    ]
-    if section.get("token_injection") == "file" and section.get("token_file_path"):
-        lines.append(f'ws_token_file = "{section["token_file_path"]}"')
-    if section.get("cookie_dir"):
-        # 受控页面引擎 cookie/profile 目录（空则组件默认 ./cookie）——
-        # 可指向共享登录态目录，脚本侧扫码后系统通道免登录
-        lines.append(f'cookie_dir = "{section["cookie_dir"]}"')
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(lines) + "\n")
+# ---------- AutoliveBridge：组件 Bridge 的 AUTOlive 子类（副本纯净——仅覆写） ----------
 
+class AutoliveBridge:
+    """DanmakuBridge 子类：消息 hook + 持久化外置。
+
+    采用延迟导入包装而非直接继承，避免在模块顶层触发组件重依赖
+    （playwright/quickjs）的 import（组件自身 pitfall：eager-import-heavy-deps）。
+    实际类在 _build_bridge_class() 内构造（继承 DanmakuBridge）。
+    """
+    pass
+
+
+def _build_bridge_class():
+    """构造 AutoliveBridge 类（进程内首次调用时执行；继承组件 DanmakuBridge）。"""
+    from danmaku_listener.web.bridge import DanmakuBridge
+
+    class AutoliveBridge(DanmakuBridge):
+        """AUTOlive 进程内桥：消息 → 托管队列；持久化外置副本。"""
+
+        def __init__(self, svc: "DanmakuListenerService"):
+            self._autolive_svc = svc
+            super().__init__()
+            # Eng A2：基类构造无参且 __init__ 内无条件赋值 _rooms_file——
+            # 构造后重定向到仓库根 persistence_data/ 并重载（消除 cwd 漂移 + rmtree 区外）
+            import os
+            self._rooms_file = os.path.join("persistence_data", "rooms.json")
+            self._rooms.clear()
+            self._load_rooms_registry()
+
+        # ---- 消息 hook（数据面唯一出口；Eng 义务：不阻塞 asyncio 事件循环） ----
+
+        async def _broadcast(self, message: dict) -> None:
+            """契约线格式 → AUTOlive 有界队列（同步非阻塞）+ 保留组件广播。"""
+            try:
+                self._autolive_svc._on_wire(message)
+            except Exception:
+                logger.error("[danmaku_listener] 队列投递异常", exc_info=True)
+            await super()._broadcast(message)
+
+        # ---- 持久化外置（Eng A3：blocked_keywords.json 在副本 web/ 内——升级清数据+版本戳漂移） ----
+
+        def _kw_file(self) -> str:
+            import os
+            return os.path.join("persistence_data", "blocked_keywords.json")
+
+        def _load_blocked_keywords(self) -> None:
+            import os
+            try:
+                with open(self._kw_file(), "r", encoding="utf-8") as f:
+                    self._blocked_keywords = json.load(f)
+                logger.info(f"[danmaku_listener] 关键词已加载 {len(self._blocked_keywords)} 条（外置文件）")
+            except (FileNotFoundError, json.JSONDecodeError):
+                self._blocked_keywords = []
+
+        def _save_blocked_keywords(self) -> None:
+            import os
+            try:
+                os.makedirs(os.path.dirname(self._kw_file()) or ".", exist_ok=True)
+                with open(self._kw_file(), "w", encoding="utf-8") as f:
+                    json.dump(self._blocked_keywords, f, indent=2, ensure_ascii=False)
+            except OSError:
+                logger.error("[danmaku_listener] 关键词保存失败", exc_info=True)
+
+    return AutoliveBridge
+
+
+# ---------- 托管服务 ----------
 
 class DanmakuListenerService:
-    """DanmakuListener serve 托管 + WS 消费者生命周期（挂载 main.py 启停）。"""
+    """DanmakuListener 进程内托管（挂载 main.py 启停；控制面经 FastAPI 暴露）。"""
 
     def __init__(self, config_getter: Callable[[], dict]):
         self._cfg = config_getter
-        self._mproc = None
-        self._consumer: Optional[_ConsumerLoop] = None
-        self._consumer_thread: Optional[threading.Thread] = None
-        self._toml_path = os.path.join("config", "danmaku_serve.toml")
-        # token 状态：托管层唯一写方；消费者每次重连前读取（A-1 生命周期语义）
-        self._token_lock = threading.Lock()
-        self._token: str = ""
-        self._token_generation = 0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._bridge: Any = None
+        self._web_runner: Any = None
+        self._stop_evt = threading.Event()
         self._state_cb: Optional[Callable[[str], None]] = None
-        # G4：system 事件环（前端 timer 轮询消费；seen 指针防重复通知）
-        self.events: deque = deque(maxlen=100)
+        self._service_on = False          # set_service_enabled 运行时态
+        self._rebuild_count = 0           # 守护重建计数（3 次停止、置红）
+        # 事件环（G4 保留：前端经 /danmaku/events 轮询）
+        self.events: deque = deque(maxlen=200)
         self._event_seq = 0
-        # G5：NEEDS_LOGIN 队列（多平台逐个呈现）+ 当前呈现态
+        self._evt_lock = threading.Lock()
+        # 登录队列（G5 保留）
         self.login_queue: list = []
         self.login_active: Optional[dict] = None
+        # 消息面
+        self._queue: Optional[_BoundedDropQueue] = None
+        self._worker: Optional[threading.Thread] = None
+        self._last_heartbeat = time.time()
+        self._unknown_type_count = 0
+        self._invalid_msg_count = 0
+        self._seen_event_keys: OrderedDict = OrderedDict()  # 事件去重（60s 窗口——Eng E3）
+        self._gift_lru: OrderedDict = OrderedDict()         # 抖音 GIFT 换算（LRU 5000）
+        self._last_msg_ts = 0.0                             # 生命信号（P2-0 ②）
+        self._msg_today_count = 0
+        self._no_active_warned = False
 
-    # ---------- G4/G5 前端数据面 ----------
+    # ---------- 配置 ----------
 
-    def push_event(self, kind: str, data: dict) -> None:
-        """system/business 状态事件入环（前端轮询消费，超限自动淘汰最旧）。"""
-        self._event_seq += 1
-        self.events.append({"seq": self._event_seq, "ts": time.time(), "kind": kind, "data": data})
+    def _section(self) -> dict:
+        """danmaku_listener 节快照（约定：_cfg 返回节本身——build 工厂与冒烟均已包装）。"""
+        try:
+            sec = self._cfg()
+            return dict(sec) if isinstance(sec, dict) else {}
+        except Exception:
+            return {}
+
+    def _queue_max(self) -> int:
+        return int(self._section().get("queue_maxsize") or QUEUE_MAX_DEFAULT)
+
+    def _stall_threshold(self) -> float:
+        return float(self._section().get("stall_threshold_seconds") or STALL_THRESHOLD_S_DEFAULT)
+
+    def _cookie_dir(self) -> str:
+        sec = self._section()
+        return str(sec.get("cookie_dir") or os.path.join("cookie"))
+
+    # ---------- 事件环 / 登录队列（保留自上轮，前端经 /danmaku/* 轮询） ----------
+
+    def push_event(self, kind: str, data: dict, dedup_key: str = "") -> None:
+        with self._evt_lock:
+            if dedup_key:
+                now = time.time()
+                for k, ts in list(self._seen_event_keys.items()):
+                    if now - ts > 60:
+                        self._seen_event_keys.pop(k, None)
+                if dedup_key in self._seen_event_keys:
+                    return
+                self._seen_event_keys[dedup_key] = now
+            self._event_seq += 1
+            self.events.append({"seq": self._event_seq, "ts": time.time(),
+                                "kind": kind, "data": data})
 
     def events_since(self, last_seq: int) -> list:
-        """返回 seq 大于 last_seq 的事件（前端增量拉取）。"""
-        return [e for e in self.events if e["seq"] > last_seq]
+        with self._evt_lock:
+            return [e for e in self.events if e["seq"] > last_seq]
 
     def submit_login_request(self, payload: dict) -> None:
-        """NEEDS_LOGIN 入队（多平台队列呈现）；首个立即激活。"""
+        failure = payload.get("failure") or {}
         item = {
-            "platform": str((payload.get("failure") or {}).get("reason_code", "unknown")).split(".")[0],
-            "reason_code": (payload.get("failure") or {}).get("reason_code", ""),
-            "fix_hint": (payload.get("failure") or {}).get("fix_hint", ""),
-            "docs_anchor": (payload.get("failure") or {}).get("docs_anchor", ""),
+            "platform": str(failure.get("reason_code", "unknown")).split(".")[0],
+            "reason_code": failure.get("reason_code", ""),
+            "fix_hint": failure.get("fix_hint", ""),
+            "docs_anchor": failure.get("docs_anchor", ""),
             "interactive": payload.get("interactive_login") or {},
             "ts": time.time(),
         }
         self.login_queue.append(item)
         if self.login_active is None:
             self.login_active = self.login_queue.pop(0)
+        self.push_event("login_request", item,
+                        dedup_key=f"login:{item['platform']}:{item['reason_code']}")
         logger.info(f"[danmaku_listener] 登录请求入队（{item['platform']}，队列 {len(self.login_queue)}）")
 
     def ack_login_done(self) -> None:
-        """UI 确认当前登录请求处理完毕（自动恢复或手动关闭）→ 弹出下一个。"""
         self.login_active = None
         if self.login_queue:
             self.login_active = self.login_queue.pop(0)
 
-    # ---------- token / 世代 ----------
+    # ---------- 数据面入口（AutoliveBridge._broadcast 调用；asyncio 线程内） ----------
 
-    def _rotate_token(self) -> None:
-        """生成新 token 并递增世代（托管层重拉时调用；轮换即 serve 世代信号，A-4）。"""
-        with self._token_lock:
-            self._token = secrets.token_urlsafe(32)  # S-3：≥32 字节熵
-            self._token_generation += 1
+    def _on_wire(self, message: dict) -> None:
+        """契约线格式单条处理（组件引擎线程内调用；全路径非阻塞）。
 
-    def current_token(self) -> str:
-        with self._token_lock:
-            return self._token
-
-    def generation(self) -> int:
-        with self._token_lock:
-            return self._token_generation
-
-    # ---------- 配置 ----------
-
-    def _section(self) -> dict:
-        cfg = dict(self._cfg())
-        return cfg
-
-    def enabled(self) -> bool:
-        return bool(self._section().get("enabled", False))
-
-    def _room_id(self) -> str:
-        sec = self._section()
-        return str(sec.get("room_id") or "")
-
-    # ---------- 生命周期 ----------
-
-    def start(self, state_cb: Optional[Callable[[str], None]] = None) -> bool:
-        """拉起 serve 并启动消费者。返回 False 表示被禁用或托管拉起失败。"""
-        sec = self._section()
-        if not sec.get("enabled"):
-            logger.info("[danmaku_listener] enabled=false，跳过托管拉起")
-            return False
-        self._state_cb = state_cb
-        self._rotate_token()
-        os.makedirs(os.path.dirname(self._toml_path), exist_ok=True)
-        _write_serve_toml(self._toml_path, sec)
-
-        comp_root = str(sec.get("component_root") or "danmaku_listener")
-        fixtures = os.path.join(comp_root, "fixtures", "demo.jsonl")
-        replay = fixtures if os.path.isfile(fixtures) else None
-        if replay is None:
-            logger.warning("[danmaku_listener] 未找到 fixtures/demo.jsonl，serve 将空转（无消息源）")
-        command = [
-            sys.executable, "-m", "danmaku_listener", "serve",
-            "--config", self._toml_path,
-        ]
-        if replay:
-            command += ["--replay", replay]
-        env = dict(os.environ)
-        env["DANMAKU_TOKEN"] = self.current_token()   # token 注入（env 方式）
-        env["PYTHONUTF8"] = "1"                        # C-2：子进程 env 契约（组件 pitfall）
-        env["PYTHONPATH"] = comp_root + os.pathsep + env.get("PYTHONPATH", "")
-
-        from utils.service_orchestrator import ManagedProcess
-        self._mproc = ManagedProcess(
-            name="danmaku_listener",
-            command=command,
-            cwd=".",
-            env=env,
-            port=int(sec.get("ws_port", 8765)),
-            policies={"start_ready_timeout_s": 30, "health_poll_interval_s": 10},
-            health_probe=_tcp_probe,
-            on_state_change=self._on_serve_state,
-        )
-        if not self._mproc.start():
-            logger.error("[danmaku_listener] serve 托管拉起失败（见 logs/services/danmaku_listener.log）")
-            return False
-
-        from utils.service_orchestrator import ServiceRegistry
-        ServiceRegistry.instance().register(self._mproc)
-        self._consumer = _ConsumerLoop(self)
-        self._consumer_thread = threading.Thread(
-            target=self._consumer.run, name="danmaku-consumer", daemon=True
-        )
-        self._consumer_thread.start()
-        set_service_instance(self)
-        return True
-
-    def stop(self) -> None:
-        """关停：消费者先停 → 托管 terminate→kill（义务块正常关停语义）。"""
-        if self._consumer:
-            self._consumer.shutdown()
-        if self._consumer_thread:
-            self._consumer_thread.join(timeout=5)
-            self._consumer_thread = None
-            self._consumer = None
-        if self._mproc:
-            self._mproc.stop()
-            self._mproc = None
-        set_service_instance(None)
-        logger.info("[danmaku_listener] 已关停")
-
-    def _on_serve_state(self, state: str, mproc) -> None:
-        """托管状态回调 → 状态条胶囊订阅（P1-3 复用）。"""
-        logger.info(f"[danmaku_listener] 托管状态: {state}")
-        if self._state_cb:
-            try:
-                self._state_cb(state)
-            except Exception:
-                logger.error("[danmaku_listener] 状态回调异常", exc_info=True)
-
-    def request_restart(self) -> bool:
-        """手动重启入口（状态条胶囊 red 态出路，D10）。"""
-        if not self._mproc:
-            return False
-        self._rotate_token()  # 重拉即新世代
-        ok = self._mproc.manual_restart()
-        return ok
-
-
-class _ConsumerLoop:
-    """WS 消费者主循环（独立线程事件循环）。system 快路径 + business 队列投递。"""
-
-    def __init__(self, service: DanmakuListenerService):
-        self._svc = service
-        self._stop = threading.Event()
-        self._work_queue: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_MAX)
-        self._worker: Optional[threading.Thread] = None
-        self._last_heartbeat = time.time()
-        self._generation_seen = service.generation()
-        self._seq_expected: dict[str, int] = {}     # room → 下一期待 seq
-        self._seq_wait_buf: dict[str, list] = {}    # room → 等待缓冲
-        self._seq_wait_since: dict[str, float] = {}
-        self._connect_fail_streak = 0
-        self._lost_reported = False
-        self._login_cb: Optional[Callable[[dict], None]] = None
-        self._status_cb: Optional[Callable[[str, dict], None]] = None
-        self._unknown_type_count = 0
-        self._invalid_msg_count = 0
-        self._dropped_count = 0
-
-    # ---------- 外部接线 ----------
-
-    def _emit_status(self, kind: str, data: dict) -> None:
-        """系统状态/计数事件上报（事件环 → 前端轮询；回调直连）。"""
-        try:
-            self._svc.push_event(kind, data)
-        except Exception:
-            pass
-        if self._status_cb:
-            try:
-                self._status_cb(kind, data)
-            except Exception:
-                logger.error(f"[danmaku_consumer] 状态回调异常（kind={kind}）", exc_info=True)
-
-    def set_login_callback(self, cb: Callable[[dict], None]) -> None:
-        """NEEDS_LOGIN 回调（payload 含 interactive_login QR/URL）→ UI 扫码对话框。"""
-        self._login_cb = cb
-
-    def set_status_callback(self, cb: Callable[[str, dict], None]) -> None:
-        """系统状态回调（kind: heartbeat_lost/gap/engine/backpressure/recovered/room/connected）。"""
-        self._status_cb = cb
-
-    def worker_snapshot(self) -> dict:
-        """状态条/调试快照。"""
-        return {
-            "queue_size": self._work_queue.qsize(),
-            "unknown_type_count": self._unknown_type_count,
-            "invalid_msg_count": self._invalid_msg_count,
-            "dropped_count": self._dropped_count,
-            "last_heartbeat_age_s": round(time.time() - self._last_heartbeat, 1),
-            "generation": self._generation_seen,
-        }
-
-    def shutdown(self) -> None:
-        self._stop.set()
-        if self._worker:
-            self._worker.join(timeout=3)
-
-    # ---------- 主循环 ----------
-
-    def run(self) -> None:
-        self._worker = threading.Thread(target=self._worker_loop, name="danmaku-worker", daemon=True)
-        self._worker.start()
-        sec = self._svc._section()
-        port = int(sec.get("ws_port", 8765))
-        url = f"ws://127.0.0.1:{port}/ws"
-        backoff = RECONNECT_BACKOFF_MIN_S
-        while not self._stop.is_set():
-            gen = self._svc.generation()
-            if gen != self._generation_seen:
-                self._on_generation_reset(gen)
-            # 每个连接会话独立 asyncio.run（daemon 线程无既有事件循环，asyncio connect 必须在循环内使用）
-            session_ok = asyncio.run(self._session(url))
-            if self._stop.is_set():
-                return
-            if session_ok:
-                backoff = RECONNECT_BACKOFF_MIN_S
-                self._connect_fail_streak = 0
-                continue
-            self._connect_fail_streak += 1
-            if self._connect_fail_streak >= CONNECT_FAIL_HANDOFF:
-                # A-3：移交托管层（重拉裁决归口 ManagedProcess），消费者保持退避重连
-                logger.error(f"[danmaku_consumer] 连续 {self._connect_fail_streak} 次连接失败，已移交托管层")
-                self._emit_status("handoff", {"streak": self._connect_fail_streak})
-            sleep_s = min(backoff, RECONNECT_BACKOFF_MAX_S)
-            backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX_S)
-            self._stop.wait(sleep_s)
-
-    async def _session(self, url: str) -> bool:
-        """单次连接会话：连接 → 读循环。正常关停返回 True，异常返回 False。"""
-        token = self._svc.current_token()  # A-1：每次重连前读当前 token
-        gen = self._svc.generation()
-        try:
-            headers = {"Authorization": f"Bearer {token}"} if token else {}
-            async with ws_connect(url, additional_headers=headers, open_timeout=5) as ws:
-                logger.info(f"[danmaku_consumer] 已连接 {url}（generation={gen}）")
-                self._connect_fail_streak = 0
-                self._lost_reported = False
-                self._last_heartbeat = time.time()
-                self._emit_status("connected", {})
-                async for raw in ws:
-                    if self._stop.is_set():
-                        return True
-                    self._process_frame(raw)
-                return True
-        except Exception as e:
-            if self._stop.is_set():
-                return True
-            if "401" in str(e) or "invalid" in str(e).lower():
-                logger.warning(f"[danmaku_consumer] 鉴权失败（{e}）；下一轮以新 token 重试")
-                self._emit_status("auth_error", {"detail": str(e)})
-            else:
-                logger.warning(f"[danmaku_consumer] 连接异常: {e}")
-            return False
-
-    def _on_generation_reset(self, gen: int) -> None:
-        """世代重置（A-4）：重拉产生新 serve 进程，seq 期待与去重窗口清空。"""
-        logger.info(f"[danmaku_consumer] 世代切换 {self._generation_seen} → {gen}；重置 seq/去重窗口")
-        self._generation_seen = gen
-        self._seq_expected.clear()
-        self._seq_wait_buf.clear()
-        self._seq_wait_since.clear()
-        try:
-            from utils import my_global
-            if getattr(my_global, "my_handle", None):
-                my_global.my_handle.clear_live_data()
-        except Exception:
-            logger.error("[danmaku_consumer] 去重窗口清空失败", exc_info=True)
-
-    def _process_frame(self, raw) -> None:
-        """单帧处理：心跳判定（快路径内联，不受主队列拥堵影响——Eng A-2）+ 分流。"""
-        now = time.time()
-        age = now - self._last_heartbeat
-        if age >= ZOMBIE_TIMEOUT_S and not self._lost_reported:
-            self._lost_reported = True
-            self._emit_status("zombie", {"age_s": round(age, 1)})
-        elif age >= HEARTBEAT_LOST_PERIODS * HEARTBEAT_INTERVAL_S and not self._lost_reported:
-            self._lost_reported = True
-            self._emit_status("heartbeat_lost", {"age_s": round(age, 1)})
-        try:
-            msg = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            self._invalid_msg_count += 1
-            logger.warning(f"[danmaku_consumer] 非法 JSON 帧丢弃（累计 {self._invalid_msg_count}）")
+        system → 事件环/登录队列；business → 活跃路由判定 → 有界队列。
+        """
+        if not isinstance(message, dict):
             return
-        norm = _normalize_wire(msg)
+        norm = _normalize_wire(message)
         if norm is None:
             self._invalid_msg_count += 1
-            logger.warning(f"[danmaku_consumer] envelope 缺失丢弃（累计 {self._invalid_msg_count}）")
             return
-        if not norm["version"].startswith(f"{CONTRACT_VERSION_MAJOR}."):
-            logger.error(f"[danmaku_consumer] 契约版本不兼容: {norm['version']}（要求 {CONTRACT_VERSION_MAJOR}.x）——拒绝消费")
-            self._emit_status("contract_mismatch", {"version": norm["version"]})
-            self._stop.set()
+        if not str(norm["version"]).startswith(f"{CONTRACT_VERSION_MAJOR}."):
+            logger.error(f"[danmaku_listener] 契约版本不兼容: {norm['version']}")
+            self.push_event("contract_mismatch", {"version": norm["version"]})
             return
-        category, mtype, room, seq = norm["category"], norm["type"], norm["room"], norm["seq"]
+        mtype, room = norm["type"], norm["room"]
+        platform = str(norm["env"].get("platform", ""))
         if mtype == "HEARTBEAT":
             self._last_heartbeat = time.time()
-            if self._lost_reported:
-                self._lost_reported = False
-                self._emit_status("recovered", {})
             return
-        if category == "system":
-            self._handle_system(mtype, norm["payload"], room)
+        if norm["category"] == "system":
+            self._handle_system(mtype, norm["payload"])
             return
-        if category != "business":
+        if norm["category"] != "business":
             self._unknown_type_count += 1
             return
-        # business：计数快路径 vs 对话链队列（B-2 路由分类）
         if mtype in _FASTPATH_BUSINESS:
-            self._count_fastpath(mtype)
+            self.push_event("count", {"type": mtype, "room": room})
             return
-        self._route_business(mtype, {"envelope": norm["env"], "payload": norm["payload"]}, room, seq)
+        # 活跃路由（P1-3，投递前过滤）：仅活跃房间进对话链队列；其余仅计数。
+        # LIVE_STATUS_CHANGE 豁免（下播裁剪作用于全队列）。无活跃房间时一次性提示。
+        active = self._active_room()
+        if mtype != "LIVE_STATUS_CHANGE":
+            if not active:
+                if not self._no_active_warned:
+                    self._no_active_warned = True
+                    self.push_event("no_active_room",
+                                    {"reason_code": "room.no_active",
+                                     "fix_hint": "未指定活跃房间，数字人不会互动——在平台配置页点选'设为活跃'",
+                                     "docs_anchor": "docs/danmaku_module.md"})
+            elif f"{platform}:{room}" != active:
+                self.push_event("count", {"type": mtype, "room": room, "inactive": True})
+                return
+        self._msg_today_count += 1
+        self._last_msg_ts = time.time()
+        self._queue.put((mtype, {"envelope": norm["env"], "payload": norm["payload"]}))
 
-    # ---------- system 快路径 ----------
-
-    def _handle_system(self, mtype: str, msg: dict, room: str) -> None:
-        payload = msg.get("payload") or {}
+    def _handle_system(self, mtype: str, payload: dict) -> None:
         if mtype == "GAP":
-            logger.warning(f"[danmaku_consumer] GAP {payload.get('window_start')}~{payload.get('window_end')} "
-                           f"reason={payload.get('reason')} approx={payload.get('approx')}")
-            self._emit_status("gap", payload)
+            self.push_event("gap", payload,
+                            dedup_key=f"gap:{payload.get('window_start')}:{payload.get('reason')}")
         elif mtype == "NEEDS_LOGIN":
-            logger.warning(f"[danmaku_consumer] NEEDS_LOGIN: {payload.get('failure', {}).get('reason_code')}")
-            try:
-                self._svc.submit_login_request(payload)
-            except Exception:
-                logger.error("[danmaku_consumer] 登录请求入队异常", exc_info=True)
-            if self._login_cb:
-                try:
-                    self._login_cb(payload)
-                except Exception:
-                    logger.error("[danmaku_consumer] 登录回调异常", exc_info=True)
+            self.submit_login_request(payload)
         elif mtype == "ENGINE_STATUS":
-            self._emit_status("engine", {"engine": payload.get("engine"), "detail": payload.get("detail")})
+            self.push_event("engine", {"engine": payload.get("engine"), "detail": payload.get("detail")})
         elif mtype == "ROUTE_FAILED":
             f = payload.get("failure") or {}
-            logger.error(f"[danmaku_consumer] ROUTE_FAILED {f.get('reason_code')}：{f.get('fix_hint')}（{f.get('docs_anchor')}）")
-            self._emit_status("route_failed", f)
+            self.push_event("route_failed", f,
+                            dedup_key=f"route:{f.get('reason_code')}:{payload.get('room_id', '')}")
         elif mtype == "BACKPRESSURE":
-            logger.warning(f"[danmaku_consumer] BACKPRESSURE 窗口丢弃: {payload.get('dropped_by_type')}")
-            self._emit_status("backpressure", payload)
+            self.push_event("backpressure", payload)
         elif mtype == "RECOVERED":
-            logger.info(f"[danmaku_consumer] 组件内恢复（{payload.get('after_seconds')}s）")
-            self._emit_status("component_recovered", payload)
+            self.push_event("component_recovered", payload)
         elif mtype == "ROOM_STATUS":
-            self._emit_status("room", {"online": payload.get("online")})
+            self.push_event("room", {"online": payload.get("online")})
         else:
             self._unknown_type_count += 1
 
-    # ---------- business 路由 ----------
+    # ---------- 活跃房间裁定（P1-3：显式 active 字段） ----------
 
-    def _count_fastpath(self, mtype: str) -> None:
-        """计数快路径（LIKE/ENTER_ROOM/ROOM_STATS）：进计数不进对话链。"""
-        self._emit_status("count", {"type": mtype})
+    def _active_room(self) -> str:
+        for r in (self._section().get("rooms") or []):
+            if isinstance(r, dict) and r.get("active"):
+                return f"{r.get('platform', '')}:{r.get('room_id', '')}"
+        return ""
 
-    def _route_business(self, mtype: str, msg: dict, room: str, seq) -> None:
-        # seq 单调校验（契约：同房间单调；跳跃等待 GAP，10s 超时 approx 降级）
-        if isinstance(seq, int):
-            expected = self._seq_expected.get(room)
-            if expected is not None and seq > expected:
-                # 跳跃：入等待缓冲（上限 SEQ_BUFFER_MAX）
-                buf = self._seq_wait_buf.setdefault(room, [])
-                if len(buf) < SEQ_BUFFER_MAX:
-                    buf.append((mtype, msg))
-                    if room not in self._seq_wait_since:
-                        self._seq_wait_since[room] = time.time()
-                    if time.time() - self._seq_wait_since[room] < SEQ_WAIT_TIMEOUT_S:
-                        return  # 等待 GAP 到达
-                    # 超时：approx 降级放行（分批注入，B-3）
-                    logger.warning(f"[danmaku_consumer] seq 等待超时降级放行 room={room}（{len(buf)} 条缓冲）")
-                    self._flush_wait_buf(room, batch=True)
-            self._seq_expected[room] = seq + 1
-            # GAP/超时后恢复单调：放行等待缓冲
-            if self._seq_wait_buf.get(room):
-                self._flush_wait_buf(room, batch=True)
-        self._enqueue(mtype, msg)
-
-    def _flush_wait_buf(self, room: str, batch: bool) -> None:
-        buf = self._seq_wait_buf.pop(room, [])
-        self._seq_wait_since.pop(room, None)
-        step = 50 if batch else len(buf)
-        for i in range(0, len(buf), step):  # 分批注入，避免瞬时打满主队列（B-3）
-            chunk = buf[i:i + step]
-            for mtype, msg in chunk:
-                self._enqueue(mtype, msg)
-            if batch and i + step < len(buf):
-                time.sleep(0.05)
-
-    def _enqueue(self, mtype: str, msg: dict) -> None:
-        try:
-            self._work_queue.put_nowait((mtype, msg))
-        except queue.Full:
-            # 溢出：按背压同序丢弃低优先级（义务块：同序丢弃并计数）
-            dropped = self._drop_lowest()
-            if dropped:
-                self._dropped_count += 1
-                try:
-                    self._work_queue.put_nowait((mtype, msg))
-                    return
-                except queue.Full:
-                    pass
-            self._dropped_count += 1
-            logger.warning(f"[danmaku_consumer] 主队列溢出丢弃（累计 {self._dropped_count}）")
-
-    def _drop_lowest(self) -> bool:
-        """从队列中移除一个最低优先级项（_DROP_ORDER 数值大者优先保留）。"""
-        items = []
-        while True:
-            try:
-                items.append(self._work_queue.get_nowait())
-            except queue.Empty:
-                break
-        if not items:
-            return False
-        items.sort(key=lambda it: _DROP_ORDER.get(it[0], 99))
-        keep = items[1:]  # 丢弃优先级最低（排序最前）的一条
-        for it in keep:
-            self._work_queue.put_nowait(it)
-        return True
-
-    # ---------- worker：队列 → 映射 → my_handle ----------
+    # ---------- 消费线程（队列 → 活跃路由 → 聚合 → _dispatch） ----------
 
     def _worker_loop(self) -> None:
-        agg = _DanmuAggregator(on_flush=self._dispatch_agg)
+        agg = _DanmuAggregator(on_flush=lambda m: self._dispatch("DANMU", m))
         like_agg = _LikeAggregator(on_flush=self._dispatch_like_agg)
-        while not self._stop.is_set():
-            try:
-                mtype, msg = self._work_queue.get(timeout=0.5)
-            except queue.Empty:
+        while not self._stop_evt.is_set():
+            item = self._queue.get(timeout=0.5)
+            if item is None:
                 agg.maybe_flush()
                 like_agg.maybe_flush()
                 continue
+            mtype, msg = item
             if mtype == "DANMU":
-                agg.add(msg)   # B-1：窗口聚合限速进对话链
+                agg.add(msg)
             elif mtype == "LIKE":
-                like_agg.add(msg)  # 点赞聚合进对话链（2026-10-03 用户需求）
+                like_agg.add(msg)
             else:
                 self._dispatch(mtype, msg)
         agg.flush()
         like_agg.flush()
 
-    def _dispatch_agg(self, merged: dict) -> None:
-        self._dispatch("DANMU", merged)
-
     def _dispatch_like_agg(self, merged: dict) -> None:
-        """聚合点赞 → 交互链（like_handle 优先；comment 兜底）。"""
         try:
             from utils import my_global
             handle = getattr(my_global, "my_handle", None)
             if handle is None:
                 return
             env = merged.get("envelope") or {}
-            platform = str(env.get("platform", ""))
-            data = {"platform": platform,
+            data = {"platform": str(env.get("platform", "")),
                     "username": merged.get("like_user_summary") or "有人",
                     "count": merged.get("like_count", 1)}
             if hasattr(handle, "like_handle"):
@@ -598,105 +455,484 @@ class _ConsumerLoop:
             else:
                 data["content"] = f"点赞了直播 x{data['count']}"
                 handle.process_data(data, "comment")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[danmaku_consumer] like 派发失败: {e}")
+        except Exception:
+            logger.error("[danmaku_listener] like 派发失败", exc_info=True)
 
     def _dispatch(self, mtype: str, msg: dict) -> None:
-        """business 消息映射进 my_handle 交互链（G3：复用不重建）。"""
+        """business 消息映射进 my_handle 交互链（复用不重建）+ 活跃路由 + GIFT 增量换算。"""
         payload = msg.get("payload") or {}
         env = msg.get("envelope") or {}
         platform = str(env.get("platform", ""))
+        room = str(env.get("room_id", ""))
         try:
             from utils import my_global
             handle = getattr(my_global, "my_handle", None)
             if handle is None:
-                logger.warning("[danmaku_consumer] my_handle 未就绪，消息丢弃")
+                logger.warning("[danmaku_listener] my_handle 未就绪，消息丢弃")
                 return
             if mtype == "DANMU":
                 data = {"platform": platform, "username": payload.get("user_name") or "匿名",
                         "content": _sanitize_danmu_text(str(payload.get("content") or ""))}
                 handle.process_data(data, "comment")
             elif mtype == "GIFT":
-                num = int(payload.get("gift_count") or 1)
-                price = payload.get("gift_value") or 0
+                num = _gift_increment(room, payload, self._gift_lru)
+                if num <= 0:
+                    return
+                price = float(payload.get("gift_value") or 0)
+                per = price / _gift_base_count(payload) if _gift_base_count(payload) else 0
                 data = {"platform": platform, "gift_name": payload.get("gift_name") or "礼物",
                         "username": payload.get("user_name") or "匿名", "num": num,
-                        "unit_price": (price / num) if num else 0, "total_price": price}
+                        "unit_price": per, "total_price": per * num}
                 handle.process_data(data, "gift")
             elif mtype == "SUPER_CHAT":
                 data = {"platform": platform, "username": payload.get("user_name") or "匿名",
                         "content": _sanitize_danmu_text(str(payload.get("content") or "")),
                         "price": payload.get("price") or 0}
-                handle.process_data(data, "comment")  # 醒目留言进对话链（price 附加）
+                handle.process_data(data, "comment")
             elif mtype == "ENTER_ROOM":
                 handle.process_data({"platform": platform, "username": payload.get("user_name") or "匿名"},
                                     "entrance")
             elif mtype == "SOCIAL":
                 action = str(payload.get("action") or "")
                 if "关注" in action or "follow" in action.lower():
-                    handle.process_data({"platform": platform, "username": payload.get("user_name") or "匿名"},
-                                        "follow") if hasattr(handle, "event_handler") else None
                     handle.follow_handle({"platform": platform, "username": payload.get("user_name") or "匿名"})
                 else:
-                    logger.info(f"[danmaku_consumer] SOCIAL {action} 计数")
+                    self.push_event("count", {"type": "SOCIAL", "action": action})
             elif mtype == "LIVE_STATUS_CHANGE":
                 live = bool(payload.get("live"))
-                logger.info(f"[danmaku_consumer] LIVE_STATUS_CHANGE live={live}")
                 if not live:
-                    self._on_stream_offline()
+                    dropped = self._queue.prune_keep({"GIFT", "SUPER_CHAT"})
+                    logger.info(f"[danmaku_listener] 下播裁剪：清空 {dropped} 条低优先级")
                 else:
-                    self._on_stream_online()
-            elif mtype in ("ROOM_STATS",):
-                pass  # 已走计数快路径；此分支防御性忽略
+                    logger.info("[danmaku_listener] 开播复位")
             else:
                 self._unknown_type_count += 1
         except Exception:
-            logger.error(f"[danmaku_consumer] {mtype} 处理异常", exc_info=True)
+            logger.error(f"[danmaku_listener] {mtype} 处理异常", exc_info=True)
 
-    def _on_stream_offline(self) -> None:
-        """下播：清空队列低优先级（保 GIFT/SUPER_CHAT），不触发对话链（义务块下播裁剪）。"""
-        kept, dropped = [], 0
-        while True:
-            try:
-                mtype, msg = self._work_queue.get_nowait()
-            except queue.Empty:
-                break
-            if mtype in ("GIFT", "SUPER_CHAT"):
-                kept.append((mtype, msg))
+    # ---------- 控制面（跨线程封装——Eng A1 高危：全部经 _submit） ----------
+
+    def _submit(self, coro, timeout: float = CONTROL_TIMEOUT_S):
+        """提交协程到组件事件循环并同步等待（UI/FastAPI 线程安全）。
+
+        返回协程结果；RoomError 转 dict（success=False + 三段式）；
+        超时/未启动抛 RuntimeError。
+        """
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("DanmakuListener 服务未运行")
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout=timeout)
+        except RuntimeError as e:
+            if e.__class__.__name__ == "RoomError" or hasattr(e, "status"):
+                return {"success": False, "error": str(e),
+                        "reason_code": getattr(e, "reason_code", "") or "room_error",
+                        "fix_hint": getattr(e, "fix_hint", ""), "docs_anchor": getattr(e, "docs_anchor", "")}
+            raise
+
+    def _submit_room_op(self, coro_factory) -> dict:
+        """房间操作统一出口：RoomError → {success:False,...} 三段式（组件异常类）。"""
+        if self._loop is None or self._loop.is_closed():
+            return {"success": False, "error": "服务未运行",
+                    "reason_code": "service.not_running",
+                    "fix_hint": "开启 danmaku_listener.enabled 后重启系统",
+                    "docs_anchor": "docs/danmaku_module.md"}
+        fut = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+        try:
+            return fut.result(timeout=CONTROL_TIMEOUT_S)
+        except Exception as e:
+            et = e.__class__.__name__
+            if et == "RoomError" or hasattr(e, "status"):
+                return {"success": False, "error": str(e), "status": getattr(e, "status", 400),
+                        "reason_code": f"room.{et.lower()}", "fix_hint": "", "docs_anchor": ""}
+            logger.error("[danmaku_listener] 控制面操作异常", exc_info=True)
+            return {"success": False, "error": str(e)[:200], "reason_code": "room.internal",
+                    "fix_hint": "查看 logs/ 日志", "docs_anchor": ""}
+
+    # ---- 房间 ----
+
+    def add_room(self, room_spec: str, platform: str = "", start: bool = True) -> dict:
+        """添加房间（持久操作：写回 config；start=False 仅预配置不启动——DX 2.2 逃生门）。"""
+        if not self._platform_enabled(platform):
+            return {"success": False,
+                    "error": f"平台 {platform} 未启用",
+                    "reason_code": "room.platform_disabled",
+                    "fix_hint": "在平台配置页打开该平台开关后重试",
+                    "docs_anchor": "docs/danmaku_module.md"}
+        result = {"success": True}
+        if start:
+            result = self._submit_room_op(lambda: self._bridge.add_room(room_spec, platform))
+            if not result.get("success") and result.get("status") != "login_required":
+                return result
+        self._persist_room(room_spec, platform, result)
+        return result
+
+    def _persist_room(self, room_spec: str, platform: str, result: dict) -> None:
+        """房间写回 config.rooms（原子 RMW）；room_id 取操作结果或链接归一。"""
+        room_id = str(((result.get("room") or {}).get("room_id")) or room_spec)
+        def mut(sec):
+            rooms = [r for r in (sec.get("rooms") or [])
+                     if not (isinstance(r, dict) and r.get("platform") == platform
+                             and str(r.get("room_id")) == room_id)]
+            rooms.append({"platform": platform, "room_id": room_id, "enabled": True,
+                          "active": not any(r.get("active") for r in rooms)})
+            sec["rooms"] = rooms
+        if _write_config_section(mut):
+            self.push_event("config_saved", {"what": "room_added", "room_id": room_id})
+
+    def remove_room(self, platform: str, room_id: str) -> dict:
+        result = self._submit_room_op(lambda: self._bridge.remove_room(platform, room_id))
+        if result.get("success"):
+            def mut(sec):
+                sec["rooms"] = [r for r in (sec.get("rooms") or [])
+                                if not (isinstance(r, dict) and r.get("platform") == platform
+                                        and str(r.get("room_id")) == room_id)]
+            _write_config_section(mut)
+        return result
+
+    def start_room(self, platform: str, room_id: str) -> dict:
+        return self._submit_room_op(lambda: self._bridge.start_room(platform, room_id))
+
+    def stop_room(self, platform: str, room_id: str) -> dict:
+        return self._submit_room_op(lambda: self._bridge.stop_room(platform, room_id))
+
+    def get_rooms(self) -> dict:
+        if self._bridge is None:
+            return {"rooms": self._section().get("rooms") or [], "running": False}
+        status = self._bridge.get_status()
+        active = self._active_room()
+        rooms = []
+        for key, r in (status.get("rooms") or {}).items():
+            rooms.append({**r, "active": (f"{r.get('platform')}:{r.get('room_id')}" == active)})
+        return {"rooms": rooms, "running": True, "message_count": status.get("message_count", 0)}
+
+    def get_status(self) -> dict:
+        sec = self._section()
+        alive = self._loop is not None and not self._loop.is_closed()
+        return {
+            "enabled": bool(sec.get("enabled")),
+            "running": alive and self._service_on,
+            "red": self._rebuild_count >= REBUILD_GUARD_MAX,
+            "rebuild_count": self._rebuild_count,
+            "queue_size": self._queue.qsize() if self._queue else 0,
+            "dropped_count": self._queue.dropped_count if self._queue else 0,
+            "unknown_type_count": self._unknown_type_count,
+            "invalid_msg_count": self._invalid_msg_count,
+            "last_msg_age_s": round(time.time() - self._last_msg_ts, 1) if self._last_msg_ts else None,
+            "stall_threshold_s": self._stall_threshold(),
+            "active_room": self._active_room() or None,
+        }
+
+    # ---- 关键词 ----
+
+    def add_keyword(self, keyword: str) -> dict:
+        kw = str(keyword or "").strip()
+        if not kw or len(kw) > 50:
+            return {"success": False, "error": "关键词须为 1-50 字符",
+                    "reason_code": "keyword.invalid", "fix_hint": "输入 1-50 字符", "docs_anchor": ""}
+        r = self._bridge.add_keyword(kw)
+        if r.get("success"):
+            self._persist_keywords()
+        return r
+
+    def remove_keyword(self, keyword: str) -> dict:
+        r = self._bridge.remove_keyword(keyword)
+        if r.get("success"):
+            self._persist_keywords()
+        return r
+
+    def set_keyword_filter(self, enabled: bool) -> dict:
+        r = self._bridge.toggle_keyword_filter(bool(enabled))
+        if r.get("success"):
+            self._persist_keywords()
+        return r
+
+    def _persist_keywords(self) -> None:
+        def mut(sec):
+            sec["keywords"] = list(self._bridge._blocked_keywords)
+            sec["keyword_filter_enabled"] = bool(self._bridge._keyword_filter_enabled)
+        _write_config_section(mut)
+
+    # ---- 服务/平台开关 ----
+
+    def set_service_enabled(self, enabled: bool) -> dict:
+        """服务总开关（持久写回 enabled；false=stop_all+停消费，true=按 config 恢复）。"""
+        _write_config_section(lambda sec: sec.__setitem__("enabled", bool(enabled)))
+        if enabled:
+            ok = self._resume_service()
+            return {"success": ok, "enabled": True}
+        if self._bridge is not None and self._loop and not self._loop.is_closed():
+            self._submit_room_op(lambda: self._bridge.stop_all())
+        self._service_on = False
+        self.push_event("service_state", {"running": False})
+        return {"success": True, "enabled": False}
+
+    def set_platform_enabled(self, platform: str, enabled: bool) -> dict:
+        """平台开关（持久写回；置 false 联动 stop 该平台运行中房间——P1-3 义务）。"""
+        _write_config_section(lambda sec: (sec.setdefault("platforms", {}).__setitem__(platform, bool(enabled))))
+        if not enabled and self._bridge is not None and self._loop and not self._loop.is_closed():
+            rooms = (self._bridge.get_status() or {}).get("rooms") or {}
+            for key, r in list(rooms.items()):
+                if r.get("platform") == platform and r.get("status") == "running":
+                    self._submit_room_op(lambda p=platform, rid=r.get("room_id"): self._bridge.stop_room(p, rid))
+        self.push_event("platform_toggled", {"platform": platform, "enabled": bool(enabled)},
+                        dedup_key=f"pt:{platform}:{enabled}")
+        return {"success": True, "platform": platform, "enabled": bool(enabled)}
+
+    def _platform_enabled(self, platform: str) -> bool:
+        return bool((self._section().get("platforms") or {}).get(platform, False))
+
+    def request_restart(self) -> bool:
+        """手动重启（守护置红出路）：清防护计数并重建。"""
+        self._rebuild_count = 0
+        return self._start_loop_service()
+
+    # ---------- 生命周期 ----------
+
+    def start(self, state_cb: Optional[Callable[[str], None]] = None) -> bool:
+        """拉起进程内托管（enabled=true 才构建——build_danmaku_listener_service 已过滤）。"""
+        sec = self._section()
+        if not sec.get("enabled"):
+            logger.info("[danmaku_listener] enabled=false，跳过启动")
+            return False
+        self._state_cb = state_cb
+        self._queue = _BoundedDropQueue(self._queue_max())
+        self._stop_evt.clear()
+        self._loop_thread = threading.Thread(target=self._loop_main, name="danmaku-bridge-loop", daemon=True)
+        self._loop_thread.start()
+        self._worker = threading.Thread(target=self._worker_loop, name="danmaku-worker", daemon=True)
+        self._worker.start()
+        set_service_instance(self)
+        return True
+
+    def _loop_main(self) -> None:
+        """专用 asyncio daemon 线程主函数（Eng A1/T4：顶层防护 + 停机顺序）。
+
+        守护语义（P1-6）：顶层异常 → 事件上报 → 重建 Bridge；连续 3 次停止重建、置红。
+        """
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._async_start())
+            self._loop.run_forever()
+        except Exception:
+            logger.error("[danmaku_listener] 事件循环致命异常", exc_info=True)
+            self.push_event("loop_crashed", {
+                "reason_code": "service.loop_crashed",
+                "fix_hint": "守护将自动重建；连续失败请查看 logs/ 并手动重启" ,
+                "docs_anchor": "docs/danmaku_module.md#排障"},
+                dedup_key=f"loop_crash:{time.time()}")
+            self._rebuild_count += 1
+            if self._rebuild_count < REBUILD_GUARD_MAX:
+                logger.warning(f"[danmaku_listener] 守护重建（第 {self._rebuild_count} 次）")
+                self._stop_evt.clear()
+                self._loop_main()  # 重建（递归；计数上限防护）
             else:
-                dropped += 1
-        for it in kept:
+                logger.error("[danmaku_listener] 连续 3 次失败——停止重建，状态置红")
+                self.push_event("service_red", {"reason_code": "service.guard_tripped",
+                                                "fix_hint": "手动重启：服务状态条胶囊 → 重启",
+                                                "docs_anchor": "docs/danmaku_module.md#排障"})
+                if self._state_cb:
+                    try:
+                        self._state_cb("red")
+                    except Exception:
+                        pass
+        finally:
             try:
-                self._work_queue.put_nowait(it)
-            except queue.Full:
-                break
-        logger.info(f"[danmaku_consumer] 下播裁剪：清空 {dropped} 条低优先级，保留 {len(kept)} 条礼物类")
+                self._loop.close()
+            except Exception:
+                pass
 
-    def _on_stream_online(self) -> None:
-        """开播：复位状态机（seq 期待清空，恢复互动）。"""
-        self._seq_expected.clear()
-        self._seq_wait_buf.clear()
-        logger.info("[danmaku_consumer] 开播复位")
+    async def _async_start(self) -> None:
+        """事件循环内启动：settings 覆写 → Bridge 构造 → rooms/keywords 注入 → web_console。"""
+        # Eng E5：组件 settings 的 cookie 路径构造期覆写（serve TOML 通道删除后的替代）
+        try:
+            from danmaku_listener.config.settings import get_settings, set_settings
+            s = get_settings()
+            cookie_dir = os.path.abspath(self._cookie_dir())
+            if hasattr(s, "cookie_dir"):
+                set_settings(s.model_copy(update={"cookie_dir": cookie_dir}))
+                logger.info(f"[danmaku_listener] 组件 cookie_dir 已覆写为 {cookie_dir}")
+            # 启动断言：cookie/profile 路径在副本外
+            if os.path.abspath("danmaku_listener") in cookie_dir:
+                logger.warning("[danmaku_listener] cookie_dir 落在组件副本内——copy_danmaku.py 重跑会清除登录态！")
+        except Exception:
+            logger.error("[danmaku_listener] 组件 settings 覆写失败", exc_info=True)
+
+        bridge_cls = _build_bridge_class()
+        self._bridge = bridge_cls(self)
+
+        # rooms 注入 + ghost 对账（Eng A5）：config 为权威源
+        await self._inject_rooms()
+
+        # keywords 注入（整体替换语义——Eng A3）
+        sec = self._section()
+        kws = [str(k) for k in (sec.get("keywords") or [])]
+        self._bridge._blocked_keywords = kws
+        self._bridge._keyword_filter_enabled = bool(sec.get("keyword_filter_enabled", True))
+        self._bridge._save_blocked_keywords()
+
+        # web_console 调试通道（默认关；8080 占用预检——P1-4）
+        if sec.get("web_console"):
+            await self._start_web_console(int(sec.get("web_console_port") or WEB_CONSOLE_PORT_DEFAULT))
+
+        self._service_on = True
+        self.push_event("service_state", {"running": True})
+        restored = len(self._bridge._rooms)
+        if restored:
+            self.push_event("restored_summary",
+                            {"message": f"已恢复 {restored} 个房间配置（启用中自动启动）"})
+        logger.info(f"[danmaku_listener] 进程内托管已启动（rooms={restored}）")
+
+    async def _inject_rooms(self) -> None:
+        """config.rooms 权威源注入：enabled 且平台启用 → add（自动 start）；ghost 对账（Eng A5）。"""
+        sec = self._section()
+        platforms = sec.get("platforms") or {}
+        config_keys = set()
+        for r in (sec.get("rooms") or []):
+            if not isinstance(r, dict):
+                continue
+            p, rid = str(r.get("platform", "")), str(r.get("room_id", ""))
+            config_keys.add(f"{p}:{rid}")
+            if not p or not rid:
+                continue
+            if not r.get("enabled"):
+                continue
+            if not bool(platforms.get(p, False)):
+                self.push_event("room_skip_disabled_platform",
+                                {"room": f"{p}:{rid}",
+                                 "reason_code": "room.platform_disabled",
+                                 "fix_hint": "该平台未启用——在平台配置页打开开关",
+                                 "docs_anchor": "docs/danmaku_module.md"},
+                                dedup_key=f"skip:{p}:{rid}")
+                continue
+            try:
+                res = await self._bridge.add_room(rid, p)
+                logger.info(f"[danmaku_listener] 注入房间 {p}:{rid} → {res.get('status', 'ok')}")
+            except Exception as e:
+                logger.error(f"[danmaku_listener] 注入房间 {p}:{rid} 失败: {e}")
+        # ghost 对账：组件注册表中不在 config 的条目清除
+        for key in list(self._bridge._rooms.keys()):
+            if key not in config_keys:
+                p, _, rid = key.partition(":")
+                try:
+                    await self._bridge.remove_room(p, rid)
+                    logger.info(f"[danmaku_listener] ghost 房间已对账清除: {key}")
+                except Exception:
+                    pass
+
+    async def _start_web_console(self, port: int) -> None:
+        """web_console=true：组件 web 层绑 127.0.0.1（app['bridge'] 注入 AutoliveBridge——零组件改动）。"""
+        # 占用预检（P1-4）
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                self.push_event("web_console_error", {
+                    "reason_code": "webconsole.eaddrinuse",
+                    "fix_hint": f"释放端口 {port} 或改 web_console_port",
+                    "docs_anchor": "docs/danmaku_module.md#排障"})
+                return
+        except OSError:
+            pass
+        try:
+            from aiohttp import web as aioweb
+            from danmaku_listener.web.app import create_app
+            app = create_app()
+            app["bridge"] = self._bridge
+            self._web_runner = aioweb.AppRunner(app)
+            await self._web_runner.setup()
+            site = aioweb.TCPSite(self._web_runner, "127.0.0.1", port)
+            await site.start()
+            logger.info(f"[danmaku_listener] web_console 已启动 http://127.0.0.1:{port}（无鉴权，仅本机调试）")
+        except Exception:
+            logger.error("[danmaku_listener] web_console 启动失败", exc_info=True)
+
+    def _resume_service(self) -> bool:
+        """set_service_enabled(true)：守护置红后的恢复路径（重建循环）。"""
+        if self._loop is None or self._loop.is_closed():
+            self._rebuild_count = 0
+            self._loop_thread = threading.Thread(target=self._loop_main, name="danmaku-bridge-loop", daemon=True)
+            self._loop_thread.start()
+        return True
+
+    def _start_loop_service(self) -> bool:
+        """request_restart 出路：重建事件循环线程。"""
+        self._resume_service()
+        return True
+
+    def stop(self) -> None:
+        """关停（Eng T4 顺序写死）：stop_all future 等待 → 停循环 → join。"""
+        self._service_on = False
+        if self._bridge is not None and self._loop and not self._loop.is_closed():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._bridge.stop_all(), self._loop)
+                fut.result(timeout=10)
+            except Exception:
+                logger.error("[danmaku_listener] stop_all 等待失败（继续停机）", exc_info=True)
+        self._stop_evt.set()
+        if self._loop and not self._loop.is_closed():
+            if self._web_runner is not None:
+                async def _cleanup():
+                    await self._web_runner.cleanup()
+                try:
+                    asyncio.run_coroutine_threadsafe(_cleanup(), self._loop).result(timeout=5)
+                except Exception:
+                    pass
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread:
+            self._loop_thread.join(timeout=5)
+            self._loop_thread = None
+        if self._worker:
+            self._worker.join(timeout=3)
+            self._worker = None
+        self._bridge = None
+        set_service_instance(None)
+        logger.info("[danmaku_listener] 已关停（stop_all 完成/循环停止/线程 join 干净）")
+
+    # ---------- 状态快照（/danmaku/status 数据源） ----------
+
+    def worker_snapshot(self) -> dict:
+        return self.get_status()
 
 
-def _sanitize_danmu_text(text: str) -> str:
-    """S-1 最低防线：长度钳制 + 控制字符/零宽字符剥离（URL 由上层过滤不进 prompt 的规则在对话链侧）。"""
-    text = "".join(ch for ch in text if ch.isprintable() and ch not in "​‌‍﻿")
-    return text[:200]
+# ---------- 抖音 GIFT 增量换算（P1-2 义务；组件 TODOS"勿按增量消费"） ----------
 
+def _gift_key(payload: dict, room: str) -> tuple:
+    return (room, str(payload.get("user_id") or payload.get("user_name") or ""),
+            str(payload.get("gift_id") or payload.get("gift_name") or ""))
+
+
+def _gift_base_count(payload: dict) -> int:
+    try:
+        return max(1, int(payload.get("gift_count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _gift_increment(room: str, payload: dict, lru: OrderedDict) -> int:
+    """totalCount → 本次增量。首见视为 1（差额丢弃计数——答谢宁可少报）；
+    差值 ≤0 丢弃；LRU 5000 键淘汰最旧（淘汰后首见语义重新触发，安全侧）。"""
+    key = _gift_key(payload, room)
+    total = _gift_base_count(payload)
+    prev = lru.get(key)
+    lru[key] = total
+    if len(lru) > GIFT_LRU_MAX:
+        lru.popitem(last=False)
+    if prev is None:
+        return 1
+    delta = total - prev
+    return delta if delta > 0 else 0
+
+
+# ---------- 线格式归一（保留自上轮：扁平/嵌套双形态兼容） ----------
 
 def _normalize_wire(msg: dict) -> Optional[dict]:
-    """线格式适配：组件 to_wire() 为扁平结构（信封字段顶层 + payload 并列），
-    schema.json 文档为嵌套结构（envelope/payload）。两者兼容归一，返回
-    {"env":..., "payload":..., "category":..., "type":..., "room":..., "seq":...} 或 None。
-    （上游 schema 与实现的漂移已记录，待组件侧对齐后本适配层保持向后兼容。）"""
     if not isinstance(msg, dict):
         return None
     payload = msg.get("payload")
     if isinstance(msg.get("envelope"), dict) and isinstance(payload, dict):
-        env = msg["envelope"]                       # 嵌套格式（schema.json 文档形态）
+        env = msg["envelope"]
     elif isinstance(payload, dict) and msg.get("category"):
-        env = msg                                   # 扁平格式（to_wire 实际线格式）
+        env = msg
         payload = dict(payload)
     else:
         return None
@@ -711,8 +947,14 @@ def _normalize_wire(msg: dict) -> Optional[dict]:
     }
 
 
+def _sanitize_danmu_text(text: str) -> str:
+    """S-1 最低防线（保留）：长度钳制 + 控制字符/零宽字符剥离。"""
+    text = "".join(ch for ch in text if ch.isprintable() and ch not in "​‌‍﻿")
+    return text[:200]
+
+
 def build_danmaku_listener_service(config) -> Optional[DanmakuListenerService]:
-    """main.py 托管挂钩工厂：返回 None 表示未启用（不拉起）。"""
+    """main.py 托管挂钩工厂（保留原签名）：返回 None 表示未启用。"""
     def cfg_getter() -> dict:
         try:
             sec = config.get("danmaku_listener")
@@ -726,10 +968,10 @@ def build_danmaku_listener_service(config) -> Optional[DanmakuListenerService]:
     return DanmakuListenerService(cfg_getter)
 
 
+# ---------- 聚合器（保留自上轮：B-1 窗口聚合 + LIKE 聚合） ----------
+
 class _LikeAggregator:
-    """LIKE 窗口聚合：窗内点赞合并为"张三、李四 等 N 人点赞"摘要进对话链
-    （2026-10-03 用户需求：监听到谁点赞——原计数快路径不进对话链致点赞不可见；
-    聚合防高频刷屏，模式同 _DanmuAggregator）。"""
+    """LIKE 窗口聚合（保留：用户需求"监听到谁点赞"）。"""
 
     def __init__(self, on_flush: Callable[[dict], None]):
         self._on_flush = on_flush
@@ -767,7 +1009,7 @@ class _LikeAggregator:
 
 
 class _DanmuAggregator:
-    """DANMU 窗口聚合（B-1）：窗内合并为一条摘要消息，降低对话链压力。"""
+    """DANMU 窗口聚合（保留：B-1 对话链限速）。"""
 
     def __init__(self, on_flush: Callable[[dict], None]):
         self._on_flush = on_flush

@@ -162,26 +162,31 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
 
 # DanmakuListener 整合（2026-09-27 计划 G6/DX）：弹幕监听组件配置节
 _DANMAKU_LISTENER_DEFAULTS: Dict[str, Any] = {
-    "enabled": False,                       # 总开关：false 时托管不拉起 serve、消费者不启动
-    "ws_port": 8765,                        # 组件 WS 推送端口（serve --config TOML 的 ws_port 来源）
-    "ws_bind": "127.0.0.1",                 # 绑定地址（E-1 硬条款：仅回环）
-    "require_token": True,                  # 强制 token 注入（false 仅 loopback，限开发态）
-    "token_injection": "env",               # token 注入方式：env（DANMAKU_TOKEN 环境变量）/ file（受限权限文件）
-    "token_file_path": "",                  # file 注入方式的 token 文件路径（env 方式忽略）
-    "platforms": {                          # 平台启用开关（逐平台独立，就绪梯度默认 B站/斗鱼/抖音）
+    "enabled": False,                       # 总开关：false 时托管不启动、前端操作禁用
+    "component_root": "danmaku_listener",   # 组件副本目录（copy_danmaku.py 复制范式；COPY_MANIFEST.json 版本戳）
+    "login_entry": True,                    # NEEDS_LOGIN 扫码弹窗常驻入口
+    "web_console": False,                   # 组件浏览器控制台调试通道（默认关；无鉴权仅本机，勿长开）
+    "web_console_port": 8080,               # web_console 端口（8080 占用检测，EADDRINUSE 事件环报错）
+    "queue_maxsize": 500,                   # 业务队列上限（可覆盖运行参数——DX 5.1 逃生门）
+    "stall_threshold_seconds": 60,          # 收流停滞判定阈值（生命信号——P2-0 ②）
+    "cookie_dir": "cookie",                 # 登录态目录（必须落 danmaku_listener/ 之外——copy_danmaku.py 重跑 rmtree）
+    "platforms": {                          # 12 平台启用开关（就绪梯度默认 B站/斗鱼/抖音）
         "bilibili": True,
         "douyu": True,
         "douyin": True,
-        "kuaishou": False,
         "huya": False,
+        "kuaishou": False,
+        "taobao": False,
+        "1688": False,
+        "meituan": False,
+        "xiaohongshu": False,
+        "pdd": False,
+        "jd": False,
         "wechat_channels": False,
     },
-    "login_entry": True,                    # NEEDS_LOGIN 扫码常驻入口（视频号常规路径）
-    "legacy_adapter_retired": False,        # 旧链路退役开关（G7：Phase 4 已裁决通过，默认关=旧链路保留）
-    "component_root": "danmaku_listener",   # 组件副本目录（G8 复制范式；COPY_MANIFEST.json 版本戳所在）
-    "cookie_dir": "",                       # 受控页面引擎 cookie/profile 目录（空=组件默认 ./cookie；
-                                            # 可指向源仓库共享登录态目录——脚本扫码后系统通道免登录）
-    "room_id": "",                          # 监听房间 ID（平台原生 ID 字符串；空=沿用全局 room_id 配置）
+    "rooms": [],                            # 房间权威源 [{platform, room_id, enabled, active}]——active 至多一个（显式指定）
+    "keywords": [],                         # 屏蔽关键词权威源（仅过滤 DANMU）
+    "keyword_filter_enabled": True,         # 关键词过滤总开关
 }
 
 # audio_player/captions_printer 整合（2026-09-25 计划 §4.5/§5.4/R7）

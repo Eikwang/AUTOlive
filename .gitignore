@@ -207,7 +207,8 @@ test.py
 # debug输出
 tmp/
 
-cookie/*.json
+/cookie/
+/persistence_data/
 
 # 数据库
 data/data.db
@@ -286,11 +287,14 @@ coverage.xml
 *.bak
 *.backup
 
-test_*.py
+/test_*.py
+!tests/
 .claude/
 .agent-teams/
 .pytest_cache/
-docs/
+docs/*
+!docs/danmaku_contract/
+!docs/danmaku_module.md
 
 # === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===
 edtalk/ckpts/

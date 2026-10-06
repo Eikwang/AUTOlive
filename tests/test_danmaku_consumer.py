@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
-"""DanmakuListener 消费者单测（整合计划测试基线：聚合器/优先级丢弃/TOML 生成/世代重置/文本净化）"""
+"""DanmakuListener 进程内托管层单测（整合计划第二阶段：P1-1~P1-3 + 回归契约）
+
+退役（整合计划"Tests to Retire"）：test_write_serve_toml / test_write_serve_toml_file_token
+——serve TOML 生成随进程内化删除（Test Plan Artifact 2026-10-06 登记）。
+保留回归契约：聚合器/文本净化/优先级丢弃（迁移到 _BoundedDropQueue）/登录队列/事件环/QR 安全。
+新增：GIFT 增量换算（含首见/LRU 淘汰）/有界队列满载丢弃/下播裁剪/事件去重窗口/活跃路由。
+"""
 import json
 import os
 import sys
 import unittest
+from collections import OrderedDict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,24 +24,6 @@ def _msg(mtype="DANMU", seq=1, room="23058", platform="bilibili", payload=None, 
                      "engine": "protocol:bilibili"},
         "payload": payload or {"type": mtype, "user_name": "测试用户", "content": "你好"},
     }
-
-
-class TestTomlGen(unittest.TestCase):
-    def test_write_serve_toml(self):
-        p = os.path.join(os.environ.get("TEMP", "/tmp"), "dtest.toml")
-        dc._write_serve_toml(p, {"ws_port": 8765, "ws_bind": "127.0.0.1", "token_injection": "env"})
-        text = open(p, encoding="utf-8").read()
-        self.assertIn('ws_port = 8765', text)
-        self.assertIn('ws_bind = "127.0.0.1"', text)
-        self.assertNotIn("ws_token_file", text)
-        os.unlink(p)
-
-    def test_write_serve_toml_file_token(self):
-        p = os.path.join(os.environ.get("TEMP", "/tmp"), "dtest2.toml")
-        dc._write_serve_toml(p, {"ws_port": 9000, "ws_bind": "127.0.0.1",
-                                 "token_injection": "file", "token_file_path": "x/token"})
-        self.assertIn('ws_token_file = "x/token"', open(p, encoding="utf-8").read())
-        os.unlink(p)
 
 
 class TestAggregator(unittest.TestCase):
@@ -67,64 +56,116 @@ class TestSanitize(unittest.TestCase):
         self.assertEqual(len(dc._sanitize_danmu_text("长" * 500)), 200)
 
 
-class TestPriorityDrop(unittest.TestCase):
-    def test_drop_lowest_prefers_like(self):
-        loop = dc._ConsumerLoop.__new__(dc._ConsumerLoop)  # 不跑 __init__（只测队列逻辑）
-        loop._work_queue = __import__("queue").Queue(maxsize=3)
-        loop._work_queue.put(("GIFT", _msg("GIFT")))
-        loop._work_queue.put(("LIKE", _msg("LIKE")))
-        loop._work_queue.put(("SUPER_CHAT", _msg("SUPER_CHAT")))
-        self.assertTrue(loop._drop_lowest())
-        remain = []
-        while True:
-            try:
-                remain.append(loop._work_queue.get_nowait())
-            except Exception:
-                break
-        kinds = [k for k, _ in remain]
-        self.assertNotIn("LIKE", kinds)       # LIKE 优先级最低先丢
-        self.assertIn("SUPER_CHAT", kinds)    # SUPER_CHAT 保留
+class TestBoundedDropQueue(unittest.TestCase):
+    """Eng E1：deque+Condition 原子结构（替代 queue.Queue 排空-回灌竞态）。"""
+
+    def test_put_get_fifo(self):
+        q = dc._BoundedDropQueue(3)
+        q.put(("DANMU", 1))
+        q.put(("DANMU", 2))
+        self.assertEqual(q.get(timeout=0.1), ("DANMU", 1))
+        self.assertEqual(q.get(timeout=0.1), ("DANMU", 2))
+        self.assertIsNone(q.get(timeout=0.05))
+
+    def test_overflow_drops_lowest_priority(self):
+        q = dc._BoundedDropQueue(3)
+        q.put(("GIFT", "g"))
+        q.put(("SUPER_CHAT", "sc"))
+        q.put(("DANMU", "d1"))
+        q.put(("LIKE", "l"))          # 满载：已有最低优先级 DANMU 被淘汰腾位
+        self.assertEqual(q.qsize(), 3)
+        self.assertEqual(q.dropped_count, 1)
+        kinds = [it[0] for it in [q.get(timeout=0.05) for _ in range(3)]]
+        self.assertNotIn("DANMU", kinds)     # 已有最低优先级被淘汰
+        self.assertIn("LIKE", kinds)         # 新条腾位后保留
+        self.assertIn("SUPER_CHAT", kinds)   # 保礼物类（背压同序）
+        self.assertIn("GIFT", kinds)
+
+    def test_overflow_drops_newest_when_exhausted(self):
+        """R3-2 兜底：可丢类型穷尽（队列仅剩 GIFT/SUPER_CHAT 保类型）→ 丢最新（本条）。"""
+        q = dc._BoundedDropQueue(2)
+        q.put(("GIFT", 1))
+        q.put(("SUPER_CHAT", 2))
+        q.put(("GIFT", 3))            # 队列全是保类型 → 新条被丢
+        self.assertEqual(q.qsize(), 2)
+        self.assertEqual(q.dropped_count, 1)
+        self.assertEqual(q.get(timeout=0.05), ("GIFT", 1))     # 原有保类型完整
+        self.assertEqual(q.get(timeout=0.05), ("SUPER_CHAT", 2))
+
+    def test_prune_keep_offline_clip(self):
+        """下播裁剪：仅保留 GIFT/SUPER_CHAT（Eng E1 同构原子操作）。"""
+        q = dc._BoundedDropQueue(10)
+        for t in ("DANMU", "LIKE", "GIFT", "ENTER_ROOM", "SUPER_CHAT"):
+            q.put((t, t))
+        dropped = q.prune_keep({"GIFT", "SUPER_CHAT"})
+        self.assertEqual(dropped, 3)
+        self.assertEqual(q.qsize(), 2)
 
 
-class TestVersionGate(unittest.TestCase):
-    def test_version_reject_path_exists(self):
-        # 版本断言为读循环内联逻辑；此处验证常量与消息工具的一致性
-        self.assertEqual(dc.CONTRACT_VERSION_MAJOR, 1)
-        msg = _msg(version="2.0.0")
-        self.assertTrue(str(msg["envelope"]["contract_version"]).startswith("2."))
+class TestGiftIncrement(unittest.TestCase):
+    """P1-2 义务：抖音 GIFT.count 是 totalCount 累计值透传——增量换算。"""
+
+    def setUp(self):
+        self.lru = OrderedDict()
+
+    def test_sequence_convert_to_increment(self):
+        payload = {"user_id": "u1", "gift_id": "g1", "gift_count": 1, "gift_value": 10}
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 1)
+        payload["gift_count"] = 2
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 1)
+        payload["gift_count"] = 3
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 1)
+
+    def test_first_seen_high_total_counts_as_one(self):
+        """首见 totalCount=5 只报 1（答谢宁可少报不可重复多报）。"""
+        payload = {"user_id": "u1", "gift_id": "g1", "gift_count": 5}
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 1)
+
+    def test_non_increasing_dropped(self):
+        payload = {"user_id": "u1", "gift_id": "g1", "gift_count": 3}
+        dc._gift_increment("room1", payload, self.lru)
+        payload["gift_count"] = 3
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 0)
+        payload["gift_count"] = 2
+        self.assertEqual(dc._gift_increment("room1", payload, self.lru), 0)
+
+    def test_lru_eviction_retriggers_first_seen(self):
+        payload = {"user_id": "u0", "gift_id": "g0", "gift_count": 9}
+        self.assertEqual(dc._gift_increment("room0", payload, self.lru), 1)  # 首见
+        for i in range(dc.GIFT_LRU_MAX):   # 经换算函数灌洪峰（触发真实淘汰）
+            flood = {"user_id": f"u{i}", "gift_id": f"g{i}", "gift_count": 9}
+            dc._gift_increment("flood", flood, self.lru)
+        self.assertNotIn(("room0", "u0", "g0"), self.lru)   # 已淘汰
+        self.assertEqual(dc._gift_increment("room0", payload, self.lru), 1)  # 首见语义重触发
 
 
 class TestFastpathRouting(unittest.TestCase):
     def test_fastpath_set_matches_contract(self):
-        # B-2 修订（2026-10-03）：LIKE 移出快路径——用户需求"监听到谁点赞"，
-        # 点赞走对话链聚合（_LikeAggregator）；ENTER_ROOM/ROOM_STATS 保持计数快路径
+        # B-2 修订（2026-10-03）：LIKE 走对话链聚合；ENTER_ROOM/ROOM_STATS 计数快路径
         self.assertEqual(dc._FASTPATH_BUSINESS, {"ENTER_ROOM", "ROOM_STATS"})
 
 
 class TestConsumerDefaults(unittest.TestCase):
     def test_thresholds_match_obligations(self):
-        self.assertEqual(dc.HEARTBEAT_INTERVAL_S, 10)
-        self.assertEqual(dc.HEARTBEAT_LOST_PERIODS, 3)
-        self.assertEqual(dc.ZOMBIE_TIMEOUT_S, 60)
-        self.assertEqual(dc.SEQ_WAIT_TIMEOUT_S, 10)
-        self.assertEqual(dc.SEQ_BUFFER_MAX, 1000)
-        self.assertEqual(dc.QUEUE_MAX, 500)
-        self.assertEqual(dc.RECONNECT_BACKOFF_MIN_S, 1.0)
-        self.assertEqual(dc.RECONNECT_BACKOFF_MAX_S, 30.0)
-        self.assertEqual(dc.CONNECT_FAIL_HANDOFF, 3)
+        self.assertEqual(dc.DANMU_AGG_WINDOW_S, 5.0)
+        self.assertEqual(dc.DANMU_AGG_MAX, 5)
+        self.assertEqual(dc.CONTRACT_VERSION_MAJOR, 1)
+        self.assertEqual(dc.QUEUE_MAX_DEFAULT, 500)          # DX 5.1 可覆盖默认
+        self.assertEqual(dc.WEB_CONSOLE_PORT_DEFAULT, 8080)
+        self.assertEqual(dc.STALL_THRESHOLD_S_DEFAULT, 60)
+        self.assertEqual(dc.REBUILD_GUARD_MAX, 3)            # P1-6 失控防护
+        self.assertEqual(dc.GIFT_LRU_MAX, 5000)              # Section 7 闭环
 
 
 class _StubSvc:
-    """最小 service stub（登录队列/事件环宿主）。"""
-    from collections import deque
-    events = []
-    login_queue = []
-    login_active = None
+    """最小 service stub（登录队列/事件环宿主——保留自上轮）。"""
 
     def __init__(self):
         from collections import deque
-        self.events = __import__("collections").deque(maxlen=100)
+        self.events = __import__("collections").deque(maxlen=200)
         self._event_seq = 0
+        self._evt_lock = __import__("threading").Lock()
+        self._seen_event_keys = OrderedDict()
         self.login_queue = []
         self.login_active = None
 
@@ -160,10 +201,125 @@ class TestEventRing(unittest.TestCase):
         self.assertEqual([e["kind"] for e in got], ["gap", "recovered"])
         self.assertEqual(svc.events_since(got[-1]["seq"]), [])  # 增量语义
 
+    def test_dedup_window_60s(self):
+        """Eng E3：事件去重键加 60s 窗口（恢复→再次 GAP 不被吞）。"""
+        svc = _StubSvc()
+        svc.push_event("gap", {"r": 1}, dedup_key="gap:1:network")
+        svc.push_event("gap", {"r": 1}, dedup_key="gap:1:network")
+        got = svc.events_since(0)
+        self.assertEqual(len([e for e in got if e["kind"] == "gap"]), 1)  # 同窗口去重
+        svc._seen_event_keys.clear()   # 窗口过期（模拟 60s 后）
+        svc.push_event("gap", {"r": 1}, dedup_key="gap:1:network")
+        got = svc.events_since(0)
+        self.assertEqual(len([e for e in got if e["kind"] == "gap"]), 2)  # 新窗口放行
+
+
+class TestNormalizeWire(unittest.TestCase):
+    def test_flat_and_nested(self):
+        flat = {"contract_version": "1.0.0", "category": "business", "type": "DANMU",
+                "platform": "bilibili", "room_id": "1", "seq": 1, "timestamp": 1,
+                "engine": "e", "payload": {"content": "x"}}
+        n = dc._normalize_wire(flat)
+        self.assertEqual(n["type"], "DANMU")
+        self.assertEqual(n["room"], "1")
+        nested = {"envelope": flat, "payload": flat["payload"]}
+        n2 = dc._normalize_wire(nested)
+        self.assertEqual(n2["type"], "DANMU")
+        self.assertIsNone(dc._normalize_wire({"bad": 1}))
+        self.assertIsNone(dc._normalize_wire("not-dict"))
+
+
+class TestOnWireRouting(unittest.TestCase):
+    """_on_wire 数据面：system 进事件环 / business 进队列 / 快路径计数。"""
+
+    def _svc(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._queue = dc._BoundedDropQueue(100)
+        svc._evt_lock = __import__("threading").Lock()
+        from collections import deque
+        svc.events = deque(maxlen=200)
+        svc._event_seq = 0
+        svc._seen_event_keys = OrderedDict()
+        svc.login_queue = []
+        svc.login_active = None
+        svc._unknown_type_count = 0
+        svc._invalid_msg_count = 0
+        svc._msg_today_count = 0
+        svc._last_msg_ts = 0.0
+        svc._last_heartbeat = 0.0
+        svc._no_active_warned = False
+        svc._cfg = lambda: {"rooms": [{"platform": "bilibili", "room_id": "23058",
+                                       "enabled": True, "active": True}]}
+        return svc
+
+    def test_business_routes_to_queue(self):
+        svc = self._svc()
+        svc._on_wire(_msg(room="23058"))
+        self.assertEqual(svc._queue.qsize(), 1)
+
+    def test_system_needs_login_enters_login_queue(self):
+        svc = self._svc()
+        svc._on_wire({"contract_version": "1.0.0", "category": "system", "type": "NEEDS_LOGIN",
+                      "platform": "wechat_channels", "room_id": "1", "seq": 1, "timestamp": 1,
+                      "engine": "e",
+                      "payload": {"type": "NEEDS_LOGIN",
+                                  "failure": {"reason_code": "wechat_channels.session_expired",
+                                              "fix_hint": "扫码", "docs_anchor": "d"},
+                                  "interactive_login": {"qr_image_b64": "AAAA"}}})
+        self.assertIsNotNone(svc.login_active)
+
+    def test_inactive_room_not_queued(self):
+        """活跃路由（P1-3）：非活跃房间不进对话链队列。"""
+        svc = self._svc()
+        svc._on_wire(_msg(room="99999"))   # 非活跃房间
+        self.assertEqual(svc._queue.qsize(), 0)
+
+    def test_version_gate(self):
+        svc = self._svc()
+        svc._on_wire(_msg(version="2.0.0"))
+        self.assertEqual(svc._queue.qsize(), 0)   # 2.x 拒绝
+        self.assertEqual(len(svc.events), 1)      # contract_mismatch 事件
+
+
+class TestActiveRoom(unittest.TestCase):
+    def test_active_from_config(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._cfg = lambda: {"rooms": [
+            {"platform": "bilibili", "room_id": "1", "enabled": True},
+            {"platform": "douyin", "room_id": "2", "enabled": True, "active": True}]}
+        self.assertEqual(svc._active_room(), "douyin:2")
+
+    def test_no_active_returns_empty(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._cfg = lambda: {"rooms": [
+            {"platform": "bilibili", "room_id": "1", "enabled": True}]}
+        self.assertEqual(svc._active_room(), "")
+
+
+class TestConfigRmw(unittest.TestCase):
+    def test_write_config_section_atomic(self):
+        """P1-3 持久化语义：_write_config_section 原子改写 danmaku_listener 节。"""
+        import tempfile
+        orig_path = dc._config_path
+        try:
+            tmpdir = tempfile.mkdtemp()
+            cfg_file = os.path.join(tmpdir, "config.json")
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump({"danmaku_listener": {"rooms": []}, "other": {"keep": 1}}, f)
+            dc._config_path = lambda: cfg_file
+            def mut(sec):
+                sec["rooms"] = [{"platform": "douyu", "room_id": "9", "enabled": True, "active": True}]
+            self.assertTrue(dc._write_config_section(mut))
+            data = json.load(open(cfg_file, encoding="utf-8"))
+            self.assertEqual(data["danmaku_listener"]["rooms"][0]["room_id"], "9")
+            self.assertEqual(data["other"]["keep"], 1)        # 其他节不碰
+            self.assertFalse(os.path.exists(cfg_file + ".tmp"))  # 原子替换后 tmp 消失
+        finally:
+            dc._config_path = orig_path
+
 
 class TestQrSafety(unittest.TestCase):
     def test_raw_b64_wrapped_as_png(self):
-        out = dc.__dict__  # noqa — 下行直接引用模块内函数
         from frontend.ui.components.danmaku_login import _safe_qr_data_url
         self.assertTrue(_safe_qr_data_url({"qr_image_b64": "iVBORw0KGgo="}).startswith("data:image/png;base64,"))
 
@@ -187,12 +343,11 @@ class TestNotifierMapping(unittest.TestCase):
     def test_key_kinds_covered(self):
         from frontend.ui.components.danmaku_login import DanmakuEventNotifier
         n = DanmakuEventNotifier._NOTIFY_TYPE
-        for kind in ("route_failed", "heartbeat_lost", "zombie", "gap", "backpressure",
-                     "auth_error", "contract_mismatch", "recovered"):
+        for kind in ("route_failed", "backpressure", "gap", "recovered",
+                     "contract_mismatch", "component_recovered"):
             self.assertIn(kind, n, f"缺少 {kind} 的通知映射")
             self.assertIsNotNone(n[kind], f"{kind} 不应静默")
-        # 静默事件不产生 notify
-        for kind in ("connected", "count", "room"):
+        for kind in ("count", "room", "service_state"):
             self.assertIsNone(n.get(kind))
 
 

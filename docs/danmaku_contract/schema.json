@@ -1,0 +1,922 @@
+{
+  "$defs": {
+    "BackpressurePayload": {
+      "description": "BACKPRESSURE：背压丢弃计数（窗口级，非累计）",
+      "properties": {
+        "type": {
+          "const": "BACKPRESSURE",
+          "default": "BACKPRESSURE",
+          "title": "Type",
+          "type": "string"
+        },
+        "window_start": {
+          "title": "Window Start",
+          "type": "integer"
+        },
+        "window_end": {
+          "title": "Window End",
+          "type": "integer"
+        },
+        "dropped_by_type": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Dropped By Type",
+          "type": "object"
+        }
+      },
+      "required": [
+        "window_start",
+        "window_end",
+        "dropped_by_type"
+      ],
+      "title": "BackpressurePayload",
+      "type": "object"
+    },
+    "Category": {
+      "description": "消息大类：业务消息 vs 系统状态消息",
+      "enum": [
+        "business",
+        "system"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "DanmuPayload": {
+      "description": "DANMU：普通弹幕",
+      "properties": {
+        "type": {
+          "const": "DANMU",
+          "default": "DANMU",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "title": "User Name",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        },
+        "badge_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Badge Name"
+        },
+        "badge_level": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Badge Level"
+        },
+        "is_admin": {
+          "default": false,
+          "title": "Is Admin",
+          "type": "boolean"
+        },
+        "is_anchor": {
+          "default": false,
+          "title": "Is Anchor",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "user_name",
+        "content"
+      ],
+      "title": "DanmuPayload",
+      "type": "object"
+    },
+    "EngineStatusPayload": {
+      "description": "ENGINE_STATUS：活跃引擎标识/引擎状态变更（兜底切换等场景的可见性）",
+      "properties": {
+        "type": {
+          "const": "ENGINE_STATUS",
+          "default": "ENGINE_STATUS",
+          "title": "Type",
+          "type": "string"
+        },
+        "engine": {
+          "title": "Engine",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        }
+      },
+      "required": [
+        "engine"
+      ],
+      "title": "EngineStatusPayload",
+      "type": "object"
+    },
+    "EnterRoomPayload": {
+      "description": "ENTER_ROOM：进入直播间",
+      "properties": {
+        "type": {
+          "const": "ENTER_ROOM",
+          "default": "ENTER_ROOM",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "title": "User Name",
+          "type": "string"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        },
+        "enter_type": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enter Type"
+        }
+      },
+      "required": [
+        "user_name"
+      ],
+      "title": "EnterRoomPayload",
+      "type": "object"
+    },
+    "Envelope": {
+      "description": "统一消息信封\n\nAttributes:\n    contract_version: 契约版本（additive-only 演进，消费者忽略未知字段）\n    category: business / system 大类（AUTOlive 按此分流，不做字符串前缀判断）\n    type: 消息类型（BusinessType 或 SystemType 值）\n    platform: 平台标识（bilibili/douyu/huya/kuaishou/douyin/wechat_channels）\n    room_id: 房间 ID（平台原生 ID 字符串）\n    seq: 房间内单调递增序号（顺序保证与缺口检测的依据）\n    timestamp: 平台消息时间戳（秒级；无平台时间戳时为引擎接收时刻，测量口径见契约文档）\n    engine: 活跃引擎标识\n    msg_id: 平台原生消息 ID（跨路线语义去重键；平台提供时必填）",
+      "properties": {
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "platform": {
+          "title": "Platform",
+          "type": "string"
+        },
+        "room_id": {
+          "title": "Room Id",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "integer"
+        },
+        "engine": {
+          "title": "Engine",
+          "type": "string"
+        },
+        "msg_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Msg Id"
+        },
+        "protocol_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Protocol Version"
+        }
+      },
+      "required": [
+        "category",
+        "type",
+        "platform",
+        "room_id",
+        "seq",
+        "timestamp",
+        "engine"
+      ],
+      "title": "Envelope",
+      "type": "object"
+    },
+    "FailureInfo": {
+      "description": "失败三段式（失败类消息强制字段，非空校验）\n\nAttributes:\n    reason_code: 机器可读原因码，形如 ``douyin.companion.version_mismatch``\n    fix_hint: 人类可读修复指引\n    docs_anchor: 文档锚点，指向平台风控手册或运维手册，如\n        ``docs/platforms/douyin/runbook.md#version-mismatch``",
+      "properties": {
+        "reason_code": {
+          "minLength": 1,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "fix_hint": {
+          "minLength": 1,
+          "title": "Fix Hint",
+          "type": "string"
+        },
+        "docs_anchor": {
+          "minLength": 1,
+          "title": "Docs Anchor",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason_code",
+        "fix_hint",
+        "docs_anchor"
+      ],
+      "title": "FailureInfo",
+      "type": "object"
+    },
+    "GapPayload": {
+      "description": "GAP：消息缺口标记（必达；下播期间缺失不计 GAP，崩溃恢复拆分为近似区间）",
+      "properties": {
+        "type": {
+          "const": "GAP",
+          "default": "GAP",
+          "title": "Type",
+          "type": "string"
+        },
+        "window_start": {
+          "title": "Window Start",
+          "type": "integer"
+        },
+        "window_end": {
+          "title": "Window End",
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/GapReason"
+        },
+        "approx": {
+          "default": false,
+          "title": "Approx",
+          "type": "boolean"
+        },
+        "dropped_estimate": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dropped Estimate"
+        }
+      },
+      "required": [
+        "window_start",
+        "window_end",
+        "reason"
+      ],
+      "title": "GapPayload",
+      "type": "object"
+    },
+    "GapReason": {
+      "description": "GAP 缺口原因分类（调试三项之一）",
+      "enum": [
+        "network",
+        "protocol",
+        "risk_control",
+        "backpressure",
+        "crash_recovery"
+      ],
+      "title": "GapReason",
+      "type": "string"
+    },
+    "GiftPayload": {
+      "description": "GIFT：礼物",
+      "properties": {
+        "type": {
+          "const": "GIFT",
+          "default": "GIFT",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "title": "User Name",
+          "type": "string"
+        },
+        "gift_name": {
+          "title": "Gift Name",
+          "type": "string"
+        },
+        "gift_count": {
+          "default": 1,
+          "title": "Gift Count",
+          "type": "integer"
+        },
+        "gift_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gift Value"
+        },
+        "gift_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gift Id"
+        },
+        "combo_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Combo Count"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "user_name",
+        "gift_name"
+      ],
+      "title": "GiftPayload",
+      "type": "object"
+    },
+    "HeartbeatPayload": {
+      "description": "HEARTBEAT：引擎存活心跳（默认 10s/条，AUTOlive 侧 3 周期失联判定）",
+      "properties": {
+        "type": {
+          "const": "HEARTBEAT",
+          "default": "HEARTBEAT",
+          "title": "Type",
+          "type": "string"
+        },
+        "loop_lag_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Loop Lag Ms"
+        }
+      },
+      "title": "HeartbeatPayload",
+      "type": "object"
+    },
+    "InteractiveLogin": {
+      "description": "登录交互载荷（NEEDS_LOGIN 的可选增强，视频号扫码等场景）\n\n引擎进程无法展示二维码，由 AUTOlive 界面呈现并把用户操作结果回传。",
+      "properties": {
+        "qr_image_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qr Image B64"
+        },
+        "login_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Login Url"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        }
+      },
+      "title": "InteractiveLogin",
+      "type": "object"
+    },
+    "LikePayload": {
+      "description": "LIKE：点赞（部分平台无法归属到单个用户，user_name 可为空语义由平台适配器文档说明）",
+      "properties": {
+        "type": {
+          "const": "LIKE",
+          "default": "LIKE",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Name"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "total_likes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Likes"
+        }
+      },
+      "title": "LikePayload",
+      "type": "object"
+    },
+    "LiveStatusChangePayload": {
+      "description": "LIVE_STATUS_CHANGE：直播状态变更（开播/下播；GAP 裁剪规则的边界信号）",
+      "properties": {
+        "type": {
+          "const": "LIVE_STATUS_CHANGE",
+          "default": "LIVE_STATUS_CHANGE",
+          "title": "Type",
+          "type": "string"
+        },
+        "live": {
+          "title": "Live",
+          "type": "boolean"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "live"
+      ],
+      "title": "LiveStatusChangePayload",
+      "type": "object"
+    },
+    "NeedsLoginPayload": {
+      "description": "NEEDS_LOGIN：登录态缺失/过期（跨路线通用；视频号扫码等交互场景带 interactive_login）",
+      "properties": {
+        "type": {
+          "const": "NEEDS_LOGIN",
+          "default": "NEEDS_LOGIN",
+          "title": "Type",
+          "type": "string"
+        },
+        "failure": {
+          "$ref": "#/$defs/FailureInfo"
+        },
+        "interactive_login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InteractiveLogin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "failure"
+      ],
+      "title": "NeedsLoginPayload",
+      "type": "object"
+    },
+    "RecoveredPayload": {
+      "description": "RECOVERED：慢速重试后恢复（避免静默恢复）",
+      "properties": {
+        "type": {
+          "const": "RECOVERED",
+          "default": "RECOVERED",
+          "title": "Type",
+          "type": "string"
+        },
+        "after_seconds": {
+          "title": "After Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "after_seconds"
+      ],
+      "title": "RecoveredPayload",
+      "type": "object"
+    },
+    "RoomStatsPayload": {
+      "description": "ROOM_STATS：房间统计",
+      "properties": {
+        "type": {
+          "const": "ROOM_STATS",
+          "default": "ROOM_STATS",
+          "title": "Type",
+          "type": "string"
+        },
+        "viewer_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewer Count"
+        },
+        "total_likes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Likes"
+        },
+        "follower_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Follower Count"
+        },
+        "gift_count_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gift Count Total"
+        }
+      },
+      "title": "RoomStatsPayload",
+      "type": "object"
+    },
+    "RoomStatusPayload": {
+      "description": "ROOM_STATUS：房间在线状态（配合 GAP 裁剪：下播期间缺失不计 GAP）",
+      "properties": {
+        "type": {
+          "const": "ROOM_STATUS",
+          "default": "ROOM_STATUS",
+          "title": "Type",
+          "type": "string"
+        },
+        "online": {
+          "title": "Online",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "online"
+      ],
+      "title": "RoomStatusPayload",
+      "type": "object"
+    },
+    "RouteFailedPayload": {
+      "description": "ROUTE_FAILED：平台路线失效/降级告警",
+      "properties": {
+        "type": {
+          "const": "ROUTE_FAILED",
+          "default": "ROUTE_FAILED",
+          "title": "Type",
+          "type": "string"
+        },
+        "failure": {
+          "$ref": "#/$defs/FailureInfo"
+        }
+      },
+      "required": [
+        "failure"
+      ],
+      "title": "RouteFailedPayload",
+      "type": "object"
+    },
+    "SocialPayload": {
+      "description": "SOCIAL：社交行为（关注/粉丝团/分享等）",
+      "properties": {
+        "type": {
+          "const": "SOCIAL",
+          "default": "SOCIAL",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "title": "User Name",
+          "type": "string"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        }
+      },
+      "required": [
+        "user_name",
+        "action"
+      ],
+      "title": "SocialPayload",
+      "type": "object"
+    },
+    "SuperChatPayload": {
+      "description": "SUPER_CHAT：醒目留言",
+      "properties": {
+        "type": {
+          "const": "SUPER_CHAT",
+          "default": "SUPER_CHAT",
+          "title": "Type",
+          "type": "string"
+        },
+        "user_name": {
+          "title": "User Name",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "price": {
+          "title": "Price",
+          "type": "number"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Currency"
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "user_name",
+        "content",
+        "price"
+      ],
+      "title": "SuperChatPayload",
+      "type": "object"
+    }
+  },
+  "description": "统一消息 = 信封 + 判别载荷\n\n构造校验 category 与 type 的一致性；系统消息携带 FailureInfo 时强制三段式非空。",
+  "properties": {
+    "envelope": {
+      "$ref": "#/$defs/Envelope"
+    },
+    "payload": {
+      "discriminator": {
+        "mapping": {
+          "BACKPRESSURE": "#/$defs/BackpressurePayload",
+          "DANMU": "#/$defs/DanmuPayload",
+          "ENGINE_STATUS": "#/$defs/EngineStatusPayload",
+          "ENTER_ROOM": "#/$defs/EnterRoomPayload",
+          "GAP": "#/$defs/GapPayload",
+          "GIFT": "#/$defs/GiftPayload",
+          "HEARTBEAT": "#/$defs/HeartbeatPayload",
+          "LIKE": "#/$defs/LikePayload",
+          "LIVE_STATUS_CHANGE": "#/$defs/LiveStatusChangePayload",
+          "NEEDS_LOGIN": "#/$defs/NeedsLoginPayload",
+          "RECOVERED": "#/$defs/RecoveredPayload",
+          "ROOM_STATS": "#/$defs/RoomStatsPayload",
+          "ROOM_STATUS": "#/$defs/RoomStatusPayload",
+          "ROUTE_FAILED": "#/$defs/RouteFailedPayload",
+          "SOCIAL": "#/$defs/SocialPayload",
+          "SUPER_CHAT": "#/$defs/SuperChatPayload"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DanmuPayload"
+        },
+        {
+          "$ref": "#/$defs/GiftPayload"
+        },
+        {
+          "$ref": "#/$defs/SuperChatPayload"
+        },
+        {
+          "$ref": "#/$defs/EnterRoomPayload"
+        },
+        {
+          "$ref": "#/$defs/LikePayload"
+        },
+        {
+          "$ref": "#/$defs/LiveStatusChangePayload"
+        },
+        {
+          "$ref": "#/$defs/RoomStatsPayload"
+        },
+        {
+          "$ref": "#/$defs/SocialPayload"
+        },
+        {
+          "$ref": "#/$defs/HeartbeatPayload"
+        },
+        {
+          "$ref": "#/$defs/RoomStatusPayload"
+        },
+        {
+          "$ref": "#/$defs/GapPayload"
+        },
+        {
+          "$ref": "#/$defs/NeedsLoginPayload"
+        },
+        {
+          "$ref": "#/$defs/EngineStatusPayload"
+        },
+        {
+          "$ref": "#/$defs/BackpressurePayload"
+        },
+        {
+          "$ref": "#/$defs/RouteFailedPayload"
+        },
+        {
+          "$ref": "#/$defs/RecoveredPayload"
+        }
+      ],
+      "title": "Payload"
+    }
+  },
+  "required": [
+    "envelope",
+    "payload"
+  ],
+  "title": "DanmakuListener Unified Message Contract v1",
+  "type": "object",
+  "$id": "danmaku-listener/contract/v1"
+}

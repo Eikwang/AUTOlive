@@ -82,8 +82,16 @@ class MainApplication:
     
     def _init_modules(self):
         """初始化各个功能模块"""
-        # 获取平台标识
-        platform = self.config.get("platform", default="")
+        # 获取平台标识（整合计划 P2-4：活跃房间平台优先，平滑替代旧架构单平台选择；
+        # TaskScheduler 以此作为定时任务/闲时任务消息的 platform 语境）
+        try:
+            _dl_rooms = self.config.get("danmaku_listener", default={}).get("rooms", []) or []
+        except Exception:
+            _dl_rooms = []
+        platform = next((str(r.get("platform")) for r in _dl_rooms
+                         if isinstance(r, dict) and r.get("active")), "")
+        if not platform:
+            platform = self.config.get("platform", default="")
         
         # 初始化Web服务器
         self.web_server = get_web_server(self.config, self.my_handle)
@@ -125,11 +133,11 @@ class MainApplication:
             if rvc_svc is not None:
                 threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
                 logger.info("RVC 变声服务拉起已后台启动")
-            # DanmakuListener 弹幕监听（整合计划 P1）：enabled=true 时拉起 serve + WS 消费者
+            # DanmakuListener 弹幕监听（整合计划第二阶段·进程内化）：enabled=true 时进程内启动
             from utils.danmaku_consumer import build_danmaku_listener_service
-            danmaku_svc = build_danmaku_listener_service(self.config)
-            if danmaku_svc is not None:
-                threading.Thread(target=danmaku_svc.start, name="svc-start-danmaku", daemon=True).start()
+            self.danmaku_svc = build_danmaku_listener_service(self.config)
+            if self.danmaku_svc is not None:
+                threading.Thread(target=self.danmaku_svc.start, name="svc-start-danmaku", daemon=True).start()
                 logger.info("DanmakuListener 托管服务拉起已后台启动")
         except Exception:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
@@ -228,6 +236,14 @@ class MainApplication:
                 svc.stop()
         except Exception:
             logger.error(f"托管服务停止异常: {traceback.format_exc()}")
+
+        # DanmakuListener 进程内托管关停（整合计划 P1-1：stop_all future 等待→停循环→join）
+        danmaku_svc = getattr(self, "danmaku_svc", None)
+        if danmaku_svc is not None:
+            try:
+                danmaku_svc.stop()
+            except Exception:
+                logger.error("DanmakuListener 关停异常", exc_info=True)
 
         logger.info("应用程序已停止")
     
