@@ -217,8 +217,6 @@ def create_platform_config_tab(
 
     with ui.card().style(card_css):
         ui.label("房间管理").style("font-size:var(--font-size-card-title,16px);font-weight:600")
-        # 活跃警示条（Design D-1：无活跃常驻警示）
-        warn_banner_host = ui.column().classes("w-full")
 
         # 添加表单（Design D-2：分组下拉，白名单平台）
         with ui.row().classes("w-full items-end gap-2"):
@@ -250,8 +248,7 @@ def create_platform_config_tab(
                 state["confirm_pending"] = None
                 rooms = _rooms()
                 rooms.append({"platform": platform, "room_id": spec,
-                              "enabled": True,  # DX 发现 1：添加即启用
-                              "active": not any(r.get("active") for r in rooms)})  # 首个自动活跃
+                              "enabled": True})  # DX 发现 1：添加即启用（active 字段已退役）
                 if not _write_rooms(rooms):
                     await _err_notify({"error": "配置保存失败",
                                        "fix_hint": "检查磁盘/权限后重试（状态未翻转）"})
@@ -363,7 +360,7 @@ def create_platform_config_tab(
     # ---------- 房间列表（config 真相 + 运行态叠加；Eng F-ENG-6 join 规则） ----------
 
     def _room_run_state(r: Dict[str, Any]) -> str:
-        """行内运行态（Design D-3 视觉位）：enabled 是配置裁决，运行态只读叠加。"""
+        """行内状态（用户裁定：开关即控制——关=停用，开=监听/待启动；无活跃概念）。"""
         if not r.get("enabled"):
             return "disabled"
         key = f"{r.get('platform')}:{r.get('room_id')}"
@@ -380,17 +377,6 @@ def create_platform_config_tab(
         list_host.clear()
         rooms = _rooms()
         with list_host:
-            active_key = next((f"{r['platform']}:{r['room_id']}" for r in rooms
-                               if r.get("active")), "")
-            with ui.row().classes("w-full items-center gap-2"):
-                ui.label(f"当前互动房间：{active_key or '未指定'}").style(
-                    "font-size:var(--font-size-field-label,14px);font-weight:500")
-            if rooms and not active_key:
-                with ui.row().classes("w-full q-pa-sm items-center").style(
-                        "background:var(--color-warning, #f2c037);border-radius:var(--radius-md,8px)"):
-                    ui.icon("warning", color="black")
-                    ui.label("未指定活跃房间——数字人不会互动。请在下方点选「设为活跃」") \
-                        .style("color:black;font-size:var(--font-size-small,12px)")
             if not rooms:
                 ui.label("还没有监听房间——① 选择平台 → ② 填房间号或粘贴链接 → ③ 添加并扫码登录") \
                     .style("color:var(--text-hint);font-size:var(--font-size-body,14px)")
@@ -401,13 +387,10 @@ def create_platform_config_tab(
                 text, color = _ROOM_STATE_TEXT[run_state]
                 enabled = bool(r.get("enabled"))
                 with ui.row().classes("w-full items-center q-py-xs q-px-sm gap-2").style(
-                        "border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px)"
-                        + (";background:var(--color-primary-opacity, rgba(41,121,255,0.06))" if r.get("active") else "")):
+                        "border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px)"):
                     ui.badge(_PLATFORM_LABELS.get(p, p)).props("outline")
                     ui.label(rid).style("font-size:var(--font-size-body,14px)")
                     ui.label(text).style(f"color:{color};font-size:var(--font-size-small,12px);font-weight:500")
-                    if r.get("active"):
-                        ui.badge("活跃").props("color=primary")
                     if run_state == "stalled":
                         ui.label(f"最近消息 {state['run_status'].get('last_msg_age_s')}s 前——确认开播或查日志") \
                             .style("font-size:var(--font-size-tiny,11px);color:var(--color-negative,#c10015)")
@@ -464,19 +447,6 @@ def create_platform_config_tab(
                         await _toast("房间已删除")
                     ui.button("删除", on_click=_remove).props("flat dense color=negative")
 
-                    # 设为活跃（写回 config——显式指定，Eng F-ENG-3 语义）
-                    if not r.get("active"):
-
-                        async def _set_active(_e=None, rr=rooms, idx=rooms.index(r)):
-                            for x in rr:
-                                x["active"] = False
-                            rr[idx]["active"] = True
-                            rr[idx]["enabled"] = True
-                            if _write_rooms(rr):
-                                await _toast(f"活跃房间已设为 {rr[idx]['platform']}:{rr[idx]['room_id']}"
-                                             + ("" if state["mode"] != "running"
-                                                else "（运行中新增互动房间——下次启动完全生效）"))
-                        ui.button("设为活跃", on_click=_set_active).props("flat dense color=primary")
 
     # ---------- 轮询（3s） ----------
 

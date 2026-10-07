@@ -269,54 +269,17 @@ class TestOnWireRouting(unittest.TestCase):
                                   "interactive_login": {"qr_image_b64": "AAAA"}}})
         self.assertIsNotNone(svc.login_active)
 
-    def test_inactive_room_not_queued(self):
-        """活跃路由（P1-3）：非活跃房间不进对话链队列。"""
+    def test_all_rooms_queued(self):
+        """R2 用户裁定：多房间全互动——非活跃概念退役，所有 enabled 房间消息进队列。"""
         svc = self._svc()
-        svc._on_wire(_msg(room="99999"))   # 非活跃房间
-        self.assertEqual(svc._queue.qsize(), 0)
+        svc._on_wire(_msg(room="99999"))   # 任意房间
+        self.assertEqual(svc._queue.qsize(), 1)
 
     def test_version_gate(self):
         svc = self._svc()
         svc._on_wire(_msg(version="2.0.0"))
         self.assertEqual(svc._queue.qsize(), 0)   # 2.x 拒绝
         self.assertEqual(len(svc.events), 1)      # contract_mismatch 事件
-
-
-class TestActiveRoom(unittest.TestCase):
-    def test_active_from_config(self):
-        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
-        svc._cfg = lambda: {"rooms": [
-            {"platform": "bilibili", "room_id": "1", "enabled": True},
-            {"platform": "douyin", "room_id": "2", "enabled": True, "active": True}]}
-        self.assertEqual(svc._active_room(), "douyin:2")
-
-    def test_no_active_returns_empty(self):
-        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
-        svc._cfg = lambda: {"rooms": [
-            {"platform": "bilibili", "room_id": "1", "enabled": True}]}
-        self.assertEqual(svc._active_room(), "")
-
-
-class TestConfigRmw(unittest.TestCase):
-    def test_write_config_section_atomic(self):
-        """P1-3 持久化语义：_write_config_section 原子改写 danmaku_listener 节。"""
-        import tempfile
-        orig_path = dc._config_path
-        try:
-            tmpdir = tempfile.mkdtemp()
-            cfg_file = os.path.join(tmpdir, "config.json")
-            with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump({"danmaku_listener": {"rooms": []}, "other": {"keep": 1}}, f)
-            dc._config_path = lambda: cfg_file
-            def mut(sec):
-                sec["rooms"] = [{"platform": "douyu", "room_id": "9", "enabled": True, "active": True}]
-            self.assertTrue(dc._write_config_section(mut))
-            data = json.load(open(cfg_file, encoding="utf-8"))
-            self.assertEqual(data["danmaku_listener"]["rooms"][0]["room_id"], "9")
-            self.assertEqual(data["other"]["keep"], 1)        # 其他节不碰
-            self.assertFalse(os.path.exists(cfg_file + ".tmp"))  # 原子替换后 tmp 消失
-        finally:
-            dc._config_path = orig_path
 
 
 class TestConfigWriterMatrix(unittest.TestCase):

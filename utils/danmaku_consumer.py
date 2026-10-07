@@ -383,20 +383,6 @@ class DanmakuListenerService:
         if mtype in _FASTPATH_BUSINESS:
             self.push_event("count", {"type": mtype, "room": room})
             return
-        # 活跃路由（P1-3，投递前过滤）：仅活跃房间进对话链队列；其余仅计数。
-        # LIVE_STATUS_CHANGE 豁免（下播裁剪作用于全队列）。无活跃房间时一次性提示。
-        active = self._active_room()
-        if mtype != "LIVE_STATUS_CHANGE":
-            if not active:
-                if not self._no_active_warned:
-                    self._no_active_warned = True
-                    self.push_event("no_active_room",
-                                    {"reason_code": "room.no_active",
-                                     "fix_hint": "未指定活跃房间，数字人不会互动——在平台配置页点选'设为活跃'",
-                                     "docs_anchor": "docs/danmaku_module.md"})
-            elif f"{platform}:{room}" != active:
-                self.push_event("count", {"type": mtype, "room": room, "inactive": True})
-                return
         self._msg_today_count += 1
         self._last_msg_ts = time.time()
         self._queue.put((mtype, {"envelope": norm["env"], "payload": norm["payload"]}))
@@ -424,11 +410,7 @@ class DanmakuListenerService:
 
     # ---------- 活跃房间裁定（P1-3：显式 active 字段） ----------
 
-    def _active_room(self) -> str:
-        for r in (self._section().get("rooms") or []):
-            if isinstance(r, dict) and r.get("active"):
-                return f"{r.get('platform', '')}:{r.get('room_id', '')}"
-        return ""
+    # ---------- 消费线程（队列 → 聚合 → _dispatch；用户裁定多房间全互动） ----------
 
     # ---------- 消费线程（队列 → 活跃路由 → 聚合 → _dispatch） ----------
 
@@ -625,10 +607,7 @@ class DanmakuListenerService:
         if self._bridge is None:
             return {"rooms": self._section().get("rooms") or [], "running": False}
         status = self._bridge.get_status()
-        active = self._active_room()
-        rooms = []
-        for key, r in (status.get("rooms") or {}).items():
-            rooms.append({**r, "active": (f"{r.get('platform')}:{r.get('room_id')}" == active)})
+        rooms = [dict(r) for r in (status.get("rooms") or {}).values()]
         return {"rooms": rooms, "running": True, "message_count": status.get("message_count", 0)}
 
     def get_status(self) -> dict:
@@ -645,7 +624,6 @@ class DanmakuListenerService:
             "invalid_msg_count": self._invalid_msg_count,
             "last_msg_age_s": round(time.time() - self._last_msg_ts, 1) if self._last_msg_ts else None,
             "stall_threshold_s": self._stall_threshold(),
-            "active_room": self._active_room() or None,
         }
 
     # ---- 关键词 ----
