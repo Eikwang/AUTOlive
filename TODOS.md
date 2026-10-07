@@ -72,6 +72,10 @@
 1. **训练完成后自动切换生产声音档案**（P2, S）— CEO 阶段延期：训练声音页产出档案后自动切换 TTS 生产声音。依赖：P2-4 voice_profiles 选择器落地。运行中换模机制定案后再评估自动化。
 2. **翻唱预生成热门歌单**（P3, M）— CEO 阶段延期：提前生成常用曲目避免直播等待。依赖：P3-2 翻唱链路稳定运行。
 
+## P3 退役批次执行记录（2026-10-07，提交 efdee3b7）
+
+用户实测通过（配置期登录/房间管理/关键词全链路）后执行：utils/platforms/ 12 模块、根目录旧资产（api_old.py/webui-bak.py/main.py.backup/proto+pb2/protobuf//直播ws脚本/启动程序1.bat/dy2.py）、config.json 旧平台节（bilibili/twitch/ordinaryroad_barrage_fly/platform/room_display_id）全部删除；test_config platform 断言（独立 fixture）不受影响；main.py TaskScheduler fallback 改 'talk'。177 项测试全绿。
+
 ## Deferred Items from /autoplan (2026-09-27) — DanmakuListener 弹幕监听整合
 
 1. **差异化假设书面化与付费理由验证**（P2, M）— CEO 原生声部发现 5.1：壁垒=整合体验+稳定性运营+合规自托管，需书面化并经阶段 0 客户验证是真实付费理由。依赖：阶段 0 客户校验（本整合 P1 并行项，用 listen --replay demo.jsonl 链路演示）。
