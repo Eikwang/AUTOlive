@@ -299,6 +299,20 @@ docs/*
 
 # === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===
 edtalk/ckpts/
+# EDTalk 整合副本（copy_edtalk.py 范式；代码+模型 20GB——入库决策留 EDTalk 计划）
+edtalk/__pycache__/
+edtalk/data_preprocess/
+edtalk/datasets/
+edtalk/face_detection/
+edtalk/face_sr/
+edtalk/fastrag/
+edtalk/fine_tune/
+edtalk/networks/
+edtalk/pytorch_gaze_redirection/
+edtalk/runtime312/
+edtalk/test_data/
+edtalk/tools/
+edtalk/ckpt_models/
 edtalk/ckpt_models/
 edtalk/realtime_serve/weights/
 edtalk/realtime_serve/*.log
