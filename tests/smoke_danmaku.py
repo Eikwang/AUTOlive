@@ -140,7 +140,7 @@ def main() -> int:
             break
         time.sleep(0.2)
     status = svc.get_status()
-    step(f"托管快照: {json.dumps({k: status[k] for k in ('running', 'queue_size', 'dropped_count', 'active_room')}, ensure_ascii=False)}")
+    step(f"托管快照: {json.dumps({k: status[k] for k in ('running', 'queue_size', 'dropped_count')}, ensure_ascii=False)}")
     step(f"stub 对话链收到: {json.dumps(received, ensure_ascii=False)}")
 
     # 断言：消息全链打通 + 队列干净 + 无 serve 子进程
