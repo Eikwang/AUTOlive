@@ -91,7 +91,7 @@ class MainApplication:
         platform = next((str(r.get("platform")) for r in _dl_rooms
                          if isinstance(r, dict) and r.get("active")), "")
         if not platform:
-            platform = self.config.get("platform", default="")
+            platform = "talk"  # 旧 config.platform 键已退役（P3-3）——定时任务语境缺省聊天模式
         
         # 初始化Web服务器
         self.web_server = get_web_server(self.config, self.my_handle)
