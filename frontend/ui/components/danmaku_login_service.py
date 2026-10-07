@@ -89,7 +89,47 @@ class DanmakuLoginService:
                     cookie_path=os.path.join(cd, "douyin_cookies.json")),
             },
         }
-        return meta.get(platform)
+        # douyu/huya：上游 v0.5.0 login_gate.ensure_cookie_file_login（cookie 文件形态，
+        # TCP 协议无注入路径——登录态供上游对账，当前协议直连游客可达）。
+        # 参数与引擎调用点逐一对齐（douyu.py:138 / huya.py:118，login_url 引擎同源）。
+        if platform in ("douyu", "huya"):
+            login_urls = {"douyu": "https://passport.douyu.com/",
+                          "huya": "https://www.huya.com/"}
+            cookie_path = os.path.join(cd, f"{platform}_login_cookies.json")
+            names = {"douyu": ("dedeuserid",),
+                     "huya": ("yyuid", "hiido_ui", "u_db_uid")}
+            meta[platform] = {
+                "check": lambda cp=cookie_path, nm=names[platform]:
+                    self._check_cookie_file_names(cp, nm),
+                "flow": lambda p=platform, lp=login_urls[platform], cp=cookie_path:
+                    self._run_gate_flow(p, lp, cp),
+            }
+        return meta
+
+    @staticmethod
+    def _check_cookie_file_names(path: str, names: tuple) -> bool:
+        """cookie 文件 JSON 的登录态判定（login_gate.has_login_cookie 同口径）。"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                stored = json.load(f)
+            from danmaku_listener.engines.login_gate import has_login_cookie
+            return has_login_cookie(stored.get("cookies") or [], names)
+        except (FileNotFoundError, json.JSONDecodeError, Exception):
+            return False
+
+    def _run_gate_flow(self, platform: str, login_url: str, cookie_path: str) -> None:
+        """douyu/huya 配置期登录：login_gate.ensure_cookie_file_login（空 stop/budget）。"""
+        from danmaku_listener.engines.login_gate import ensure_cookie_file_login
+
+        async def emit_status(detail: str) -> None:
+            self._set_state(platform, "waiting_scan", detail)
+
+        self._set_state(platform, "waiting_scan",
+                        f"请在弹出的浏览器中登录 {platform} 账号")
+        coro = ensure_cookie_file_login(
+            "config-login", platform, login_url, cookie_path,
+            {}, {}, set(), emit_status)
+        self._loop.run_until_complete(asyncio.wait_for(coro, timeout=LOGIN_WAIT_TIMEOUT))
 
     @staticmethod
     def _check_state_file(path: str) -> bool:

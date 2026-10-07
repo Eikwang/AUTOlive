@@ -38,7 +38,7 @@ _PLATFORM_LABELS = {
 }
 _ALL_PLATFORMS = list(_PLATFORM_LABELS.keys())
 # 配置期登录支持范围（Eng F-ENG-13 裁决）
-_CONFIG_LOGIN_PLATFORMS = {"bilibili", "kuaishou", "douyin"}
+_CONFIG_LOGIN_PLATFORMS = {"bilibili", "kuaishou", "douyin", "douyu", "huya"}
 _ROOM_SPEC_MAX = 200  # Eng F-ENG-9
 
 # 状态中文文案表（Design S-2；动词统一：启动系统/开始·停止监听）
@@ -167,16 +167,23 @@ def create_platform_config_tab(
 
             async def _toggle_service(_e=None):
                 target = head_switch.value
-                r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
-                if r is None or not isinstance(r, dict) or not r.get("success"):
-                    if r is None:
-                        await _toast("主程序未运行——总开关将在「启动系统」后生效（选择已保存）", "info")
-                        set_config_callback("danmaku_listener", "enabled", value=target, _notify=False)
-                    else:
-                        await _err_notify(r)
+                if state["mode"] == "running":  # 运行期：窄端点联动（main.py 即时生效）
+                    r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
+                    if r is None or not isinstance(r, dict) or not r.get("success"):
+                        await _err_notify(r or {"error": "运行面切换失败"})
                         head_switch.value = not target
-                else:
+                        return
                     await _toast("监听已开启" if target else "监听已关闭")
+                else:  # 配置期：直写 config（不尝试 API——消除误导提示与闪动）
+                    ok = set_config_callback("danmaku_listener", "enabled",
+                                             value=target, _notify=False)
+                    if ok is False:
+                        await _err_notify({"error": "配置保存失败",
+                                           "fix_hint": "开关状态未翻转"})
+                        head_switch.value = not target
+                        return
+                    await _toast("已开启——启动系统后将同时启动已启用房间的监听"
+                                 if target else "已关闭")
             head_switch.on("update:model-value", _toggle_service)
 
         with ui.row().classes("items-center gap-2"):
@@ -406,7 +413,7 @@ def create_platform_config_tab(
                                 .props("flat dense color=warning")
                     else:
                         ui.badge("运行期登录").props("outline color=info").tooltip(
-                            "该平台在启动系统后首次监听时按引导自动登录")
+                            "该平台（受控页面引擎）在启动系统后首次监听时按引导自动登录")
                     # 启用开关（行内——问题 3 根治；三态分流 F1）
                     room_switch = ui.switch("监听", value=enabled)
 
@@ -472,7 +479,8 @@ def create_platform_config_tab(
             if isinstance(rr, dict):
                 state["run_rooms"] = {f"{x.get('platform')}:{x.get('room_id')}": x
                                       for x in (rr.get("rooms") or []) if isinstance(x, dict)}
-        head_switch.value = bool(sec.get("enabled", False))
+        if state["mode"] == "running":  # 配置期开关归用户操作（防闪动）
+            head_switch.value = bool(sec.get("enabled", False))
         _render_pill()
         _render_login_chip()
         _render_rooms()
