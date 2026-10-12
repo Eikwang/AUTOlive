@@ -7,6 +7,7 @@ import sys
 import os
 import signal
 import subprocess
+import threading
 import traceback
 from pathlib import Path
 
@@ -87,7 +88,31 @@ from utils.my_log import logger
 
 class AutoliveApp:
     """AUTOlive 应用程序类"""
-    
+
+    # script mode 运行态单例（启动链假启动修复 2026-10-12）：每个浏览器连接都会
+    # 重跑 __init__（root page 重入，__init__:106 重入判定），实例字段的运行态会被
+    # 重置——running_flag 刷新即"假停止"、my_subprocesses 丢失成孤儿进程。
+    # 运行态挂类级 property 共享；dark_mode 等每用户状态不受影响。
+    _shared_running = False
+    _shared_subprocesses = {}
+
+    @property
+    def running_flag(self) -> bool:
+        return AutoliveApp._shared_running
+
+    @running_flag.setter
+    def running_flag(self, value) -> None:
+        AutoliveApp._shared_running = bool(value)
+
+    @property
+    def my_subprocesses(self) -> dict:
+        return AutoliveApp._shared_subprocesses
+
+    @my_subprocesses.setter
+    def my_subprocesses(self, value: dict) -> None:
+        # 测试与重置路径用赋值换新 dict；类级引用替换保持跨重入共享
+        AutoliveApp._shared_subprocesses = value if isinstance(value, dict) else {}
+
     def __init__(self):
         """初始化应用程序
 
@@ -122,12 +147,8 @@ class AutoliveApp:
         self.login_form = LoginForm(self.config._config)
         self.theme_manager_ui = ThemeManager(self.config._config)
 
-        # 状态变量
-        self.running_flag = False
+        # 状态变量（运行态挂类级 property——见类头注释；此处不重置）
         self.user_info = None
-
-        # 存储运行的子进程
-        self.my_subprocesses = {}
 
         # 暗夜模式（任务7/DG-B8：单实例收敛 + 按配置初始化——先于任何 UI 构建
         # 与 check_login，登录页不闪白；缺省 light）
@@ -248,6 +269,26 @@ class AutoliveApp:
 
         # fastrag 知识库服务（计划 §6.2）
         self._start_fastrag(config_data)
+
+    def _start_main_system(self):
+        """拉起主系统 main.py 子进程（编排层，启动链假启动修复 2026-10-12）。
+
+        start_programs 只负责配置驱动的外围程序（coordination/edtalk/fastrag，
+        tests/test_startup_wiring.py 锁定其行为）；main.py 主系统的拉起属启动
+        编排。shell=False + list 传参（native H1 规范）。
+        """
+        main_py = os.path.join(str(getattr(self, "base_path", os.getcwd())), "main.py")
+        if not os.path.exists(main_py):
+            logger.error(f"主系统入口不存在: {main_py}（problem=入口缺失；fix=检查仓库完整性）")
+            return
+        logger.info(f"运行程序: main 主系统 位于: {os.path.dirname(main_py)}")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, main_py],
+                cwd=str(os.path.dirname(main_py)), shell=False)
+            self.my_subprocesses["main"] = process
+        except Exception as e:
+            logger.error(f"启动主系统 main 失败: {e}")
 
     def _start_edtalk_realtime(self, config_data: dict):
         """拉起 EDTalk realtime_serve 服务（计划 §4.2 + Eng 义务⑨⑬）。
@@ -451,22 +492,38 @@ class AutoliveApp:
             # 启动协同程序和主程序
             self.start_programs()
 
+            # 启动主系统进程（启动链假启动修复 2026-10-12）：代码拆分后主系统
+            # 独立为 main.py（控制面 API 8082 + 主循环），webui 仅前端——但启动链
+            # 沿用 webui-bak 内嵌时代的逻辑，从未拉起 main.py（stop_programs 却
+            # 一直有 "main" 停止项）→「启动系统」实际只拉外围程序，假启动。
+            # sys.executable=webui 进程解释器（runtime312），与手动
+            # `python main.py` 等价；stop_programs("main") 原样兼容。
+            self._start_main_system()
+
             # 启动后一次性存活检查（E2）：3 秒后 poll 各子进程。部分失败场景下
             # start_programs 内部只 logger.error（沿用移植自 webui-bak 的行为），
             # 且 Windows shell=True 时命令不存在 Popen 也可能"假成功"——这里把
             # 秒退程序变成用户可见的 negative notify。不复位 running_flag：
             # 持续监控/自动恢复属独立议题（TODOS「main.py 子进程退出监控」条目）。
-            def check_processes_alive():
+            # 通道分派（slot 修复 2026-10-12）：ui.timer 需要 NiceGUI slot 上下文，
+            # 在 /sys_cmd 等 HTTP 请求上下文调用即抛 slot empty 异常——曾把 api
+            # 通道的 run 连带 except 复位 running_flag（子进程成孤儿）。webui 通道
+            # （按钮点击，有 slot）走 ui.timer+notify；api 通道走线程定时器+logger。
+            def check_processes_alive(use_ui: bool = False):
                 for name, proc in list(self.my_subprocesses.items()):
                     try:
                         if proc.poll() is not None:
                             logger.error(f"启动后检查: 程序 {name} 已退出 (code={proc.returncode})")
-                            ui.notify(position="top", type="negative",
-                                      message=f"程序 {name} 启动后已退出，请查看日志")
+                            if use_ui:
+                                ui.notify(position="top", type="negative",
+                                          message=f"程序 {name} 启动后已退出，请查看日志")
                     except Exception as e:
                         logger.error(f"启动后检查 {name} 失败: {e}")
 
-            ui.timer(3.0, check_processes_alive, once=True)
+            if type == "webui":
+                ui.timer(3.0, lambda: check_processes_alive(use_ui=True), once=True)
+            else:
+                threading.Timer(3.0, check_processes_alive).start()
 
             if type == "webui":
                 ui.notify(position="top", type="positive", message="程序开始运行")
