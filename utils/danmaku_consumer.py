@@ -587,6 +587,92 @@ class DanmakuListenerService:
             return {"success": False, "error": str(e)[:200], "reason_code": "room.internal",
                     "fix_hint": "查看 logs/ 日志", "docs_anchor": ""}
 
+    # ---- 发送控制面（O2 单条手动发送：进程内直调管线——线程亲和经 _submit） ----
+
+    SEND_BUDGET_S = 70  # 对齐 sender 管线兜底超时（taobao 55s + 裕量）
+
+    def _send_auth_check(self, token: str) -> Optional[dict]:
+        """发送鉴权（组件 web 层同语义）：token 未配置=503 AUTH_UNCONFIGURED；不匹配=401。"""
+        try:
+            from danmaku_listener.config.settings import get_settings
+            from danmaku_listener.push.ws_server import load_token, constant_time_equal
+            expected = load_token(get_settings().ws_token_file, os.environ.get("DANMAKU_TOKEN"))
+        except Exception as e:
+            logger.error("[danmaku_listener] 发送鉴权 token 读取失败", exc_info=True)
+            return {"status_code": 503, "error": "AUTH_UNCONFIGURED", "detail": str(e)[:120],
+                    "fix_hint": "配置 ws_token_file（persistence_data/send_token.txt）后重启"}
+        if not expected:
+            return {"status_code": 503, "error": "AUTH_UNCONFIGURED",
+                    "fix_hint": "配置 ws_token_file 或 DANMAKU_TOKEN 后重启"}
+        if not token or not constant_time_equal(str(token), expected):
+            return {"status_code": 401, "error": "unauthorized",
+                    "fix_hint": "token 与 persistence_data/send_token.txt 不匹配"}
+        return None
+
+    def send_danmu(self, platform: str, room_id: str, content: str,
+                   request_id: str, token: str) -> dict:
+        """单条手动发送（主 webui 控制面 → 发送管线，复用组件守卫链/审计/回执全链）。
+
+        返回 {status_code, status?, ...}：status 线格式小写 sent/failed/dry_run/unknown；
+        failed 带三段式（reason_code/fix_hint）；dry_run=已记录未实发（不得视为已实发）。
+        批量队列节奏不在本入口（O2 浸泡后项——单条人工路径与 web_console 四宫格等价）。
+        """
+        auth = self._send_auth_check(token)
+        if auth:
+            return auth
+        if self._loop is None or self._loop.is_closed():
+            return {"status_code": 503, "error": "service.not_running",
+                    "fix_hint": "DanmakuListener 服务未运行"}
+        try:
+            from danmaku_listener.senders.wiring import get_send_pipeline
+            pipeline = get_send_pipeline()
+        except Exception:
+            logger.error("[danmaku_listener] 发送管线构建失败", exc_info=True)
+            return {"status_code": 503, "error": "send.pipeline_unavailable",
+                    "fix_hint": "查看启动日志 senders/registry 段"}
+        try:
+            wire = self._submit(pipeline.handle_request(
+                platform=platform, room_id=room_id, request_id=request_id,
+                content=content, source="autolive-webui"), timeout=self.SEND_BUDGET_S)
+        except Exception as e:
+            logger.error("[danmaku_listener] 发送请求异常", exc_info=True)
+            return {"status_code": 500, "status": "failed", "request_id": request_id,
+                    "reason_code": "send.invoke_failed", "fix_hint": str(e)[:120]}
+        # 线格式转换（SendStatus 为 str 枚举——json 序列化后为小写值，勿 str() 直转）
+        try:
+            payload = json.loads(json.dumps((wire or {}).get("payload") or {}))
+        except Exception:
+            payload = {}
+        return {"status_code": 200, "request_id": request_id,
+                "status": str(payload.get("status", "")),
+                "reason_code": payload.get("reason_code"),
+                "fix_hint": payload.get("fix_hint"),
+                "detail": payload.get("detail")}
+
+    def send_results(self, request_id: str, token: str) -> dict:
+        """发送对账（幂等索引只读）：语义同组件 GET /api/send-results（鉴权同发送）。"""
+        auth = self._send_auth_check(token)
+        if auth:
+            return auth
+        try:
+            from danmaku_listener.senders.wiring import get_send_pipeline
+            seen = get_send_pipeline()._audit.lookup(request_id)
+        except Exception:
+            logger.error("[danmaku_listener] 对账查询异常", exc_info=True)
+            return {"status_code": 500, "error": "audit.lookup_failed"}
+        return {"status_code": 200, "request_id": request_id, "result": seen}
+
+    def send_status_snapshot(self, token: str) -> dict:
+        """发送状态快照（开关/熔断/限速——发送前预检）。"""
+        auth = self._send_auth_check(token)
+        if auth:
+            return auth
+        try:
+            from danmaku_listener.senders.wiring import get_send_pipeline
+            return {"status_code": 200, "send": get_send_pipeline().send_status_snapshot()}
+        except Exception:
+            return {"status_code": 503, "send": None}
+
     # ---- 房间 ----
 
     def set_room_enabled(self, platform: str, room_id: str, enabled: bool) -> dict:
@@ -751,14 +837,31 @@ class DanmakuListenerService:
 
     async def _async_start(self) -> None:
         """事件循环内启动：settings 覆写 → Bridge 构造 → rooms/keywords 注入 → web_console。"""
-        # Eng E5：组件 settings 的 cookie 路径构造期覆写（serve TOML 通道删除后的替代）
+        # Eng E5 + v0.7.0 O2：组件 settings 构造期覆写——cookie 路径 + config.json 发送键灌入
+        # （进程内形态无 serve TOML 通道，config.json danmaku_listener 节是唯一配置入口；
+        #   缺此灌入则 ws_token_file=None→发送恒 503、send_enabled_platforms 空→恒 disabled）
         try:
             from danmaku_listener.config.settings import get_settings, set_settings
             s = get_settings()
+            updates = {}
             cookie_dir = os.path.abspath(self._cookie_dir())
             if hasattr(s, "cookie_dir"):
-                set_settings(s.model_copy(update={"cookie_dir": cookie_dir}))
-                logger.info(f"[danmaku_listener] 组件 cookie_dir 已覆写为 {cookie_dir}")
+                updates["cookie_dir"] = cookie_dir
+            sec = self._section() or {}
+            _CONFIG_KEYS = (
+                "send_enabled_platforms", "send_dry_run", "send_min_interval_seconds",
+                "send_jitter_seconds", "send_rate_key", "send_circuit_threshold",
+                "send_dedup_window_seconds", "send_max_length", "send_lock_timeout_seconds",
+                "send_audit_file", "send_idempotency_index", "send_session_idle_timeout_seconds",
+                "send_window_mode", "send_min_interval_overrides", "ws_token_file")
+            for k in _CONFIG_KEYS:
+                if k in sec and sec[k] not in (None, ""):
+                    updates[k] = sec[k]
+            # 重建走 pydantic 校验（畸形配置值→异常→回落出厂默认，对齐 overrides 畸形处置语义）
+            set_settings(type(s)(**{**s.model_dump(), **updates}))
+            applied = [k for k in updates if k != "cookie_dir"]
+            logger.info(f"[danmaku_listener] 组件 settings 覆写: cookie_dir={cookie_dir}"
+                        + (f"；发送/鉴权键 {len(applied)} 项 {applied}" if applied else "；无发送键配置"))
             # 启动断言：cookie/profile 路径在副本外
             if os.path.abspath("danmaku_listener") in cookie_dir:
                 logger.warning("[danmaku_listener] cookie_dir 落在组件副本内——copy_danmaku.py 重跑会清除登录态！")
@@ -767,6 +870,12 @@ class DanmakuListenerService:
 
         bridge_cls = _build_bridge_class()
         self._bridge = bridge_cls(self)
+        # O2 wiring：web.app 全局 _bridge 对齐（先于发送管线首建；web_console 关闭时控制面发送仍正确）
+        try:
+            import danmaku_listener.web.app as _dl_webapp
+            _dl_webapp._bridge = self._bridge
+        except Exception:
+            logger.warning("[danmaku_listener] web.app 全局 bridge 对齐失败（发送房间判定将失败）", exc_info=True)
 
         # rooms 注入 + ghost 对账（Eng A5）：config 为权威源
         await self._inject_rooms()
@@ -833,6 +942,14 @@ class DanmakuListenerService:
         try:
             from aiohttp import web as aioweb
             from danmaku_listener.web.app import create_app
+            # O2 wiring 缺口：进程内形态 web.app 全局 _bridge 对齐 AutoliveBridge——
+            # 发送管线 room_checker/get_bridge 查询的全局实例（serve 形态由 serve 赋值；
+            # 不对齐则管线绑到裸 Bridge → 恒 ROOM_NOT_LISTENED）。须先于管线首建。
+            try:
+                import danmaku_listener.web.app as _dl_webapp
+                _dl_webapp._bridge = self._bridge
+            except Exception:
+                logger.warning("[danmaku_listener] web.app 全局 bridge 对齐失败（发送房间判定将失败）", exc_info=True)
             app = create_app()
             app["bridge"] = self._bridge
             # R39：发送回执广播接入进程内 Bridge（独立进程形态在组件 __main__.py 接线；

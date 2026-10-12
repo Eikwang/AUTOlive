@@ -138,6 +138,34 @@ def register_danmaku_routes(app, config) -> None:
                         "fix_hint": "重启系统后重试", "docs_anchor": "docs/danmaku_module.md"}
         return _unwrap(svc.set_service_enabled(target))
 
+    @app.post("/danmaku/send")
+    def danmaku_send(body: dict):
+        """单条手动发送（O2 第一阶段：主 webui 发送入口；鉴权语义同组件 Bearer——
+        503 AUTH_UNCONFIGURED / 401 unauthorized 以 body.status_code 内嵌返回，
+        对齐控制面 _unwrap 惯例 HTTP 200 + 语义字段）。"""
+        platform = str(body.get("platform") or "")
+        room_id = str(body.get("room_id") or "")
+        content = str(body.get("content") or "")
+        if not platform or not room_id or not content.strip():
+            raise HTTPException(status_code=400, detail="platform/room_id/content 必填")
+        import uuid as _uuid
+        request_id = str(body.get("request_id") or f"webui-{_uuid.uuid4().hex[:12]}")
+        return _svc().send_danmu(platform, room_id, content, request_id,
+                                 token=str(body.get("token") or ""))
+
+    @app.post("/danmaku/send-results")
+    def danmaku_send_results(body: dict):
+        """发送对账（POST+body token——控制面内部约定；组件侧为 GET+Bearer header）。"""
+        request_id = str(body.get("request_id") or "")
+        if not request_id:
+            raise HTTPException(status_code=400, detail="request_id 必填")
+        return _svc().send_results(request_id, token=str(body.get("token") or ""))
+
+    @app.post("/danmaku/send-status")
+    def danmaku_send_status(body: dict):
+        """发送状态快照（开关/熔断/限速——发送前预检）。"""
+        return _svc().send_status_snapshot(token=str(body.get("token") or ""))
+
     @app.get("/danmaku/events")
     def danmaku_events(since: int = 0):
         svc = get_service_instance()

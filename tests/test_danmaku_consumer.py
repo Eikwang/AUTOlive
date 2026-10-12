@@ -450,5 +450,68 @@ class TestR39SelfEchoDedup(unittest.TestCase):
         self.assertFalse(svc._is_self_echo("z"))     # 降级放行
 
 
+class TestSendControlPlane(unittest.TestCase):
+    """发送控制面服务层（O2 第一阶段）：鉴权语义同组件（503/401）+ 管线直调线格式转换。"""
+
+    def _svc(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+
+        class _FakeLoop:
+            def is_closed(self):
+                return False
+        svc._loop = _FakeLoop()                      # 非空+未关即过运行判定（_submit 本测被 stub）
+        return svc
+
+    def test_auth_503_when_unconfigured(self):
+        import unittest.mock as _mock
+        svc = self._svc()
+        with _mock.patch("danmaku_listener.push.ws_server.load_token", return_value=None):
+            r = svc.send_danmu("bilibili", "123", "hi", "r1", token="x")
+        self.assertEqual(r["status_code"], 503)
+        self.assertEqual(r["error"], "AUTH_UNCONFIGURED")
+
+    def test_auth_401_on_mismatch(self):
+        import unittest.mock as _mock
+        svc = self._svc()
+        with _mock.patch("danmaku_listener.push.ws_server.load_token", return_value="secret"):
+            r = svc.send_danmu("bilibili", "123", "hi", "r1", token="wrong")
+            r2 = svc.send_danmu("bilibili", "123", "hi", "r2", token="")
+        self.assertEqual(r["status_code"], 401)
+        self.assertEqual(r2["status_code"], 401, msg=str(r2))    # 空 token 同拒绝
+
+    def test_send_dry_run_wire_lowercase(self):
+        """管线直调：to_wire payload 为 dict+str 枚举，经 json 序列化后 status 为小写线格式。"""
+        import unittest.mock as _mock
+        from danmaku_listener.contract.models import SendStatus
+        svc = self._svc()
+        # 模拟真实 to_wire 形态：payload dict、status 为 str 枚举对象（json.dumps 输出小写值）
+        wire = {"payload": {"type": "DANMU_SEND_RESULT", "request_id": "r1",
+                            "status": SendStatus.DRY_RUN, "content": "hi"}}
+        stub = type("P", (), {"handle_request": staticmethod(
+            lambda **kw: _async_passthrough(wire))})
+        svc._submit = lambda coro, timeout=60: wire  # 绕过线程亲和（本测不建环）
+        with _mock.patch("danmaku_listener.push.ws_server.load_token", return_value="secret"), \
+             _mock.patch("danmaku_listener.senders.wiring.get_send_pipeline", return_value=stub()):
+            r = svc.send_danmu("bilibili", "123", "hi", "r1", token="secret")
+        self.assertEqual(r["status_code"], 200)
+        self.assertEqual(r["status"], "dry_run")     # 小写线格式（勿 str(枚举)）
+        self.assertEqual(r["request_id"], "r1")
+
+    def test_results_auth_gated(self):
+        import unittest.mock as _mock
+        svc = self._svc()
+        with _mock.patch("danmaku_listener.push.ws_server.load_token", return_value="secret"):
+            r = svc.send_results("r1", token="nope")
+        self.assertEqual(r["status_code"], 401)      # 对账同鉴权（不触 audit）
+
+
+def _async_passthrough(value):
+    """stub 管线的 handle_request：返回 awaitable 占位（_submit 已被 stub，不真 await）。"""
+
+    async def _coro():
+        return value
+    return _coro()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

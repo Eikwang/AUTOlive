@@ -15,7 +15,7 @@
 """
 import asyncio
 
-from nicegui import ui
+from nicegui import ui, app
 from typing import Dict, Any, Callable
 
 import requests
@@ -346,6 +346,104 @@ def create_platform_config_tab(
                     ui.label(kw).style("font-size:var(--font-size-small,12px)")
                     ui.button(icon="close", on_click=_rm).props("flat dense size=xs")
 
+    # ---------- 弹幕发送（O2 第一阶段：单条手动；鉴权=组件 send_token） ----------
+
+    state["last_request_id"] = ""
+
+    async def _send_token() -> str:
+        tok = (send_token_input.value or "").strip()
+        if tok:
+            try:
+                app.storage.browser["send_token"] = tok
+            except Exception:
+                pass
+            return tok
+        try:
+            return str(app.storage.browser.get("send_token") or "")
+        except Exception:
+            return ""
+
+    def _render_send_result(r: Dict[str, Any]):
+        code = r.get("status_code")
+        if code == 503:
+            send_result_label.text = ""
+            ui.notify(f"发送未配置：{r.get('error')}｜{r.get('fix_hint', '')}",
+                      type="warning", close_button="知道了")
+            return
+        if code == 401:
+            send_result_label.text = ""
+            ui.notify("token 不匹配——核对 persistence_data/send_token.txt",
+                      type="negative", close_button="知道了")
+            return
+        status = str(r.get("status") or "")
+        rid = str(r.get("request_id") or "")
+        state["last_request_id"] = rid
+        kind = {"sent": "positive", "dry_run": "info", "unknown": "warning"}.get(status, "negative")
+        msg = f"回执 {status or '无'}｜request_id={rid}"
+        if r.get("reason_code"):
+            msg += f"｜{r.get('reason_code')}"
+        if r.get("fix_hint"):
+            msg += f"｜{r.get('fix_hint')}"
+        send_result_label.text = msg
+        ui.notify(msg, type=kind, close_button="知道了")
+        if status in ("sent", "dry_run", "unknown"):
+            send_content.value = ""
+
+    async def _do_send():
+        key = send_room_select.value
+        room = state["run_rooms"].get(key) if key else None
+        if not room:
+            await _toast("请选择在听房间（服务未运行或无在听房间）", "warning")
+            return
+        content = (send_content.value or "").strip()
+        if not content:
+            await _toast("弹幕内容不能为空", "warning")
+            return
+        tok = await _send_token()
+        if not tok:
+            await _toast("首次发送需填入发送 token（persistence_data/send_token.txt 内容）", "warning")
+            return
+        r = await _api(config, "POST", "/danmaku/send", body={
+            "platform": room.get("platform"), "room_id": room.get("room_id"),
+            "content": content, "token": tok}, timeout=80)
+        if not isinstance(r, dict):
+            await _toast("发送请求失败（控制面不可达）", "negative")
+            return
+        _render_send_result(r)
+
+    async def _do_reconcile():
+        rid = state.get("last_request_id") or ""
+        if not rid:
+            await _toast("无最近 request_id——先发送一次", "warning")
+            return
+        tok = await _send_token()
+        r = await _api(config, "POST", "/danmaku/send-results",
+                       body={"request_id": rid, "token": tok}, timeout=10)
+        if not isinstance(r, dict):
+            await _toast("对账请求失败", "negative")
+            return
+        seen = r.get("result")
+        ui.notify(f"对账 {rid}: {(str(seen)[:160] if seen else '无记录')}",
+                  type="info", close_button="知道了")
+
+    with ui.card().style(card_css):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("弹幕发送").style("font-size:var(--font-size-card-title,16px);font-weight:600")
+            send_result_label = ui.label("").style(
+                "font-size:var(--font-size-small,12px);color:var(--text-hint)")
+        ui.label("单条手动发送（限速/熔断由组件守卫链兜底）；dry_run=已记录未实发，实发需组件 send_dry_run=false").style(
+            "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
+        with ui.row().classes("w-full items-center gap-2"):
+            send_room_select = ui.select(
+                label="目标房间（在听）", options={}).style("width:var(--input-width-md,250px)")
+            send_token_input = ui.input(
+                label="发送 token（首次填入后本机缓存）", password=True).style(
+                "width:var(--input-width-md,250px)")
+        send_content = ui.input(label="弹幕内容（单条上限 100 字）").classes("w-full")
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.button("发送", on_click=_do_send).props("unelevated color=primary")
+            ui.button("对账最近", on_click=_do_reconcile).props("outline")
+
     # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
 
     async def _onboard_login(platform: str):
@@ -479,6 +577,12 @@ def create_platform_config_tab(
             if isinstance(rr, dict):
                 state["run_rooms"] = {f"{x.get('platform')}:{x.get('room_id')}": x
                                       for x in (rr.get("rooms") or []) if isinstance(x, dict)}
+            # 发送卡目标房间联动（O2 第一阶段）
+            _rooms_now = list(state["run_rooms"].keys())
+            if list(send_room_select.options or []) != _rooms_now:
+                send_room_select.options = _rooms_now
+                if send_room_select.value not in _rooms_now:
+                    send_room_select.value = None
         if state["mode"] == "running":  # 配置期开关归用户操作（防闪动）
             head_switch.value = bool(sec.get("enabled", False))
         _render_pill()

@@ -91,7 +91,7 @@
 ## Deferred Items from /autoplan (2026-10-11) — DanmakuListener v0.7.0 发送整合
 
 1. **~~O1 AUTOlive UI 呈现 ENGINE_STATUS 登录事件~~（已完成 2026-10-12）**——engine 事件通知文案落地（danmaku_login.py _NOTIFY_TEXT 补 "engine" 条目，detail 全文透出 login.first_login 等登录引导）；事件流透出与 notify 映射此前已在位。
-2. **O2 原生发送按钮+批量队列节奏**（P2, M）— web_console 四宫格已可用；触发条件=浸泡两周无主进程异常自动开工，列下一计划核心。开工前重校 send_min_interval_seconds（3s 治人工低频，未必适自动化）。**批量同公告发多房间需契约层 room 维度或错峰发送**（sent_at 秒级+payload 无 room_id，R39 全局去重会误杀同秒同内容第二条——eng M4）。依赖：R8 浸泡通过。
+2. **O2 原生发送按钮+批量队列节奏**（P2, M）— **第一阶段已落地（2026-10-12，用户指令提前开工）**：AUTOlive webui 平台配置页"弹幕发送"卡（在听房间下拉+token 本机缓存+发送/对账按钮，回执四态呈现）；控制面 POST /danmaku/send + /danmaku/send-results + /danmaku/send-status（进程内直调管线，鉴权同组件 Bearer 语义）；同批修复两个进程内 wiring 缺口（组件 settings 从 config.json 灌 [send] 键+ws_token_file；web.app 全局 _bridge 对齐 AutoliveBridge——缺一则发送恒 503/ROOM_NOT_LISTENED）。端到端验证：401→dry_run→对账全通。**剩余（触发条件=浸泡两周无异常）**：批量发送队列节奏+原生 UI 批量形态（开工前重校 send_min_interval_seconds；批量同公告发多房间需契约层 room 维度或错峰发送——R39 全局去重会误杀同秒同内容第二条）。
 3. **~~F6 指南 vs 实测修正 checklist 沉淀+季度同步窗口~~（已完成 2026-10-12）**——docs/danmaku_upgrade_checklist.md：前置判据+六类失真实录（键表漏列/依赖声明失真/文件清单漏列/表述过时/示例误导/大小写失真）+数据迁移纪律+升级验证顺序+季度窗口约定。
 4. **DX 埋点（TTHW 自动度量）**（P3, S）— POLISH 裁决不强加；随 O2 原生发送层考虑。
 5. **契约层 room 维度扩展**（P3, M）— R39 去重的根治方案（上游契约变更）；O2 批量场景开工前评估。依赖：上游协作。
