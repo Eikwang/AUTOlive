@@ -766,6 +766,20 @@ class DanmakuListenerService:
         """服务总开关（持久写回 enabled；false=stop_all+停消费，true=按 config 恢复）。"""
         _write_config_section(lambda sec: sec.__setitem__("enabled", bool(enabled)))
         if enabled:
+            if self._loop is not None and not self._loop.is_closed():
+                # 活循环强制全量重建（2026-10-12）：settings 覆写（发送白名单/
+                # dry_run 等）只发生在 _async_start——此前活循环直接 return，
+                # 开关 off→on 后监听不恢复、发送配置改了也不生效。stop 走完整
+                # 关停（join 线程/set_service_instance(None)），start 内部自查
+                # enabled（刚落盘 true）并重建线程+重注册实例。
+                self.stop()
+                try:
+                    started = self.start()
+                except Exception:
+                    logger.error("[danmaku_listener] 运行中重建失败", exc_info=True)
+                    return {"success": False, "enabled": True,
+                            "error": "监听重建失败", "fix_hint": "重启系统后重试"}
+                return {"success": bool(started), "enabled": True}
             ok = self._resume_service()
             return {"success": ok, "enabled": True}
         if self._bridge is not None and self._loop and not self._loop.is_closed():

@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock as _mock
 from collections import OrderedDict
 from typing import Any
 
@@ -511,6 +512,62 @@ def _async_passthrough(value):
     async def _coro():
         return value
     return _coro()
+
+
+class TestSetServiceEnabled(unittest.TestCase):
+    """服务总开关重建语义（2026-10-12 开关语义修复回归锁定）。
+
+    settings 覆写（发送白名单/dry_run 等）只发生在 _async_start（循环线程重建
+    时）——活循环 off→on 必须强制 stop+start 全量重建，否则监听不恢复、运行期
+    发送配置改了也不生效；loop 从未启动/已关闭走 _resume_service 原路径。
+    """
+
+    def _make_svc(self, loop_alive: bool):
+        import unittest.mock as _mock
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        if loop_alive:
+            svc._loop = _mock.MagicMock()
+            svc._loop.is_closed.return_value = False
+        else:
+            svc._loop = None
+        svc._service_on = True
+        svc._bridge = None
+        return svc
+
+    @_mock.patch("utils.danmaku_consumer._write_config_section", return_value=True)
+    def test_live_loop_rebuilds_via_stop_start(self, _w):
+        import unittest.mock as _mock
+        svc = self._make_svc(loop_alive=True)
+        with _mock.patch.object(svc, "stop") as m_stop, \
+                _mock.patch.object(svc, "start", return_value=True) as m_start, \
+                _mock.patch.object(svc, "_resume_service") as m_resume:
+            r = svc.set_service_enabled(True)
+        m_stop.assert_called_once()
+        m_start.assert_called_once()
+        m_resume.assert_not_called()
+        self.assertTrue(r["success"])
+
+    @_mock.patch("utils.danmaku_consumer._write_config_section", return_value=True)
+    def test_dead_loop_keeps_resume_path(self, _w):
+        svc = self._make_svc(loop_alive=False)
+        with _mock.patch.object(svc, "stop") as m_stop, \
+                _mock.patch.object(svc, "start") as m_start, \
+                _mock.patch.object(svc, "_resume_service", return_value=True) as m_resume:
+            r = svc.set_service_enabled(True)
+        m_stop.assert_not_called()
+        m_start.assert_not_called()
+        m_resume.assert_called_once()
+        self.assertTrue(r["success"])
+
+    @_mock.patch("utils.danmaku_consumer._write_config_section", return_value=True)
+    def test_disable_writes_config_and_marks_off(self, _w):
+        svc = self._make_svc(loop_alive=True)
+        with _mock.patch.object(svc, "push_event") as m_push:
+            r = svc.set_service_enabled(False)
+        self.assertFalse(r["enabled"])
+        self.assertFalse(svc._service_on)
+        m_push.assert_called_once()     # service_state 事件照推（前端 pill 联动）
+        _w.assert_called_once()         # 意图落盘（重启语义一致）
 
 
 if __name__ == "__main__":

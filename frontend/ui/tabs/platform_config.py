@@ -14,6 +14,7 @@
 - 写前校验（CEO F5）：重复/平台枚举/非空/长度≤200/链接试解析提示
 """
 import asyncio
+import json
 
 from nicegui import ui, app
 from typing import Dict, Any, Callable
@@ -70,6 +71,24 @@ def _api_base(config: Dict[str, Any]) -> str:
 _LOCAL_SESSION = requests.Session()
 _LOCAL_SESSION.trust_env = False
 _LOCAL_SESSION.proxies = {"http": None, "https": None}
+
+
+def _disk_danmaku_section() -> Dict[str, Any]:
+    """磁盘 config.json 的 danmaku_listener 节（2026-10-12 开关语义修复）。
+
+    webui 与 main.py 各持内存副本且互不同步（config_watcher 未接线）——运行期
+    toggle 由 main.py 落盘，webui 内存副本 stale。开关=配置意图（启动系统时是否
+    启动监听），其显示值必须以磁盘为唯一真相：运行态由状态胶囊承担，二者职责
+    分离（此前轮询把运行面 enabled 回读进开关，开关被做成了状态指示器——启动后
+    自动变开启、停止后自动变关闭，用户裁定为错误语义）。
+    """
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("danmaku_listener") or {}
+    except Exception:
+        logger.error("[platform_config] 磁盘 config.json 读取失败", exc_info=True)
+        return {}
 
 
 async def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, Any] = None,
@@ -146,11 +165,19 @@ def create_platform_config_tab(
         """config.rooms 直写（set_config 通道双回滚；失败时调用方保持 UI 不翻转——DX 发现 5）。"""
         return set_config_callback("danmaku_listener", "rooms", value=rooms, _notify=False) is not False
 
-    def _write_keywords():
+    async def _write_keywords() -> bool:
+        """关键词写盘（F-ENG-2 分流：main 可达时 Settings.save 磁盘回读会覆盖
+        danmaku_listener 节直写——走窄端点落盘+服务端热载；main_down 时 webui
+        是该节唯一写者，set_config 直写可落盘）。"""
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/keywords-config", {
+                "keywords": list(state["kw"]), "enabled": bool(state["kw_on"])})
+            return bool(isinstance(r, dict) and r.get("success"))
         set_config_callback("danmaku_listener", "keywords",
                             value=list(state["kw"]), _notify=False)
         set_config_callback("danmaku_listener", "keyword_filter_enabled",
                             value=state["kw_on"], _notify=False)
+        return True
 
     # ---------- 三态判定（Eng F-ENG-5） ----------
 
@@ -167,7 +194,9 @@ def create_platform_config_tab(
         with ui.row().classes("items-center gap-2"):
             ui.label("弹幕监听（DanmakuListener）").style(
                 "font-size:var(--font-size-page-title,16px);font-weight:600;color:var(--text-primary)")
-            head_switch = ui.switch("启用监听", value=False)
+            # 开关=配置意图（初值读磁盘真相；注释见 _disk_danmaku_section）
+            head_switch = ui.switch(
+                "启用监听", value=bool(_disk_danmaku_section().get("enabled", False)))
 
             async def _toggle_service(_e=None):
                 target = head_switch.value
@@ -288,9 +317,11 @@ def create_platform_config_tab(
 
             async def _toggle_kw(_e=None):
                 state["kw_on"] = kw_switch.value
-                _write_keywords()
-                if state["mode"] == "running":  # M-1 ③：运行期 reload 热生效
-                    await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
+                if not await _write_keywords():
+                    await _err_notify({"error": "过滤开关保存失败",
+                                       "fix_hint": "开关状态未变更"})
+                    return
+                if state["mode"] == "running":  # M-1 ③：热载已由窄端点服务端完成
                     await _toast("过滤开关已保存并即时生效")
             kw_switch.on("update:model-value", _toggle_kw)
         ui.label("仅屏蔽弹幕内容，不影响礼物与进场；运行中修改即时生效").style(
@@ -310,33 +341,29 @@ def create_platform_config_tab(
             await _toast("关键词已存在", "warning")
             return
         state["kw"] = state["kw"] + [kw]
-        if not _write_keywords_wrap():
+        if not await _write_keywords_wrap():
             await _err_notify({"error": "配置保存失败", "fix_hint": "检查磁盘/权限（状态未翻转）"})
             return
         kw_input.value = ""
         _render_kw()  # 即时渲染（DX 发现 2：不依赖轮询）
-        if state["mode"] == "running":  # M-1 ③ 热生效
-            await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
+        if state["mode"] == "running":  # M-1 ③ 热载由窄端点服务端完成
             await _toast("关键词已保存并即时生效")
 
-    def _write_keywords_wrap() -> bool:
+    async def _write_keywords_wrap() -> bool:
         """关键词写盘（失败返回 False——DX 发现 5 调用方感知）。"""
         try:
-            _write_keywords()
-            return True
+            return await _write_keywords()
         except Exception:
             logger.error("[platform_config] 关键词写盘失败", exc_info=True)
             return False
 
     async def _rm_kw(kw: str):
         state["kw"] = [k for k in state["kw"] if k != kw]
-        if not _write_keywords_wrap():
+        if not await _write_keywords_wrap():
             await _err_notify({"error": "配置保存失败", "fix_hint": "词条未删除"})
             _render_kw()
             return
         _render_kw()
-        if state["mode"] == "running":
-            await _api(config, "POST", "/danmaku/keywords/reload", timeout=8)
 
     def _render_kw():
         """关键词词条（NiceGUI 3.16 ui.chip 无 on_removal 参数——badge+close 组合）。"""
@@ -394,6 +421,10 @@ def create_platform_config_tab(
             msg += f"｜{r.get('fix_hint')}"
         send_result_label.text = msg
         ui.notify(msg, type=kind, close_button="知道了")
+        if r.get("reason_code") == "SENDER_DISABLED":
+            ui.notify("该平台未在发送白名单——在『发送启用平台』中勾选并保存，"
+                      "然后关闭再开启『启用监听』开关（或重启系统）生效",
+                      type="warning", close_button="知道了")
         if status in ("sent", "dry_run", "unknown"):
             send_content.value = ""
 
@@ -434,12 +465,53 @@ def create_platform_config_tab(
         ui.notify(f"对账 {rid}: {(str(seen)[:160] if seen else '无记录')}",
                   type="info", close_button="知道了")
 
+    async def _save_send_platforms(e):
+        # e.value 保证是新值（on_value_change 官方契约）——此前 on("update:model-value")
+        # 触发时 select.value 仍是旧值，把旧白名单写回磁盘（界面已选、落盘不变的假保存）
+        val = ",".join(str(x) for x in (list(e.value or []) if e is not None else []))
+        # main 可达时 Settings.save 会磁盘回读覆盖 danmaku_listener 节（F-ENG-2
+        # 写者分配矩阵）——直写被静默丢弃，必须走运行面窄端点（对齐 F1 房间开关）
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/send-config", {"platforms": val})
+            if not isinstance(r, dict) or not r.get("success"):
+                await _err_notify(r or {"error": "发送平台保存失败（运行面不可达）"})
+                return
+        else:
+            ok = set_config_callback("danmaku_listener", "send_enabled_platforms",
+                                     value=val, _notify=False)
+            if ok is False:
+                await _err_notify({"error": "发送平台保存失败", "fix_hint": "配置未变更"})
+                return
+        if state["mode"] == "running":
+            await _toast("发送平台已保存——关闭再开启『启用监听』开关（重建监听）后生效", "info")
+        else:
+            await _toast("发送平台已保存——启动系统后生效", "info")
+
+    async def _save_send_dry_run(e):
+        live = bool(e.value) if e is not None else bool(send_live_switch.value)
+        # 分流同 _save_send_platforms（F-ENG-2：main 可达时直写不落盘）
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/send-config", {"dry_run": not live})
+            if not isinstance(r, dict) or not r.get("success"):
+                await _err_notify(r or {"error": "发送模式保存失败（运行面不可达）"})
+                return
+        else:
+            ok = set_config_callback("danmaku_listener", "send_dry_run",
+                                     value=not live, _notify=False)
+            if ok is False:
+                await _err_notify({"error": "发送模式保存失败", "fix_hint": "配置未变更"})
+                return
+        if live:
+            await _toast("已开启实发——生效后弹幕将真实发送至直播间", "warning")
+        else:
+            await _toast("已开启观察模式（dry_run：只记录不发送）", "info")
+
     with ui.card().style(card_css):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("弹幕发送").style("font-size:var(--font-size-card-title,16px);font-weight:600")
             send_result_label = ui.label("").style(
                 "font-size:var(--font-size-small,12px);color:var(--text-hint)")
-        ui.label("单条手动发送（限速/熔断由组件守卫链兜底）；dry_run=已记录未实发，实发需组件 send_dry_run=false").style(
+        ui.label("单条手动发送（限速/熔断由组件守卫链兜底）；观察模式只记录不发送，实发需开启『实发模式』").style(
             "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
         with ui.row().classes("w-full items-center gap-2"):
             send_room_select = ui.select(
@@ -447,10 +519,27 @@ def create_platform_config_tab(
             send_token_input = ui.input(
                 label="发送 token（首次填入后本机缓存）", password=True).style(
                 "width:var(--input-width-md,250px)")
+        # 发送白名单（config send_enabled_platforms，逗号分隔）+ 实发模式（send_dry_run
+        # 取反）——发送是敏感操作，组件出厂默认全关+观察（R10/DX-F1 安全态）。保存写
+        # config；settings 重灌只发生在监听重建（_async_start），故运行期改后需
+        # 关再开『启用监听』或重启系统生效。
+        _send_sec = _disk_danmaku_section()
+        send_platforms_select = ui.select(
+            label="发送启用平台（白名单——保存后重启监听生效）",
+            options={p: _PLATFORM_LABELS[p] for p in _ALL_PLATFORMS},
+            multiple=True,
+            value=[p.strip() for p in str(_send_sec.get("send_enabled_platforms") or "").split(",")
+                   if p.strip()],
+        ).classes("w-full")
+        send_live_switch = ui.switch(
+            "实发模式（关闭=观察 dry_run，仅记录不发送）",
+            value=not bool(_send_sec.get("send_dry_run", True)))
         send_content = ui.input(label="弹幕内容（单条上限 100 字）").classes("w-full")
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("发送", on_click=_do_send).props("unelevated color=primary")
             ui.button("对账最近", on_click=_do_reconcile).props("outline")
+        send_platforms_select.on_value_change(_save_send_platforms)
+        send_live_switch.on_value_change(_save_send_dry_run)
 
     # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
 
@@ -594,11 +683,9 @@ def create_platform_config_tab(
                 # NiceGUI 3.x：options 属性赋值不自动推前端（value 是 reactive
                 # 而 options 不是）——缺 update() 则前端下拉永远显示旧选项
                 send_room_select.update()
-        if state["mode"] == "running":  # 回读运行面真相（假启动批次修复：此前读
-            # webui 进程 stale 内存——toggle 由 main.py 写文件+main 内存，webui
-            # 无跨进程同步，3 秒后轮询回弹成旧值）
-            head_switch.value = bool(state["run_status"].get("enabled",
-                                     sec.get("enabled", False)))
+        # 开关不回读运行态（2026-10-12 语义修复）：开关=配置意图（磁盘 config
+        # enabled，仅用户点击经直写/toggle 落盘变更，初值读磁盘）；监听的实际
+        # 运行状态由 _render_pill 状态胶囊承担——二者职责分离。
         _render_pill()
         _render_login_chip()
         _render_rooms()

@@ -23,7 +23,7 @@ def register_danmaku_routes(app, config) -> None:
     """
     from fastapi import HTTPException
 
-    from utils.danmaku_consumer import get_service_instance
+    from utils.danmaku_consumer import get_service_instance, _write_config_section
 
     def _svc():
         svc = get_service_instance()
@@ -149,6 +149,59 @@ def register_danmaku_routes(app, config) -> None:
                         "reason_code": "service.build_failed",
                         "fix_hint": "重启系统后重试", "docs_anchor": "docs/danmaku_module.md"}
         return _unwrap(svc.set_service_enabled(target))
+
+    @app.post("/danmaku/send-config")
+    def danmaku_send_config(body: dict):
+        """发送配置窄端点（写者分配矩阵 F-ENG-2 对齐，2026-10-12）。
+
+        main.py 可达时 Settings.save 会把磁盘 danmaku_listener 节回读覆盖内存
+        （防 webui 旧快照覆盖运行期写入）——webui 对该节的 set_config 直写在
+        运行期被静默丢弃（toast 假成功）。发送白名单/实发模式的运行期写入必须
+        经本端点落盘（对齐 F1 房间开关 config-first 模式）；生效时机=监听重建
+        （_async_start 重灌组件 settings）。
+        """
+        platforms = str(body.get("platforms", ""))
+        dry_run = body.get("dry_run", None)
+
+        def _mut(sec):
+            sec["send_enabled_platforms"] = platforms
+            if dry_run is not None:
+                sec["send_dry_run"] = bool(dry_run)
+
+        if not _write_config_section(_mut):
+            return {"success": False, "error": "config 落盘失败",
+                    "reason_code": "config.write_failed",
+                    "fix_hint": "检查 config.json 是否被占用"}
+        return {"success": True, "platforms": platforms, "dry_run": dry_run}
+
+    @app.post("/danmaku/keywords-config")
+    def danmaku_keywords_config(body: dict):
+        """关键词配置窄端点（写者分配矩阵 F-ENG-2 对齐，同 /danmaku/send-config）。
+
+        旧关键词写端点退役时假设 webui 直写有效，但 main 可达时 Settings.save
+        会磁盘回读覆盖 danmaku_listener 节——运行期关键词保存假成功且 reload
+        热载旧值。本端点落盘后调用 reload_keywords 热载 Bridge（M-1 ③ 闭环）。
+        """
+        keywords = [str(k) for k in (body.get("keywords") or [])]
+        enabled = bool(body.get("enabled", True))
+
+        def _mut(sec):
+            sec["keywords"] = keywords
+            sec["keyword_filter_enabled"] = enabled
+
+        if not _write_config_section(_mut):
+            return {"success": False, "error": "config 落盘失败",
+                    "reason_code": "config.write_failed",
+                    "fix_hint": "检查 config.json 是否被占用"}
+        svc = get_service_instance()
+        reloaded = None
+        if svc is not None:
+            try:
+                reloaded = bool(svc.reload_keywords())
+            except Exception:
+                logger.error("[danmaku_api] 关键词热载失败", exc_info=True)
+        return {"success": True, "keywords": keywords,
+                "enabled": enabled, "reloaded": reloaded}
 
     @app.post("/danmaku/send")
     def danmaku_send(body: dict):
