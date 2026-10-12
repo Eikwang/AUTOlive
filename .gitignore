@@ -297,6 +297,10 @@ docs/*
 !docs/upstream/
 !docs/danmaku_module.md
 !docs/danmaku_upgrade_checklist.md
+!docs/architecture/
+!docs/开发记录/
+docs/开发记录/*
+!docs/开发记录/2026-10-12_整合阶段改动盘点.md
 
 # === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===
 edtalk/ckpts/

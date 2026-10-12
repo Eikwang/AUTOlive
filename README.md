@@ -6,19 +6,15 @@
 
 </div>
 
-`AUTOlive` 是一款结合了最先进技术的虚拟AI主播。它的核心是一系列高效的人工智能模型和平台，包括 `ChatterBot、GPT、Claude、langchain、chatglm、text-generation-webui、讯飞星火、智谱AI、谷歌Bard、通义星尘、阿里云百炼（通义千问、百川、月之暗面、零一万物、MiniMax）、千帆大模型（文心一言）、Gemini、Kimi Chat、QAnything、koboldcpp、FastGPT、Ollama、One-API、AnythingLLM、LLM_TPU、Dify、火山引擎（豆包）`。这些模型既可以在本地运行，也可以通过云端服务提供支持。当然，为了让对话照进现实，还结合了多模态模型，包括 `Gemini、glm-4v、Blip` 的图像识别能力，获取电脑画面进行分析讲解。
+**AUTOlive** 是一款 AI 直播数字人整合中枢：直播弹幕实时驱动对话与互动，数字人形象实时开口回应。本项目 fork 自 [Ikaros-521/AI-Vtuber](https://github.com/Ikaros-521/AI-Vtuber)（Luna AI），已更名为 **AUTOlive** 独立演进（hard fork），整合了弹幕监听、对话生成、语音合成、数字人驱动与训练的完整直播链路。感谢原作者 [Ikaros-521](https://github.com/Ikaros-521) 与上游社区贡献者的杰出工作。
 
-`AUTOlive` 的外观由 `Live2D、Vtube Studio、xuniren、UE5 结合 Audio2Face、EasyAIVtuber、数字人视频播放器（Easy-Wav2Lip、Sadtalker、GeneFace++、MuseTalk、AniTalker、本地视频）、metahuman-stream（ernerf、musetalk、wav2lip）、DH_live、live2d-TTS-LLM-GPT-SoVITS-Vtuber` 技术打造，为用户提供了一个生动、互动的虚拟形象。这使得 `AUTOlive` 能够在各大直播平台，如 `Bilibili、抖音、快手、微信视频号、拼多多、1688、斗鱼、淘宝、让弹幕飞、YouTube、Twitch 和 TikTok`，进行实时互动直播。当然，它也可以在本地环境中与您进行个性化对话。
+## 🧩 核心能力
 
-为了使交流更加自然，`AUTOlive` 使用了先进的自然语言处理技术，结合文本转语音系统，如 `Edge-TTS、VITS-Fast、elevenlabs、bark-gui、VALL-E-X、睿声AI、OpenVoice、GPT_SoVITS、clone-voice、Azure TTS、fish-speech、ChatTTS、CosyVoice、F5-TTS、MultiTTS、MeloTTS`。这不仅让它能够生成流畅的回答，还可以通过 `so-vits-svc 和 DDSP-SVC` 实现声音的变化，以适应不同的场景和角色。
-
-此外，`AUTOlive` 还能够通过特定指令与 `Stable Diffusion` 协作，展示画作。用户还可以自定义文案，让 AUTOlive 循环播放，以满足不同场合的需求。
-
-## 🧬 项目来源
-
-本项目 fork 自 [Ikaros-521/AI-Vtuber](https://github.com/Ikaros-521/AI-Vtuber)（Luna AI），并已更名为 **AUTOlive** 独立演进（hard fork）。感谢原作者 [Ikaros-521](https://github.com/Ikaros-521) 与上游社区贡献者的杰出工作。
-
-本项目基于 GPL-3.0 协议开源，原始版权与许可声明见 [LICENSE](./LICENSE)。
+- **弹幕互动（收与发）**：内置弹幕监听组件覆盖 **12 个直播平台**（抖音、斗鱼、哔哩哔哩、快手、虎牙、微信视频号、淘宝、1688、美团、小红书、拼多多、京东），进程内运行、逐引擎隔离；支持配置期扫码登录、多房间监听、关键词屏蔽；弹幕发送为第一阶段能力（实验性）。
+- **对话链**：多 LLM 通道（本地/云端大模型可配），弹幕/礼物/进场事件驱动回复，支持图像识别讲解。
+- **语音链路**：TTS 与实时变声的托管服务——[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)（文本转语音）、RVC（实时变声热切换）、AICoverGen（一键翻唱）作为一等公民随系统拉起，含声音训练流水线（训练声音页）。
+- **数字人**：[EDTalk](https://github.com/References-of-Talk/EDTalk) 实时推理驱动（音频推送、口型同步），配套"训练主播"一键全链路训练（audio2lip ckpt）。
+- **字幕与播放**：内置字幕前端（web_captions），音频播放器/字幕打印机内置化，断线自检。
 
 ## 🚀 快速开始
 
@@ -27,14 +23,24 @@
    git clone https://github.com/Eikwang/AUTOlive.git
    cd AUTOlive
    ```
-2. 准备 Python 3.10+ 环境（推荐 conda 或项目自带的 runtime312 统一环境，详见 `specs/技术栈.md`）；
-3. 双击 `启动程序.bat` 启动 WebUI（默认端口 8086），按页面提示完成配置。
+2. 准备统一 Python 运行时 `runtime312`（EDTalk 共享环境，`D:\AI\EDTalk\runtime312`），环境补丁清单见 [docs/开发环境搭建.md](./docs/开发环境搭建.md)；
+3. 双击 `启动程序.bat` 启动 WebUI（默认 `http://127.0.0.1:8086`）；
+4. 按 [docs/danmaku_module.md](./docs/danmaku_module.md) 的**三阶段上手**完成弹幕监听接入（环境自检 → 冒烟 → 添加房间到对话链）。
+
+## 🏗️ 架构简述
+
+```
+WebUI(8086) + 主循环（对话链）
+ ├── DanmakuListener：进程内 12 平台弹幕引擎（逐引擎隔离）
+ ├── GPT-SoVITS / RVC：托管子进程（apps/ 一等公民，hosted 可关）
+ └── EDTalk realtime：HTTP 音频推送（16kHz），外部 runtime
+```
+
+细节见 [docs/architecture/系统拓扑.md](./docs/architecture/系统拓扑.md) 与 [docs/danmaku_module.md](./docs/danmaku_module.md)。
 
 ## 💡 提问的智慧
 
-提交 issues 前请先阅读以下内容：
-
-https://lug.ustc.edu.cn/wiki/doc/smart-questions
+提交 issues 前请先阅读：https://lug.ustc.edu.cn/wiki/doc/smart-questions
 
 ## 🀅 开发&项目相关
 
@@ -43,6 +49,10 @@ https://lug.ustc.edu.cn/wiki/doc/smart-questions
 ![image](./docs/simple_flowchart.png)
 ![image](./docs/chart.jpg)
 
+### 改动记录
+
+- [docs/开发记录/2026-10-12_整合阶段改动盘点.md](./docs/开发记录/2026-10-12_整合阶段改动盘点.md)——整合阶段（2026-09-24 → 10-12）76 提交盘点与全面测试准备清单
+
 ## License
 
-本项目遵循 [GPL-3.0](./LICENSE) 协议开源。
+本项目遵循 [GPL-3.0](./LICENSE) 协议开源，原始版权与许可声明见 [LICENSE](./LICENSE)。
