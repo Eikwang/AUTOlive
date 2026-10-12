@@ -39,7 +39,10 @@ def create_common_config_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="common_config")
 
     chat_type_options = {'custom_llm': '自定义LLM'}
-    visual_body_options = {'metahuman_stream': 'metahuman_stream'}
+    # edtalk_realtime 为合法运行态值（EDTalk 整合，frontend/main.py 开关双检）——
+    # 漏列曾致通用配置页 "Invalid value: edtalk_realtime"（2026-10-06 基线既有问题，2026-10-12 修复）
+    visual_body_options = {'metahuman_stream': 'metahuman_stream',
+                           'edtalk_realtime': 'EDTalk 实时驱动'}
     audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS'}
 
     # 基础配置（3列网格）

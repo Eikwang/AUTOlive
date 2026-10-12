@@ -1077,6 +1077,22 @@ class AutoliveApp:
             logger.debug("AutoliveApp.run() 重入——跳过 ui.run（server 已运行）")
             return
 
+        # NiceGUI 3.16 socket.io 消息超限断联（TODOS 既有问题）：AsyncServer 在
+        # nicegui/nicegui.py:52 硬编码初始化，无 buffer 配置通道（默认 1MB，3.x script
+        # mode 全量 UI 下发易超限致"连接丢失"）——启动前猴补调大至 10MB。
+        # 注意 python-engineio 参数为 snake_case max_http_buffer_size（camelCase 是 JS 版）。
+        # 升级 NiceGUI 若官方开放 socket.io 配置透传，移除本补丁改用官方参数。
+        import socketio as _socketio
+        if getattr(_socketio.AsyncServer.__init__, "_autolive_patched", None) is not True:
+            _orig_server_init = _socketio.AsyncServer.__init__
+
+            def _patched_server_init(self, *args, **kwargs):
+                kwargs.setdefault("max_http_buffer_size", 10 * 1024 * 1024)
+                _orig_server_init(self, *args, **kwargs)
+
+            _patched_server_init._autolive_patched = True
+            _socketio.AsyncServer.__init__ = _patched_server_init
+
         # 启动应用
         ui.run(
             host=webui_ip,

@@ -235,6 +235,7 @@ class DanmakuEventNotifier:
         "handoff": "弹幕消费者连续连接失败，移交托管层",
         "recovered": "弹幕服务已恢复",
         "component_recovered": "弹幕组件内部恢复",
+        "engine": "弹幕引擎状态",   # ENGINE_STATUS（含 login.first_login 等登录生命周期，detail 全文透出——v0.7.0 合并 O1）
     }
 
     def __init__(self):

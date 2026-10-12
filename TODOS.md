@@ -85,13 +85,13 @@
 
 1. **S7 多房间对话链扩展（2026-10-07 用户裁定语义变更：多房间全监听全互动已实现——活跃概念退役，本条收敛为多房间消息归账/答谢计费的精细化）**（P2, L）— Bridge 原生支持多房间监听（已落地：非活跃房间仅计数+行内明示"仅监听不互动"），但 my_handle 对话链为单直播间架构——多房间全量互动需产品级设计（消息路由/答谢计费/开播状态机多房间化）。rooms[].active 显式指定为正交扩展点。
 2. **S9 商用合规与隔离形态重评**（P1, M）— 商用签约前置：① 重新评估进程内隔离形态（引擎硬崩溃会带走数字人——回退方案 B：修复 serve 接线的托管子进程，见整合计划第 3 节 A/B/C 决策记录）；② 专用监听账号体系（严禁客户主账号）；③ web_console 无鉴权面复核。个人使用阶段不受阻。
-3. **edtalk_realtime 配置加载失败（既有问题，2026-10-06 基线对照确认）**——通用配置页 "加载配置失败: Invalid value: edtalk_realtime"：某 select 的 value 不在 options 集（EDTalk 整合遗留）；与弹幕整合无关，独立修复。
-4. **NiceGUI 3.16 "消息超过 WebSocket 大小限制"断联（既有问题，2026-10-06 基线对照确认）**——页面加载/运行中出现 socket.io 消息超限（>1MB）致前端"连接丢失"；与 NiceGUI 3.x script mode 全量 UI 下发相关。候选修复：ui.run 传 socket_io_kwargs 调大 maxHttpBufferSize，或收编页面结构减小单次下发。
+3. **~~edtalk_realtime 配置加载失败~~（已修复 2026-10-12）**——根因=通用配置页 visual_body select options 漏列合法运行态值 edtalk_realtime（EDTalk 整合设置）；common_config.py visual_body_options 已补该选项。
+4. **~~NiceGUI 3.16 "消息超过 WebSocket 大小限制"断联~~（已修复 2026-10-12）**——根因=nicegui/nicegui.py:52 硬编码 AsyncServer 无 buffer 配置通道（默认 1MB）；frontend/main.py 启动前猴补 socketio.AsyncServer 传 max_http_buffer_size=10MB（python-engineio snake_case 参数，实证 eio.max_http_buffer_size=10485760 生效）；NiceGUI 升级开放官方透传后移除补丁。
 
 ## Deferred Items from /autoplan (2026-10-11) — DanmakuListener v0.7.0 发送整合
 
-1. **O1 AUTOlive UI 呈现 ENGINE_STATUS 登录事件**（P3, S）— 指南 §4.3 建议项；事件流透出已做（/danmaku/events），UI 呈现随原生发送集成同批。依赖：O2。
+1. **~~O1 AUTOlive UI 呈现 ENGINE_STATUS 登录事件~~（已完成 2026-10-12）**——engine 事件通知文案落地（danmaku_login.py _NOTIFY_TEXT 补 "engine" 条目，detail 全文透出 login.first_login 等登录引导）；事件流透出与 notify 映射此前已在位。
 2. **O2 原生发送按钮+批量队列节奏**（P2, M）— web_console 四宫格已可用；触发条件=浸泡两周无主进程异常自动开工，列下一计划核心。开工前重校 send_min_interval_seconds（3s 治人工低频，未必适自动化）。**批量同公告发多房间需契约层 room 维度或错峰发送**（sent_at 秒级+payload 无 room_id，R39 全局去重会误杀同秒同内容第二条——eng M4）。依赖：R8 浸泡通过。
-3. **F6 指南 vs 实测修正 checklist 沉淀+季度同步窗口**（P3, S）— 本轮 6 处指南失真的修正经验固化为升级 checklist；流程资产，半径外。
+3. **~~F6 指南 vs 实测修正 checklist 沉淀+季度同步窗口~~（已完成 2026-10-12）**——docs/danmaku_upgrade_checklist.md：前置判据+六类失真实录（键表漏列/依赖声明失真/文件清单漏列/表述过时/示例误导/大小写失真）+数据迁移纪律+升级验证顺序+季度窗口约定。
 4. **DX 埋点（TTHW 自动度量）**（P3, S）— POLISH 裁决不强加；随 O2 原生发送层考虑。
 5. **契约层 room 维度扩展**（P3, M）— R39 去重的根治方案（上游契约变更）；O2 批量场景开工前评估。依赖：上游协作。

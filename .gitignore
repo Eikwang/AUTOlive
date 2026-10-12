@@ -296,6 +296,7 @@ docs/*
 !docs/danmaku_contract/
 !docs/upstream/
 !docs/danmaku_module.md
+!docs/danmaku_upgrade_checklist.md
 
 # === EDTalk 运行副本大文件（EDTalk功能集成计划 §3） ===
 edtalk/ckpts/
