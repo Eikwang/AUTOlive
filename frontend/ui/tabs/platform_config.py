@@ -56,7 +56,11 @@ _LOGIN_BADGE = {  # J-3 三级视觉
 
 def _api_base(config: Dict[str, Any]) -> str:
     try:
-        port = int(config.get("api_port", default=8000))
+        # Config.get 无 default kwarg（65948e8f 同款 or 兜底）——default= kwarg 会
+        # TypeError 被 except 吞掉，端口静默落 8000，而实际控制面在 api_port
+        # （8082）：此前 /danmaku/* 前端轮询全部打错端口，开关与发送房间
+        # 下拉的运行态联动全数失效。
+        port = int(config.get("api_port") or 8000)
     except Exception:
         port = 8000
     return f"http://127.0.0.1:{port}"
@@ -587,6 +591,9 @@ def create_platform_config_tab(
                 send_room_select.options = _rooms_now
                 if send_room_select.value not in _rooms_now:
                     send_room_select.value = None
+                # NiceGUI 3.x：options 属性赋值不自动推前端（value 是 reactive
+                # 而 options 不是）——缺 update() 则前端下拉永远显示旧选项
+                send_room_select.update()
         if state["mode"] == "running":  # 回读运行面真相（假启动批次修复：此前读
             # webui 进程 stale 内存——toggle 由 main.py 写文件+main 内存，webui
             # 无跨进程同步，3 秒后轮询回弹成旧值）
