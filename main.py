@@ -62,12 +62,12 @@ class MainApplication:
             self.config = Config(self.config_path)
             logger.info(f"配置文件加载完成: {self.config_path}")
             
-            # 初始化通用工具
-            self.common = Common(self.config)
+            # 初始化通用工具（Common 为无参 mixin 工具类——config 由 My_handle 等调用方自持；2026-10-12 修复签名漂移）
+            self.common = Common()
             logger.info("通用工具初始化完成")
             
-            # 初始化处理器
-            self.my_handle = My_handle(self.config, self.common)
+            # 初始化处理器（My_handle.__init__(config_path) 单参——内部自建 Config/Common 单例；2026-10-12 修复签名漂移）
+            self.my_handle = My_handle(self.config_path)
             logger.info("处理器初始化完成")
             
             # 初始化各个模块
@@ -85,7 +85,7 @@ class MainApplication:
         # 获取平台标识（整合计划 P2-4：活跃房间平台优先，平滑替代旧架构单平台选择；
         # TaskScheduler 以此作为定时任务/闲时任务消息的 platform 语境）
         try:
-            _dl_rooms = self.config.get("danmaku_listener", default={}).get("rooms", []) or []
+            _dl_rooms = (self.config.get("danmaku_listener") or {}).get("rooms", []) or []
         except Exception:
             _dl_rooms = []
         platform = next((str(r.get("platform")) for r in _dl_rooms
@@ -166,8 +166,8 @@ class MainApplication:
             self.is_running = True
             
             # 启动Web服务器
-            api_port = self.config.get("api_port", default=8000)
-            web_port = self.config.get("web_port", default=8080)
+            api_port = self.config.get("api_port") or 8000
+            web_port = self.config.get("web_port") or 8080
             self.web_server.start_all(api_port, web_port)
             logger.info(f"Web服务器已启动，API端口: {api_port}, Web端口: {web_port}")
             
