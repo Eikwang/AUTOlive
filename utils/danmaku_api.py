@@ -116,18 +116,30 @@ def register_danmaku_routes(app, config) -> None:
 
     @app.post("/danmaku/service/toggle")
     def danmaku_service_toggle(body: dict):
-        """F-ENG-5 503 死路修复：enabled=true 且服务未构建时在线 build+start。"""
+        """F-ENG-5 503 死路修复：enabled=true 且服务未构建时在线 build+start。
+
+        跨进程状态纪律（假启动批次修复 2026-10-12）：main.py 与 webui 各持 config
+        内存副本（config_watcher 未接线），本端点是运行面 enabled 的唯一写手——
+        落盘（_write_config_section）+ 内存构建双写，前端轮询以 /danmaku/status
+        的运行面值为准。
+        """
         target = bool(body.get("enabled", True))
         svc = get_service_instance()
-        if svc is None and target:
+        if svc is None:
+            if not target:
+                # 服务本就未构建：幂等返回（此前会 AttributeError——svc.set_service_enabled）
+                return {"success": True, "enabled": False, "already_off": True}
             try:
-                from utils.danmaku_consumer import DanmakuListenerService
+                from utils.danmaku_consumer import DanmakuListenerService, _write_config_section
+                if not _write_config_section(lambda sec: sec.__setitem__("enabled", True)):
+                    return {"success": False, "error": "config 落盘失败",
+                            "reason_code": "config.write_failed",
+                            "fix_hint": "检查 config.json 是否被占用", "docs_anchor": "docs/danmaku_module.md"}
                 from utils.config import Config
                 cfg = Config.config or {}
                 sec = cfg.get("danmaku_listener") or {}
-                if not sec.get("enabled"):
-                    sec["enabled"] = True
-                    cfg["danmaku_listener"] = sec
+                sec["enabled"] = True
+                cfg["danmaku_listener"] = sec
                 svc = DanmakuListenerService(lambda: dict(sec))
                 threading.Thread(target=svc.start, name="svc-start-danmaku-api", daemon=True).start()
                 return {"success": True, "enabled": True, "started": True}

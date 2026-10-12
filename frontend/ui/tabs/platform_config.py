@@ -167,7 +167,11 @@ def create_platform_config_tab(
 
             async def _toggle_service(_e=None):
                 target = head_switch.value
-                if state["mode"] == "running":  # 运行期：窄端点联动（main.py 即时生效）
+                # main 活着的两种形态都走运行面端点（假启动批次修复 2026-10-12）：
+                # service_disabled（服务未构建）走 toggle 可在线构建——此前只有
+                # running 走 API，service_disabled 落配置期直写，但 main.py 内存
+                # 不会热重载 config 文件，导致开关写盘后运行面永远不知道。
+                if state["mode"] in ("running", "service_disabled"):
                     r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
                     if r is None or not isinstance(r, dict) or not r.get("success"):
                         await _err_notify(r or {"error": "运行面切换失败"})
@@ -583,8 +587,11 @@ def create_platform_config_tab(
                 send_room_select.options = _rooms_now
                 if send_room_select.value not in _rooms_now:
                     send_room_select.value = None
-        if state["mode"] == "running":  # 配置期开关归用户操作（防闪动）
-            head_switch.value = bool(sec.get("enabled", False))
+        if state["mode"] == "running":  # 回读运行面真相（假启动批次修复：此前读
+            # webui 进程 stale 内存——toggle 由 main.py 写文件+main 内存，webui
+            # 无跨进程同步，3 秒后轮询回弹成旧值）
+            head_switch.value = bool(state["run_status"].get("enabled",
+                                     sec.get("enabled", False)))
         _render_pill()
         _render_login_chip()
         _render_rooms()
