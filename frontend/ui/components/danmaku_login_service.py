@@ -96,7 +96,9 @@ class DanmakuLoginService:
             login_urls = {"douyu": "https://passport.douyu.com/",
                           "huya": "https://www.huya.com/"}
             cookie_path = os.path.join(cd, f"{platform}_login_cookies.json")
-            names = {"douyu": ("dedeuserid",),
+            # 判定名对齐 login_gate.LOGIN_COOKIE_NAMES 权威（douyu 曾用过时 dedeuserid
+            # ——gate 取证实录：36 cookie 无 dedeuserid，acf_* 家族才是登录字段）
+            names = {"douyu": ("acf_uid", "acf_auth"),
                      "huya": ("yyuid", "hiido_ui", "u_db_uid")}
             meta[platform] = {
                 "check": lambda cp=cookie_path, nm=names[platform]:
@@ -104,7 +106,17 @@ class DanmakuLoginService:
                 "flow": lambda p=platform, lp=login_urls[platform], cp=cookie_path:
                     self._run_gate_flow(p, lp, cp),
             }
-        return meta
+        # 受控平台（v0.7.0 全平台覆盖——除美团外）：check=F1 快照文件存在且含 cookie
+        # （storage_state 格式，_check_state_file 兼容）；flow=persistent profile 登录。
+        for p, (prof, url) in self._PROFILE_PLATFORMS.items():
+            meta[p] = {
+                "check": lambda sp=os.path.join(cd, f"{prof}_login_state.json"):
+                    self._check_state_file(sp),
+                "flow": lambda p=p, pn=prof, u=url: self._run_profile_flow(p, pn, u),
+            }
+        # e3c31330 五平台扩展时回归：必须返回单平台条目（返回整表则 meta["check"] KeyError
+        # ——登录态判定异常+登录流程异常双失败，2026-10-12 手测发现）
+        return meta.get(platform)
 
     @staticmethod
     def _check_cookie_file_names(path: str, names: tuple) -> bool:
@@ -117,8 +129,9 @@ class DanmakuLoginService:
         except (FileNotFoundError, json.JSONDecodeError, Exception):
             return False
 
-    def _run_gate_flow(self, platform: str, login_url: str, cookie_path: str) -> None:
-        """douyu/huya 配置期登录：login_gate.ensure_cookie_file_login（空 stop/budget）。"""
+    def _run_gate_flow(self, platform: str, login_url: str, cookie_path: str):
+        """douyu/huya 配置期登录（返回 coro——_process 统一 run_until_complete；
+        曾在内部自行执行后 return None → _process 对 None 再 run_until_complete 炸）。"""
         from danmaku_listener.engines.login_gate import ensure_cookie_file_login
 
         async def emit_status(detail: str) -> None:
@@ -126,10 +139,9 @@ class DanmakuLoginService:
 
         self._set_state(platform, "waiting_scan",
                         f"请在弹出的浏览器中登录 {platform} 账号")
-        coro = ensure_cookie_file_login(
+        return ensure_cookie_file_login(
             "config-login", platform, login_url, cookie_path,
             {}, {}, set(), emit_status)
-        self._loop.run_until_complete(asyncio.wait_for(coro, timeout=LOGIN_WAIT_TIMEOUT))
 
     @staticmethod
     def _check_state_file(path: str) -> bool:
@@ -161,7 +173,7 @@ class DanmakuLoginService:
         try:
             return bool(meta["check"]())
         except Exception:
-            logger.warning(f"[danmaku-login-svc] {platform} 登录态判定异常", exc_info=True)
+            logger.opt(exception=True).warning(f"[danmaku-login-svc] {platform} 登录态判定异常")
             return False
 
     def login_supported(self, platform: str) -> bool:
@@ -220,7 +232,8 @@ class DanmakuLoginService:
                 try:
                     self._process(item["platform"])
                 except Exception:
-                    logger.error(f"[danmaku-login-svc] {item['platform']} 登录流程异常", exc_info=True)
+                    # loguru 无 exc_info 参数（曾静默吞栈——手测排查三小时）；opt(exception=True) 才带栈
+                    logger.opt(exception=True).error(f"[danmaku-login-svc] {item['platform']} 登录流程异常")
                     self._set_state(item["platform"], "failed", "登录流程异常")
         finally:
             self._loop.close()
@@ -235,7 +248,9 @@ class DanmakuLoginService:
         self._set_state(platform, "launching", "浏览器启动中")
         started = time.time()
         # 组件 run_login_flow：可见浏览器 → 扫码 → cookie 保存（阻塞至完成/超时/关闭）
-        self._loop.run_until_complete(meta["flow"]())
+        # 外层 wait_for 兜底防挂死（受控平台 coro 内部 deadline 300s+宽限 30s+goto 45s）
+        self._loop.run_until_complete(
+            asyncio.wait_for(meta["flow"](), timeout=LOGIN_WAIT_TIMEOUT + 120))
         elapsed = time.time() - started
         if self.check_login(platform):
             self._set_state(platform, "success", f"登录成功（{elapsed:.0f}s，浏览器已关闭）")
@@ -244,16 +259,134 @@ class DanmakuLoginService:
         else:
             self._set_state(platform, "failed", "登录未完成（浏览器已关闭）——可重试")
 
-    def _run_flow(self, module_name: str, **kwargs) -> None:
-        """组件 run_login_flow 统一调用（login.waiting_scan/saving 迁移日志）。"""
+    def _run_flow(self, module_name: str, **kwargs):
+        """组件 run_login_flow 统一调用（返回 coro——_process 统一 run_until_complete）。"""
         import importlib
         mod = importlib.import_module(module_name)
         self._set_state(self._state["platform"], "waiting_scan",
                         "请在弹出的浏览器中完成扫码/登录")
-        # 组件函数内部轮询登录标志 cookie（30 行注释见 douyin_login）
-        coro = mod.run_login_flow(**kwargs)
-        # 组件 run_login_flow 内部有登录标志检测循环；超时由组件控制
-        self._loop.run_until_complete(asyncio.wait_for(coro, timeout=LOGIN_WAIT_TIMEOUT))
+        # 组件函数内部有登录标志检测循环；超时由组件/服务层 wait_for 控制
+        return mod.run_login_flow(**kwargs)
+
+    # ---------- 受控平台配置期登录（v0.7.0 全平台覆盖——除美团外） ----------
+
+    #: 受控平台注册表：profile 名与快照路径对齐运行期引擎（controlled_base
+    #: _profile_dir/_login_state_path 与 web/relogin.py PLATFORM_LOGIN_CARRIERS 同源）；
+    #: meituan 按需求不实现。判定名缺省平台（pdd/wxsp——上游待实测校准）走"关窗确认"。
+    _PROFILE_PLATFORMS = {
+        "taobao": ("taobao_profile", "https://login.taobao.com/"),
+        "1688": ("1688_profile", "https://login.1688.com/"),
+        "xiaohongshu": ("xhs_profile", "https://www.xiaohongshu.com/"),
+        "pdd": ("pdd_profile", "https://www.pinduoduo.com/"),
+        "jd": ("jd_profile", "https://passport.jd.com/new/login.aspx"),
+        "wechat_channels": ("wxsp_profile", "https://channels.weixin.qq.com/"),
+    }
+
+    def _run_profile_flow(self, platform: str, profile_name: str, login_url: str):
+        """受控平台配置期登录（返回 coro）：persistent profile + F1 快照自愈。
+
+        判定名命中（taobao/1688/jd/xhs）→ 快照落盘+30s 保窗宽限；判定名缺省
+        （pdd/wxsp——LOGIN_COOKIE_NAMES 无条目，上游待实测）→ 用户关窗即确认，
+        全量 storage_state 落盘（快照格式与运行期一致，判定名校准后自动收敛）。
+        """
+        return self._profile_login_coro(platform, profile_name, login_url)
+
+    async def _profile_login_coro(self, platform: str, profile_name: str,
+                                  login_url: str) -> str:
+        from pathlib import Path
+
+        from danmaku_listener.engines import login_state_store
+        from danmaku_listener.engines.login_gate import LOGIN_COOKIE_NAMES
+        from playwright.async_api import async_playwright
+
+        cd = _cookie_dir()
+        profile = Path(os.path.join(cd, profile_name))
+        profile.mkdir(parents=True, exist_ok=True)
+        state_path = os.path.join(cd, f"{profile_name}_login_state.json")
+        names = tuple(LOGIN_COOKIE_NAMES.get(platform, ()))
+        outcome = "timeout"
+        async with async_playwright() as pw:
+            context = await pw.chromium.launch_persistent_context(
+                str(profile), headless=False,
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/131.0.0.0 Safari/537.36"),
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled",
+                      "--hide-crash-restore-bubble"])
+            try:
+                # F1 快照自愈（profile 丢登录时注入——运行期同语义）
+                await login_state_store.restore_login_state(
+                    context, names=names, path=state_path, label=f"{platform}-config")
+                page = context.pages[0] if context.pages else await context.new_page()
+                self._set_state(platform, "waiting_scan",
+                                f"请在弹出的浏览器中登录 {platform} 账号"
+                                + ("" if names else "（完成后关闭浏览器窗口即可保存）"))
+                try:
+                    await page.goto(login_url, timeout=45000, wait_until="domcontentloaded")
+                except Exception as e:  # noqa: BLE001  网络抖动不阻断（用户可在窗口内手动导航）
+                    logger.debug(f"[danmaku-login-svc] {platform} goto warning: {e}")
+                deadline = time.monotonic() + LOGIN_WAIT_TIMEOUT
+                last_cookies = []
+                while time.monotonic() < deadline:
+                    if self._stop.is_set():
+                        outcome = "stopped"
+                        break
+                    try:
+                        cookies = await context.cookies()
+                        last_cookies = cookies
+                    except Exception:  # noqa: BLE001  窗口被关
+                        cookies = last_cookies
+                    hit = bool(names) and bool(
+                        {c.get("name") for c in cookies if c.get("value")} & set(names))
+                    if hit:
+                        # 登录落地即快照 + 30s 保窗宽限（登录后立即关窗会杀安全验证——
+                        # 虎牙/淘宝/抖音同款缺陷，send_login.py 范式）
+                        await login_state_store.snapshot_login_state(
+                            context, names=names, path=state_path, label=f"{platform}-config")
+                        self._set_state(platform, "saving", "登录态保存中（30s 保窗宽限）")
+                        grace = time.monotonic() + 30.0
+                        while time.monotonic() < grace:
+                            try:
+                                await context.cookies()
+                            except Exception:
+                                break
+                            await asyncio.sleep(2)
+                        outcome = "logged_in"
+                        break
+                    try:
+                        if page.is_closed():
+                            # 关窗确认制：无判定名平台（pdd/wxsp）由用户关窗表示登录完成；
+                            # 有判定名平台关窗时最后已知 cookie 命中同样落盘（gate 同款恢复语义）
+                            if last_cookies:
+                                import json as _json
+                                state = await context.storage_state() if not page.is_closed() else {
+                                    "cookies": last_cookies, "origins": []}
+                                tmp = Path(state_path + ".tmp")
+                                tmp.write_text(_json.dumps(state, ensure_ascii=False),
+                                               encoding="utf-8")
+                                tmp.replace(state_path)
+                                outcome = "logged_in"
+                            else:
+                                outcome = "window_closed"
+                            break
+                    except Exception:  # noqa: BLE001  页面已关（cookies 也失效）
+                        if last_cookies:
+                            import json as _json
+                            Path(state_path).write_text(
+                                _json.dumps({"cookies": last_cookies, "origins": []},
+                                            ensure_ascii=False), encoding="utf-8")
+                            outcome = "logged_in"
+                        else:
+                            outcome = "window_closed"
+                        break
+                    await asyncio.sleep(2)
+            finally:
+                try:
+                    await context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return outcome
         self._set_state(self._state["platform"], "saving", "登录态保存中")
 
 
