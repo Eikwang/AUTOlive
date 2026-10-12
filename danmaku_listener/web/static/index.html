@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DanmakuListener 测试控制台</title>
+    <link rel=",icon" href="data:,">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶部标题栏 -->
+        <header class="header">
+            <h1>DanmakuListener <span class="console-tag">本地测试控制台</span></h1>
+            <div class="connection-status">
+                <span id="status-indicator" class="status-dot disconnected"></span>
+                <span id="status-text">未连接</span>
+                <span id="data-source" class="data-source hidden"></span>
+            </div>
+        </header>
+
+        <!-- 系统告警条（SYSTEM_STATUS 可视化，最新在上，可关闭） -->
+        <div id="alert-bar" class="alert-bar" role="alert" aria-live="assertive"></div>
+
+        <!-- 主体内容 -->
+        <div class="main-content">
+            <!-- 左侧面板：房间管理 + 代理控制 -->
+            <aside class="left-panel">
+                <!-- 房间管理 -->
+                <section class="room-section">
+                    <h2>房间管理</h2>
+                    <div class="room-add-form">
+                        <select id="platform-select" aria-label="选择平台"></select>
+                        <input type="text" id="room-input" placeholder="房间号或直播间链接" aria-label="房间号或直播间链接">
+                        <button id="add-room-btn">添加</button>
+                    </div>
+                    <div id="room-error" class="error-msg hidden"></div>
+                    <ul id="room-list" class="room-list"></ul>
+                    <button id="stop-all-btn" class="btn-danger" disabled>全部暂停</button>
+                </section>
+
+            </aside>
+
+            <!-- 中间主区域：弹幕（左大区）+ 互动/信息（右上下两区） -->
+            <main class="center-area">
+                <section class="danmaku-section">
+                    <div class="danmaku-header">
+                        <div class="danmaku-title-row">
+                            <h2>弹幕</h2>
+                            <button id="scroll-toggle-btn">暂停滚动</button>
+                        </div>
+                        <div class="type-filter" id="type-filter" role="group" aria-label="消息类型过滤"></div>
+                    </div>
+                    <div id="danmaku-container" class="danmaku-container" aria-live="polite" aria-label="实时弹幕流">
+                        <div class="empty-state" id="empty-state">
+                            <p>暂无消息</p>
+                            <p class="empty-hint">在左侧选择平台并输入房间号或直播间链接添加监听</p>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="side-streams">
+                    <section class="stream-section stream-interactive">
+                        <h2>礼物 · 点赞 · 关注</h2>
+                        <div id="interactive-container" class="stream-container" aria-label="互动消息流">
+                            <div class="stream-empty" id="empty-interactive">暂无礼物 / 点赞 / 关注</div>
+                        </div>
+                    </section>
+                    <section class="stream-section stream-info">
+                        <h2>入场 · 房间信息</h2>
+                        <div id="info-container" class="stream-container" aria-label="房间信息流">
+                            <div class="stream-empty" id="empty-info">暂无入场 / 房间信息</div>
+                        </div>
+                    </section>
+                </div>
+            </main>
+
+            <!-- 右侧面板：统计面板 + 关键词屏蔽 -->
+            <aside class="right-panel">
+                <!-- 统计面板 -->
+                <section class="stats-section">
+                    <h2>统计</h2>
+                    <div class="stats-engine">
+                        <span class="stats-label">引擎</span>
+                        <span id="stats-engine" class="stats-value">—</span>
+                    </div>
+                    <div class="stats-rate">
+                        <span class="stats-label">速率</span>
+                        <span id="stats-rate" class="stats-value">0 msg/s</span>
+                    </div>
+                    <div id="stats-types" class="stats-types"></div>
+                    <div id="stats-rooms" class="stats-rooms"></div>
+                </section>
+
+                <!-- 设置面板（S2） -->
+                <section class="settings-section">
+                    <h2>设置 <button id="settings-toggle-btn" class="settings-toggle" aria-expanded="false">展开</button></h2>
+                    <div id="settings-body" class="settings-body hidden">
+                        <div class="settings-group">
+                            <h3>通道</h3>
+                            <label class="setting-row">WS 端口 <input type="number" id="cfg-ws_port"></label>
+                            <label class="setting-row">控制台端口 <input type="number" id="cfg-web_port"></label>
+                        </div>
+                        <div class="settings-group">
+                            <h3>引擎</h3>
+                            <label class="setting-row">最大房间数 <input type="number" id="cfg-max_rooms"></label>
+                            <label class="setting-row">快速重试次数 <input type="number" id="cfg-fast_retry_max"></label>
+                            <label class="setting-row">慢速重试封顶(秒) <input type="number" id="cfg-slow_retry_cap_seconds"></label>
+                            <label class="setting-row">页面会话寿命(秒) <input type="number" id="cfg-session_lifetime_seconds"></label>
+                        </div>
+                        <div class="settings-group">
+                            <h3>缓冲</h3>
+                            <label class="setting-row">环形缓冲容量 <input type="number" id="cfg-bus_ring_capacity"></label>
+                            <label class="setting-row">去重窗口(秒) <input type="number" id="cfg-bus_dedup_window_seconds"></label>
+                        </div>
+                        <div class="settings-actions">
+                            <button id="save-config-btn">保存</button>
+                            <span class="restart-note">保存后需重启服务生效</span>
+                        </div>
+                        <div id="settings-msg" class="settings-msg hidden"></div>
+                    </div>
+                </section>
+
+                <!-- 关键词屏蔽 -->
+                <section class="keyword-section">
+                    <h2>关键词屏蔽</h2>
+                    <div class="keyword-add-form">
+                        <input type="text" id="keyword-input" placeholder="屏蔽关键词" aria-label="屏蔽关键词">
+                        <button id="add-keyword-btn">添加</button>
+                    </div>
+                    <label class="kw-toggle">
+                        <input type="checkbox" id="keyword-toggle" checked> 启用过滤
+                    </label>
+                    <ul id="keyword-list" class="keyword-list"></ul>
+                </section>
+
+                <!-- AutoDanmu 发送（T7 状态行保留；测试表单已由房间行内发送取代——D-H 裁定） -->
+                <section class="keyword-section send-section">
+                    <h2>弹幕发送</h2>
+                    <div id="send-status-line" class="send-status-line">发送：加载中…</div>
+                </section>
+            </aside>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=11"></script>
+</body>
+</html>

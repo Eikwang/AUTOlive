@@ -27,13 +27,15 @@
 | system | BACKPRESSURE | 背压丢弃计数（窗口级） |
 | system | ROUTE_FAILED | 路线失效/降级告警 |
 | system | RECOVERED | 慢速重试后恢复 |
+| command | DANMU_SEND_REQUEST | 发送命令（AUTOlive→引擎，ADR-002 AutoDanmu；request_id 幂等键） |
+| command | DANMU_SEND_RESULT | 发送回执（引擎→AUTOlive；尽力推送+审计权威对账） |
 
 ## 信封字段（Envelope）
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | contract_version | string | ✓ | 固定 "1.0.0"；additive-only 演进 |
-| category | enum | ✓ | business / system——AUTOlive 按此分流 |
+| category | enum | ✓ | business / system / command——AUTOlive 按此分流（command=下行命令，AutoDanmu） |
 | type | string | ✓ | 上表类型值；必须与 payload.type 一致 |
 | platform | string | ✓ | bilibili / douyu / huya / kuaishou / douyin / wechat_channels |
 | room_id | string | ✓ | 平台原生房间 ID |
@@ -53,6 +55,23 @@
 5. **GAP 语义**：断线/停机/丢弃窗口必达可见；按下播（LIVE_STATUS_CHANGE）裁剪，
    下播期间缺失不计 GAP；崩溃恢复的拆分边界为**尽力近似**（approx=true，
    live 状态持久化 + 平台状态 API 校准后仍不确定时置位）。
-6. **契约演进**：v1 内 additive-only（禁删字段/禁改类型/新字段必须 optional）；
+6. **发送命令（AutoDanmu，ADR-002）**：
+   - **请求**：category=command，type=DANMU_SEND_REQUEST，payload={request_id, content}；
+     platform/room_id 在信封——**发送目标限定当前监听中的房间**（未监听回执 ROOM_NOT_LISTENED）。
+   - **回执**：DANMU_SEND_RESULT，payload={request_id, status, reason_code?, fix_hint?,
+     docs_anchor?, sent_at?, content?}。status ∈ sent/dry_run/failed/unknown。
+   - **投递语义**：尽力推送（GAP 同款先例，无 ack/重放）+ 审计日志为权威对账记录
+     （AUTOlive 重连后按 request_id 经 GET /api/send-results?request_id= 对账，R18）。
+   - **幂等**：重复 request_id 直接拒绝并回执上次结果（IDEMPOTENT_REPLAY 或原状态）；
+     幂等索引持久化并随审计重建（重启语义 F9）。
+   - **dry_run 非成功语义**：status=dry_run 表示已记录未实发——AUTOlive 不得视为已实发。
+   - **守卫拒绝不排队**：RATE_LIMITED/DUPLICATE/TOO_LONG/KEYWORD_BLOCKED/AUDIT_UNAVAILABLE
+     一律拒绝回执，AUTOlive 负责退避重试与过期内容丢弃；CIRCUIT_OPEN 与 SENDER_DISABLED
+     分离（前者等人工恢复，后者别重试）。
+   - **unknown 语义**：超时/不可判定；不计熔断失败计数，计入告警。
+7. **自发声回环（F8/R39）**：发送成功的弹幕会回到本系统监听流（DANMU 消息）——AUTOlive
+   在问答循环中必须用自己的发声去重：对账窗口内按 DANMU_SEND_RESULT 的 request_id →
+   sent_at+content 匹配监听流中的同内容消息并跳过，防止自激循环。
+8. **契约演进**：v1 内 additive-only（禁删字段/禁改类型/新字段必须 optional）；
    消费者必须忽略未知字段与未知类型并计数上报（复用坏消息处置语义，
    阈值 → ROUTE_FAILED 由配置定义）。

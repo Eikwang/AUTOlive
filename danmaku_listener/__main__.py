@@ -193,6 +193,13 @@ async def cmd_serve(config: str | None, replay: str | None = None, with_web: boo
     token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
     server = PushServer(host=settings.ws_bind, port=settings.ws_port, token=token)
     await server.start()
+
+    # AutoDanmu 发送管线接线（T5：回执广播到 AUTOlive 8765 通道 + 下行命令解析 F1/E3/F6）
+    from danmaku_listener.senders import wiring as send_wiring
+
+    send_wiring.set_result_broadcaster(server.broadcast)
+    server.set_command_handler(
+        lambda data: send_wiring.get_send_pipeline().handle_wire(data, source="ws"))
     config_source = config_path
 
     if with_web:

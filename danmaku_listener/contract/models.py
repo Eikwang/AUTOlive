@@ -13,10 +13,98 @@ CONTRACT_VERSION = "1.0.0"
 
 
 class Category(str, Enum):
-    """消息大类：业务消息 vs 系统状态消息"""
+    """消息大类：业务消息 / 系统状态消息 / 下行命令消息（AutoDanmu 契约 v1 additive 扩展，ADR-002）"""
 
     BUSINESS = "business"
     SYSTEM = "system"
+    COMMAND = "command"
+
+
+class CommandType(str, Enum):
+    """下行命令类型（AUTOlive→DanmakuListener；AutoDanmu ADR-002/R1）
+
+    DANMU_SEND_REQUEST: 发送请求（AUTOlive→引擎，携带 request_id）
+    DANMU_SEND_RESULT:  发送回执（引擎→AUTOlive，尽力推送+审计权威对账——R11/GAP 先例）
+    """
+
+    DANMU_SEND_REQUEST = "DANMU_SEND_REQUEST"
+    DANMU_SEND_RESULT = "DANMU_SEND_RESULT"
+
+
+class SendStatus(str, Enum):
+    """发送结果状态（回执专用——非成功语义必须可区分，DX-F1/F5/R36）"""
+
+    SENT = "sent"            # 平台已确认发送成功（成功判定标准见 M0 探针产出）
+    DRY_RUN = "dry_run"      # 观察模式：已记录未实发（非成功语义，AUTOlive 不得视为已实发）
+    FAILED = "failed"        # 明确失败（reason_code 三段式必填）
+    UNKNOWN = "unknown"      # 超时/不可判定（不计熔断失败计数，计入告警——R36）
+
+
+class SendRejectReason(str, Enum):
+    """发送拒绝/失败原因码枚举（SCREAMING_SNAKE，沿用 SYSTEM 词表风格——DX-F3/F1/R14 定稿）
+
+    守卫命中=拒绝不排队（DX-F1）：AUTOlive 负责退避重试与过期内容丢弃。
+    """
+
+    SENDER_DISABLED = "SENDER_DISABLED"            # 平台发送开关关闭（人工关闭）
+    SENDER_UNAVAILABLE = "SENDER_UNAVAILABLE"      # 平台未注册 sender
+    ROOM_NOT_LISTENED = "ROOM_NOT_LISTENED"        # 房间未在监听（发送目标限定监听中房间）
+    RATE_LIMITED = "RATE_LIMITED"                  # 限速窗口命中（拒绝不排队）
+    DUPLICATE = "DUPLICATE"                        # 同内容去重窗口命中
+    TOO_LONG = "TOO_LONG"                          # 超过平台长度上限
+    KEYWORD_BLOCKED = "KEYWORD_BLOCKED"            # 关键词过滤命中
+    AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"        # 审计写入失败（实发路径 fail-closed，R25）
+    CIRCUIT_OPEN = "CIRCUIT_OPEN"                  # 熔断态（F3：与 SENDER_DISABLED 分离——等人工恢复）
+    AUTH_UNCONFIGURED = "AUTH_UNCONFIGURED"        # token 未配置（F6：拒绝服务）
+    IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"        # 重复 request_id——非错误，回执上次结果（R18）
+    PLATFORM_REJECTED = "PLATFORM_REJECTED"        # 平台侧明确拒绝（三段式 reason_code 细分）
+    SEND_TIMEOUT = "SEND_TIMEOUT"                  # 发送超时（unknown 语义）
+    ROUTE_UNVERIFIED = "ROUTE_UNVERIFIED"          # 路线未经验证（M2/M3 探针前，R22）
+
+
+class DanmuSendRequestPayload(BaseModel):
+    """DANMU_SEND_REQUEST：发送命令载荷（AUTOlive→引擎）
+
+    request_id 由 AUTOlive 生成并保证唯一；重复 request_id 直接拒绝并回执上次结果（R18 幂等）。
+    """
+
+    type: Literal["DANMU_SEND_REQUEST"] = "DANMU_SEND_REQUEST"
+    request_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)    # 弹幕内容（发送前过滤链处理；空串拒绝）
+
+    @field_validator("content")
+    @classmethod
+    def _reject_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("content must not be blank")
+        return v
+
+
+class DanmuSendResultPayload(BaseModel):
+    """DANMU_SEND_RESULT：发送回执载荷（引擎→AUTOlive）
+
+    - status=dry_run 非成功语义（AUTOlive 不得误判已实发——DX-F1/R11）
+    - status=failed/unknown 时 reason 三段式必填（复用 FailureInfo）
+    - sent_at+content 供 AUTOlive 自发声回环去重（F8/R39）
+    """
+
+    type: Literal["DANMU_SEND_RESULT"] = "DANMU_SEND_RESULT"
+    request_id: str = Field(min_length=1)
+    status: SendStatus
+    reason_code: Optional[str] = None     # SendRejectReason 值或平台细分码（reason 非 None 时必填）
+    fix_hint: Optional[str] = None
+    docs_anchor: Optional[str] = None
+    sent_at: Optional[int] = None         # 平台确认发送时刻（秒级；status=sent 时必填）
+    content: Optional[str] = None         # 实发内容（回环去重用）
+
+    @model_validator(mode="after")
+    def _validate_reason(self) -> "DanmuSendResultPayload":
+        if self.status in (SendStatus.FAILED, SendStatus.UNKNOWN):
+            if not self.reason_code:
+                raise ValueError("failed/unknown requires reason_code")
+        if self.status == SendStatus.SENT and not self.sent_at:
+            raise ValueError("sent requires sent_at")
+        return self
 
 
 class BusinessType(str, Enum):
@@ -318,12 +406,16 @@ Payload = Annotated[
         BackpressurePayload,
         RouteFailedPayload,
         RecoveredPayload,
+        # command（AutoDanmu 契约 v1 additive 扩展，ADR-002）
+        DanmuSendRequestPayload,
+        DanmuSendResultPayload,
     ],
     Field(discriminator="type"),
 ]
 
 _BUSINESS_TYPES = {t.value for t in BusinessType}
 _SYSTEM_TYPES = {t.value for t in SystemType}
+_COMMAND_TYPES = {t.value for t in CommandType}
 
 
 class UnifiedMessage(BaseModel):
@@ -342,6 +434,8 @@ class UnifiedMessage(BaseModel):
             raise ValueError(f"category=business requires business type, got {et!r}")
         if self.envelope.category == Category.SYSTEM and et not in _SYSTEM_TYPES:
             raise ValueError(f"category=system requires system type, got {et!r}")
+        if self.envelope.category == Category.COMMAND and et not in _COMMAND_TYPES:
+            raise ValueError(f"category=command requires command type, got {et!r}")
         if et != self.payload.type:
             raise ValueError(f"envelope.type {et!r} != payload.type {self.payload.type!r}")
         if self.envelope.category == Category.SYSTEM and et in (

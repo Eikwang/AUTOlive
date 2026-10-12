@@ -8,7 +8,7 @@
 
 from typing import Any
 
-__version__ = "0.4.0"
+__version__ = "0.7.0"
 
 __all__ = ["DanmakuListener", "DanmakuMessage", "GiftInfo", "MetricsCollector", "__version__"]
 

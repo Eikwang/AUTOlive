@@ -113,6 +113,74 @@ def parse_base64_mixed_message(base64_data: str) -> list:
 
 
 class Live1688Engine(ControlledPageEngine):
+    """1688 直播受控页面引擎（AutoDanmu send 钩子同 E5 纪律——选择器待 M0 校准）"""
+
+    # 1688 实证（2026-10-07）：fill 的 DOM 值不进框架 state、发送 div 点击不可靠——
+    # 覆写钩子用唯一可靠配方 = click 聚焦 + 逐键输入 + Enter 提交
+    SEND_INPUT_SELECTORS = ["input[placeholder*=说]", "input.input-box"]
+
+    async def send_danmu(self, room_id: str, content: str):
+        from danmaku_listener.contract.models import SendRejectReason, SendStatus
+        from danmaku_listener.senders.base import SendResult
+
+        try:
+            await asyncio.wait_for(self._profile_lock.acquire(), timeout=3.0)
+        except asyncio.TimeoutError:
+            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                              fix_hint="profile 锁被监听操作占用——稍后重试（busy）")
+        try:
+            # F-A：复用常驻监听页（同浏览器同会话）——禁止对同 profile 另开第二个
+            # persistent context（双实例争抢 cookie 库 → 会话损坏 NOT_LOGIN + 监听页顶死，
+            # 2026-10-08 验收实证：sent 假阳性 + 监听静默）
+            page = self._live_pages.get(room_id)
+            if page is None or page.is_closed():
+                return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                  fix_hint="1688 监听页未就绪（可能已退出）——停止房间后重新添加以重建监听页")
+            # F-B：登录态前置检查——NOT_LOGIN 会话的提交被平台静默吞（本地假回显），
+            # 禁止继续发送（2026-10-08 实证：loginId=NOT_LOGIN 时 input 清空≠受理）
+            cookies = await page.context.cookies()
+            if not self._has_login_cookie(cookies):
+                return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                  fix_hint="1688 会话未登录——停止房间后重新添加以触发登录窗口")
+            input_sel = None
+            for sel in self.SEND_INPUT_SELECTORS:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        input_sel = sel; break
+                except Exception:  # noqa: BLE001
+                    continue
+            if input_sel is None:
+                return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                  fix_hint="未发现聊天输入框（页面结构/未登录）——重跑 M0 探针")
+            loc = page.locator(input_sel).first
+            await loc.click()
+            await loc.press_sequentially(content, delay=40)
+            await loc.press("Enter")
+            echo = time.monotonic() + 12  # 对齐 M0 探针回显窗（原 8s 不足）
+            while time.monotonic() < echo:
+                if content in await page.content():
+                    return SendResult(SendStatus.SENT, sent_at=int(time.time()))
+                await asyncio.sleep(1.5)
+            # 判据降级（评审 F-B）：input 清空单独不再判 SENT——今日实证 NOT_LOGIN
+            # 会话下同样清空但服务端静默吞。无 DOM 回显 = 送达未证实（R36 unknown 语义）
+            iv = (await loc.input_value()).strip()
+            if not iv:
+                return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
+                                  detail="input cleared 但无 DOM 回显——送达未证实",
+                                  fix_hint="请到直播间目视确认弹幕是否上屏；未上屏则检查登录态/发言权限")
+            return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
+                              detail="无回显且 input 未清空")
+        except Exception as e:  # noqa: BLE001  E5 隔离
+            logger.warning(f"[1688] send_danmu error: {type(e).__name__}: {str(e)[:100]}")
+            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                              detail=f"{type(e).__name__}: {str(e)[:100]}")
+        finally:
+            self._profile_lock.release()
+
+    def _send_room_url(self, room_id: str) -> str:
+        return LIVE_URL_TEMPLATE.format(feed_id=room_id)
+
     """1688 直播弹幕引擎（受控页面响应拦截，独立平台）"""
 
     platform = "1688"
@@ -127,6 +195,10 @@ class Live1688Engine(ControlledPageEngine):
         self._unmapped_pull: Dict[str, dict] = {}  # pull 未映射聚合（60s 汇总降噪）
         self._last_unmapped_flush = time.monotonic()
         self._last_room_stats: Dict[str, tuple] = {}  # ROOM_STATS 值去重（值变化才发）
+        # 常驻监听页登记（2026-10-08 评审 F-A：发送复用监听 context 的页面——
+        # 禁止对同 profile 另开第二个 persistent context：双实例争抢 cookie 库
+        # 致会话损坏（NOT_LOGIN）+监听页被顶死，2026-10-08 验收实证）
+        self._live_pages: dict = {}
 
     def validate_room_id(self, room_id: str) -> None:
         """add_room 预校验：feedId 可解析"""
@@ -227,6 +299,7 @@ class Live1688Engine(ControlledPageEngine):
                     logger.debug(f"[1688] room {room_id} goto warning: {e}")
 
                 logger.info(f"[1688] room {room_id} live page ready")
+                self._live_pages[room_id] = page  # F-A：登记常驻页供发送复用
 
                 # 登录闭环：聊天弹幕只推给登录会话（2026-09-29 实测）——
                 # 未登录（无 unb cookie）且当前为无头时改可见窗口等用户登录
@@ -260,6 +333,7 @@ class Live1688Engine(ControlledPageEngine):
                     except (asyncio.CancelledError, Exception):
                         pass
             finally:
+                self._live_pages.pop(room_id, None)  # F-A：会话结束注销常驻页
                 await context.close()
 
     async def _poll_dom_danmu(self, room_id: str, page) -> None:

@@ -67,6 +67,86 @@ class NeedLoginVisible(Exception):
 
 
 class WechatChannelsEngine(ControlledPageEngine):
+    """视频号受控后台引擎（助手发言身份；AutoDanmu send 钩子同 E5 纪律——选择器待 M0 校准）"""
+
+    SEND_INPUT_SELECTORS = ["textarea", "div[contenteditable=true]", "input[placeholder*=说]"]
+    SEND_BUTTON_SELECTORS = ['button:has-text("发送")', 'text=发送']
+
+    def _send_room_url(self, room_id: str) -> str:
+        return BACKEND_URL
+
+    async def _send_navigate(self, page, room_id: str) -> None:
+        """后台型导航：直播图标→直播管理→进入直播间（复用监听侧几何路径助手）"""
+        await self._navigate_to_live_room(room_id, page)
+
+    _held_pages: Dict[str, Any] = {}  # room_id → 常驻后台页（单会话长跑；发送复用同页，E5）
+
+    async def send_danmu(self, room_id: str, content: str):
+        """AutoDanmu send 钩子（E5 单会话长跑变体）：直接在常驻后台页上发言
+
+        助手发言=官方功能，同页操作零 profile 冲突；页面未就绪/未开播 → 拒绝。
+        """
+        from danmaku_listener.contract.models import SendRejectReason, SendStatus
+        from danmaku_listener.senders.base import SendResult
+
+        page = self._held_pages.get(room_id)
+        if page is None or page.is_closed():
+            return SendResult(SendStatus.FAILED, SendRejectReason.ROOM_NOT_LISTENED.value,
+                              fix_hint="视频号后台页未就绪——先启动该房间监听")
+        # 助手发言输入框在评论面板底部——先滚到底（1280x800 视口截断实证）
+        try:
+            await page.keyboard.press("End")
+            await asyncio.sleep(1)
+            await page.mouse.wheel(0, 2000)
+            await asyncio.sleep(1)
+        except Exception:  # noqa: BLE001
+            pass
+        # 助手发言控件在 shadow DOM 内——get_by_placeholder 自动穿透（dump 实证
+        # querySelectorAll 主 frame 零命中而截图有框）
+        loc = page.get_by_placeholder("助手发言")
+        try:
+            if await loc.count() == 0:
+                loc = page.get_by_placeholder("说点什么")
+        except Exception:  # noqa: BLE001
+            pass
+        if await loc.count() == 0:
+            try:
+                await page.screenshot(path="persistence_data/wxsp-send-blocked.png")
+            except Exception:  # noqa: BLE001
+                pass
+            # 诊断：JS 枚举全部输入类元素（含属性与坐标）——选择器校准输入
+            try:
+                dump = await page.evaluate(
+                    "() => Array.from(document.querySelectorAll("
+                    "'input, textarea, div[contenteditable], [contenteditable], "
+                    "[class*=input], [class*=Input], [placeholder]')).map(el => ({"
+                    "tag: el.tagName.toLowerCase(), ph: el.getAttribute('placeholder') || '', "
+                    "cls: (el.className || '').toString().slice(0, 60), "
+                    "ce: el.getAttribute('contenteditable'), "
+                    "rect: (r => [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)])(el.getBoundingClientRect())}))")
+                logger.info(f"[wxsp] input candidates dump: {json.dumps(dump, ensure_ascii=False)[:800]}")
+            except Exception as e:  # noqa: BLE001
+                logger.info(f"[wxsp] input dump failed: {e}")
+            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                              fix_hint="未发现助手发言输入框（未开播/面板未展开）——诊断截图+dump 已存")
+        await loc.click()
+        await loc.press_sequentially(content, delay=30)
+        await loc.press("Enter")
+        await asyncio.sleep(3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            # 评论区在 shadow DOM 内——get_by_text 自动穿透（page.content() 不行，
+            # 2026-10-07 实测三发全部成功但 content 检查全盲）
+            if content in await page.content() or await page.get_by_text(content).count() > 0:
+                return SendResult(SendStatus.SENT, sent_at=int(time.time()))
+            await asyncio.sleep(1.5)
+        try:
+            await page.screenshot(path="persistence_data/wxsp-send-unknown.png")
+        except Exception:  # noqa: BLE001
+            pass
+        return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
+                          detail="无回显（虚拟列表/面板折叠）——诊断截图已存")
+
     """视频号受控后台引擎（wxlivespy 同构解析 + 登录窗口闭环）"""
 
     platform = "wechat_channels"
@@ -188,6 +268,7 @@ class WechatChannelsEngine(ControlledPageEngine):
                     raise NeedLoginVisible()
                 logger.info(f"[wxsp] room {room_id} backend page ready "
                             f"(url={page.url[:70]})")
+                self._held_pages[room_id] = page  # AutoDanmu：发送复用同页（E5）
 
                 # 导航：直播 → 直播管理 → 进入直播间（2026-09-30 用户实测
                 # 路径——live/msg 轮询只在进入直播间中控页后启动）
@@ -247,6 +328,7 @@ class WechatChannelsEngine(ControlledPageEngine):
                 else:
                     logger.warning(f"[wxsp] room {room_id} scan login timeout")
             finally:
+                self._held_pages.pop(room_id, None)
                 await context.close()
 
     @staticmethod

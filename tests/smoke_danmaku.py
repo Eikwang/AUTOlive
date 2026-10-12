@@ -10,6 +10,7 @@ stub my_handle 收到映射消息 → 优雅关停（Eng T4 顺序断言）。
     python -X utf8 tests/smoke_danmaku.py
 退出码 0 = 冒烟通过。各步耗时输出（TTHW 可见——DX 三阶段上手路径阶段 1，目标 <2 分钟）。
 """
+import asyncio
 import json
 import os
 import sys
@@ -147,6 +148,77 @@ def main() -> int:
     total = sum(received.values())
     passed = total >= 3 and status.get("queue_size", 1) == 0
     tthw = time.time() - t0
+
+    # ---------- R7-5 发送冒烟（v0.7.0 合并）：自动化段仅 dry_run 回执+审计落盘 ----------
+    # 无浏览器/登录态副作用：独立管线实例 + 临时审计文件（不污染 persistence_data/send_audit.jsonl）
+    dryrun_ok = False
+    try:
+        import tempfile
+        from danmaku_listener.config.settings import Settings
+        from danmaku_listener.senders.audit import SendAuditLog
+        from danmaku_listener.senders.guard import SendGuard
+        from danmaku_listener.senders.pipeline import DanmuCommandPipeline
+        from danmaku_listener.senders.registry import SenderRegistry
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            audit = SendAuditLog(os.path.join(tmpd, "audit.jsonl"), os.path.join(tmpd, "idx.json"))
+            captured = []
+
+            async def _cap(wire):
+                captured.append(wire)
+
+            pipe = DanmuCommandPipeline(
+                SenderRegistry(room_checker=lambda p, r: True),
+                SendGuard(Settings(send_dry_run=True, send_enabled_platforms="bilibili")),
+                audit, broadcaster=_cap, auth_configured=True)
+            wire = asyncio.run(pipe.handle_request(
+                "bilibili", "23058", "smoke-dryrun-001", "冒烟测试", source="rest"))
+            # 线格式断言经真实 json 序列化（SendStatus 为 str 枚举，线格式为小写字符串）
+            wire_json = json.loads(json.dumps(wire, ensure_ascii=False))
+            st = str((wire_json.get("payload") or {}).get("status", ""))
+            with open(os.path.join(tmpd, "audit.jsonl"), encoding="utf-8") as f:
+                audit_lines = [json.loads(x) for x in f if x.strip()]
+            kinds = [x.get("kind") for x in audit_lines]
+            # 断言：回执小写 dry_run + 尽力广播 1 次 + intent/result 审计行均落盘且 dry_run 字段区分
+            dryrun_ok = (st == "dry_run" and st.islower() and len(captured) == 1
+                         and "intent" in kinds and "result" in kinds
+                         and all(x.get("dry_run") for x in audit_lines))
+            step(f"发送冒烟(dry_run): 回执 status={st} 广播={len(captured)} 审计行={kinds}")
+    except Exception as e:  # noqa: BLE001  发送冒烟失败不掩盖既有断言，单列判定
+        step(f"发送冒烟异常: {type(e).__name__}: {str(e)[:120]}")
+    if not dryrun_ok:
+        passed = False
+
+    # 门控实发段（AUTOLIVE_SMOKE_REAL_SEND=1 才执行——无真 sender 注册，验证实发路径走通至分发点）
+    if os.environ.get("AUTOLIVE_SMOKE_REAL_SEND") == "1":
+        try:
+            import tempfile
+            from danmaku_listener.config.settings import Settings
+            from danmaku_listener.senders.audit import SendAuditLog
+            from danmaku_listener.senders.guard import SendGuard
+            from danmaku_listener.senders.pipeline import DanmuCommandPipeline
+            from danmaku_listener.senders.registry import SenderRegistry
+
+            with tempfile.TemporaryDirectory() as tmpd2:
+                audit2 = SendAuditLog(os.path.join(tmpd2, "audit.jsonl"), os.path.join(tmpd2, "idx.json"))
+                pipe2 = DanmuCommandPipeline(
+                    SenderRegistry(room_checker=lambda p, r: True),
+                    SendGuard(Settings(send_dry_run=False, send_enabled_platforms="bilibili")),
+                    audit2, auth_configured=True)
+                wire2 = asyncio.run(pipe2.handle_request(
+                    "bilibili", "23058", "smoke-realsend-001", "冒烟实发", source="rest"))
+                wire2_json = json.loads(json.dumps(wire2, ensure_ascii=False))
+                st2 = str((wire2_json.get("payload") or {}).get("status", ""))
+                rc2 = str((wire2_json.get("payload") or {}).get("reason_code", ""))
+                ok2 = st2 == "failed" and rc2 == "SENDER_UNAVAILABLE"
+                step(f"门控实发段: status={st2}（SENDER_UNAVAILABLE=守卫链+审计+回执形态走通，未触浏览器）")
+                if not ok2:
+                    passed = False
+        except Exception as e:  # noqa: BLE001
+            step(f"门控实发段异常: {type(e).__name__}: {str(e)[:120]}")
+            passed = False
+    else:
+        step("实发段跳过（AUTOLIVE_SMOKE_REAL_SEND 未设——实发验证保留在 R5 第 6 项人工清单）")
 
     # 优雅关停（Eng T4 顺序：stop_all → 停循环 → join）
     stop_t = time.time()

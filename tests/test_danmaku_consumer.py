@@ -369,5 +369,86 @@ class TestNotifierMapping(unittest.TestCase):
             self.assertIsNone(n.get(kind))
 
 
+class TestR39SelfEchoDedup(unittest.TestCase):
+    """R39 自联回环去重（v0.7.0 合并 ENG-M4/M5）：sent_at+content 登记、≤10s 窗口收紧、LRU 有界、异常降级。"""
+
+    import time as _time
+
+    def _svc(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._queue = dc._BoundedDropQueue(100)
+        svc._evt_lock = __import__("threading").Lock()
+        from collections import deque
+        svc.events = deque(maxlen=200)
+        svc._event_seq = 0
+        svc._seen_event_keys = OrderedDict()
+        svc.login_queue = []
+        svc.login_active = None
+        svc._unknown_type_count = 0
+        svc._invalid_msg_count = 0
+        svc._msg_today_count = 0
+        svc._last_msg_ts = 0.0
+        svc._last_heartbeat = 0.0
+        svc._no_active_warned = False
+        svc._self_send = OrderedDict()
+        svc._self_echo_dropped = 0
+        svc._cfg = lambda: {"rooms": [{"platform": "bilibili", "room_id": "23058",
+                                       "enabled": True, "active": True}]}
+        return svc
+
+    @staticmethod
+    def _result_wire(sent_at, content, status="sent"):
+        """DANMU_SEND_RESULT 尽力推送 wire（平铺形态，_normalize_wire 可解析）。"""
+        return {"contract_version": "1.0.0", "category": "command", "type": "DANMU_SEND_RESULT",
+                "platform": "bilibili", "room_id": "23058", "seq": 1, "timestamp": sent_at,
+                "engine": "send:pipeline",
+                "payload": {"type": "DANMU_SEND_RESULT", "request_id": "r1", "status": status,
+                            "sent_at": sent_at, "content": content}}
+
+    # 断言 1（ENG-M5）：同键二次派发被吞——回执登记后 ≤10s 内同 content DANMU 不入队
+    def test_same_key_second_dispatch_swallowed(self):
+        svc = self._svc()
+        now = int(self._time.time())
+        svc._on_wire(self._result_wire(now, "回环内容"))
+        svc._on_wire(_msg(payload={"type": "DANMU", "user_name": "主播", "content": "回环内容"}))
+        self.assertEqual(svc._queue.qsize(), 0)
+        self.assertEqual(svc._self_echo_dropped, 1)
+
+    # 断言 2（ENG-M5）：不同 sent_at 放行——旧 sent_at 窗口外放行；重登记新 sent_at 生效（同 content 覆盖）
+    def test_different_sent_at_passes(self):
+        svc = self._svc()
+        svc._record_self_send({"sent_at": int(self._time.time()) - 60, "content": "x"})
+        self.assertFalse(svc._is_self_echo("x"))     # 旧 sent_at 窗口外 → 放行
+        svc._record_self_send({"sent_at": int(self._time.time()), "content": "x"})  # 重发登记
+        self.assertTrue(svc._is_self_echo("x"))      # 新 sent_at 生效，不被旧值卡死
+
+    # 断言 3（ENG-M5）：窗口外放行——|now-sent_at| > 10s 不判回环，弹幕正常入队
+    def test_outside_window_passes(self):
+        svc = self._svc()
+        stale = int(self._time.time()) - (dc.SELF_SEND_WINDOW_S + 2)
+        svc._on_wire(self._result_wire(stale, "y"))
+        svc._on_wire(_msg(payload={"type": "DANMU", "user_name": "u", "content": "y"}))
+        self.assertEqual(svc._queue.qsize(), 1)
+        self.assertEqual(svc._self_echo_dropped, 0)
+
+    # 断言 4（ENG-M5）：LRU 容量有界——超 SELF_SEND_LRU_MAX 淘汰最旧键
+    def test_lru_capacity_bounded(self):
+        svc = self._svc()
+        now = int(self._time.time())
+        for i in range(dc.SELF_SEND_LRU_MAX + 10):
+            svc._record_self_send({"sent_at": now, "content": f"c{i}"})
+        self.assertEqual(len(svc._self_send), dc.SELF_SEND_LRU_MAX)
+        self.assertNotIn("c0", svc._self_send)       # 最旧被淘汰
+        self.assertIn(f"c{dc.SELF_SEND_LRU_MAX + 9}", svc._self_send)
+
+    # 附加：dry_run 回执不登记（仅 status=sent）；去重内部异常降级放行（监听主链不断）
+    def test_dry_run_not_recorded_and_degraded(self):
+        svc = self._svc()
+        svc._on_wire(self._result_wire(int(self._time.time()), "z", status="dry_run"))
+        self.assertEqual(len(svc._self_send), 0)
+        svc._self_send = None                        # 模拟内部状态异常
+        self.assertFalse(svc._is_self_echo("z"))     # 降级放行
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -67,6 +67,10 @@ LOGIN_WAIT_TIMEOUT = 300.0
 LOGIN_BUDGET = 2
 #: 登录窗口 cookie 轮询间隔
 LOGIN_POLL_INTERVAL = 2.0
+#: 登录成功后保窗宽限（2026-10-08 验收实证：登录 cookie 落地后淘宝常弹安全滑块，
+#: 立即关窗会杀掉验证——profile 拿不到通过状态，后续瞬态发送页被 x5sec 拦。
+#: 保窗 30s 供人工完成滑块；用户可手动关窗提前结束）
+LOGIN_POST_GRACE_S = 30.0
 
 
 def _has_login_cookie(cookies) -> bool:
@@ -130,6 +134,160 @@ def rebuild_failures_degraded(failures: int) -> bool:
 
 
 class TaobaoWebProtocolEngine(BaseEngine):
+    """淘宝直播 mtop 双通道受控页面引擎
+
+    AutoDanmu send 钩子：E5 经引擎实例瞬态 context（per-profile Lock 串行）；
+    选择器为候选集，M0 探针（tools/send_probes/）校准后修订。
+    """
+
+    # M0 发现模式实证（2026-10-07 dom_discover：聊天输入=右下 textarea，发送=BtnSend div
+    # 无文本非 button——搜索框 ph='点击更换，喜欢就搜吧' 是误选陷阱，置于候选尾位防回退）
+    SEND_INPUT_SELECTORS = ["textarea[class*=chatInputCenterTextarea]",
+                            "textarea[placeholder*=说点什么]", "textarea"]
+    SEND_BUTTON_SELECTORS = ["div[class*=chatInputCenterBtnSend]",
+                             "div[class*=chatInputSendIcon]",
+                             'button:has-text("发送")', 'text=发送']
+
+    async def send_danmu(self, room_id: str, content: str):
+        """AutoDanmu send 钩子（E5）：引擎 profile 锁内瞬态 context → 直播间 DOM 发送
+
+        .. deprecated:: T2（2026-10-07）——TaobaoMtopSender（mtop page-eval）已接管淘宝发送。
+        本 DOM 钩子 deprecated 保留：T4 兜底参照+回退路径（wiring 回切步骤见计划 T4）。
+        T1 判定：页面 mtop 库调用（page-eval）为唯一可行 API 形态（纯 HTTP 重放被
+        RGV587 拒）；DOM 路线的滑块风控问题（headless 3/5 触发）保留原状。
+
+        与凭证提取/登录窗口共用 _profile_lock（persistent context 单实例串行）；
+        acquire 带超时（S4-1，超时回执 busy）；异常不出引擎边界（E5 隔离）。
+        """
+        from danmaku_listener.contract.models import SendRejectReason, SendStatus
+        from danmaku_listener.senders.base import SendResult
+
+        try:
+            await asyncio.wait_for(self._profile_lock.acquire(), timeout=3.0)
+        except asyncio.TimeoutError:
+            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                              fix_hint="profile 锁被监听操作占用——稍后重试（busy）")
+        try:
+            from playwright.async_api import async_playwright
+
+            live_id = self._extract_live_id(room_id)
+            live_url = self.LIVE_URL_TEMPLATE.format(live_id=live_id)
+            async with async_playwright() as pw:
+                context = await pw.chromium.launch_persistent_context(
+                    self._profile_dir(),
+                    headless=True,
+                    user_agent=UA,
+                    viewport={"width": 1280, "height": 800},
+                    args=["--disable-blink-features=AutomationControlled",
+                          "--disable-setuid-sandbox",
+                          "--hide-crash-restore-bubble"],
+                )
+                try:
+                    await context.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined});")
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    try:
+                        await page.goto(live_url, timeout=45000, wait_until="domcontentloaded")
+                    except Exception as e:  # noqa: BLE001
+                        return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
+                                          detail=f"goto: {type(e).__name__}")
+                    await asyncio.sleep(3)
+                    input_sel, btn_sel = None, None
+                    for sel in self.SEND_INPUT_SELECTORS:
+                        try:
+                            loc = page.locator(sel).first
+                            if await loc.count() > 0 and await loc.is_visible():
+                                input_sel = sel; break
+                        except Exception:  # noqa: BLE001
+                            continue
+                    if input_sel is None:
+                        return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                          fix_hint="未发现发送输入框（页面结构/未登录）——重跑 M0 探针校准选择器")
+                    for sel in self.SEND_BUTTON_SELECTORS:
+                        try:
+                            if await page.locator(sel).first.count() > 0:
+                                btn_sel = sel; break
+                        except Exception:  # noqa: BLE001
+                            continue
+                    async def _fill_and_send() -> None:
+                        await page.locator(input_sel).first.fill(content)
+                        clicked = False
+                        if btn_sel:
+                            try:
+                                # React 受控组件灰态/遮挡 → force click + 短超时（Enter 兜底）
+                                await page.locator(btn_sel).first.click(timeout=5000, force=True)
+                                clicked = True
+                            except Exception as e:  # noqa: BLE001
+                                logger.debug(f"[taobao] send click fallback: {e}")
+                        if not clicked:
+                            await page.locator(input_sel).first.press("Enter")
+
+                    async def _slider_blocked() -> bool:
+                        # noCaptcha 惯例在 iframe 内——page.locator 不穿透，须遍历 frames
+                        for frame in page.frames:
+                            for sel in ("text=拖动下方滑块", "text=完成验证",
+                                        "text=请按住滑块", "text=安全验证",
+                                        ".nc-container", "[class*=nc_wrapper]"):
+                                try:
+                                    if await frame.locator(sel).first.count() > 0:
+                                        return True
+                                except Exception:  # noqa: BLE001
+                                    continue
+                        return False
+
+                    await _fill_and_send()
+                    await asyncio.sleep(2)
+                    # R17 风控信号：滑块验证 → 单次自动滑动（登录 spike 同款助手）→ 重发一次
+                    if await _slider_blocked():
+                        logger.warning(f"[taobao] send slider captcha — auto-slide once")
+                        slid = await self._try_auto_slide(page)
+                        await asyncio.sleep(2)
+                        await _fill_and_send()  # 滑块吞掉了第一次发送——重填重发
+                        await asyncio.sleep(2)
+                        if await _slider_blocked():
+                            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                              fix_hint="风控滑块拦截（自动滑动未通过）——降低发送频率，稍后重试",
+                                              detail=f"auto_slide={slid}")
+                    echo_deadline = time.monotonic() + 8  # 1688 实证：聊天列表渲染延迟可达数秒
+                    sent_echo = False
+                    while time.monotonic() < echo_deadline:
+                        if content in await page.content():
+                            sent_echo = True; break
+                        await asyncio.sleep(1.5)
+                    if sent_echo:
+                        return SendResult(SendStatus.SENT, sent_at=int(time.time()))
+                    for sel in ("text=禁言", "text=验证码", "text=操作过于频繁"):
+                        try:
+                            if await page.locator(sel).first.count() > 0 and await page.locator(sel).first.is_visible():
+                                return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                                                  fix_hint=f"平台风控信号：{sel}", detail=sel)
+                        except Exception:  # noqa: BLE001
+                            continue
+                    try:
+                        from pathlib import Path as _P
+                        _shot = _P("persistence_data/taobao-send-unknown.png")
+                        await page.screenshot(path=str(_shot))
+                        logger.info(f"[taobao] unknown-state screenshot: {_shot}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
+                                      detail="无回显无显式错误（虚拟列表/慢渲染）")
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as e:  # noqa: BLE001  E5 隔离
+            logger.warning(f"[taobao] send_danmu error: {type(e).__name__}: {str(e)[:100]}")
+            return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
+                              detail=f"{type(e).__name__}: {str(e)[:100]}")
+        finally:
+            self._profile_lock.release()
+
+    def _send_room_url(self, room_id: str) -> str:
+        return self.LIVE_URL_TEMPLATE.format(live_id=room_id)
+
     """淘宝直播 mtop 双通道引擎（每平台一实例、每房间独立任务）"""
 
     platform = "taobao"
@@ -431,6 +589,24 @@ class TaobaoWebProtocolEngine(BaseEngine):
                             logger.info(
                                 f"[taobao] room {room_id} login ok: new_cookies={new_names} "
                                 f"unb_changed=True unb_mask={_mask_cookie((unb or {}).get('value', ''))}")
+                            # 登录后保窗宽限（2026-10-08 验收用户实证：登录成功即关窗
+                            # 会杀掉紧随的安全滑块——profile 缺滑块通过状态，后续
+                            # 发送被 x5sec 拦）。保窗 LOGIN_POST_GRACE_S 供人工完成；
+                            # 用户手动关窗立即提前结束（登录态已入 profile，仍算成功）
+                            grace_deadline = clock() + LOGIN_POST_GRACE_S
+                            while clock() < grace_deadline:
+                                if self._stop_flags.get(room_id):  # Eng F3
+                                    logger.info(f"[taobao] room {room_id} login grace stopped by user")
+                                    return "stopped"
+                                try:
+                                    await _cookies()
+                                except Exception as e:
+                                    logger.info(f"[taobao] room {room_id} post-login window closed "
+                                                f"({type(e).__name__})——滑块宽限提前结束，登录态已入 profile")
+                                    return "logged_in"
+                                await sleep_fn(poll_interval)
+                            logger.info(f"[taobao] room {room_id} login grace ended "
+                                        f"({LOGIN_POST_GRACE_S:.0f}s)——窗口关闭")
                             return "logged_in"
                         await sleep_fn(poll_interval)
                     logger.info(f"[taobao] room {room_id} login wait timeout "

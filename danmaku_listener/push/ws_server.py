@@ -9,6 +9,7 @@
 import asyncio
 import hmac
 import json
+import time
 from pathlib import Path
 from typing import Optional, Set
 
@@ -44,6 +45,8 @@ class PushServer:
         self.port = port
         self._token = token
         self._clients: Set = set()
+        self._command_handler = None   # AutoDanmu：发送命令处理器（wiring 注入）
+        self._command_errors = 0       # E3：命令处理异常计数（观测）
         self._app = web.Application()
         self._app.router.add_get("/ws", self._handler)
         self._runner: Optional[web.AppRunner] = None
@@ -95,13 +98,54 @@ class PushServer:
         self._clients.add(ws)
         logger.info(f"consumer connected ({len(self._clients)} online)")
         try:
-            async for _ in ws:
-                # v1：消费端→服务端的消息（如控制命令）未定义；读到即忽略
-                pass
+            async for msg in ws:
+                # AutoDanmu 下行命令（E3：per-message 异常隔离——单条畸形消息不炸连接循环）
+                if msg.type == WSMsgType.TEXT and msg.data:
+                    try:
+                        await self._handle_incoming(msg.data)
+                    except Exception as e:  # noqa: BLE001
+                        self._command_errors += 1
+                        logger.warning(f"[ws] command handling error (isolated, "
+                                       f"total={self._command_errors}): {type(e).__name__}: {e}")
         finally:
             self._clients.discard(ws)
             logger.info(f"consumer disconnected ({len(self._clients)} online)")
         return ws
+
+    async def _handle_incoming(self, text: str) -> None:
+        """消费端→服务端消息解析（ws_server.py:99 预留挂点——AutoDanmu R3 落地）
+
+        F6：token 未配置=拒绝服务（AUTH_UNCONFIGURED 回执）——回环边界不因无鉴权开放发送。
+        """
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.debug("[ws] non-JSON incoming message ignored")
+            return
+        if not isinstance(data, dict):
+            return
+        if data.get("category") != "command":
+            return  # 非 command 消息忽略（v1 语义不变）
+        if self._command_handler is None:
+            return
+        if not self._token:
+            # F6：无 token 连接（127.0.0.1 边界）不得触达发送管线
+            await self.broadcast({
+                "category": "command", "type": "DANMU_SEND_RESULT",
+                "platform": data.get("platform", "unknown"),
+                "room_id": data.get("room_id", "?"), "seq": 0,
+                "timestamp": int(time.time()), "engine": "send:pipeline",
+                "payload": {"type": "DANMU_SEND_RESULT",
+                            "request_id": str((data.get("payload") or {}).get("request_id", "?")),
+                            "status": "failed", "reason_code": "AUTH_UNCONFIGURED",
+                            "fix_hint": "配置 ws_token_file 或 DANMAKU_TOKEN 后重启"},
+            })
+            return
+        await self._command_handler(data)
+
+    def set_command_handler(self, handler) -> None:
+        """注入发送命令处理器（AutoDanmu T5——管线单例 handle_wire）"""
+        self._command_handler = handler
 
 
 async def _selftest() -> None:  # pragma: no cover

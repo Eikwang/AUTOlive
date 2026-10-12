@@ -113,3 +113,28 @@ async def run_login_flow(
             return {"status": "ok", "cookies": cookie_dict}
         finally:
             await browser.close()
+
+
+# ---- CLI 入口（T6/DX-D1 凭证生成入口——发送侧 storage_state 从零配置闭环） ----
+
+if __name__ == "__main__":
+    import argparse
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        description="快手 storage_state 登录（cookie/kuaishou_storage_state.json——发送 sender 凭证）")
+    parser.add_argument("room_id", nargs="?", default="",
+                        help="直播间号（可选——打开对应页面以弹登录框）")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                        help=f"登录等待超时（秒，默认 {DEFAULT_TIMEOUT}）")
+    args = parser.parse_args()
+
+    async def _cli_login() -> None:
+        result = await run_login_flow(
+            room_id=args.room_id, headless=False, timeout=args.timeout,
+            on_status=lambda s: print(f"[status] {s}"))
+        print(f"[result] {_json.dumps(result, ensure_ascii=False)[:200]}")
+        if result.get("status") != "ok":
+            raise SystemExit(1)
+
+    asyncio.run(_cli_login())

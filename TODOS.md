@@ -87,3 +87,11 @@
 2. **S9 商用合规与隔离形态重评**（P1, M）— 商用签约前置：① 重新评估进程内隔离形态（引擎硬崩溃会带走数字人——回退方案 B：修复 serve 接线的托管子进程，见整合计划第 3 节 A/B/C 决策记录）；② 专用监听账号体系（严禁客户主账号）；③ web_console 无鉴权面复核。个人使用阶段不受阻。
 3. **edtalk_realtime 配置加载失败（既有问题，2026-10-06 基线对照确认）**——通用配置页 "加载配置失败: Invalid value: edtalk_realtime"：某 select 的 value 不在 options 集（EDTalk 整合遗留）；与弹幕整合无关，独立修复。
 4. **NiceGUI 3.16 "消息超过 WebSocket 大小限制"断联（既有问题，2026-10-06 基线对照确认）**——页面加载/运行中出现 socket.io 消息超限（>1MB）致前端"连接丢失"；与 NiceGUI 3.x script mode 全量 UI 下发相关。候选修复：ui.run 传 socket_io_kwargs 调大 maxHttpBufferSize，或收编页面结构减小单次下发。
+
+## Deferred Items from /autoplan (2026-10-11) — DanmakuListener v0.7.0 发送整合
+
+1. **O1 AUTOlive UI 呈现 ENGINE_STATUS 登录事件**（P3, S）— 指南 §4.3 建议项；事件流透出已做（/danmaku/events），UI 呈现随原生发送集成同批。依赖：O2。
+2. **O2 原生发送按钮+批量队列节奏**（P2, M）— web_console 四宫格已可用；触发条件=浸泡两周无主进程异常自动开工，列下一计划核心。开工前重校 send_min_interval_seconds（3s 治人工低频，未必适自动化）。**批量同公告发多房间需契约层 room 维度或错峰发送**（sent_at 秒级+payload 无 room_id，R39 全局去重会误杀同秒同内容第二条——eng M4）。依赖：R8 浸泡通过。
+3. **F6 指南 vs 实测修正 checklist 沉淀+季度同步窗口**（P3, S）— 本轮 6 处指南失真的修正经验固化为升级 checklist；流程资产，半径外。
+4. **DX 埋点（TTHW 自动度量）**（P3, S）— POLISH 裁决不强加；随 O2 原生发送层考虑。
+5. **契约层 room 维度扩展**（P3, M）— R39 去重的根治方案（上游契约变更）；O2 批量场景开工前评估。依赖：上游协作。

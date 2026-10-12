@@ -1903,11 +1903,13 @@
     }
   },
   "danmaku_listener": {
-    "enabled": false,
+    "enabled": true,
     "component_root": "danmaku_listener",
     "login_entry": true,
-    "web_console": false,
-    "web_console_port": 8080,
+    "web_console": true,
+    "web_console_port": 8086,
+    "send_enabled_platforms": "bilibili",
+    "ws_token_file": "persistence_data/send_token.txt",
     "queue_maxsize": 500,
     "stall_threshold_seconds": 60,
     "cookie_dir": "cookie",

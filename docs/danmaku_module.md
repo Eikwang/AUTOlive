@@ -135,3 +135,12 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 ## 商用前置警示
 
 进程内形态**仅限个人使用**。商用前必须重新评估隔离形态（回退方案 B：修复 serve 接线的托管子进程，见整合计划第 3 节 A/B/C 决策记录）与监听账号隔离（专用监听账号，严禁客户主账号）——见 TODOS.md S9。
+
+## 发送通道（v0.7.0 合并新增，2026-10-12）
+
+- 发送经组件 web_console 四宫格（`http://127.0.0.1:8086`，`danmaku_listener.web_console=true`）：房间列表 + 启动/删除/发送/登录按钮；发送等状态变更路由强制 Bearer token（`persistence_data/send_token.txt`；页面首次发送 prompt 一次并 localStorage 缓存）。web_console 无页面级鉴权且仅绑 127.0.0.1。
+- 回执四态（线格式小写）：`sent` / `failed`（reason_code+fix_hint+docs_anchor 三段式）/ `dry_run`（已记录未实发，不得视为已实发）/ `unknown`（可能已送达——禁止盲重）。对账：`GET /api/send-results?request_id=`（鉴权同 POST）。预算 60s，超时走对账。
+- **一键回退开关**：`config.json` 的 `danmaku_listener.send_enabled_platforms` 置空（`""`）即整体关闭发送，监听不受影响（改后重启生效）；逐平台停发从该键移除对应平台名。
+- **风控基线**：限速 3s/平台（虎牙 35s 内置兜底，可被 `send_min_interval_overrides` 胜出，但下调须对证风控实测——虎牙 10-14s 实测失败）；连续失败 5 次熔断；`sent` 回执证明发出、不证明未被平台影子限流——实发可见性人工抽检为例行运维节奏。
+- **浸泡门槛（R8）**：上线后连续 7 个直播时段主进程零"组件致重启"方视为整合完成。日志锚点：`[danmaku_listener]`（守护重建/停机）、`[send-guard]`（熔断/限速/overrides 解析）、sender 异常栈（审计 result 行 reason_code）、`web_console_error` 事件；**发送常驻会话异常单列计数**（守护重建计数仅覆盖监听 Bridge）。两周内 ≥2 次主进程异常（组件致）→ 自动复议独立进程形态（UC-1 复议，输入=R8 故障域数据）。
+- 运维详单：上游 `D:\AI\DanmakuListener\docs\ops\send-runbook.md`（不随拷贝，仅供对证）。

@@ -329,3 +329,11 @@ models/rvc/
 
 # P1-5: apps/ 为安装器产物（装机布局，不入库）
 apps/
+
+# v0.7.0 合并：DanmakuListener 副本 static 纳入版本管理（回滚三步要求 git 管理副本全量；
+# 上面的全局 static/ 规则服务 AUTOlive 自身构建产物，此处精确白名单不受影响）
+!danmaku_listener/web/static/
+!danmaku_listener/web/static/**
+
+# v0.7.0 合并：登录态备份持久目录（DX-M5——不得落工具临时区）
+/backups/

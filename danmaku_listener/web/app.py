@@ -42,7 +42,15 @@ async def index(request: web.Request) -> web.FileResponse:
 async def api_get_status(request: web.Request) -> web.Response:
     """获取系统整体状态 → AC-001"""
     bridge = request.app.get("bridge") or get_bridge()
-    return web.json_response(bridge.get_status())
+    status = bridge.get_status()
+    # AutoDanmu day-1 状态行数据源（T7/S8-1）——管线未装配时给未配置态
+    try:
+        from danmaku_listener.senders.wiring import get_send_pipeline
+        status["send"] = get_send_pipeline().send_status_snapshot()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"send snapshot unavailable: {e}")
+        status["send"] = None
+    return web.json_response(status)
 
 
 
@@ -197,10 +205,18 @@ async def api_get_config(request: web.Request) -> web.Response:
 
     settings = get_settings()
     values = {f: getattr(settings, f) for f in CONFIG_WHITELIST}
+    # AutoDanmu day-1 状态行数据源（T7/S8-1）——管线未装配时给出未配置态
+    send_snapshot = None
+    try:
+        from danmaku_listener.senders.wiring import get_send_pipeline
+        send_snapshot = get_send_pipeline().send_status_snapshot()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"send snapshot unavailable: {e}")
     return web.json_response({
         "config": values,
         "source": "config.local.toml" if os.path.exists(default_config_path()) else "defaults",
         "all_require_restart": True,
+        "send": send_snapshot,
     })
 
 
@@ -297,6 +313,100 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def api_relogin(request: web.Request) -> web.Response:
+    """手动重新登录（2026-10-10 用户需求——发送按钮旁"登录"按钮）
+
+    清平台登录载体（profile/快照/cookie 文件）→ 重新 start_room，由既有
+    登录门接管弹窗与恢复。鉴权同 send-danmu（状态变更操作——F6 同源）。
+    """
+    from danmaku_listener.config.settings import get_settings
+    from danmaku_listener.push.ws_server import load_token, constant_time_equal
+    from danmaku_listener.web.relogin import ReloginUnsupported, run_relogin_flow
+
+    settings = get_settings()
+    token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
+    if not token:
+        return web.json_response({"success": False, "error": "AUTH_UNCONFIGURED",
+                                  "fix_hint": "配置 ws_token_file 或 DANMAKU_TOKEN 后重启"},
+                                 status=503)
+    provided = request.headers.get("Authorization", "")
+    if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
+        return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+    platform = str(data.get("platform") or "")
+    room_id = str(data.get("room_id") or "")
+    if not platform or not room_id:
+        return web.json_response({"success": False, "error": "platform/room_id 必填"}, status=400)
+    bridge = request.app.get("bridge") or get_bridge()
+    try:
+        result = await run_relogin_flow(bridge, platform, room_id)
+        return web.json_response(result)
+    except ReloginUnsupported as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:  # noqa: BLE001
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def api_send_danmu(request: web.Request) -> web.Response:
+    """发送弹幕命令（AutoDanmu T5——REST 备用通道；R9/F6/S1-1）
+
+    鉴权：Bearer token 必须命中 settings token（常量时间比较）；
+    token 未配置 → 503 AUTH_UNCONFIGURED（拒绝服务，无降级——F6/账号级 blast radius）。
+    """
+    from danmaku_listener.config.settings import get_settings
+    from danmaku_listener.push.ws_server import load_token, constant_time_equal
+    from danmaku_listener.senders.wiring import get_send_pipeline
+
+    settings = get_settings()
+    token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
+    if not token:
+        return web.json_response({"success": False, "error": "AUTH_UNCONFIGURED",
+                                  "fix_hint": "配置 ws_token_file 或 DANMAKU_TOKEN 后重启"},
+                                 status=503)
+    provided = request.headers.get("Authorization", "")
+    if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
+        return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+    platform = str(data.get("platform") or "")
+    room_id = str(data.get("room_id") or "")
+    content = str(data.get("content") or "")
+    request_id = str(data.get("request_id") or f"rest-{int(asyncio.get_event_loop().time()*1e6)}")
+    if not platform or not room_id or not content.strip():
+        return web.json_response({"success": False, "error": "platform/room_id/content 必填"}, status=400)
+    pipeline = get_send_pipeline()
+    wire = await pipeline.handle_request(platform=platform, room_id=room_id,
+                                         request_id=request_id, content=content, source="rest")
+    return web.json_response({"success": True, "result": wire})
+
+
+async def api_send_results(request: web.Request) -> web.Response:
+    """发送结果对账查询（R18——只读；鉴权同 POST）"""
+    from danmaku_listener.config.settings import get_settings
+    from danmaku_listener.push.ws_server import load_token, constant_time_equal
+    from danmaku_listener.senders.wiring import get_send_pipeline
+
+    settings = get_settings()
+    token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
+    if not token:
+        return web.json_response({"success": False, "error": "AUTH_UNCONFIGURED"}, status=503)
+    provided = request.headers.get("Authorization", "")
+    if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
+        return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    request_id = request.query.get("request_id", "")
+    if not request_id:
+        return web.json_response({"success": False, "error": "request_id 必填"}, status=400)
+    pipeline = get_send_pipeline()
+    seen = pipeline._audit.lookup(request_id)
+    return web.json_response({"success": True, "request_id": request_id,
+                              "found": seen is not None, "result": seen})
+
+
 def create_app() -> web.Application:
     """创建 aiohttp Application
 
@@ -345,6 +455,11 @@ def create_app() -> web.Application:
     cors.add(app.router.add_post("/api/keywords", api_add_keyword))
     cors.add(app.router.add_delete("/api/keywords/{keyword}", api_remove_keyword))
     cors.add(app.router.add_put("/api/keywords/toggle", api_toggle_keyword_filter))
+
+    # AutoDanmu 发送 API（T5：R9 备用通道+R18 对账；Bearer 硬要求 F6/S1-1）
+    cors.add(app.router.add_post("/api/send-danmu", api_send_danmu))
+    cors.add(app.router.add_post("/api/relogin", api_relogin))
+    cors.add(app.router.add_get("/api/send-results", api_send_results))
 
     # 静态文件服务
     app.router.add_static("/static", static_dir)

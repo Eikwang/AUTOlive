@@ -17,6 +17,7 @@ CONFIG_FILE_NAME = "config.local.toml"
 #: Settings 字段名 → TOML 位置（None=顶层平铺键）
 FIELD_TO_TOML: Dict[str, Optional[tuple]] = {
     "ws_port": ("ws", "port"),
+    "ws_token_file": ("ws", "token_file"),
     "web_port": ("web", "port"),
     "bus_ring_capacity": ("bus", "ring_capacity"),
     "bus_dedup_window_seconds": ("bus", "dedup_window_seconds"),
@@ -24,6 +25,22 @@ FIELD_TO_TOML: Dict[str, Optional[tuple]] = {
     "fast_retry_max": None,
     "slow_retry_cap_seconds": None,
     "session_lifetime_seconds": None,
+    # AutoDanmu 发送（ADR-002；[send] 节）
+    "send_enabled_platforms": ("send", "enabled_platforms"),
+    "send_dry_run": ("send", "dry_run"),
+    "send_min_interval_seconds": ("send", "min_interval_seconds"),
+    "send_jitter_seconds": ("send", "jitter_seconds"),
+    "send_rate_key": ("send", "rate_key"),
+    "send_circuit_threshold": ("send", "circuit_threshold"),
+    "send_dedup_window_seconds": ("send", "dedup_window_seconds"),
+    "send_max_length": ("send", "max_length"),
+    "send_lock_timeout_seconds": ("send", "lock_timeout_seconds"),
+    "send_audit_file": ("send", "audit_file"),
+    "send_idempotency_index": ("send", "idempotency_index"),
+    # 抖音常驻发送会话（T3；[send] 节）
+    "send_session_idle_timeout_seconds": ("send", "session_idle_timeout_seconds"),
+    "send_window_mode": ("send", "window_mode"),
+    "send_min_interval_overrides": ("send", "min_interval_overrides"),
 }
 
 #: 白名单（可经 /api/config 修改的字段）

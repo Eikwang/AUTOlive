@@ -1,23 +1,20 @@
 {
   "source": "D:\\AI\\DanmakuListener",
-  "copied_at": "2026-10-06T17:36:31",
-  "content_sha256": "1e212b2a2b358adc5b9e07a239feb24a05224999630ba16c8cb267f79164c548",
-  "total_files": 100,
-  "total_bytes": 1314444,
+  "copied_at": "2026-10-12T09:40:29",
+  "content_sha256": "c77b41b248e8f08ee7eddb5b18857ffb98b046a3c4d4681876e45218bd33e5b7",
+  "total_files": 117,
+  "total_bytes": 1584716,
   "items": {
     "danmaku_listener": {
-      "files": 95,
-      "bytes": 1278981,
+      "files": 112,
+      "bytes": 1543676,
       "note": "组件核心包（engines/adapters/bus/push/contract/config/fixtures/managers/persistence/utils）"
     },
     "docs\\danmaku_contract": {
       "files": 5,
-      "bytes": 35463,
+      "bytes": 41040,
       "note": "契约文档与机读 Schema（export_contract 漂移检查数据源）"
     }
   },
-  "upgrade_flow": "重跑本脚本 → python -m danmaku_listener contract（版本核对）→ 冒烟脚本",
-  "upstream_baseline_commit": "7e3aec8",
-  "upstream_version": "v0.5.0",
-  "upstream_note": "十二平台登录闭环全覆盖(实机cookie校准)——此前 af9124c+dirty patch 已被正式提交取代，docs/upstream/ 旧 patch 存档保留供对账"
+  "upgrade_flow": "重跑本脚本 → python -m danmaku_listener contract（版本核对）→ 冒烟脚本"
 }

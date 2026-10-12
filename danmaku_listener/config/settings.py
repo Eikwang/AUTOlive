@@ -81,6 +81,23 @@ class Settings(BaseSettings):
     session_lifetime_seconds: int = 14400  # 兜底/受控页面有界会话寿命（4 小时）
     heap_rebuild_threshold_mb: int = 300   # 页面堆监控提前重建阈值
 
+    # ===== AutoDanmu 发送（ADR-002 / R1；全部默认安全态——R10/DX-F1） =====
+    send_enabled_platforms: str = ""       # 逗号分隔启用列表；默认空=全部关闭
+    send_dry_run: bool = True              # 观察模式出厂默认=开启（DX-F4/R20；验证期后调整归运维）
+    send_min_interval_seconds: float = 3.0  # 每限速键最小发送间隔（秒）——2026-10-10 用户裁定 30s→3s 防刷屏；平台实测约束走 per-platform 覆写（huya 35s 内置）
+    send_jitter_seconds: float = 8.0       # 随机抖动上限（秒，防行为指纹）
+    send_rate_key: str = "platform"        # 限速键口径：platform / platform_room（F4/R35，M1b 前定稿）
+    send_circuit_threshold: int = 5        # 连续失败熔断阈值 N（F3/R10；恢复=人工重开）
+    send_dedup_window_seconds: int = 300   # 同内容去重窗口（R14）
+    send_max_length: int = 100             # 单条内容长度上限（R14；平台可再收紧）
+    send_lock_timeout_seconds: float = 3.0  # per-profile 锁 acquire 超时（S4-1，超时回执 busy）
+    send_audit_file: str = "./persistence_data/send_audit.jsonl"  # 发送审计（权威对账，R6/R25）
+    send_idempotency_index: str = "./persistence_data/send_idempotency.json"  # request_id→结果索引（F9）
+    # 抖音常驻发送会话（T3/ResidentSendSession；CEO-F3/DX-D9/ENG-1）
+    send_session_idle_timeout_seconds: int = 1800  # 常驻会话空闲自动关闭（秒）
+    send_window_mode: str = "headless_new"  # 抖音会话形态：headless_new（T1 探针实证可用，无桌面）/ minimized / foreground
+    send_min_interval_overrides: str = ""  # per-platform 限速覆写 JSON（如 {"huya": 35}；空=无覆写）
+
     @model_validator(mode="after")
     def _validate_bounds(self) -> "Settings":
         if self.bus_ring_capacity <= 0:

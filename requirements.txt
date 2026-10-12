@@ -26,3 +26,7 @@ numpy>=1.24.0
 
 # 其他工具
 tqdm>=4.65.0
+
+# DanmakuListener v0.7.0 发送链（对齐上游 pyproject.toml:21,23；消除 runtime312 users.pth 隐式依赖）
+quickjs>=1.19.0
+psutil>=5.9.0

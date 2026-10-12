@@ -34,10 +34,11 @@
       "type": "object"
     },
     "Category": {
-      "description": "消息大类：业务消息 vs 系统状态消息",
+      "description": "消息大类：业务消息 / 系统状态消息 / 下行命令消息（AutoDanmu 契约 v1 additive 扩展，ADR-002）",
       "enum": [
         "business",
-        "system"
+        "system",
+        "command"
       ],
       "title": "Category",
       "type": "string"
@@ -111,6 +112,118 @@
         "content"
       ],
       "title": "DanmuPayload",
+      "type": "object"
+    },
+    "DanmuSendRequestPayload": {
+      "description": "DANMU_SEND_REQUEST：发送命令载荷（AUTOlive→引擎）\n\nrequest_id 由 AUTOlive 生成并保证唯一；重复 request_id 直接拒绝并回执上次结果（R18 幂等）。",
+      "properties": {
+        "type": {
+          "const": "DANMU_SEND_REQUEST",
+          "default": "DANMU_SEND_REQUEST",
+          "title": "Type",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "content": {
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "content"
+      ],
+      "title": "DanmuSendRequestPayload",
+      "type": "object"
+    },
+    "DanmuSendResultPayload": {
+      "description": "DANMU_SEND_RESULT：发送回执载荷（引擎→AUTOlive）\n\n- status=dry_run 非成功语义（AUTOlive 不得误判已实发——DX-F1/R11）\n- status=failed/unknown 时 reason 三段式必填（复用 FailureInfo）\n- sent_at+content 供 AUTOlive 自发声回环去重（F8/R39）",
+      "properties": {
+        "type": {
+          "const": "DANMU_SEND_RESULT",
+          "default": "DANMU_SEND_RESULT",
+          "title": "Type",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SendStatus"
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason Code"
+        },
+        "fix_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fix Hint"
+        },
+        "docs_anchor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Docs Anchor"
+        },
+        "sent_at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sent At"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        }
+      },
+      "required": [
+        "request_id",
+        "status"
+      ],
+      "title": "DanmuSendResultPayload",
       "type": "object"
     },
     "EngineStatusPayload": {
@@ -716,6 +829,17 @@
       "title": "RouteFailedPayload",
       "type": "object"
     },
+    "SendStatus": {
+      "description": "发送结果状态（回执专用——非成功语义必须可区分，DX-F1/F5/R36）",
+      "enum": [
+        "sent",
+        "dry_run",
+        "failed",
+        "unknown"
+      ],
+      "title": "SendStatus",
+      "type": "string"
+    },
     "SocialPayload": {
       "description": "SOCIAL：社交行为（关注/粉丝团/分享等）",
       "properties": {
@@ -842,6 +966,8 @@
         "mapping": {
           "BACKPRESSURE": "#/$defs/BackpressurePayload",
           "DANMU": "#/$defs/DanmuPayload",
+          "DANMU_SEND_REQUEST": "#/$defs/DanmuSendRequestPayload",
+          "DANMU_SEND_RESULT": "#/$defs/DanmuSendResultPayload",
           "ENGINE_STATUS": "#/$defs/EngineStatusPayload",
           "ENTER_ROOM": "#/$defs/EnterRoomPayload",
           "GAP": "#/$defs/GapPayload",
@@ -907,6 +1033,12 @@
         },
         {
           "$ref": "#/$defs/RecoveredPayload"
+        },
+        {
+          "$ref": "#/$defs/DanmuSendRequestPayload"
+        },
+        {
+          "$ref": "#/$defs/DanmuSendResultPayload"
         }
       ],
       "title": "Payload"

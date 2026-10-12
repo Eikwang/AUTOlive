@@ -51,6 +51,8 @@ CONTRACT_VERSION_MAJOR = 1         # 兼容断言：1.x 接受，2.x 拒绝
 CONTROL_TIMEOUT_S = 30             # 控制面协程等待超时（登录门启动等合法耗时最长）
 REBUILD_GUARD_MAX = 3              # 守护重建失控防护（连续 3 次停止重建、置红）
 GIFT_LRU_MAX = 5000                # 抖音 GIFT 换算映射上限（Section 7 闭环）
+SELF_SEND_LRU_MAX = 5000           # R39 自联回环去重键上限（对齐 GIFT_LRU_MAX 先例）
+SELF_SEND_WINDOW_S = 10            # R39：收到时刻与 sent_at 差 ≤10s 才判回环（sent_at 秒级、payload 无 room 维度——窗口收紧防批量同秒误杀）
 
 # 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性）
 _DROP_ORDER = {"LIKE": 0, "ENTER_ROOM": 1, "DANMU": 2, "SOCIAL": 3, "ROOM_STATS": 4, "GIFT": 5, "SUPER_CHAT": 6}
@@ -284,6 +286,8 @@ class DanmakuListenerService:
         self._last_heartbeat = time.time()
         self._unknown_type_count = 0
         self._invalid_msg_count = 0
+        self._self_send: "OrderedDict[str, int]" = OrderedDict()  # R39：content → sent_at（发送回执登记）
+        self._self_echo_dropped = 0       # R39 回环丢弃计数
         self._seen_event_keys: OrderedDict = OrderedDict()  # 事件去重（60s 窗口——Eng E3）
         self._gift_lru: OrderedDict = OrderedDict()         # 抖音 GIFT 换算（LRU 5000）
         self._last_msg_ts = 0.0                             # 生命信号（P2-0 ②）
@@ -377,11 +381,21 @@ class DanmakuListenerService:
         if norm["category"] == "system":
             self._handle_system(mtype, norm["payload"])
             return
+        if norm["category"] == "command":
+            # R39：发送回执尽力推送经此登记 sent_at+content（进程内接线见 _start_web_console）
+            if mtype == "DANMU_SEND_RESULT" and str(norm["payload"].get("status", "")) == "sent":
+                self._record_self_send(norm["payload"])
+            return
         if norm["category"] != "business":
             self._unknown_type_count += 1
             return
         if mtype in _FASTPATH_BUSINESS:
             self.push_event("count", {"type": mtype, "room": room})
+            return
+        if mtype == "DANMU" and self._is_self_echo(str(norm["payload"].get("content", ""))):
+            # R39：命中已登记发送且 ≤10s 窗口 → 自联回环，不派发（窗口外/异常均放行）
+            self._self_echo_dropped += 1
+            logger.info(f"[danmaku_listener] R39 自联回环丢弃: {str(norm['payload'].get('content', ''))[:30]}")
             return
         self._msg_today_count += 1
         self._last_msg_ts = time.time()
@@ -407,6 +421,37 @@ class DanmakuListenerService:
             self.push_event("room", {"online": payload.get("online")})
         else:
             self._unknown_type_count += 1
+
+    # ---------- R39 自联回环去重（ENG-M4/M5：sent_at+content，≤10s 窗口收紧） ----------
+
+    def _record_self_send(self, payload: dict) -> None:
+        """登记发送回执的 sent_at+content（LRU 有界；异常降级为不登记）。"""
+        try:
+            sent_at = payload.get("sent_at")
+            content = payload.get("content")
+            if not sent_at or not content:
+                return
+            content = str(content)
+            if content in self._self_send:
+                self._self_send.move_to_end(content)
+            self._self_send[content] = int(sent_at)
+            while len(self._self_send) > SELF_SEND_LRU_MAX:
+                self._self_send.popitem(last=False)
+        except Exception:
+            logger.warning("[danmaku_listener] R39 自发声登记异常（降级不登记）", exc_info=True)
+
+    def _is_self_echo(self, content: str) -> bool:
+        """R39 判定：content 命中已登记发送且 |now-sent_at| ≤10s → 自联回环。
+
+        窗口外放行（防同内容合法弹幕误杀）；去重自身异常放行（监听主链不断）。
+        """
+        try:
+            sent_at = self._self_send.get(content)
+            if sent_at is None:
+                return False
+            return abs(time.time() - sent_at) <= SELF_SEND_WINDOW_S
+        except Exception:
+            return False
 
     # ---------- 活跃房间裁定（P1-3：显式 active 字段） ----------
 
@@ -622,6 +667,7 @@ class DanmakuListenerService:
             "dropped_count": self._queue.dropped_count if self._queue else 0,
             "unknown_type_count": self._unknown_type_count,
             "invalid_msg_count": self._invalid_msg_count,
+            "self_echo_dropped": self._self_echo_dropped,
             "last_msg_age_s": round(time.time() - self._last_msg_ts, 1) if self._last_msg_ts else None,
             "stall_threshold_s": self._stall_threshold(),
         }
@@ -789,6 +835,13 @@ class DanmakuListenerService:
             from danmaku_listener.web.app import create_app
             app = create_app()
             app["bridge"] = self._bridge
+            # R39：发送回执广播接入进程内 Bridge（独立进程形态在组件 __main__.py 接线；
+            # web_console 与 Bridge 同环——pipeline await broadcaster 即同环协程调用）
+            try:
+                from danmaku_listener.senders import wiring as _send_wiring
+                _send_wiring.set_result_broadcaster(self._bridge._broadcast)
+            except Exception:
+                logger.warning("[danmaku_listener] 发送回执广播接线失败（R39 去重降级为不登记）", exc_info=True)
             self._web_runner = aioweb.AppRunner(app)
             await self._web_runner.setup()
             site = aioweb.TCPSite(self._web_runner, "127.0.0.1", port)
