@@ -203,6 +203,44 @@ def register_danmaku_routes(app, config) -> None:
         return {"success": True, "keywords": keywords,
                 "enabled": enabled, "reloaded": reloaded}
 
+    @app.post("/danmaku/rooms-config")
+    def danmaku_rooms_config(body: dict):
+        """房间列表窄端点（写者分配矩阵 F-ENG-2 对齐，2026-10-13）。
+
+        main 可达时 webui 对 danmaku_listener.rooms 的 set_config 直写被
+        Settings.save 磁盘回读静默覆盖（添加/删除房间 toast 假成功、重启回滚）。
+        本端点整节落盘 + 服务端 _inject_rooms 权威对账（Eng A5：config 为源——
+        新启用房间注入启动，registry 中不在 config 的 ghost 清除）。
+        """
+        rooms = [r for r in (body.get("rooms") or []) if isinstance(r, dict)]
+        if not _write_config_section(lambda sec: sec.__setitem__("rooms", rooms)):
+            return {"success": False, "error": "config 落盘失败",
+                    "reason_code": "config.write_failed",
+                    "fix_hint": "检查 config.json 是否被占用"}
+        svc = get_service_instance()
+        injected = None
+        if svc is not None:
+            injected = svc._submit_room_op(svc._inject_rooms)
+        return {"success": True, "rooms": rooms, "injected": injected}
+
+    @app.post("/danmaku/relogin")
+    def danmaku_relogin(body: dict):
+        """手动重登（组件 run_relogin_flow，2026-10-13 用户需求）。
+
+        清平台登录载体（profile 目录/快照/cookie 文件）→ 停该平台在听房间 →
+        start_room 既有登录门接管（弹可见窗→登录→保存→自动恢复监听）。
+        载体清单与安全边界（目录逃逸防护）在组件侧单源。
+        """
+        platform = str(body.get("platform") or "")
+        room_id = str(body.get("room_id") or "")
+        if not platform:
+            raise HTTPException(status_code=400, detail="platform 必填")
+        svc = _svc()
+        from danmaku_listener.web.relogin import run_relogin_flow
+        cookie_dir = str((svc._section() or {}).get("cookie_dir") or "./cookie")
+        return _unwrap(svc._submit_room_op(
+            lambda: run_relogin_flow(svc._bridge, platform, room_id, cookie_dir)))
+
     @app.post("/danmaku/send")
     def danmaku_send(body: dict):
         """单条手动发送（O2 第一阶段：主 webui 发送入口；鉴权语义同组件 Bearer——

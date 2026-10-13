@@ -195,6 +195,30 @@ class DanmakuLoginService:
         self._ensure_thread()
         return {"success": True, "status": self._state["status"]}
 
+    def request_relogin(self, platform: str) -> dict:
+        """清除平台登录载体后重新发起登录（房间行"登录"按钮——配置期路径，2026-10-13）。
+
+        载体清单与安全边界与运行期单源（danmaku_listener.web.relogin——profile
+        目录/快照/cookie 文件）；清除后 request_login 入队弹配置期登录窗。
+        meituan 无载体定义不支持。运行期路径走控制面 /danmaku/relogin（登录门
+        在 main 进程弹窗），两路径互斥由前端 mode 分流保证。
+        """
+        try:
+            from danmaku_listener.web.relogin import clear_login_state, ReloginUnsupported
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": f"组件 relogin 模块不可用: {e}"}
+        try:
+            deleted = clear_login_state(platform, _cookie_dir())
+        except ReloginUnsupported:
+            return {"success": False,
+                    "error": f"平台 {platform} 不支持手动重登（无登录载体定义）"}
+        except Exception as e:  # noqa: BLE001
+            logger.opt(exception=True).error(f"[danmaku-login-svc] {platform} 载体清除失败")
+            return {"success": False, "error": f"登录载体清除失败: {e}"}
+        r = self.request_login(platform)
+        r["cleared"] = deleted
+        return r
+
     def get_state(self) -> dict:
         with self._lock:
             return dict(self._state)

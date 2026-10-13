@@ -16,12 +16,11 @@
 import asyncio
 import json
 
-from nicegui import ui, app
+from nicegui import ui
 from typing import Dict, Any, Callable
 
 import requests
 
-from frontend.ui.components.config_helper import get_nested_value
 from utils.my_log import logger
 from frontend.ui.components.danmaku_login_service import get_login_service
 
@@ -161,8 +160,14 @@ def create_platform_config_tab(
     def _rooms() -> list:
         return [r for r in state["rooms_cfg"] if isinstance(r, dict)]
 
-    def _write_rooms(rooms: list) -> bool:
-        """config.rooms 直写（set_config 通道双回滚；失败时调用方保持 UI 不翻转——DX 发现 5）。"""
+    async def _write_rooms(rooms: list) -> bool:
+        """config.rooms 写盘（F-ENG-2 分流，2026-10-13）：main 可达时 Settings.save
+        磁盘回读会覆盖 danmaku_listener 节直写（添加/删除房间假成功）——走
+        /danmaku/rooms-config 窄端点落盘+服务端权威对账；main_down 时 webui 是
+        该节唯一写者，set_config 直写可落盘。"""
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/rooms-config", {"rooms": rooms})
+            return bool(isinstance(r, dict) and r.get("success"))
         return set_config_callback("danmaku_listener", "rooms", value=rooms, _notify=False) is not False
 
     async def _write_keywords() -> bool:
@@ -224,9 +229,9 @@ def create_platform_config_tab(
             head_switch.on("update:model-value", _toggle_service)
 
         with ui.row().classes("items-center gap-2"):
+            # 旧「登录：空闲」chip 已移除（2026-10-13 用户裁定弃用——登录进度由
+            # 表单下方 login_progress 行内呈现，房间行登录徽章承载登录态）
             pill = ui.badge("未启用").props("outline")
-            login_chip = ui.chip("登录：空闲", icon="qr_code_2").props("outline").style(
-                "font-size:var(--font-size-tiny,11px)")
 
     def _render_pill():
         mode = state["mode"]
@@ -244,18 +249,15 @@ def create_platform_config_tab(
         pill._props["color"] = c
         pill.update()
 
-    def _render_login_chip():
+    def _login_state_text() -> str:
+        """登录进度文本（login_chip 移除后 login_progress 的数据源）。"""
         ls = login_svc.get_state()
         status = ls.get("status", "idle")
         plat = ls.get("platform")
-        text = {"idle": "登录：空闲", "queued": f"登录排队：{plat}", "launching": f"浏览器启动中：{plat}",
+        return {"idle": "登录：空闲", "queued": f"登录排队：{plat}", "launching": f"浏览器启动中：{plat}",
                 "waiting_scan": f"等待扫码：{plat}", "saving": f"保存中：{plat}",
                 "success": f"登录成功：{plat}", "failed": f"登录失败：{plat}",
                 "timeout": f"登录超时：{plat}"}.get(status, "登录：空闲")
-        login_chip.text = text
-        login_chip._props["color"] = {"success": "positive", "failed": "negative",
-                                      "timeout": "warning"}.get(status, "info")
-        login_chip.update()
 
     # ---------- 卡①：房间管理（首屏主对象——Design D-1） ----------
 
@@ -293,7 +295,7 @@ def create_platform_config_tab(
                 rooms = _rooms()
                 rooms.append({"platform": platform, "room_id": spec,
                               "enabled": True})  # DX 发现 1：添加即启用（active 字段已退役）
-                if not _write_rooms(rooms):
+                if not await _write_rooms(rooms):
                     await _err_notify({"error": "配置保存失败",
                                        "fix_hint": "检查磁盘/权限后重试（状态未翻转）"})
                     return
@@ -385,18 +387,21 @@ def create_platform_config_tab(
 
     state["last_request_id"] = ""
 
-    async def _send_token() -> str:
-        tok = (send_token_input.value or "").strip()
-        if tok:
-            try:
-                app.storage.browser["send_token"] = tok
-            except Exception:
-                pass
-            return tok
+    def _disk_token() -> str:
+        """发送 token 磁盘真相（config.ws_token_file——webui 与 main 同机直接读
+        文件。此前只存 app.storage.browser：webui 重启/NiceGUI 存储目录清理后
+        丢失，每次重启都要重填——2026-10-13 用户报告）。"""
         try:
-            return str(app.storage.browser.get("send_token") or "")
+            path = str(_disk_danmaku_section().get("ws_token_file")
+                       or "persistence_data/send_token.txt")
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
         except Exception:
             return ""
+
+    async def _send_token() -> str:
+        # 输入框已预填磁盘值（密码框掩码显示）；用户改动即用，空则回读文件兜底
+        return (send_token_input.value or "").strip() or _disk_token()
 
     def _render_send_result(r: Dict[str, Any]):
         code = r.get("status_code")
@@ -517,7 +522,8 @@ def create_platform_config_tab(
             send_room_select = ui.select(
                 label="目标房间（在听）", options={}).style("width:var(--input-width-md,250px)")
             send_token_input = ui.input(
-                label="发送 token（首次填入后本机缓存）", password=True).style(
+                label="发送 token（自动读取本机文件，可修改）", password=True,
+                value=_disk_token()).style(
                 "width:var(--input-width-md,250px)")
         # 发送白名单（config send_enabled_platforms，逗号分隔）+ 实发模式（send_dry_run
         # 取反）——发送是敏感操作，组件出厂默认全关+观察（R10/DX-F1 安全态）。保存写
@@ -628,13 +634,36 @@ def create_platform_config_tab(
                                     await _err_notify({"error": "运行面切换失败",
                                                        "fix_hint": "服务仍在线——请重试"})
                                     return
-                        if not _write_rooms(rr):  # DX 发现 5：失败不翻转
+                        if not await _write_rooms(rr):  # DX 发现 5：失败不翻转
                             sw.value = not target
                             await _err_notify({"error": "配置保存失败", "fix_hint": "状态未翻转"})
                             return
                         await _toast(f"{p}:{rid} {'开始监听' if target else '已停止监听'}"
                                      + ("" if state["mode"] == "running" else "（下次启动系统后生效）"))
                     room_switch.on("update:model-value", _toggle_room)
+
+                    # 登录（2026-10-13 用户需求）：清平台登录载体→重新弹登录窗
+                    # （组件 run_relogin_flow 已实装——运行期走控制面端点登录门
+                    # 收口；配置期复用其 clear_login_state + 配置期登录服务）
+                    async def _relogin(pp=p, rd=rid):
+                        if state["mode"] in ("running", "service_disabled"):
+                            r = await _api(config, "POST", "/danmaku/relogin",
+                                           {"platform": pp, "room_id": rd}, timeout=45)
+                            if not isinstance(r, dict):
+                                await _toast("重登请求失败（运行面不可达）", "negative")
+                                return
+                            if r.get("success"):
+                                await _toast(str(r.get("msg") or "登录窗口已弹出"), "info")
+                            else:
+                                await _err_notify(r)
+                        else:
+                            r = login_svc.request_relogin(pp)
+                            if r.get("success"):
+                                await _toast("登录载体已清除——登录窗口排队弹出", "info")
+                            else:
+                                await _err_notify(r)
+                    ui.button("登录", on_click=_relogin).props("flat dense color=warning").tooltip(
+                        "清除该平台登录态并重新弹出登录窗口（登录后自动恢复监听）")
 
                     # 删除（运行态两步走——M-1 ②：先窄端点停再删配置）
                     async def _remove(_e=None, pp=p, rd=rid):
@@ -643,7 +672,7 @@ def create_platform_config_tab(
                                        {"enabled": False}, timeout=10)
                         kept = [x for x in _rooms()
                                 if not (x.get("platform") == pp and str(x.get("room_id")) == rd)]
-                        if not _write_rooms(kept):
+                        if not await _write_rooms(kept):
                             await _err_notify({"error": "删除保存失败", "fix_hint": "房间列表未变更"})
                             return
                         await _toast("房间已删除")
@@ -659,7 +688,10 @@ def create_platform_config_tab(
             logger.error("[platform_config] 轮询渲染异常（下轮重试）", exc_info=True)
 
     async def _poll_inner():
-        sec = get_nested_value(config, "danmaku_listener", default={}) or {}
+        # 磁盘真相（2026-10-13）：房间/关键词运行期经窄端点落盘（F-ENG-2 分流），
+        # webui 内存副本不随动——列表/开关初值/关键词展示必须读磁盘，否则运行期
+        # 添加的房间"落盘成功但列表不显示"。3s 一次小 JSON 读，开销可忽略。
+        sec = _disk_danmaku_section()
         state["rooms_cfg"] = list(sec.get("rooms") or [])
         state["kw"] = list(sec.get("keywords") or [])
         state["kw_on"] = bool(sec.get("keyword_filter_enabled", True))
@@ -687,13 +719,12 @@ def create_platform_config_tab(
         # enabled，仅用户点击经直写/toggle 落盘变更，初值读磁盘）；监听的实际
         # 运行状态由 _render_pill 状态胶囊承担——二者职责分离。
         _render_pill()
-        _render_login_chip()
         _render_rooms()
         _render_kw()
-        # 登录进度行内呈现（Design A-1 非模态）
+        # 登录进度行内呈现（Design A-1 非模态；login_chip 已弃用移除）
         ls = login_svc.get_state()
         if ls.get("status") in ("queued", "launching", "waiting_scan", "saving"):
-            login_progress.text = f"登录进度：{login_chip.text}"
+            login_progress.text = f"登录进度：{_login_state_text()}"
             login_progress.style("display:block")
         else:
             login_progress.style("display:none")
@@ -703,4 +734,3 @@ def create_platform_config_tab(
     _render_rooms()
     _render_kw()
     _render_pill()
-    _render_login_chip()
