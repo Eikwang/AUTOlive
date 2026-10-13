@@ -97,7 +97,12 @@ def get_send_pipeline() -> DanmuCommandPipeline:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[send-wiring] douyin sender register failed: {e}")
 
-    guard = SendGuard(settings, blocked_keywords=list(bridge._blocked_keywords))
+    # 发送屏蔽词单源 settings.send_blocked_keywords（2026-10-13 词表分离）——
+    # 此前复用 bridge._blocked_keywords（接收侧弹幕过滤表，AUTOlive config.keywords
+    # 灌入）：用户配置的接收屏蔽短词（如 "sb"）以子串匹配误拦正常发送内容，
+    # 全平台 KEYWORD_BLOCKED。接收过滤≠发送限制，两表分离。
+    _send_kw = [k.strip() for k in (settings.send_blocked_keywords or "").split(",") if k.strip()]
+    guard = SendGuard(settings, blocked_keywords=_send_kw)
     audit = SendAuditLog(settings.send_audit_file, settings.send_idempotency_index)
     token = load_auth_token()
     _pipeline = DanmuCommandPipeline(

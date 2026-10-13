@@ -863,7 +863,8 @@ class DanmakuListenerService:
                 updates["cookie_dir"] = cookie_dir
             sec = self._section() or {}
             _CONFIG_KEYS = (
-                "send_enabled_platforms", "send_dry_run", "send_min_interval_seconds",
+                "send_enabled_platforms", "send_blocked_keywords", "send_dry_run",
+                "send_min_interval_seconds",
                 "send_jitter_seconds", "send_rate_key", "send_circuit_threshold",
                 "send_dedup_window_seconds", "send_max_length", "send_lock_timeout_seconds",
                 "send_audit_file", "send_idempotency_index", "send_session_idle_timeout_seconds",

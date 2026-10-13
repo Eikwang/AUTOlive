@@ -160,11 +160,13 @@ def register_danmaku_routes(app, config) -> None:
         经本端点落盘（对齐 F1 房间开关 config-first 模式）；生效时机=监听重建
         （_async_start 重灌组件 settings）。
         """
-        platforms = str(body.get("platforms", ""))
+        platforms = body.get("platforms", None)
         dry_run = body.get("dry_run", None)
 
         def _mut(sec):
-            sec["send_enabled_platforms"] = platforms
+            # 键缺省不写（2026-10-13 修正：此前缺省写空串会抹掉白名单）
+            if platforms is not None:
+                sec["send_enabled_platforms"] = str(platforms)
             if dry_run is not None:
                 sec["send_dry_run"] = bool(dry_run)
 
