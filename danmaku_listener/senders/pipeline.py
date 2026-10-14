@@ -89,11 +89,30 @@ class DanmuCommandPipeline:
                                        SendRejectReason.SENDER_DISABLED.value,
                                        fix_hint="在 [send] send_enabled_platforms 中启用该平台", source=source)
 
-        # 监听房间判定（F2：快照拒绝）
+        # 监听房间判定（F2：快照拒绝）+ 重登 fence 扩面（2026-10-13 S4 附带/E7：
+        # 房间未监听 OR 该平台存在活跃 relogin 会话——防窗口内手动 start_room 成功后
+        # 绕过 fence 撞上 close/stale/takeover 中的发送会话）
+        active_relogin = self._get_active_relogin(platform)
+        relogin_extra = None
+        if active_relogin:
+            # 懒 import 同 _get_active_relogin（F19：retry_after_s 单源 relogin.RETRY_AFTER_S）
+            from danmaku_listener.web.relogin import RETRY_AFTER_S
+            relogin_extra = {"relogin_in_progress": True,
+                             "relogin_id": active_relogin.get("relogin_id"),
+                             "retry_after_s": RETRY_AFTER_S}
         if not self._registry.is_room_listened(platform, room_id):
+            hint = "发送目标限定当前监听中的房间"
+            if relogin_extra:
+                hint += "；该平台重登编排进行中——按 retry_after_s 退避重试"
             return await self._finish(platform, room_id, request_id, content, SendStatus.FAILED,
                                        SendRejectReason.ROOM_NOT_LISTENED.value,
-                                       fix_hint="发送目标限定当前监听中的房间", source=source)
+                                       fix_hint=hint, source=source, extra=relogin_extra)
+        if relogin_extra:
+            return await self._finish(platform, room_id, request_id, content, SendStatus.FAILED,
+                                       SendRejectReason.RELOGIN_IN_PROGRESS.value,
+                                       fix_hint="该平台重登编排进行中——按 retry_after_s 退避重试"
+                                                "（登录窗口/恢复完成后自动解除）",
+                                       source=source, extra=relogin_extra)
 
         # 守卫链（DX-F1：拒绝不排队）
         ok, reason, sanitized = self._guard.check(platform, room_id, content)
@@ -169,12 +188,23 @@ class DanmuCommandPipeline:
         self._seq += 1
         return self._seq
 
+    @staticmethod
+    def _get_active_relogin(platform: str) -> Optional[dict]:
+        """查 relogin 注册表（懒导入——senders→web 反向引用先例 wiring.py:51；
+        import 失败退化 None：fence 关闭不阻断发送）"""
+        try:
+            from danmaku_listener.web.relogin import get_active_relogin
+            return get_active_relogin(platform)
+        except Exception:  # noqa: BLE001
+            return None
+
     async def _finish(self, platform: str, room_id: str, request_id: str, content: str,
                       status: SendStatus, reason_code: Optional[str] = None,
                       fix_hint: Optional[str] = None, docs_anchor: Optional[str] = None,
                       sent_at: Optional[int] = None, source: str = "rest",
                       dry_run: bool = False, replay: bool = False,
-                      detail: Optional[str] = None) -> dict:
+                      detail: Optional[str] = None,
+                      extra: Optional[dict] = None) -> dict:
         """结果审计 + 回执构造 + 尽力推送（R11）"""
         if reason_code == SendRejectReason.AUDIT_UNAVAILABLE.value and status == SendStatus.FAILED:
             pass  # R25 fail-closed：intent 未落盘，结果行也记不进去——仅日志（上文已告警）
@@ -188,6 +218,10 @@ class DanmuCommandPipeline:
             })
         wire = self._build_result_wire(platform, room_id, request_id, status,
                                        reason_code, fix_hint, docs_anchor, sent_at, content)
+        if extra:
+            # 附加字段 additive 携带进 REST 回执与 WS 广播（{**wire, **extra} 后
+            # _broadcast 同样广播；消费端忽略未知字段——2026-10-14 F24 勘误原注释）
+            wire = {**wire, **extra}
         await self._broadcast(wire)
         if detail:
             logger.info(f"[send-pipeline] {platform}:{room_id} {status.value} {reason_code or ''} {detail[:200]}")

@@ -10,6 +10,8 @@ serve 与 AUTOlive 集成的统一入口：按平台构造契约 v1 引擎。
 
 from typing import Dict, Optional
 
+from loguru import logger
+
 from danmaku_listener.engines.base import BaseEngine
 from danmaku_listener.engines.protocol.bilibili import BilibiliProtocolEngine
 from danmaku_listener.engines.protocol.douyin import DouyinWebProtocolEngine
@@ -91,8 +93,18 @@ def build_engine(platform: str, state_store: Optional[RoomStateStore] = None, **
     # 平台特有配置注入（Settings 单源）
     if platform == "bilibili":
         try:
+            from pathlib import Path as _P
             from danmaku_listener.config.settings import get_settings
-            kwargs.setdefault("cookie_file", get_settings().bilibili_cookie_file)
+            cookie_file = get_settings().bilibili_cookie_file
+            # S5 兜底（2026-10-13）：默认 txt 不存在时兜底读登录闭环产物
+            # bilibili_storage_state.json（wiring.py 同款路径）——消除重启后
+            # 静默回退游客；SESSDATA 即用、过期交既有 -101/NEEDS_LOGIN 语义
+            if cookie_file and not _P(cookie_file).is_file():
+                fallback = str(_P(cookie_file).parent / "bilibili_storage_state.json")
+                if _P(fallback).is_file():
+                    logger.info(f"[registry] bilibili 默认 cookie 文件缺失，兜底 storage_state: {fallback}")
+                    cookie_file = fallback
+            kwargs.setdefault("cookie_file", cookie_file)
         except Exception:
             pass
     if platform == "kuaishou":

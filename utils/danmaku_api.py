@@ -8,7 +8,10 @@ DanmakuListener 控制面 FastAPI 路由（前端 webui → main.py 进程唯一
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
+import re
 import threading
 from typing import Optional
 
@@ -227,61 +230,82 @@ def register_danmaku_routes(app, config) -> None:
 
     @app.post("/danmaku/relogin")
     def danmaku_relogin(body: dict):
-        """手动重登（组件 run_relogin_flow，2026-10-13 用户需求）。
+        """手动重登（v0.8.0 会话刷新编排——一次登录双载体齐活，2026-10-14）。
 
-        清平台登录载体（profile 目录/快照/cookie 文件）→ 停该平台在听房间 →
-        start_room 既有登录门接管（弹可见窗→登录→保存→自动恢复监听）。
-        载体清单与安全边界（目录逃逸防护）在组件侧单源。
+        异步两段式：同步段即时回执（relogin_id/rooms_stopped/carriers_cleared/...），
+        登录与恢复由后台编排推进，终态经 GET /danmaku/relogin/status 轮询。
+        同步段最坏 >35s（supersede join 15s+发送会话 close 20s+清理+一次排队）——
+        专用超时 75s（ENG F2），不走 _submit_room_op 通用 30s。
+        status_url 覆写为控制面前缀（上游 /api/* 路由在 AUTOlive 不存在，ENG F5）。
         """
         platform = str(body.get("platform") or "")
         room_id = str(body.get("room_id") or "")
         if not platform:
             raise HTTPException(status_code=400, detail="platform 必填")
+        from danmaku_listener.web.relogin import PLATFORM_LOGIN_CARRIERS, run_relogin_flow
+        if platform not in PLATFORM_LOGIN_CARRIERS:
+            # ENG F7：不支持平台显式 400 语义，不落 room.internal 泛化
+            return {"success": False, "status": 400,
+                    "error": f"平台 {platform} 无手动重登载体",
+                    "reason_code": "room.unsupported",
+                    "fix_hint": "该平台不支持手动重登（无登录载体定义）"}
         svc = _svc()
-        from danmaku_listener.web.relogin import run_relogin_flow
         cookie_dir = str((svc._section() or {}).get("cookie_dir") or "./cookie")
-        return _unwrap(svc._submit_room_op(
-            lambda: run_relogin_flow(svc._bridge, platform, room_id, cookie_dir)))
+        result = _unwrap(svc._submit_room_op(
+            lambda: run_relogin_flow(svc._bridge, platform, room_id, cookie_dir),
+            timeout=75.0))
+        if isinstance(result, dict) and result.get("success") and result.get("relogin_id"):
+            result["status_url"] = f"/danmaku/relogin/status?id={result['relogin_id']}"
+        return result
 
-    @app.post("/danmaku/send-login")
-    def danmaku_send_login(body: dict):
-        """发送侧登录（双载体平台监听/发送登录态分离——2026-10-13 用户实测闭环补全）。
+    @app.get("/danmaku/relogin/status")
+    def danmaku_relogin_status(id: str = ""):
+        """重登编排终态查询（v0.8.0 5 态状态机控制面转发——2026-10-14）。
 
-        douyin/huya 的发送凭证是 persistent profile（指纹绑定，与监听 cookie
-        载体独立）、douyu 是独立 cookie 文件——房间行"登录"按钮清理全部载体后
-        监听登录门自动收口，发送载体需本端点弹可见窗补登（组件 run_profile_login
-        _flow/_huya_login/_douyu_login 已实装）。后台线程执行（扫码等待最长 300s，
-        不占控制面 worker）；登录完成直接重试发送即可。
+        5 态=1 进行态（recovering——前端持续轮询）+4 终态（completed/login_required/
+        failed/superseded——停轮询+对应文案）。单循环不变量（REGISTRY 单事件循环访问
+        约束）：读取经服务循环通道执行（ENG F1），禁线程池直调 deepcopy；None（记录被
+        _gc 淘汰或进程重启）=未知 id 终态；deepcopy 竞态异常重试一次后仍失败=可重试
+        语义（前端继续轮询），与未知 id 分流。
         """
-        platform = str(body.get("platform") or "")
-        room_id = str(body.get("room_id") or "")
-        if platform not in ("douyin", "huya", "douyu"):
-            return {"success": False,
-                    "error": f"平台 {platform} 无独立发送登录流程",
-                    "fix_hint": "该平台发送共用监听凭证或发送时自动引导登录"}
-        threading.Thread(target=_send_login_worker, args=(platform, room_id),
-                         name=f"send-login-{platform}", daemon=True).start()
-        return {"success": True,
-                "msg": "发送登录窗口已弹出——完成扫码/登录后重新点『发送』"}
+        rid = str(id or "")
+        if not re.fullmatch(r"[0-9a-fA-F-]{1,64}", rid):  # ENG F6：照抄上游 id 形态校验
+            return {"success": False, "reason_code": "status.bad_id",
+                    "error": "relogin_id 形态非法",
+                    "fix_hint": "以 /danmaku/relogin 回执的 relogin_id 为准"}
+        from danmaku_listener.web.relogin import get_relogin_status
 
-    def _send_login_worker(platform: str, room_id: str) -> None:
-        import asyncio as _aio
-        loop = _aio.new_event_loop()
-        try:
-            if platform == "douyin":
-                from danmaku_listener.engines.douyin_login import run_profile_login_flow
-                res = loop.run_until_complete(run_profile_login_flow(room_id=room_id))
-            elif platform == "huya":
-                from danmaku_listener.engines.send_login import _huya_login
-                res = loop.run_until_complete(_huya_login(room_id))
-            else:
-                from danmaku_listener.engines.send_login import _douyu_login
-                res = loop.run_until_complete(_douyu_login(room_id))
-            logger.info(f"[danmaku_api] send-login {platform} 结果: {res.get('status')}")
-        except Exception:
-            logger.error(f"[danmaku_api] send-login {platform} 异常", exc_info=True)
-        finally:
-            loop.close()
+        async def _read_on_loop():
+            # 服务循环线程内执行——满足 REGISTRY 单循环访问约束（deepcopy 不与编排并发迭代）
+            return get_relogin_status(rid)
+
+        def _read_once():
+            svc = get_service_instance()
+            if svc is None or svc._loop is None or svc._loop.is_closed():
+                # 服务未构建/循环已关：无并发编排，直读安全（注册表导入即存在）
+                return get_relogin_status(rid)
+            fut = asyncio.run_coroutine_threadsafe(_read_on_loop(), svc._loop)
+            return fut.result(timeout=5.0)
+
+        rec = None
+        for attempt in (1, 2):  # ENG F1：deepcopy 竞态异常重试一次
+            try:
+                rec = _read_once()
+                break
+            except concurrent.futures.TimeoutError:
+                return {"success": False, "reason_code": "status.read_timeout",
+                        "error": "状态读取超时", "fix_hint": "瞬时失败可重试——前端将继续轮询"}
+            except Exception:
+                if attempt == 2:
+                    logger.error("[danmaku_api] relogin status 读取异常（重试后仍失败）", exc_info=True)
+                    return {"success": False, "reason_code": "status.read_failed",
+                            "error": "状态读取失败（已重试）",
+                            "fix_hint": "瞬时失败可重试——前端将继续轮询"}
+        if rec is None:
+            return {"success": True, "found": False, "state": None,
+                    "msg": "状态已不可查——以实际弹窗结果为准，可重新点登录"}
+        return {"success": True, "found": True, "state": rec.get("state"),
+                "record": rec, "status_url": f"/danmaku/relogin/status?id={rid}"}
 
     @app.post("/danmaku/send")
     def danmaku_send(body: dict):

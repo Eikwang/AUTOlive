@@ -25,6 +25,9 @@ DOUYU_COOKIE_FILE = "cookie/douyu_login_cookies.json"
 DOUYU_COOKIE_NAMES = ("acf_uid", "acf_auth")
 HUYA_PROFILE_DIR = "cookie/huya_login_profile"
 HUYA_COOKIE_NAMES = ("yyuid", "hicl_imid", "huya_uid")
+#: huya takeover 参数组（URL/cookie 元组/grace_s）——relogin 编排与 huya sender
+#: 引擎闭环共用（2026-10-14 F12：双份手工同步收敛为单一来源）
+HUYA_TAKEOVER_PARAMS = ("https://www.huya.com/", HUYA_COOKIE_NAMES, 30.0)
 
 
 async def _douyu_login(room_id: str = "", timeout: float = 240.0) -> dict:

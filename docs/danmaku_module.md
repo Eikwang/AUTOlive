@@ -36,10 +36,30 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 ## 升级流程（上游组件更新）
 
 1. **版本核对**（第 0 步）：`python -m danmaku_listener contract` —— 记录当前契约版本
-2. **重跑复制**：`python Scripts/copy_danmaku.py` —— 副本整体替换为上游最新（注意：`danmaku_listener/` 会被 rmtree，登录态/关键词/注册表在副本外不受影响）
-3. **契约漂移检查**：`python Scripts/export_contract.py --check`
-4. **hook 存在性断言**：冒烟脚本首步断言 `DanmakuBridge._broadcast` 等被子类 hook 的成员签名仍在（私有方法不受上游 API 承诺保护，防同步后静默断流）
-5. **冒烟**：重跑阶段 1
+2. **拷贝前核对**：`git status --porcelain danmaku_listener/ docs/danmaku_contract/` —— 确认除 `__pycache__` 等已知生成物外无未跟踪文件（rmtree 对未入库产物不可逆）
+3. **重跑复制**：`python Scripts/copy_danmaku.py` —— 副本整体替换为上游最新（注意：`danmaku_listener/` 会被 rmtree，登录态/关键词/注册表在副本外不受影响）；异常回滚 `git checkout HEAD -- danmaku_listener/ docs/danmaku_contract/`
+4. **本地补丁重放**（见下方台账）——干净覆盖会丢失下列本地改动
+5. **契约漂移检查**：`python -m danmaku_listener contract`（版本核对）
+6. **hook 存在性断言**：冒烟脚本首步断言 `DanmakuBridge._broadcast` 等被子类 hook 的成员签名仍在（私有方法不受上游 API 承诺保护，防同步后静默断流）
+7. **冒烟**：`pytest tests/` 全量 + `tests/smoke_danmaku.py`
+
+> 本次同步（2026-10-14）：上游 v0.8.0 + HEAD `d92edec`（含未发布虎牙未开播 GAP 修复）。上游正式发布 v0.8.1 时核对一次该修复是否存活。
+> smoke_danmaku 覆盖边界：契约数据面冒烟——v0.8.0 新链路（快手 STEALTH_JS 伪装、重登编排生命周期）仅由上游测试与人工实测保障，无本地回归网。
+
+### 本地补丁台账（2026-10-14 建立——每次升级后逐条核对重放，防漏放）
+
+| 文件 | 改动 | 意图 | 重放验证 |
+|---|---|---|---|
+| `danmaku_listener/config/settings.py` | +`send_blocked_keywords: str = ""` 字段 | 发送屏蔽词独立词表（AUTOlive 8926b9fe，通用需求） | `pytest tests/test_send_guard_keywords.py` |
+| `danmaku_listener/senders/wiring.py` | SendGuard 改用独立 `send_blocked_keywords`（不复用 `bridge._blocked_keywords`） | 同上——短词子串误拦根治 | 同上 |
+
+> 台账首条即词表分离——上游 PR 提回收编后本表该项退役（TODOS.md 2026-10-14 项）。
+
+## 手动重登（v0.8.0 会话刷新编排，2026-10-14）
+
+- **一次登录双载体齐活**：房间行「登录」按钮触发重登编排——抖音单窗双喂（profile 登录→storage_state 域白名单导出喂监听 cookie）、虎牙 takeover 可见窗同步导出监听存档；其余平台单载体一次覆盖监听+发送（上游 12 平台会话拓扑审查实证：双载体仅抖音/虎牙）。**无需二次登录**；旧的「发送登录」入口已随此语义移除（D2a 终门裁定 2026-10-14）。
+- **异步两段式**：`POST /danmaku/relogin` 同步段即时回执（relogin_id/rooms_stopped/carriers_cleared）→ 后台编排推进登录与恢复 → 前端轮询 `GET /danmaku/relogin/status?id=`。5 态状态机=1 进行态（recovering，前端每 3s 轮询）+4 终态（completed/login_required/failed/superseded，停轮询+对应文案）；轮询上限 5 分钟。
+- **接口约束**：`/danmaku/relogin` 专用超时 75s（同步段最坏 supersede join 15s+发送会话 close 20s+清理 >35s，高于通用 30s）；TimeoutError 单列 `reason_code=control.timeout`（编排可能仍在进行，勿盲目重试）；status 端点读取经服务循环通道（REGISTRY 单事件循环访问约束——禁止线程池直调 deepcopy）；未知 id（记录被 _gc 淘汰：上限 10 条/3600s，或进程重启）=found=False 终止语义；读取异常=可重试语义（重试一次后仍失败前端继续轮询）。`get_relogin_status` 为消费侧认定的稳定接口——上游改动需同步核对。
 
 ## 排障（problem + cause + fix）
 

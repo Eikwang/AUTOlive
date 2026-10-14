@@ -173,6 +173,12 @@ class ResidentSendSession:
 
         await self.close()          # 释放 profile（关无头 context；pages 清空）
         self._closed = False        # 转正重启需复位 close 语义
+        if self._stale:
+            # DX-D7：takeover 的 launch 直调不经 _launch——close 超时残留进程
+            # 先清理，防撞 profile SingletonLock（与 _launch 同款自愈，F8）
+            killed = cleanup_stale_chromium(self._profile_dir)
+            logger.info(f"[{self.name}] 会话清理: 移除残留 Chromium 进程 {killed} 个（DX-D7 自愈）")
+            self._stale = False
         self._pw_stack = async_playwright()
         self._pw = await self._pw_stack.__aenter__()
         try:
@@ -188,6 +194,7 @@ class ResidentSendSession:
             raise
         try:
             page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+            self._last_activity = time.monotonic()  # ship 对抗F1：launch→goto 段同样算活跃
             try:
                 await page.goto(url, timeout=45000, wait_until="domcontentloaded")
             except Exception as e:  # noqa: BLE001
@@ -205,6 +212,7 @@ class ResidentSendSession:
             except Exception:  # noqa: BLE001
                 baseline = {}
             while time.monotonic() < deadline:
+                self._last_activity = time.monotonic()  # ship 对抗F1：takeover 等待期=活跃期，防空闲看门狗锁内误杀登录窗
                 try:
                     cookies_list = await self._context.cookies()
                 except Exception:  # noqa: BLE001  窗口被用户关闭

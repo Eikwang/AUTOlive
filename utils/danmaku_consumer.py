@@ -31,6 +31,7 @@ DanmakuListener 进程内托管层（整合计划第二阶段：进程内化与�
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import socket
@@ -568,8 +569,12 @@ class DanmakuListenerService:
                         "fix_hint": getattr(e, "fix_hint", ""), "docs_anchor": getattr(e, "docs_anchor", "")}
             raise
 
-    def _submit_room_op(self, coro_factory) -> dict:
-        """房间操作统一出口：RoomError → {success:False,...} 三段式（组件异常类）。"""
+    def _submit_room_op(self, coro_factory, timeout: float = CONTROL_TIMEOUT_S) -> dict:
+        """房间操作统一出口：RoomError → {success:False,...} 三段式（组件异常类）。
+
+        timeout 可覆写：重登编排同步段最坏 >35s（supersede join 15s+发送会话 close 20s+清理，
+        v0.8.0 relogin.py:101/103）+ 一次排队等待——调用方用专用预算（≥75s），勿走通用 30s。
+        """
         if self._loop is None or self._loop.is_closed():
             return {"success": False, "error": "服务未运行",
                     "reason_code": "service.not_running",
@@ -577,7 +582,14 @@ class DanmakuListenerService:
                     "docs_anchor": "docs/danmaku_module.md"}
         fut = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
         try:
-            return fut.result(timeout=CONTROL_TIMEOUT_S)
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # 编排未被取消——可能仍在进行（弹窗照常）。专用 reason_code 供前端判别
+            # 「失败 toast 与实际弹窗并存」的假失败窗口（ENG F2）
+            logger.error(f"[danmaku_listener] 控制面操作超时（{timeout}s）——编排可能仍在进行")
+            return {"success": False, "error": f"控制面等待超时（{timeout:.0f}s）",
+                    "reason_code": "control.timeout",
+                    "fix_hint": "编排可能仍在进行——以实际弹窗为准，勿盲目重试", "docs_anchor": ""}
         except Exception as e:
             et = e.__class__.__name__
             if et == "RoomError" or hasattr(e, "status"):

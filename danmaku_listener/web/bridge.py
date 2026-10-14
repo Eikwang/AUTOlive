@@ -138,32 +138,41 @@ class DanmakuBridge:
             await self._broadcast_system_status(room_key, f"登录成功但启动失败: {e}")
 
     async def _douyin_login_then_start(self, room_key: str, room_id: str, engine: Any, cookie_path: str) -> None:
-        """douyin 受控登录闭环：弹窗口→用户扫码→cookie 保存→自动开始监听
+        """douyin 登录闭环 v2（2026-10-13 单窗双喂——用户验收裁定的一次登录）
 
-        2026-10-03 五轮采样实证：礼物事件（WebcastGiftMessage）只推给登录
-        观众——游客连接缺失全部礼物消息。登录 cookie 注入 roomInit 与
-        WS 握手后消息集合完整。
+        添加平台检测未登录时**一次扫码同时建立发送 profile（bd_ticket_guard
+        指纹绑定）与监听 cookie 文件**（域白名单导出）——消除旧两段式
+        「监听登录门写 cookies.json → 发送拒绝 → 手动点登录再走 profile」。
+        2026-10-03 五轮采样实证：礼物事件只推登录观众——登录 cookie 注入
+        roomInit 与 WS 握手后消息集合完整（本闭环沿用该热注入契约）。
         """
-        from danmaku_listener.engines.douyin_login import run_login_flow
+        from danmaku_listener.engines.douyin_login import (
+            load_login_cookies, run_profile_login_flow)
 
         async def status_cb(status: str) -> None:
             await self._broadcast_system_status(room_key, f"douyin 登录流程: {status}")
 
-        await self._broadcast_system_status(room_key, "登录窗口已打开，请在浏览器中登录抖音账号")
-        result = await run_login_flow(
-            room_id=room_id, cookie_path=cookie_path, headless=False,
+        await self._broadcast_system_status(
+            room_key, "登录窗口已打开，请在浏览器中登录抖音账号"
+                      "（一次扫码同时开通监听完整消息流与弹幕发送）")
+        result = await run_profile_login_flow(
+            room_id=room_id, headless=False,
+            export_cookie_path=cookie_path,
             on_status=lambda s: status_cb(s),
         )
-        if result.get("status") != "ok":
-            await self._broadcast_system_status(room_key, "登录未完成——抖音礼物监听需要登录态，请重试")
+        if result.get("status") != "ok" or result.get("export") != "ok":
+            detail = ("登录未完成" if result.get("status") != "ok"
+                      else "登录成功但监听 cookie 导出失败（重跑登录即可，发送侧不受影响）")
+            await self._broadcast_system_status(room_key, f"{detail}——抖音礼物监听需要登录态，请重试")
             self._rooms[room_key]["status"] = "login_failed"
             return
 
-        # 登录 cookie 热注入引擎（登录窗口保存的 cookie 即时生效）
-        engine._login_cookies = result.get("cookies", {})
+        # 监听 cookie 热注入引擎（导出文件即监听登录态——与发送 profile 同源同批）
+        engine._login_cookies = load_login_cookies(cookie_path)
         engine._room_init._login_cookies = engine._login_cookies
 
-        await self._broadcast_system_status(room_key, "登录成功——开始监听")
+        reused = "（复用存活登录态）" if result.get("reused_existing") else ""
+        await self._broadcast_system_status(room_key, f"登录成功{reused}——开始监听")
         try:
             await engine.start(room_id)
             self._rooms[room_key]["status"] = "running"

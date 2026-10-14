@@ -313,15 +313,13 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def api_relogin(request: web.Request) -> web.Response:
-    """手动重新登录（2026-10-10 用户需求——发送按钮旁"登录"按钮）
-
-    清平台登录载体（profile/快照/cookie 文件）→ 重新 start_room，由既有
-    登录门接管弹窗与恢复。鉴权同 send-danmu（状态变更操作——F6 同源）。
+def _require_bearer(request: web.Request) -> web.Response | None:
+    """Bearer 鉴权前置（2026-10-14 D5：四处同构块收口）：通过返回 None，否则返回
+    503（AUTH_UNCONFIGURED）/401（unauthorized）Response——四处端点共用；
+    api_send_results 统一后 503 补齐 fix_hint（additive 字段，无害）。
     """
     from danmaku_listener.config.settings import get_settings
     from danmaku_listener.push.ws_server import load_token, constant_time_equal
-    from danmaku_listener.web.relogin import ReloginUnsupported, run_relogin_flow
 
     settings = get_settings()
     token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
@@ -332,6 +330,20 @@ async def api_relogin(request: web.Request) -> web.Response:
     provided = request.headers.get("Authorization", "")
     if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
         return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    return None
+
+
+async def api_relogin(request: web.Request) -> web.Response:
+    """手动重新登录（2026-10-10 用户需求——发送按钮旁"登录"按钮）
+
+    清平台登录载体（profile/快照/cookie 文件）→ 重新 start_room，由既有
+    登录门接管弹窗与恢复。鉴权同 send-danmu（状态变更操作——F6 同源）。
+    """
+    from danmaku_listener.web.relogin import ReloginUnsupported, run_relogin_flow
+
+    resp = _require_bearer(request)
+    if resp is not None:
+        return resp
     try:
         data = await request.json()
     except Exception:
@@ -350,25 +362,39 @@ async def api_relogin(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+async def api_relogin_status(request: web.Request) -> web.Response:
+    """重登异步段回执（2026-10-13 会话刷新编排——计划 §3.1-6）
+
+    鉴权与 /api/relogin 同源（load_token + constant_time_equal）；id 形态校验
+    （uuid4）；未知 id 统一 404（AUTOlive 契约：停止轮询按未知终局处理）。
+    """
+    from danmaku_listener.web.relogin import get_relogin_status
+
+    resp = _require_bearer(request)
+    if resp is not None:
+        return resp
+    rid = request.query.get("id", "")
+    if not rid or len(rid) > 64 or not all(c in "0123456789abcdef-" for c in rid.lower()):
+        return web.json_response({"success": False, "error": "id 形态非法"}, status=400)
+    rec = get_relogin_status(rid)
+    if rec is None:
+        return web.json_response({"success": False, "error": "relogin_id 不可得（已淘汰或进程重启）"
+                                  "——停止轮询按未知终局处理；重 POST 有停房+弹窗副作用，先确认真需重登"},
+                                 status=404)
+    return web.json_response({"success": True, **rec})
+
+
 async def api_send_danmu(request: web.Request) -> web.Response:
     """发送弹幕命令（AutoDanmu T5——REST 备用通道；R9/F6/S1-1）
 
     鉴权：Bearer token 必须命中 settings token（常量时间比较）；
     token 未配置 → 503 AUTH_UNCONFIGURED（拒绝服务，无降级——F6/账号级 blast radius）。
     """
-    from danmaku_listener.config.settings import get_settings
-    from danmaku_listener.push.ws_server import load_token, constant_time_equal
     from danmaku_listener.senders.wiring import get_send_pipeline
 
-    settings = get_settings()
-    token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
-    if not token:
-        return web.json_response({"success": False, "error": "AUTH_UNCONFIGURED",
-                                  "fix_hint": "配置 ws_token_file 或 DANMAKU_TOKEN 后重启"},
-                                 status=503)
-    provided = request.headers.get("Authorization", "")
-    if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
-        return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    resp = _require_bearer(request)
+    if resp is not None:
+        return resp
     try:
         data = await request.json()
     except Exception:
@@ -387,17 +413,11 @@ async def api_send_danmu(request: web.Request) -> web.Response:
 
 async def api_send_results(request: web.Request) -> web.Response:
     """发送结果对账查询（R18——只读；鉴权同 POST）"""
-    from danmaku_listener.config.settings import get_settings
-    from danmaku_listener.push.ws_server import load_token, constant_time_equal
     from danmaku_listener.senders.wiring import get_send_pipeline
 
-    settings = get_settings()
-    token = load_token(settings.ws_token_file, os.environ.get("DANMAKU_TOKEN"))
-    if not token:
-        return web.json_response({"success": False, "error": "AUTH_UNCONFIGURED"}, status=503)
-    provided = request.headers.get("Authorization", "")
-    if not provided.startswith("Bearer ") or not constant_time_equal(provided[len("Bearer "):], token):
-        return web.json_response({"success": False, "error": "unauthorized"}, status=401)
+    resp = _require_bearer(request)
+    if resp is not None:
+        return resp
     request_id = request.query.get("request_id", "")
     if not request_id:
         return web.json_response({"success": False, "error": "request_id 必填"}, status=400)
@@ -459,6 +479,7 @@ def create_app() -> web.Application:
     # AutoDanmu 发送 API（T5：R9 备用通道+R18 对账；Bearer 硬要求 F6/S1-1）
     cors.add(app.router.add_post("/api/send-danmu", api_send_danmu))
     cors.add(app.router.add_post("/api/relogin", api_relogin))
+    cors.add(app.router.add_get("/api/relogin/status", api_relogin_status))
     cors.add(app.router.add_get("/api/send-results", api_send_results))
 
     # 静态文件服务

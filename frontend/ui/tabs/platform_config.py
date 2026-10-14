@@ -431,8 +431,8 @@ def create_platform_config_tab(
                       "然后关闭再开启『启用监听』开关（或重启系统）生效",
                       type="warning", close_button="知道了")
         if r.get("reason_code") == "PLATFORM_REJECTED":
-            ui.notify("发送会话登录态失效——抖音/虎牙的发送与监听是两套登录，"
-                      "选好目标房间后点『发送登录』补登，完成后重新发送",
+            ui.notify("发送会话登录态失效——在房间列表点该平台的『登录』按钮重新登录"
+                      "（一次登录同时恢复监听与发送），完成后重新发送",
                       type="warning", close_button="知道了")
         if status in ("sent", "dry_run", "unknown"):
             send_content.value = ""
@@ -548,29 +548,48 @@ def create_platform_config_tab(
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("发送", on_click=_do_send).props("unelevated color=primary")
             ui.button("对账最近", on_click=_do_reconcile).props("outline")
-            # 发送侧登录（2026-10-13）：douyin/huya 发送凭证=独立 persistent profile
-            # （指纹绑定），与监听登录分离——房间行"登录"只闭环监听侧，发送载体
-            # 需此处补登；douyu 为独立 cookie 文件同走本入口
-            async def _send_login():
-                room = state["run_rooms"].get(send_room_select.value) \
-                    if send_room_select.value else None
-                if not room:
-                    await _toast("先在『目标房间』选择要登录发送的平台", "warning")
-                    return
-                r = await _api(config, "POST", "/danmaku/send-login",
-                               {"platform": room.get("platform"),
-                                "room_id": room.get("room_id")}, timeout=15)
-                if isinstance(r, dict) and r.get("success"):
-                    await _toast(str(r.get("msg") or "发送登录窗口已弹出"), "info")
-                else:
-                    await _err_notify(r or {"error": "发送登录请求失败"})
-            ui.button("发送登录", on_click=_send_login).props("outline").tooltip(
-                "抖音/虎牙发送与监听是两套登录（指纹绑定独立 profile）——"
-                "聊天面板未出现/需先登录时点此补登发送侧")
+            # （2026-10-14 D2a 终门裁定）『发送登录』按钮已移除——v0.8.0 一次登录
+            # 双载体齐活，房间行『登录』一次扫码即恢复监听+发送；发送登录态失效
+            # 时 PLATFORM_REJECTED 引导指向『登录』按钮
         send_platforms_select.on_value_change(_save_send_platforms)
         send_live_switch.on_value_change(_save_send_dry_run)
 
     # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
+
+    async def _poll_relogin_status(rid: str):
+        """重登编排终态轮询（v0.8.0 5 态状态机，2026-10-14）：每 3s 查询、上限 5 分钟。
+
+        recovering=持续轮询；4 终态（completed/login_required/failed/superseded）
+        停轮询+对应文案；found=False（GC 淘汰 10 条/3600s 或进程重启）立即停轮询；
+        读取失败（status.read_failed/read_timeout=可重试语义）继续轮询至上限（ENG F1 分流）。
+        """
+        if not rid:
+            return
+        for _ in range(100):  # 100×3s=5 分钟上限
+            await asyncio.sleep(3)
+            r = await _api(config, "GET", f"/danmaku/relogin/status?id={rid}", timeout=10)
+            if not isinstance(r, dict):
+                continue  # 网络抖动——继续轮询
+            if not r.get("success"):
+                continue  # 可重试语义——继续轮询至上限
+            if not r.get("found"):
+                await _toast("重登状态已不可查（记录过期或系统重启）——"
+                             "以实际弹窗结果为准，可重新点『登录』", "warning")
+                return
+            st = str(r.get("state") or "")
+            if st == "recovering":
+                continue
+            msgs = {
+                "completed": "重登完成——监听与发送登录态已恢复（一次登录双载体齐活）",
+                "login_required": "重登需要登录——请在弹出的窗口完成扫码/登录",
+                "failed": "重登失败——可重新点『登录』重试",
+                "superseded": "该次重登已被更新的登录操作取代",
+            }
+            await _toast(msgs.get(st, f"重登状态：{st}"),
+                         "positive" if st == "completed" else "warning")
+            return
+        await _toast("重登状态跟踪超时（5 分钟）——重登仍在进行或已中断，可重新点『登录』",
+                     "warning")
 
     async def _onboard_login(platform: str):
         """添加→检测→自动弹窗→列表刷新（CEO F2 编排接缝；Eng F-ENG-13 三平台）。"""
@@ -665,25 +684,25 @@ def create_platform_config_tab(
                                      + ("" if state["mode"] == "running" else "（下次启动系统后生效）"))
                     room_switch.on("update:model-value", _toggle_room)
 
-                    # 登录（2026-10-13 用户需求）：清平台登录载体→重新弹登录窗
-                    # （组件 run_relogin_flow 已实装——运行期走控制面端点登录门
-                    # 收口；配置期复用其 clear_login_state + 配置期登录服务）
+                    # 登录（2026-10-14 v0.8.0 一次登录双载体齐活）：重登编排同步段
+                    # 即时回执→后台轮询终态（监听+发送一次扫码同时恢复）
                     async def _relogin(pp=p, rd=rid):
                         if state["mode"] in ("running", "service_disabled"):
+                            # v0.8.0 异步两段式：专用超时 75s（同步段最坏 >35s）
                             r = await _api(config, "POST", "/danmaku/relogin",
-                                           {"platform": pp, "room_id": rd}, timeout=45)
+                                           {"platform": pp, "room_id": rd}, timeout=90)
                             if not isinstance(r, dict):
                                 await _toast("重登请求失败（运行面不可达）", "negative")
                                 return
-                            if r.get("success"):
-                                tip = str(r.get("msg") or "登录窗口已弹出")
-                                if pp in ("douyin", "huya"):
-                                    # 双载体平台：relogin 清监听+发送两套载体，监听
-                                    # 登录门已收口——发送侧需发送卡『发送登录』补登
-                                    tip += "；发送侧请在弹幕发送卡点『发送登录』补登"
-                                await _toast(tip, "info")
-                            else:
+                            if not r.get("success"):
                                 await _err_notify(r)
+                                return
+                            rid_ = str(r.get("relogin_id") or "")
+                            tip = str(r.get("msg") or "登录窗口已弹出——完成后自动恢复监听")
+                            if rid_:
+                                tip += "；进度将自动跟踪"
+                            await _toast(tip, "info")
+                            await _poll_relogin_status(rid_)
                         else:
                             r = login_svc.request_relogin(pp)
                             if r.get("success"):
@@ -691,7 +710,8 @@ def create_platform_config_tab(
                             else:
                                 await _err_notify(r)
                     ui.button("登录", on_click=_relogin).props("flat dense color=warning").tooltip(
-                        "清除该平台登录态并重新弹出登录窗口（登录后自动恢复监听）")
+                        "清除该平台登录态并重新弹出登录窗口（一次登录同时恢复监听与发送，"
+                        "完成后自动恢复监听）")
 
                     # 删除（运行态两步走——M-1 ②：先窄端点停再删配置）
                     async def _remove(_e=None, pp=p, rd=rid):

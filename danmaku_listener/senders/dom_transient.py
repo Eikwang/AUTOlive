@@ -23,6 +23,9 @@ from playwright.async_api import async_playwright  # 模块级：测试注入点
 
 from danmaku_listener.contract.models import SendRejectReason, SendStatus
 from danmaku_listener.senders.base import BaseSender, SendResult
+# 2026-10-14 D5 裁定单源化：STEALTH_JS 移入 senders/_stealth.py——本模块
+# re-export 保持 kuaishou_douyu.py 的 import 链不变
+from danmaku_listener.senders._stealth import STEALTH_JS
 
 PAGE_TIMEOUT_MS = 30_000
 ECHO_WAIT_S = 12.0
@@ -42,6 +45,15 @@ class DomTransientSender(BaseSender):
     cookie_file: str = ""                # 凭证文件路径（子类定）
     storage_state_mode: bool = False     # True=playwright storage_state 注入；False=cookie 数组注入
     home_url: str = ""                   # 注入后先访问的域首页（cookie 作用域激活）
+    # 通用诊断/对抗开关（瞬态基类，默认全关）：
+    # force_headed=True 去掉 --headless=new（真 headed 可见窗——取证专用，
+    #   自动发送场景不得长期启用）；observe_window_s>0=回执后保窗 N 秒供肉眼
+    #   核验（sleep 在回执路径上——回执会延迟 N 秒返回，前端 60s 超时先触发）；
+    # stealth_script 非空=add_init_script 反检测伪装注入（headless=new 指纹
+    #   被平台风控静默吞弹幕的解法——虎牙/快手实证同根因）
+    force_headed: bool = False
+    observe_window_s: int = 0
+    stealth_script: str | None = None
 
     async def send(self, room_id: str, content: str) -> SendResult:
         if not self.room_url_template:
@@ -52,13 +64,17 @@ class DomTransientSender(BaseSender):
             # headless=new（完整 Chrome 指纹）——旧 headless（headless_shell）被平台
             # 检测/前端降级（T1 抖音实证 bd_ticket_guard；快手"请求过快"/"错误代码22"
             # 同源嫌疑）——2026-10-07 T6 实测对齐抖音形态
+            launch_args = ["--disable-blink-features=AutomationControlled",
+                           "--disable-setuid-sandbox", "--hide-crash-restore-bubble"]
+            if not self.force_headed:
+                launch_args.append("--headless=new")
             context = await pw.chromium.launch_persistent_context(
                 self._temp_profile_dir(), headless=False,
                 user_agent=self._ua(), viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-setuid-sandbox", "--hide-crash-restore-bubble",
-                      "--headless=new"])
+                args=launch_args)
             try:
+                if self.stealth_script:
+                    await context.add_init_script(f"({self.stealth_script})()")
                 if not await self._inject_credentials(context):
                     return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
                                       detail=f"凭证文件不存在或损坏: {self.cookie_file}",
@@ -118,6 +134,15 @@ class DomTransientSender(BaseSender):
                 return SendResult(SendStatus.UNKNOWN, SendRejectReason.SEND_TIMEOUT.value,
                                   detail="无回显无显式错误（shadow DOM/虚拟列表/慢渲染可能）")
             finally:
+                if self.observe_window_s > 0:
+                    # 观察保窗：回执已产出，窗口留给用户肉眼核验
+                    # （弹幕是否真进直播间/页面登录态/风控信号）
+                    logger.info(f"[{self.platform}] 保窗 {self.observe_window_s}s 供观察——"
+                                "确认后可手动关窗提前结束")
+                    try:
+                        await asyncio.sleep(self.observe_window_s)
+                    except asyncio.CancelledError:
+                        raise  # 保持取消语义（2026-10-14 ship 审查 D4：吞取消违反 asyncio 协作式取消）
                 try:
                     await context.close()
                 except Exception:  # noqa: BLE001

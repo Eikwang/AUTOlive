@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from danmaku_listener.senders.dom_transient import DomTransientSender
+from danmaku_listener.senders.dom_transient import STEALTH_JS, DomTransientSender
 
 
 class KuaishouStateSender(DomTransientSender):
@@ -23,6 +23,13 @@ class KuaishouStateSender(DomTransientSender):
     cookie_file = "cookie/kuaishou_storage_state.json"
     storage_state_mode = True
     home_url = "https://live.kuaishou.com/"
+    # 2026-10-13 假弹幕终诊（用户 headed 可见窗观察实证：登录态正常、弹幕真实
+    # 进直播间）——根因=headless=new 指纹被快手风控静默吞（虎牙 10-09 同款），
+    # 非 profile 错误。修复=虎牙纯后台终态同款 STEALTH_JS 伪装注入；期间前端
+    # 「发送超时」为诊断保窗 90s 的预期副作用（sleep 在回执路径上），非回显
+    # 判定缺陷。若伪装后实发验收仍被吞：备选=瞬态 headed（force_headed=True，
+    # 每发必弹窗，仅应急）。
+    stealth_script = STEALTH_JS
 
 
 class DouyuCookieSender(DomTransientSender):

@@ -187,8 +187,12 @@ class BaseEngine(ABC):
         state.last_received_ts = ts if ts is not None else int(time.time())
         self._persist_state(room_id, state)
 
-    def mark_live_change(self, room_id: str, live: bool, ts: Optional[int] = None) -> None:
-        """记录直播状态转换（开播/下播）；下播即闭合未决缺口（下播期间缺失不计 GAP）"""
+    def mark_live_change(self, room_id: str, live: bool, ts: Optional[int] = None) -> bool:
+        """记录直播状态转换（开播/下播）；下播即闭合未决缺口（下播期间缺失不计 GAP）
+
+        返回是否发生状态转换（与上次不同）——供调用方做「转换沿只发一次」
+        的状态播报去重（2026-10-14 huya 未开播接线首次消费）。
+        """
         state = self._room(room_id)
         ts = ts if ts is not None else int(time.time())
         changed = state.live != live
@@ -199,6 +203,7 @@ class BaseEngine(ABC):
         self._persist_state(room_id, state)
         if changed:
             logger.debug(f"Room {room_id} live state -> {live}")
+        return changed
 
     def mark_gap_start(self, room_id: str, ts: Optional[int] = None) -> None:
         """断线/停机开始：记录未决缺口起点（仅开播中才记录，下播不计 GAP）"""

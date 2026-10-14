@@ -83,10 +83,8 @@ class Settings(BaseSettings):
 
     # ===== AutoDanmu 发送（ADR-002 / R1；全部默认安全态——R10/DX-F1） =====
     send_enabled_platforms: str = ""       # 逗号分隔启用列表；默认空=全部关闭
-    send_blocked_keywords: str = ""        # 发送屏蔽词（逗号分隔）——与接收过滤 keywords 分离（2026-10-13）；
-                                           # 空=发送不拦词。此前复用接收词表，短词（如 "sb"）子串匹配
-                                           # 误拦正常发送内容（KEYWORD_BLOCKED）
     send_dry_run: bool = True              # 观察模式出厂默认=开启（DX-F4/R20；验证期后调整归运维）
+    send_blocked_keywords: str = ""        # 发送屏蔽词（逗号分隔）——与接收过滤 keywords 词表分离（2026-10-13 AUTOlive 8926b9fe；默认空=发送不拦词）
     send_min_interval_seconds: float = 3.0  # 每限速键最小发送间隔（秒）——2026-10-10 用户裁定 30s→3s 防刷屏；平台实测约束走 per-platform 覆写（huya 35s 内置）
     send_jitter_seconds: float = 8.0       # 随机抖动上限（秒，防行为指纹）
     send_rate_key: str = "platform"        # 限速键口径：platform / platform_room（F4/R35，M1b 前定稿）

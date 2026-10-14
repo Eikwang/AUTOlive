@@ -163,7 +163,17 @@ class ControlledPageEngine(BaseEngine):
                                    f"launch failed: {type(e).__name__}: {str(e)[:80]}")
                     return "window_closed"
                 try:
-                    page = context.pages[0] if context.pages else await context.new_page()
+                    # 确定性落页（2026-10-13 验收反馈修复）：persistent profile
+                    # 会恢复上次会话标签页——pages[0] 可能是旧测试直播间页。
+                    # 登录窗恒新开页导航到目标房间，并关闭恢复出来的遗留页，
+                    # 保证用户看到的一定是当前房间的登录/直播页。
+                    page = await context.new_page()
+                    for stale in list(context.pages):
+                        if stale is not page:
+                            try:
+                                await stale.close()
+                            except Exception:  # noqa: BLE001
+                                pass
                     try:
                         await page.goto(goto_url, timeout=30000,
                                         wait_until="domcontentloaded")

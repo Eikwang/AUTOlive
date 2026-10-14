@@ -22,7 +22,11 @@ import time
 from loguru import logger
 
 from danmaku_listener.contract.models import SendRejectReason, SendStatus
+# 常量单源（2026-10-14 F12/F11）：HUYA_COOKIE_NAMES/HUYA_TAKEOVER_PARAMS 与
+# STEALTH_JS 均收敛单一来源；send_login 模块级仅依赖 stdlib+loguru，无环
+from danmaku_listener.engines.send_login import HUYA_COOKIE_NAMES, HUYA_TAKEOVER_PARAMS
 from danmaku_listener.senders.base import BaseSender, SendResult
+from danmaku_listener.senders._stealth import STEALTH_JS  # 2026-10-14 D5 裁定单源化（原双副本之一）
 from danmaku_listener.senders.resident_session import (
     MODE_HEADLESS_NEW,
     LoginTakeoverError,
@@ -30,25 +34,6 @@ from danmaku_listener.senders.resident_session import (
 )
 
 PROFILE_DIR = "cookie/huya_login_profile"
-#: headless 反检测指纹包（2026-10-09 对抗实验 1：虎牙风控识别 headless=new
-#: 指纹并静默吞弹幕——headed 对照可过。注入 7 信号伪装后再验）
-STEALTH_JS = """
-() => {
-    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    Object.defineProperty(window, 'outerWidth', {get: () => 1280});
-    Object.defineProperty(window, 'outerHeight', {get: () => 800});
-    Object.defineProperty(screen, 'availWidth', {get: () => 1280});
-    Object.defineProperty(screen, 'availHeight', {get: () => 760});
-    Object.defineProperty(screen, 'colorDepth', {get: () => 24});
-    Object.defineProperty(screen, 'pixelDepth', {get: () => 24});
-    if (!window.chrome) { window.chrome = {runtime: {}, loadTimes: () => {}, csi: () => {}}; }
-    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-    Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-    const origQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (p) => p.name === 'notifications'
-        ? Promise.resolve({state: Notification.permission}) : origQuery(p);
-}
-"""
 
 INPUT_SELECTORS = ("#pub_msg_input",  # 2026-10-10 DOM 取证实测（真输入面=textarea
                    # placeholder"发条弹幕呗~"，卡片 huya-dom-20261010-*；用户
@@ -77,6 +62,70 @@ def _get_session(idle_timeout_s: int, window_mode: str) -> ResidentSendSession:
             init_scripts=[f"({STEALTH_JS})()"],
             login_cookie_names=("yyuid", "hicl_imid", "huya_uid"))
     return _session
+
+
+async def export_huya_archive(context) -> bool:
+    """huya 域登录 cookie 写监听存档（login_gate 同格式 {"cookies":[...]}）
+
+    一次登录两态齐（2026-10-13 用户验收裁定）：takeover 快照入发送 profile
+    后同步写存档文件——引擎存档门见存档即过，不再二次弹窗。
+    """
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+    from danmaku_listener.config.settings import get_settings
+
+    names = set(HUYA_COOKIE_NAMES)  # F12：单源（engines/send_login.py）
+    try:
+        # huya 域段匹配（F7：原子串匹配会误命中伪后缀域——notdouyin.com 同类）
+        cookies = []
+        for c in await context.cookies():
+            domain = str(c.get("domain", ""))
+            if c.get("value") and (domain == "huya.com" or domain.endswith(".huya.com")):
+                cookies.append(c)
+        if not ({c["name"] for c in cookies} & names):
+            logger.warning("[huya] 存档导出：context 无 huya 登录 cookie（未登录？）")
+            return False
+        path = _Path(get_settings().cookie_dir) / "huya_login_cookies.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"cookies": cookies}, ensure_ascii=False, indent=2))
+        _os.replace(tmp, path)
+        logger.info(f"[huya] 监听存档已同步（{len(cookies)} 条）→ {path}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[huya] 监听存档导出失败: {type(e).__name__}: {str(e)[:80]}")
+        return False
+
+
+async def takeover_login_and_archive(room_id: str) -> bool:
+    """发送侧登录闭环（引擎一次登录门委托）：takeover 可见窗一次扫码→
+    快照入发送 profile →huya 域 cookie 写监听存档。False=用户关窗/超时/异常。
+    """
+    from danmaku_listener.config.settings import get_settings
+    st = get_settings()
+    mode = getattr(st, "send_window_mode", MODE_HEADLESS_NEW) or MODE_HEADLESS_NEW
+    idle = int(getattr(st, "send_session_idle_timeout_seconds", 1800) or 1800)
+    session = _get_session(idle, mode)
+    try:
+        page = await session.login_takeover(room_id, *HUYA_TAKEOVER_PARAMS)
+        return await export_huya_archive(page.context)
+    except asyncio.CancelledError:
+        # ship 对抗F2：stop_room→引擎取消路径会穿透此处（CancelledError 非
+        # Exception 子类）——可见登录窗+playwright 进程必须就地回收，否则
+        # profile 目录被占用，后续发送/重登连锁撞 SingletonLock。
+        try:
+            await session.close()
+        except Exception:  # noqa: BLE001  close 失败由 DX-D7 stale 自愈兜底
+            pass
+        raise
+    except LoginTakeoverError as e:
+        logger.warning(f"[huya] takeover 登录未完成: {e}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[huya] takeover 异常: {type(e).__name__}: {str(e)[:80]}")
+        return False
 
 
 class HuyaResidentSender(BaseSender):
@@ -111,7 +160,7 @@ class HuyaResidentSender(BaseSender):
                 mask = (await mask_loc.count() > 0
                         and await mask_loc.first.is_visible())
                 cookies = {c["name"] for c in await page.context.cookies() if c.get("value")}
-                logged = bool({"yyuid", "hicl_imid", "huya_uid"} & cookies) and not mask
+                logged = bool(set(HUYA_COOKIE_NAMES) & cookies) and not mask
             except Exception:  # noqa: BLE001  探测失败不阻断（fake page 兼容）
                 logged = True
             if not logged:
@@ -119,7 +168,7 @@ class HuyaResidentSender(BaseSender):
                 try:
                     page = await self._session.login_takeover(
                         rid, f"https://www.huya.com/{rid}",
-                        ("yyuid", "hicl_imid", "huya_uid"), grace_s=30.0)
+                        HUYA_COOKIE_NAMES, grace_s=30.0)
                 except LoginTakeoverError as e:
                     return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
                                       detail=f"登录未完成: {e}",
@@ -129,6 +178,10 @@ class HuyaResidentSender(BaseSender):
                     return SendResult(SendStatus.FAILED, SendRejectReason.PLATFORM_REJECTED.value,
                                       detail=f"登录窗异常: {type(e).__name__}: {str(e)[:80]}",
                                       fix_hint="重试发送将再次弹出登录窗口")
+                else:
+                    # 一次登录（2026-10-13）：takeover 成功即同步监听存档——
+                    # 引擎存档门不再二次弹窗
+                    await export_huya_archive(page.context)
             # 渲染等待：goto 返回后 SPA 输入框延迟挂载（1s 即查会假阴性）。
             # 2026-10-10 发现逻辑升级：逐匹配扫描（.first 抓错元素教训）+
             # 可见且可编辑过滤（包裹层 div 不可编辑——选它打字全空）

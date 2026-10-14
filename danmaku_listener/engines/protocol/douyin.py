@@ -36,6 +36,9 @@ from danmaku_listener.contract.models import GapReason
 from danmaku_listener.engines.protocol.douyin_gifts import lookup_gift
 from danmaku_listener.engines.base import BaseEngine
 from danmaku_listener.engines.protocol.douyin_assets import douyin_pb2 as dy_pb2
+# 常量单源（2026-10-14 F13）：douyin_login 仅依赖 stdlib+loguru，本方向无环
+# （反向 douyin_login→本模块才是循环——常量因此放在 douyin_login）
+from danmaku_listener.engines.douyin_login import DOUYIN_SESSION_COOKIE_NAMES
 
 PROTOCOL_VERSION = "douyin-2"
 
@@ -121,11 +124,12 @@ class DouyinRoomInit:
     def fetch(self, rid: str) -> Dict[str, Any]:
         """返回 {ttwid, ms_token, real_room, uid}；失败抛 DouyinRoomInitError"""
         if self._login_cookies:
-            # 只注入身份 cookie；排除 ttwid/msToken（会话级，由 Session 自获——
-            # 2026-10-03 用户实测：登录文件里的 ttwid 与自获 ttwid 域属性不同，
-            # jar 同名共存 → CookieConflictError）。同名残留先删（del 删全部同名）
+            # 只注入身份 cookie；排除会话级身份 cookie（DOUYIN_SESSION_COOKIE_NAMES
+            # ——2026-10-14 F13 与 douyin_login 导出排除约定单源。会话级由 Session
+            # 自获——2026-10-03 用户实测：登录文件里的 ttwid 与自获 ttwid 域属性
+            # 不同，jar 同名共存 → CookieConflictError）。同名残留先删（del 删全部同名）
             login = {k: v for k, v in self._login_cookies.items()
-                     if k not in ("ttwid", "msToken")}
+                     if k not in DOUYIN_SESSION_COOKIE_NAMES}
             for name in list(login):
                 if name in self._session.cookies:
                     del self._session.cookies[name]
@@ -357,6 +361,7 @@ class DouyinWebProtocolEngine(BaseEngine):
     async def _serve_room(self, room_id: str, ws_url: str, ctx: Dict[str, Any]) -> None:
         cookie_pairs = [f"ttwid={ctx['ttwid']}", f"msToken={ctx['ms_token']}"]
         # 登录 cookie 并入握手（礼物事件只推登录观众——2026-10-03 实证）
+        # 子集语义：仅排除 ttwid（msToken 走上方独立 pair——DOUYIN_SESSION_COOKIE_NAMES 子集）
         cookie_pairs += [f"{k}={v}" for k, v in self._login_cookies.items()
                          if k not in ("ttwid",)]
         headers = {

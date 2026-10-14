@@ -55,6 +55,7 @@ class SendRejectReason(str, Enum):
     KEYWORD_BLOCKED = "KEYWORD_BLOCKED"            # 关键词过滤命中
     AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"        # 审计写入失败（实发路径 fail-closed，R25）
     CIRCUIT_OPEN = "CIRCUIT_OPEN"                  # 熔断态（F3：与 SENDER_DISABLED 分离——等人工恢复）
+    RELOGIN_IN_PROGRESS = "RELOGIN_IN_PROGRESS"    # 该平台重登编排进行中（2026-10-13 S4 附带——回执携 relogin_id/retry_after_s，可辨识"稍后重试"）
     AUTH_UNCONFIGURED = "AUTH_UNCONFIGURED"        # token 未配置（F6：拒绝服务）
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"        # 重复 request_id——非错误，回执上次结果（R18）
     PLATFORM_REJECTED = "PLATFORM_REJECTED"        # 平台侧明确拒绝（三段式 reason_code 细分）
