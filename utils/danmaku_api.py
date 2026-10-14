@@ -243,6 +243,46 @@ def register_danmaku_routes(app, config) -> None:
         return _unwrap(svc._submit_room_op(
             lambda: run_relogin_flow(svc._bridge, platform, room_id, cookie_dir)))
 
+    @app.post("/danmaku/send-login")
+    def danmaku_send_login(body: dict):
+        """发送侧登录（双载体平台监听/发送登录态分离——2026-10-13 用户实测闭环补全）。
+
+        douyin/huya 的发送凭证是 persistent profile（指纹绑定，与监听 cookie
+        载体独立）、douyu 是独立 cookie 文件——房间行"登录"按钮清理全部载体后
+        监听登录门自动收口，发送载体需本端点弹可见窗补登（组件 run_profile_login
+        _flow/_huya_login/_douyu_login 已实装）。后台线程执行（扫码等待最长 300s，
+        不占控制面 worker）；登录完成直接重试发送即可。
+        """
+        platform = str(body.get("platform") or "")
+        room_id = str(body.get("room_id") or "")
+        if platform not in ("douyin", "huya", "douyu"):
+            return {"success": False,
+                    "error": f"平台 {platform} 无独立发送登录流程",
+                    "fix_hint": "该平台发送共用监听凭证或发送时自动引导登录"}
+        threading.Thread(target=_send_login_worker, args=(platform, room_id),
+                         name=f"send-login-{platform}", daemon=True).start()
+        return {"success": True,
+                "msg": "发送登录窗口已弹出——完成扫码/登录后重新点『发送』"}
+
+    def _send_login_worker(platform: str, room_id: str) -> None:
+        import asyncio as _aio
+        loop = _aio.new_event_loop()
+        try:
+            if platform == "douyin":
+                from danmaku_listener.engines.douyin_login import run_profile_login_flow
+                res = loop.run_until_complete(run_profile_login_flow(room_id=room_id))
+            elif platform == "huya":
+                from danmaku_listener.engines.send_login import _huya_login
+                res = loop.run_until_complete(_huya_login(room_id))
+            else:
+                from danmaku_listener.engines.send_login import _douyu_login
+                res = loop.run_until_complete(_douyu_login(room_id))
+            logger.info(f"[danmaku_api] send-login {platform} 结果: {res.get('status')}")
+        except Exception:
+            logger.error(f"[danmaku_api] send-login {platform} 异常", exc_info=True)
+        finally:
+            loop.close()
+
     @app.post("/danmaku/send")
     def danmaku_send(body: dict):
         """单条手动发送（O2 第一阶段：主 webui 发送入口；鉴权语义同组件 Bearer——

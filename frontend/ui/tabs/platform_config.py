@@ -430,6 +430,10 @@ def create_platform_config_tab(
             ui.notify("该平台未在发送白名单——在『发送启用平台』中勾选并保存，"
                       "然后关闭再开启『启用监听』开关（或重启系统）生效",
                       type="warning", close_button="知道了")
+        if r.get("reason_code") == "PLATFORM_REJECTED":
+            ui.notify("发送会话登录态失效——抖音/虎牙的发送与监听是两套登录，"
+                      "选好目标房间后点『发送登录』补登，完成后重新发送",
+                      type="warning", close_button="知道了")
         if status in ("sent", "dry_run", "unknown"):
             send_content.value = ""
 
@@ -544,6 +548,25 @@ def create_platform_config_tab(
         with ui.row().classes("w-full items-center gap-2"):
             ui.button("发送", on_click=_do_send).props("unelevated color=primary")
             ui.button("对账最近", on_click=_do_reconcile).props("outline")
+            # 发送侧登录（2026-10-13）：douyin/huya 发送凭证=独立 persistent profile
+            # （指纹绑定），与监听登录分离——房间行"登录"只闭环监听侧，发送载体
+            # 需此处补登；douyu 为独立 cookie 文件同走本入口
+            async def _send_login():
+                room = state["run_rooms"].get(send_room_select.value) \
+                    if send_room_select.value else None
+                if not room:
+                    await _toast("先在『目标房间』选择要登录发送的平台", "warning")
+                    return
+                r = await _api(config, "POST", "/danmaku/send-login",
+                               {"platform": room.get("platform"),
+                                "room_id": room.get("room_id")}, timeout=15)
+                if isinstance(r, dict) and r.get("success"):
+                    await _toast(str(r.get("msg") or "发送登录窗口已弹出"), "info")
+                else:
+                    await _err_notify(r or {"error": "发送登录请求失败"})
+            ui.button("发送登录", on_click=_send_login).props("outline").tooltip(
+                "抖音/虎牙发送与监听是两套登录（指纹绑定独立 profile）——"
+                "聊天面板未出现/需先登录时点此补登发送侧")
         send_platforms_select.on_value_change(_save_send_platforms)
         send_live_switch.on_value_change(_save_send_dry_run)
 
@@ -653,7 +676,12 @@ def create_platform_config_tab(
                                 await _toast("重登请求失败（运行面不可达）", "negative")
                                 return
                             if r.get("success"):
-                                await _toast(str(r.get("msg") or "登录窗口已弹出"), "info")
+                                tip = str(r.get("msg") or "登录窗口已弹出")
+                                if pp in ("douyin", "huya"):
+                                    # 双载体平台：relogin 清监听+发送两套载体，监听
+                                    # 登录门已收口——发送侧需发送卡『发送登录』补登
+                                    tip += "；发送侧请在弹幕发送卡点『发送登录』补登"
+                                await _toast(tip, "info")
                             else:
                                 await _err_notify(r)
                         else:
