@@ -1,5 +1,9 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-14) — DanmakuListener v0.8.0 模块更新
+
+1. **词表分离上游化 PR**（P2, S）— AUTOlive 的 send_blocked_keywords 词表分离（8926b9fe）是通用需求而非 AUTOlive 特有，提回上游 D:\AI\DanmakuListener 收编后永久消除该补丁的每轮重放债（v0.7.0→v0.8.0 已重放两次）。依赖：v0.8.0 同步落地后执行；落点=上游 wiring.py SendGuard 构造处支持 settings.send_blocked_keywords + 上游测试；同时维护 docs/danmaku_module.md 本地补丁台账作为未上游化期间的核对清单。
+
 ## Deferred Items from /autoplan (2026-10-12) — 改动盘点与文档刷新
 
 1. **全面测试执行**（P1, M）— 整合浪潮（76 提交）后的系统级验证。**退出标准**：全链路冒烟通过（冷启动+弹幕监听+对话链+数字人+字幕）+ tests/features 29 文件入库裁决完成。测试入口清单见 [docs/开发记录/2026-10-12_整合阶段改动盘点.md](docs/开发记录/2026-10-12_整合阶段改动盘点.md)「全面测试准备清单」节。依赖：无（本批文档已就绪）。
