@@ -113,21 +113,35 @@ def create_svc_tab(
 
         ui.timer(2.0, _poll)
 
-    # ---------- 声音模型列表（点选即热切换）----------
+    # ---------- 声音模型列表（R-3：档案优先分组+扫描兜底，点选即热切换）----------
+    profiles = load_profiles()
+    profile_models = [
+        {"name": pid, "display": (p.get("name") or pid),
+         "pth": p.get("rvc_model"), "index": p.get("rvc_index"),
+         "source": "档案"}
+        for pid, p in profiles.items() if p.get("rvc_model")
+    ]
+    scanned_names = {os.path.splitext(os.path.basename(m["pth"]))[0] for m in profile_models}
+    scan_models = [
+        {**m, "display": m["name"], "source": "目录"}
+        for m in models if m["name"] not in scanned_names
+    ]
     with ui.card().style(card_css):
-        ui.label("声音模型（共享目录 models/rvc/）")
-        if not models:
-            ui.label("models/rvc/ 目录为空").style("color:var(--text-secondary)")
+        ui.label("声音模型（档案优先，共享目录兜底）")
+        if not profile_models and not scan_models:
+            ui.label("暂无声音模型：训练完成后自动出现，或放入 models/rvc/（社区模型"
+                     "同前缀 .pth+.index 即被识别）").style("color:var(--text-secondary)")
         else:
             with ui.column().style("width:100%;gap:4px"):
-                for m in models:
+                for m in profile_models + scan_models:
                     has_index = bool(m["index"])
                     with ui.row().style(
                         "width:100%;align-items:center;border:1px solid var(--border-color);"
                         "border-radius:var(--radius-md);padding:6px 10px;"
                     ):
-                        ui.label(m["name"]).style("flex:1")
-                        ui.label(".pth + .index ✔" if has_index else "缺 index ⚠").style(
+                        ui.label(m["display"]).style("flex:1")
+                        ui.label(f"{m['source']} · " +
+                                 (".pth + .index ✔" if has_index else "缺 index ⚠")).style(
                             "font-size:11px;color:var(--text-secondary)")
                         switch_btn = ui.button(
                             "切换",
@@ -140,32 +154,42 @@ def create_svc_tab(
 
         switch_result = ui.label("").style("font-size:12px;color:var(--text-secondary)")
 
-    # ---------- 实时参数（D12：三项起步 + 高级折叠）----------
+    # ---------- 实时参数（R-2 接线：写 config 持久化 + POST /params 热更新）----------
+    def _apply_param(key, value, cast=float):
+        """双写：config 持久化（下次启动默认值）+ /params 端点热更新（立即生效）。"""
+        set_config_callback("rvc_vc", key, cast(value))
+        try:
+            client.update_params({key: cast(value)})
+        except Exception as e:
+            ui.notify(position="top", type="warning",
+                      message=f"参数热更新失败（服务未就绪？）: {str(e)[:100]}")
+
     with ui.card().style(card_css):
         with ui.expansion("实时参数", value=False).style("width:100%"):
-            with ui.grid(columns=3):
-                with ui.column().style("width:100%"):
-                    FormField.create_input(
-                        label="f0 变调 (key)",
-                        value=str(get_nested_value(config, "rvc_vc", "pitch") or 0),
-                        on_change=lambda e: set_config_callback("rvc_vc", "pitch", _as_float(e.value)),
-                        style="width:100%",
-                    )
-                with ui.column().style("width:100%"):
-                    FormField.create_input(
-                        label="索引率",
-                        value=str(get_nested_value(config, "rvc_vc", "index_rate") or 0.75),
-                        on_change=lambda e: set_config_callback("rvc_vc", "index_rate", _as_float(e.value)),
-                        style="width:100%",
-                    )
-                with ui.column().style("width:100%"):
-                    FormField.create_input(
-                        label="保护率",
-                        value=str(get_nested_value(config, "rvc_vc", "protect") or 0.33),
-                        on_change=lambda e: set_config_callback("rvc_vc", "protect", _as_float(e.value)),
-                        style="width:100%",
-                    )
-            ui.label("高级参数（block/crossfade/阈值等）在 config rvc_vc 节").style(
+            def _slider_row(label, value, lo, hi, step, fmt, key, cast):
+                """滑杆行（NiceGUI 原生；设计令牌：无硬编码色值）。"""
+                with ui.row().style("width:100%;align-items:center;gap:8px"):
+                    ui.label(label).style("min-width:150px;font-size:12px")
+                    val_lab = ui.label(fmt(value)).style("min-width:44px;font-size:12px;"
+                                                         "color:var(--text-secondary)")
+                    ui.slider(min=lo, max=hi, step=step, value=value,
+                              on_change=lambda e: (
+                                  val_lab.set_text(fmt(e.value)),
+                                  _apply_param(key, e.value, cast)),
+                              ).props("label-always").style("flex:1")
+            _slider_row("f0 变调 pitch（半音）",
+                        float(get_nested_value(config, "rvc_vc", "pitch") or 0),
+                        -16, 16, 1, lambda v: f"{int(v):+d}", "pitch", int)
+            _slider_row("性别因子 formant",
+                        float(get_nested_value(config, "rvc_vc", "formant") or 0.0),
+                        -2.0, 2.0, 0.05, lambda v: f"{v:+.2f}", "formant", float)
+            _slider_row("索引率",
+                        float(get_nested_value(config, "rvc_vc", "index_rate") or 0.75),
+                        0.0, 1.0, 0.01, lambda v: f"{v:.2f}", "index_rate", float)
+            _slider_row("保护率",
+                        float(get_nested_value(config, "rvc_vc", "protect") or 0.33),
+                        0.0, 1.0, 0.01, lambda v: f"{v:.2f}", "protect", float)
+            ui.label("f0method 等高级参数在 config rvc_vc 节；滑杆值即时热更新（服务在线时）").style(
                 "font-size:11px;color:var(--text-secondary)")
 
     # ---------- 旧 so-vits-svc（DX-9：隐藏+legacy_svc.show 可恢复；D2/F5 首次提示）----------

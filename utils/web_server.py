@@ -181,6 +181,26 @@ class WebServer:
             register_tts_routes(self.app, self.config)
         except Exception:
             logger.error("TTS 控制面路由挂载失败（不影响其他 API）", exc_info=True)
+
+        # 翻唱队列控制面（/autoplan 2026-10-14 C-3：点歌页队列状态卡数据源；
+        # 写者矩阵=cover_worker（main 进程）唯一写者，webui 只读窄端点）
+        @self.app.get("/cover/status")
+        async def cover_status():
+            try:
+                cq = getattr(self.my_handle, "cover_queue", None) if self.my_handle else None
+                if cq is None:
+                    return {"available": False, "reason": "翻唱队列未初始化（未触发过点歌）"}
+                with cq.lock:
+                    queue = [{"song": j["song"], "viewer": j["viewer"],
+                              "retries_left": j["retries_left"]} for j in cq.queue]
+                    cur = dict(cq.current) if cq.current else None
+                    if cur and cur.get("started_at"):
+                        cur = {**cur, "elapsed_s": round(__import__("time").time() - cur["started_at"], 1)}
+                return {"available": True, "queue": queue, "current": cur,
+                        "policies": cq._policies()}
+            except Exception as e:
+                logger.error("/cover/status 异常", exc_info=True)
+                return {"available": False, "reason": str(e)}
             
         @self.app.post("/send")
         async def send(msg: SendMessage):

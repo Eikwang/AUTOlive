@@ -50,12 +50,24 @@ PROJECTS = {
     "rvc": {
         "source_root": r"D:\AI\RVC20240604Nvidia",
         "items": [
-            ("infer", "infer", False, "推理模块", []),
-            ("configs", "configs", False, "配置", []),
-            ("tools", "tools", False, "工具（rvc_for_realtime.py 推理类所在）", []),
+            ("infer", "infer", False, "推理模块（rtrvc 实时推理类/训练脚本/torch_compat 兼容层）", []),
+            ("configs", "configs", False, "配置（v1/40k.json 训练模板等）", []),
+            ("tools", "tools", False, "工具（rvc_for_realtime 旧版保留=变声回退路径/torchgate）", []),
+            (".env", ".env", False, "上游 env 约定（weight_root/index_root/outside_index_root 三键，S-1 计划明确复制）", []),
+            ("ffmpeg.exe", "ffmpeg.exe", False, "上游 PATH 前置依赖的 ffmpeg（infer/lib/audio.py 调用）", []),
             ("assets/weights", "assets/weights", True, "用户声音模型（P1-4 已迁 models/rvc/，此处随包可选）", []),
-            ("assets/pretrained", "assets/pretrained", True, "底模（hubert/rmvpe 等）", []),
+            ("assets/pretrained", "assets/pretrained", True, "v1 底模（12 文件，get_pretrained_models v1 分支）", []),
             ("assets/indices", "assets/indices", True, "检索索引", []),
+        ],
+        # S-1（/autoplan 2026-10-14）：big 资产 junction——v2 底模/hubert/rmvpe/mute
+        # 训练集。注意 v2+40k 实际用 assets/pretrained_v2/f0G40k.pth+f0D40k.pth
+        #（现状 items 漏 pretrained_v2 是缺陷，本批修正为链接）；logs/mute 为
+        # filelist 的 2 条 mute 行依赖。
+        "link_items": [
+            ("assets/pretrained_v2", "v2 底模（f0G40k/f0D40k 等训练底模）"),
+            ("assets/hubert", "HuBERT 特征提取模型（hubert_base.pt）"),
+            ("assets/rmvpe", "RMVPE 音高提取模型（rmvpe.pt）"),
+            ("logs/mute", "预置静音训练集（filelist mute 行依赖）"),
         ],
         "skip_big_subpaths": [],
     },
@@ -64,7 +76,7 @@ PROJECTS = {
         "items": [
             ("src", "src", False, "主流水线（mdx/rvc/infer_pack）", []),
             ("mdxnet_models", "mdxnet_models", True, "MDX 分离模型（按需下载亦可）", []),
-            ("rvc_models", "rvc_models", True, "RVC 模型目录（翻唱用，P3 指向 models/rvc/）", []),
+            ("rvc_models", "rvc_models", True, "RVC 模型目录（翻唱共享通道落点，C-2 基根）", []),
         ],
         "skip_big_subpaths": [],
     },

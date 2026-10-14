@@ -45,9 +45,20 @@ class RealtimeVC:
         os.chdir(rvc_root)  # RVC 内部以相对路径读 assets/hubert 等
 
         from configs.config import Config as RVCConfig
-        import tools.rvc_for_realtime as rvc_for_realtime  # noqa: F401 版本锁定
+        # R-1（/autoplan 2026-10-14）：推理类升级——旧版 tools/rvc_for_realtime.py
+        # 无 formant，改用 fork 新版 infer/lib/rtrvc.py（formant+fcpe+last_rvc
+        # 复用链完整）；旧版保留=回退路径（D2 变声侧回退半径），加载失败回落。
+        self._rvc_module = None
+        self._is_rtrvc = False
+        try:
+            from infer.lib import rtrvc as rvc_for_realtime  # noqa: F401 fork 新版
+            self._rvc_module = rvc_for_realtime
+            self._is_rtrvc = True
+        except Exception as e:
+            logger.warning(f"[rvc-vc] rtrvc 加载失败，回退旧版 tools/rvc_for_realtime: {e}")
+            import tools.rvc_for_realtime as legacy  # noqa: F401 旧版回退（保留不删）
+            self._rvc_module = legacy
 
-        self._rvc_module = rvc_for_realtime
         self.config = RVCConfig()
         self.rvc = None  # 当前 RVC 实例（None=未加载模型）
         self.current_model = None  # {"pth","index","index_rate"}
@@ -69,6 +80,8 @@ class RealtimeVC:
             "n_cpu": 4,
             "f0method": "rmvpe",
             "pitch": 0,
+            "formant": 0.0,   # rtrvc 新能力（性别因子/声线粗细，-2~2）
+            "protect": 0.33,  # R-2 参数链闭合项（前端值必须真实生效）
             "sr_type": "sr_model",
             "input_device": None,
             "output_device": None,
@@ -92,18 +105,34 @@ class RealtimeVC:
             import faiss  # 提前暴露缺失依赖
 
             torch.cuda.empty_cache()  # 上游 start_vc 模式：切换前清缓存
-            new_rvc = self._rvc_module.RVC(
-                self.params["pitch"],
-                # 注：本副本 RVC 类签名无 formant（gui_v1 调用与文件不同步，按实文件调用）
-                pth_path,
-                index_path,
-                self.params["index_rate"],
-                self.params["n_cpu"],
-                self.inp_q,
-                self.opt_q,
-                self.config,
-                self.rvc if self.rvc is not None else None,  # 底模共享
-            )
+            if self._is_rtrvc:
+                # rtrvc 签名（infer/lib/rtrvc.py:42-55）：key, formant, pth, index,
+                # index_rate, n_cpu, inp_q, opt_q, config, last_rvc
+                new_rvc = self._rvc_module.RVC(
+                    self.params["pitch"],
+                    self.params["formant"],
+                    pth_path,
+                    index_path,
+                    self.params["index_rate"],
+                    self.params["n_cpu"],
+                    self.inp_q,
+                    self.opt_q,
+                    self.config,
+                    self.rvc if self.rvc is not None else None,  # 底模共享
+                )
+            else:
+                # 旧版回退签名（tools/rvc_for_realtime.py，无 formant）
+                new_rvc = self._rvc_module.RVC(
+                    self.params["pitch"],
+                    pth_path,
+                    index_path,
+                    self.params["index_rate"],
+                    self.params["n_cpu"],
+                    self.inp_q,
+                    self.opt_q,
+                    self.config,
+                    self.rvc if self.rvc is not None else None,  # 底模共享
+                )
             # 构建成功 → 原子替换（音频流零间隙；旧 net_g 由 GC 释放）
             old = self.rvc
             self.rvc = new_rvc
@@ -309,7 +338,48 @@ class RealtimeVC:
             "last_infer_time_s": round(getattr(self, "last_infer_time", 0), 3),
             "params": self.params,
             "has_cuda": torch.cuda.is_available(),
+            "infer_class": "rtrvc" if self._is_rtrvc else "legacy",
         }
+
+    def update_params(self, updates: dict):
+        """R-2 参数链闭合（/autoplan 2026-10-14）：前端写入值真实生效。
+
+        pitch/formant/index_rate 走 rtrvc 热更新方法（免重载模型）；
+        protect/rms_mix_rate/f0method/threhold 直接改 params（audio_callback
+        每块推理读取）。未知键拒绝（值域校验），失败抛异常由三要素错误返回。
+        """
+        allowed = {
+            "pitch": (-16, 16, "int"),
+            "formant": (-2.0, 2.0, "float"),
+            "index_rate": (0.0, 1.0, "float"),
+            "protect": (0.0, 1.0, "float"),
+            "rms_mix_rate": (0.0, 1.0, "float"),
+            "f0method": (["pm", "harvest", "crepe", "rmvpe", "fcpe"], None, "enum"),
+            "threhold": (-60, 0, "int"),
+        }
+        for key, value in updates.items():
+            if key not in allowed:
+                raise ValueError(f"未知参数 {key}（可更新：{', '.join(allowed)}）")
+            spec = allowed[key]
+            if spec[1] is None:  # enum
+                if value not in spec[0]:
+                    raise ValueError(f"{key}={value} 不在 {spec[0]}")
+            else:
+                lo, hi = spec[0], spec[1]
+                v = float(value)
+                if not (lo <= v <= hi):
+                    raise ValueError(f"{key}={v} 超出 [{lo}, {hi}]")
+                value = int(v) if spec[2] == "int" else v
+            self.params[key] = value
+        # 热更新映射（rtrvc change_* 免重载；旧版无这些方法，下次切换生效）
+        if self.rvc is not None and self._is_rtrvc:
+            if "pitch" in updates:
+                self.rvc.change_key(self.params["pitch"])
+            if "formant" in updates:
+                self.rvc.change_formant(self.params["formant"])
+            if "index_rate" in updates:
+                self.rvc.change_index_rate(self.params["index_rate"])
+        return dict(self.params)
 
     def devices(self):
         import sounddevice as sd
@@ -351,6 +421,11 @@ class ControlServer:
                             body.get("index_rate"),
                         )
                         self._json(200, {"ok": True, "model": result})
+                    elif self.path == "/params":
+                        # R-2 参数链闭合端点（/autoplan 2026-10-14）：pitch/
+                        # formant/index_rate/protect/f0method 热更新
+                        result = vc.update_params(body)
+                        self._json(200, {"ok": True, "params": result})
                     elif self.path == "/start":
                         self._json(200, {"ok": True, **vc.start_stream(
                             body.get("input_device"), body.get("output_device"))})
@@ -358,11 +433,11 @@ class ControlServer:
                         self._json(200, {"ok": True, **vc.stop_stream()})
                     else:
                         self._json(404, {"problem": "未知路径", "cause": self.path,
-                                         "fix": "POST /switch /start /stop"})
+                                         "fix": "POST /switch /params /start /stop"})
                 except Exception as e:
                     # 三要素错误（DX-2）：事务失败时旧模型继续服务
                     self._json(500, {"problem": str(e), "cause": type(e).__name__,
-                                     "fix": "检查模型/索引路径；切换失败时旧模型继续服务"})
+                                     "fix": "检查参数值域/模型路径；切换失败时旧模型继续服务"})
 
             def log_message(self, fmt, *args):
                 pass  # 静默访问日志

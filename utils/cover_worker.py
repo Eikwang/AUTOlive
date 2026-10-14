@@ -69,18 +69,36 @@ class CoverQueue:
         return os.path.join(self._song_path(), "covers")
 
     def _rvc_models_root(self) -> str:
+        """RVC 模型共享目录基根（C-2 修复，/autoplan 2026-10-14 outside 发现 2）：
+        AICoverGen main.py:31-34 读 `AICoverGen根/rvc_models`，旧实现写
+        `rvc_vc.rvc_root/rvc_models`（目录不存在）——写读两根永不相交=共享模型
+        翻唱必然失败。基根切换到 aicovergen 根（apps/aicovergen/rvc_models，
+        S-1 junction 对齐）。config paths.aicovergen_root 可覆盖。"""
+        return os.path.join(self._aicovergen_root(), "rvc_models")
+
+    def _aicovergen_root(self) -> str:
+        """AICoverGen 根（C-4 收敛：config paths.aicovergen_root → apps 副本 →
+        旧 aicovergen.root → 外部树兜底）。"""
+        for section, key in (("paths", "aicovergen_root"), ("aicovergen", "root")):
+            v = self.config.get(section, key)
+            if v and str(v).strip():
+                return os.path.abspath(str(v).strip())
         return os.path.join(
-            self.config.get("rvc_vc", "rvc_root") or r"D:\AI\RVC20240604Nvidia",
-            "rvc_models")
+            self.config.get("paths", "autolive_home")
+            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "apps", "aicovergen")
 
     def _aicovergen_src(self) -> str:
-        return os.path.join(
-            self.config.get("aicovergen", "root") or r"D:\AI\AICoverGen", "src")
+        return os.path.join(self._aicovergen_root(), "src")
 
     def _rt_python(self) -> str:
-        return self.config.get("rvc_vc", "runtime_python") or os.path.join(
-            self.config.get("rvc_vc", "rvc_root") or r"D:\AI\RVC20240604Nvidia",
-            "runtime", "python.exe")
+        """翻唱子进程解释器（S-2 显式钉住）：默认=外部树 py3.9 嵌入式 runtime
+        （AICoverGen 依赖全齐的唯一 runtime；不得从 rvc_root 派生——S-1 根翻转
+        apps/rvc 后派生值指向不存在的 apps/rvc/runtime，/autoplan outside 发现 3）。"""
+        v = self.config.get("rvc_vc", "runtime_python")
+        if v and str(v).strip():
+            return str(v).strip()
+        return r"D:\AI\RVC20240604Nvidia\runtime\python.exe"
 
     # ---------- 归一化匹配（B-6）----------
 
@@ -209,10 +227,19 @@ class CoverQueue:
         timeout_s = policies["job_timeout_min"] * 60
         profile = job["profile_id"]
         # AICoverGen：模型目录约定 rvc_models/<dirname>/（复制/硬链一份）
+        # C-1 修复（/autoplan 2026-10-14）：派发补 -oformat wav——旧默认 mp3 与
+        # _find_produced_wav 只匹配 .wav 矛盾，落库命中未混音中间干人声。
+        # C-3 音高接线：前端八度值直接传 -p（CLI 单位=八度，main.py:330 help；
+        # AICoverGen main.py:292 内部 ×12——前端不得预乘，outside 发现 1 更正）。
+        pitch = self.config.get("choose_song", "cover_pitch")
+        try:
+            pitch = str(max(-12, min(12, int(pitch or 0))))
+        except (TypeError, ValueError):
+            pitch = "0"
         cmd = [
             self._rt_python(), "-c", self._bootstrap_code(),
             "--", "-i", job["song_path"], "-dir", f"autolive_{profile}",
-            "-p", "0", "-ir", "0.75", "-palgo", "rmvpe",
+            "-p", pitch, "-ir", "0.75", "-palgo", "rmvpe", "-oformat", "wav",
         ]
         env = os.environ.copy()
         env.setdefault("AUTOLIVE_COVER_OUT", self._covers_dir())
@@ -231,13 +258,97 @@ class CoverQueue:
             return
         # 原子落位（S-4）：AICoverGen 输出在 song_output/，找到成品移到 covers/
         produced = self._find_produced_wav(job)
+        if rc != 0 or not produced:
+            # 后处理补刀（/autoplan 2026-10-14 翻唱实跑发现）：py39 runtime 下
+            # torch 加载后 pedalboard C++ 同进程崩溃（rc=139，三次复现）——主跑
+            # 死在效果链时 RVC 中产物已在，用干净进程（零 torch）补 effects+mix。
+            self._postprocess_fallback(job)
+            produced = self._find_produced_wav(job)
         if rc == 0 and produced:
             tmp = cover + ".tmp.wav"
             shutil.copy2(produced, tmp)
             os.replace(tmp, cover)
             logger.info(f"[cover] 完成: {song} → {cover}")
+            # C-5 自动插播（/autoplan 2026-10-14 终门 uc1a=立即插播）：回调由
+            # feature_handler 注入（复用点歌播放通道）；成品已落盘，回调失败不影响任务
+            cb = getattr(self, "on_done", None)
+            if cb:
+                try:
+                    cb(job)
+                except Exception:
+                    logger.error("[cover] 插播回调异常（成品已落盘不影响任务）", exc_info=True)
         else:
             self._fail(job, policies)
+
+    def _postprocess_fallback(self, job: Dict):
+        """效果链+混音补刀（零 torch 干净进程）：主跑崩在 effects 段时，
+        ai_vocals 中产物已落盘 song_output——本方法用 pedalboard+pydub 直接
+        补齐 add_audio_effects+combine_audio（逻辑对齐 main.py:213-240，
+        参数同默认值）。成功=成品出现在 song_output（finder 可命中）。"""
+        song_dir = os.path.join(self._aicovergen_root(), "song_output")
+        if not os.path.isdir(song_dir):
+            return
+        # 定位最新的 ai_vocals 中产物（*_p{pitch}_i{rate}_*.wav）
+        best, best_m = None, 0
+        for dirpath, _, fns in os.walk(song_dir):
+            for fn in fns:
+                if fn.endswith(".wav") and "_i0.75_" in fn and "_p" in fn \
+                        and "mixed" not in fn:
+                    full = os.path.join(dirpath, fn)
+                    m = os.path.getmtime(full)
+                    if m > job.get("started_at", 0) and m > best_m:
+                        best, best_m = full, m
+        if not best:
+            logger.warning("[cover] 补刀中止：未找到 RVC 中产物")
+            return
+        base = os.path.splitext(best)[0].rsplit("_p", 1)[0]
+        inst = f"{base}_Instrumental.wav"
+        backup = f"{base}_Vocals_Backup.wav"
+        for dep in (inst, backup):
+            if not os.path.isfile(dep):
+                logger.warning(f"[cover] 补刀中止：缺伴奏轨 {dep}")
+                return
+        final = f"{os.path.splitext(os.path.basename(job['song_path']))[0]} (autolive_{job['profile_id']} Ver).wav"
+        final_path = os.path.join(os.path.dirname(best), final)
+        code = self._postprocess_code(best, backup, inst, final_path)
+        try:
+            r = subprocess.run(
+                [self._rt_python(), "-c", code], capture_output=True,
+                text=True, timeout=600, encoding="utf-8", errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if os.path.isfile(final_path):
+                logger.info(f"[cover] 补刀完成: {final_path}")
+            else:
+                logger.error(f"[cover] 补刀失败（无成品）: {(r.stderr or '')[-300:]}")
+        except Exception:
+            logger.error("[cover] 补刀异常", exc_info=True)
+
+    def _postprocess_code(self, ai_vocals: str, backup: str, inst: str, final: str) -> str:
+        """零 torch 后处理代码串：效果链（高通+压缩+混响，main.py:217-223 同参）
+        +三轨混音（main -4dB/backup -6dB/inst -7dB，main.py:236-240 同语义）。"""
+        return f"""
+import os
+from pedalboard import Pedalboard, HighpassFilter, Compressor, Reverb
+from pedalboard.io import AudioFile
+from pydub import AudioSegment
+ai_vocals = r'''{ai_vocals}'''
+backup = r'''{backup}'''
+inst = r'''{inst}'''
+final = r'''{final}'''
+mixed = os.path.splitext(ai_vocals)[0] + '_mixed.wav'
+if not os.path.isfile(mixed):
+    board = Pedalboard([HighpassFilter(), Compressor(ratio=4, threshold_db=-15),
+                        Reverb(room_size=0.15, dry_level=0.8, wet_level=0.2, damping=0.7)])
+    with AudioFile(ai_vocals) as f, AudioFile(mixed, 'w', f.samplerate, f.num_channels) as o:
+        while f.tell() < f.frames:
+            chunk = f.read(int(f.samplerate))
+            o.write(board(chunk, f.samplerate, reset=False))
+main_v = AudioSegment.from_wav(mixed) - 4
+back_v = AudioSegment.from_wav(backup) - 6
+inst_v = AudioSegment.from_wav(inst) - 7
+main_v.overlay(back_v).overlay(inst_v).export(final, format='wav')
+print('POSTPROCESS_OK')
+"""
 
     def _fail(self, job: Dict, policies: dict, timeout: bool = False):
         if job["retries_left"] > 0:
@@ -283,26 +394,55 @@ class CoverQueue:
                     shutil.copy2(index, dst_idx)
 
     def _bootstrap_code(self) -> str:
-        """嵌入式 ._pth 绕过：显式 sys.path 注入 + runpy 执行 main.py。"""
+        """嵌入式 ._pth 绕过：显式 sys.path 注入 + runpy 执行 main.py。
+
+        gr.Progress 桩（/autoplan 2026-10-14 翻唱实跑发现）：py39 runtime 的
+        gradio 3.14.0 无 Progress（3.20+ 才有）——main.py:247 默认参数在 import
+        时求值即炸。CLI 模式 progress 恒 no-op（gradio UI 进度对子进程无用），
+        在 runpy 前注入桩：tqdm 透传迭代器、其余调用返回 None。不改上游 main.py
+        （apps/aicovergen/src 与上游逐字节一致的承诺保持）。"""
         src = self._aicovergen_src().replace("\\", "/")
         return (
             "import sys, runpy\n"
             f"sys.path.insert(0, r'{src}')\n"
             "sys.argv = ['main.py'] + sys.argv[1:]\n"
+            "try:\n"
+            "    import gradio as _gr\n"
+            "    if not hasattr(_gr, 'Progress'):\n"
+            "        class _NoopProgress:\n"
+            "            def __init__(self, *a, **k): pass\n"
+            "            def __call__(self, *a, **k): return self\n"
+            "            def tqdm(self, it=None, *a, **k): return it if it is not None else []\n"
+            "            def __getattr__(self, n):\n"
+            "                def _f(*a, **k): return None\n"
+            "                return _f\n"
+            "        _gr.Progress = _NoopProgress\n"
+            "except ImportError:\n"
+            "    pass\n"
             f"runpy.run_path(r'{src}/main.py', run_name='__main__')\n"
         )
 
     def _find_produced_wav(self, job: Dict) -> Optional[str]:
-        """AICoverGen 产出定位：song_output/<viewer_song>/ 最深 wav。"""
+        """AICoverGen 产出定位：优先成品名（"{歌名} ({模型} Ver).wav"，C-1 兜底），
+        回落 mtime 最新 wav。中间产物（*_p{pitch}_i{rate}_*.wav）不含 " Ver)."，
+        成品名优先可避免命中未混音的 RVC 中间干人声（/autoplan 2026-10-14 勘察 bug）。"""
         out_root = os.path.join(self._aicovergen_src(), "..", "song_output")
         if not os.path.isdir(out_root):
             return None
-        best, best_mtime = None, 0
+        finals, fallback, best_mtime = [], None, 0
         for dirpath, _, filenames in os.walk(out_root):
             for fn in filenames:
-                if fn.endswith(".wav"):
-                    full = os.path.join(dirpath, fn)
-                    m = os.path.getmtime(full)
-                    if m > job.get("started_at", 0) and m > best_mtime:
-                        best, best_mtime = full, m
-        return best
+                if not fn.endswith(".wav"):
+                    continue
+                full = os.path.join(dirpath, fn)
+                m = os.path.getmtime(full)
+                if m <= job.get("started_at", 0):
+                    continue
+                if " Ver)." in fn:
+                    finals.append((m, full))
+                elif m > best_mtime:
+                    fallback, best_mtime = full, m
+        if finals:
+            finals.sort(reverse=True)
+            return finals[0][1]
+        return fallback

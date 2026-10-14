@@ -324,7 +324,15 @@ class FeatureHandler:
                         if _cq is None:
                             _cq = CoverQueue(self.my_handle.config, None)
                             self.my_handle.cover_queue = _cq
-                        _profile_id = self.my_handle.config.get("gpt_sovits", "voice_profile_id") or "default"
+                        # C-5 自动插播（/autoplan 2026-10-14 终门 uc1a）：翻唱 done
+                        # 即播——复用点歌播放通道（弹幕线程同构调用，通道内排队/
+                        # 打断语义与点歌一致）；回调失败不影响成品落盘
+                        if getattr(_cq, "on_done", None) is None:
+                            _cq.on_done = self._play_cover_done
+                        # C-2 修复（/autoplan 2026-10-14）：翻唱档案=RVC 专属语义，
+                        # 读 choose_song.cover_profile_id（C-3 前端写、本处读）——
+                        # 旧实现借 gpt_sovits.voice_profile_id（TTS 档案）当 RVC 档案。
+                        _profile_id = self.my_handle.config.get("choose_song", "cover_profile_id") or "default"
                         _r = _cq.enqueue(username, song_filename, _profile_id)
                         if _r["action"] == "queued":
                             _cq.ensure_worker()
@@ -334,7 +342,6 @@ class FeatureHandler:
                         # cooldown/cached: 静默（D6 有意设计）
                     except Exception:
                         logger.error("[点歌] 翻唱入队异常（不阻塞播放）", exc_info=True)
-                    
                     message = {
                         "type": "song",
                         "tts_type": self.my_handle.config.get("audio_synthesis_type"),
@@ -352,15 +359,34 @@ class FeatureHandler:
                 # 判断取消点歌命令是否正确
                 elif stop_cmd:
                     self.my_handle.audio.stop_current_audio()
-                    
+
                     return True
-            
+
             return False
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"点歌处理失败：{e}")
             return False
-    
+
+    def _play_cover_done(self, job: dict):
+        """C-5（/autoplan 2026-10-14 终门 uc1a=立即插播）：翻唱 done 回调——
+        构造 song 消息走点歌播放通道（audio_synthesis_handle），成品自动入播放。
+        播放通道互斥策略=通道既有行为（与点歌手动播放一致，排队等待当前播报）。
+        调用线程=cover-worker 线程（与弹幕线程同构，通道安全）。"""
+        try:
+            message = {
+                "type": "song",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": "翻唱完成",
+                "content": job["cover_path"],
+            }
+            logger.info(f"[翻唱] 自动插播: {job['song']} → {job['cover_path']}")
+            self.my_handle.audio_synthesis_handle(message)
+        except Exception:
+            logger.error("[翻唱] 自动插播异常（成品已落盘 song/covers/）", exc_info=True)
+
     def sd_handle(self, data):
         """
         SD处理

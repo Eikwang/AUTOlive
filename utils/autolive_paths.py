@@ -24,6 +24,14 @@ from utils.config import Config
 KEY_AUTOLIVE_HOME = "autolive_home"
 KEY_GPT_SOVITS_ROOT = "gpt_sovits_root"
 KEY_GPT_SOVITS_PYTHON = "gpt_sovits_python"
+KEY_RVC_ROOT = "rvc_root"
+KEY_RVC_PYTHON = "rvc_python"
+KEY_AICOVERGEN_ROOT = "aicovergen_root"
+
+# S-2 显式钉住（/autoplan 2026-10-14 outside 发现 3）：翻唱子进程解释器默认=
+# 外部树 py3.9 嵌入式 runtime（AICoverGen 依赖全齐的唯一 runtime），禁止从
+# rvc_root 派生（apps/rvc 根翻转后派生值指向不存在的副本内 runtime）。
+_RVC_COVER_PYTHON_DEFAULT = r"D:\AI\RVC20240604Nvidia\runtime\python.exe"
 
 # users.pth 收编（CEO-P1-2）：GPT-SoVITS 子进程需要的 PYTHONPATH 注入清单，
 # 相对 gpt_sovits_root。与原 users.pth 的 6 条路径一一对应。
@@ -55,6 +63,19 @@ class AutolivePaths:
         )
         self.gpt_sovits_python: str = self._resolve(
             KEY_GPT_SOVITS_PYTHON, r"D:\AI\runtime312-clone\python.exe"
+        )
+        # RVC 运行副本与训练/变声 runtime（S-1/S-2：默认 apps/rvc 副本+
+        # EDTalk\runtime312 基准——RVC fork 本地改造全针对该环境，py39 嵌入式
+        # 已被 fork 弃用；config 可覆盖回外部树）
+        self.rvc_root: str = self._resolve(
+            KEY_RVC_ROOT, os.path.join(self.autolive_home, "apps", "rvc"),
+        )
+        self.rvc_python: str = self._resolve(
+            KEY_RVC_PYTHON, r"D:\AI\EDTalk\runtime312\python.exe",
+        )
+        # AICoverGen 运行副本根（C-4 收敛：cover_worker 的模型共享目录基根）
+        self.aicovergen_root: str = self._resolve(
+            KEY_AICOVERGEN_ROOT, os.path.join(self.autolive_home, "apps", "aicovergen"),
         )
 
     def _resolve(self, key: str, default: str) -> str:

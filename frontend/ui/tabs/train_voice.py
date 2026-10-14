@@ -80,6 +80,13 @@ def create_train_voice_tab(
                 save_s2_input = ui.number(label="SoVITS 每N轮保存", value=5, min=1, max=50)
                 save_s1_input = ui.number(label="GPT 每N轮保存", value=10, min=1, max=50)
                 dpo_check = ui.checkbox("DPO 训练（推荐）", value=True)
+            # F-1 RVC 可调组（Design P7 复核发现 8：epoch 是最常调旋钮不固定）；
+            # 40k/v2/f0=true/CPU10/rmvpe_gpu/spk0=固定规格不暴露（管线内置）
+            with ui.grid(columns=3).style("margin-top:6px"):
+                epoch_rvc_input = ui.number(label="RVC 轮数", value=20, min=1, max=200)
+                save_rvc_input = ui.number(label="RVC 每N轮保存", value=8, min=1, max=50)
+                ui.label("RVC 规格：40k · v2 · f0 指导 · rmvpe_gpu · CPU 进程 10 · 说话人 0").style(
+                    "font-size:11px;color:var(--text-secondary);align-self:center")
 
     # ---------- 管线切换（P3-1：GPT-SoVITS / RVC 双流共用一页） ----------
     pipeline_type_state = {"value": "gpt-sovits"}
@@ -116,7 +123,8 @@ def create_train_voice_tab(
         ui.label("启动确认").style("font-weight:var(--font-weight-emphasis)")
         consent = ui.checkbox(
             "我确认拥有录制/使用该声音的合法授权（将留档）")
-        ui.label("注意：训练产出的声音当前仅可用于 TTS；变声/翻唱消费随后续版本开放。").style(
+        ui.label("注意：训练产出的声音将写入声音档案——TTS（AI对话）与变声（AI对话-变声）、"
+                 "翻唱（高级功能-点歌）三端消费。").style(
             "font-size:12px;color:var(--color-warning)")
         ui.label("提示：训练与 AI 对话共享同一张显卡（进程内 TTS 常驻显存已计入准入预算）；"
                  "训练期间对话合成可能变慢，建议避开直播时段训练。").style(
@@ -174,9 +182,16 @@ def create_train_voice_tab(
                 _pipeline = TrainRvcPipeline(config, paths)
                 _pipeline.prepare(
                     dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
-                    total_epoch=int(epoch_s1_input.value or 20),
                     batch_size=int(batch_input.value or 8),
+                    total_epoch=int(epoch_rvc_input.value or 20),
+                    save_every=int(save_rvc_input.value or 8),
+                    already_dry=dry_check.value,
+                    authorized=True,
                 )
+                if getattr(_pipeline, "asset_issues", None):
+                    _msgs = "；".join(f"{n}({r})" for r, n, _ in _pipeline.asset_issues[:4])
+                    ui.notify(position="top", type="negative",
+                              message=f"RVC 资产预检未通过（{_pipeline.asset_issues.__len__()} 项）：{_msgs}——详见日志")
             else:
                 _pipeline = TrainVoicePipeline(config, paths)
                 _pipeline.prepare(

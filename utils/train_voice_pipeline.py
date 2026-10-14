@@ -44,16 +44,18 @@ DEFAULTS = {
 }
 
 # MDXNet 三阶段模型（T-1）：人声/伴奏→主唱/和声→去混响；干声=反相轨 DeReverb
-# pick=每阶段要的人声轨（对齐 AICoverGen main.py 解包语义：stage2/3 的主唱在反相轨）
-MDXNET_DIR = os.path.join("models", "mdxnet")
-MDX_STAGES = [
-    {"model": "UVR-MDX-NET-Voc_FT.onnx", "pick": "main",
-     "kwargs": {"denoise": True}},
-    {"model": "UVR_MDXNET_KARA_2.onnx", "pick": "invert",
-     "kwargs": {"suffix": "Backup", "invert_suffix": "Main", "denoise": True}},
-    {"model": "Reverb_HQ_By_FoxJoy.onnx", "pick": "invert",
-     "kwargs": {"invert_suffix": "DeReverb", "exclude_main": True, "denoise": True}},
-]
+# （2026-10-14 Eng shared-code 裁决：常量与三阶段实现提取至 train_process_utils，
+#  GSV/RVC 共用；此处同名 re-export 保持既有 import 兼容）
+from utils.train_process_utils import (  # noqa: F401,E402
+    MDXNET_DIR,
+    MDX_STAGES,
+    cleanup_after_step as _tpu_cleanup,
+    gpu_gate as _tpu_gpu_gate,
+    release_local_gpu as _tpu_release_local_gpu,
+    run_mdx_dry_vocals as _tpu_run_mdx,
+    vram_used_gb as _tpu_vram_used_gb,
+    wait_vram_release as _tpu_wait_vram_release,
+)
 
 # T-4 资产预检清单：相对 gsv_root；covers=训练配置实际引用 + ASR 模型 + MDX
 REQUIRED_ASSETS = [
@@ -243,59 +245,20 @@ class TrainVoicePipeline:
             except Exception:
                 logger.error("[train-voice] 状态回调异常", exc_info=True)
 
-    # ---------- 子进程工具 ----------
+    # ---------- 子进程工具（2026-10-14 Eng 裁决：实现提取至 train_process_utils，薄委托） ----------
 
     def _vram_used_gb(self) -> Optional[float]:
-        """当前显存占用（GB）；查询失败返回 None（跳过等待）。"""
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=8,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            ).stdout.strip().splitlines()
-            return float(out[0]) / 1024.0 if out else None
-        except Exception:
-            return None
+        return _tpu_vram_used_gb()
 
     def _wait_vram_release(self, used_before_gb: Optional[float], timeout: int = 60) -> None:
-        """轮询等待显存回落到基线（+0.5GB 容差）；超时放行+警告。"""
-        if used_before_gb is None:
-            return
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            now = self._vram_used_gb()
-            if now is None or now <= used_before_gb + 0.5:
-                return
-            time.sleep(3)
-        logger.warning(
-            f"[train-voice] 显存回落超时（当前 {self._vram_used_gb():.1f}GB > 基线 {used_before_gb:.1f}GB）"
-            "——可能存在外部进程占用，继续下一步")
+        _tpu_wait_vram_release(used_before_gb, timeout=timeout, prefix="[train-voice]")
 
     def _release_local_gpu(self) -> None:
-        """进程内 GPU 资源显式回收（MDX 步等直调场景）：GC+torch 缓存清空。"""
-        try:
-            import gc as _gc
-            _gc.collect()
-            import torch as _torch
-            if _torch.cuda.is_available():
-                _torch.cuda.empty_cache()
-        except Exception:
-            pass
+        _tpu_release_local_gpu()
 
     def _cleanup_after_step(self, proc: Optional[subprocess.Popen], used_before_gb: Optional[float]):
-        """步间资源清理（2026-10-14 用户指令）：步骤子进程退出后——
-        ①taskkill /T 终结整棵进程树（mp.spawn 孙进程/dataloader worker 孤儿必灭）；
-        ②轮询等待显存回落到本步启动前基线（+0.5GB 容差），60s 超时放行+警告。
-        E2E 实测教训：训练前残留显存占用会让 DPO 换页慢 10-20 倍。"""
-        if proc is not None and proc.poll() is None:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True, timeout=15,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            except Exception:
-                logger.warning("[train-voice] taskkill 清理异常", exc_info=True)
-        self._wait_vram_release(used_before_gb)
+        """步间资源清理（2026-10-14 用户指令）：进程树终结+显存回落确认（共享实现）。"""
+        _tpu_cleanup(proc, used_before_gb, prefix="[train-voice]")
 
     def _run(self, cmd: list, env_extra: Optional[dict] = None, timeout: int = 7200) -> bool:
         """同步子进程：输出进日志缓冲；GPU 准入由调用方先行判定；
@@ -325,12 +288,7 @@ class TrainVoicePipeline:
             self.proc = None
 
     def _gpu_gate(self) -> bool:
-        ok, reason = is_background_task_allowed(
-            float(self.config.get("audio_integration", "policies", "vram_reserve_gb") or 4.0))
-        if not ok:
-            # D5：拒绝文案含占用来源与再试时机
-            self.log_lines.append(f"[GPU 拒绝] {reason}——完成后可重试本步骤")
-        return ok
+        return _tpu_gpu_gate(self.config, self.log_lines, prefix="[train-voice]")
 
     # ---------- 各步骤 ----------
 
@@ -338,95 +296,13 @@ class TrainVoicePipeline:
         return os.path.join(self.gsv_root, "logs", self.params["exp_name"])
 
     def _st_mdx(self) -> bool:
-        """T-1：MDXNet 三阶段分离（进程内直调 apps/aicovergen/src/mdx.py）。
-
-        输入→44100Hz 立体声归一化（mono→ffmpeg -ac 2）→三阶段链（denoise=True），
-        最终干声 = *_Vocals_Main_DeReverb.wav（反相轨）。已是干声时本步 SKIPPED（_plan 控制）。
-        """
-        import sys as _sys
-        import numpy as _np  # noqa: F401  mdx.py 依赖已随主进程环境就绪
-        used_before = self._vram_used_gb()
-        d = self.params["dataset_dir"]
-        work = os.path.join(d, "mdx_work")
-        os.makedirs(work, exist_ok=True)
-        mdxnet_dir = os.path.join(self.autolive_home, MDXNET_DIR)
-        with open(os.path.join(mdxnet_dir, "model_data.json"), encoding="utf-8") as f:
-            model_params = json.load(f)
-        sys_path = os.path.join(self.autolive_home, "apps", "aicovergen", "src")
-        if sys_path not in _sys.path:
-            _sys.path.insert(0, sys_path)
-        from mdx import run_mdx  # noqa: E402  进程内直调（T-1）
-
-        # 阶段 0：输入归一化——**无条件**转 44100Hz 立体声副本进 mdx_work（即使已是立体声）：
-        # run_mdx 输出目录=输入文件目录，统一落点使全部中间产物收进 mdx_work 不散落数据集根
-        try:
-            import librosa
-        except ImportError as e:
-            self.log_lines.append(f"[MDX 失败] librosa 不可用: {e}")
+        """T-1：MDXNet 三阶段分离（共享实现 run_mdx_dry_vocals，2026-10-14 提取）。
+        已是干声时本步 SKIPPED（_plan 控制）。"""
+        outputs = _tpu_run_mdx(self.params["dataset_dir"], self.log_lines,
+                               self.autolive_home, prefix="[MDX]")
+        if outputs is None:
             return False
-        inputs = []
-        for fn in sorted(os.listdir(d)):
-            if not fn.lower().endswith((".wav", ".mp3", ".flac", ".m4a", ".ogg")):
-                continue
-            src = os.path.join(d, fn)
-            stem = os.path.splitext(fn)[0]
-            stereo = os.path.join(work, f"{stem}_stereo.wav")
-            if os.path.exists(stereo):
-                inputs.append(stereo)
-                continue
-            try:
-                wave, _ = librosa.load(src, mono=False, sr=44100)  # 仅探测可解码性
-            except Exception as e:
-                self.log_lines.append(f"[MDX 失败] 无法解码 {fn}: {e}")
-                return False
-            rc = subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-i", src,
-                 "-ar", "44100", "-ac", "2", stereo],
-                capture_output=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if rc.returncode != 0:
-                self.log_lines.append(f"[MDX 失败] 立体声转换失败 {fn}: ffmpeg rc={rc.returncode}")
-                return False
-            inputs.append(stereo)
-        if not inputs:
-            self.log_lines.append("[MDX 失败] 数据集目录无音频文件（支持 wav/mp3/flac/m4a/ogg）")
-            return False
-
-        # 三阶段链（pick 语义对齐 AICoverGen main.py 解包：stage2/3 主唱在反相轨）
-        current = inputs
-        for stage in MDX_STAGES:
-            model_path = os.path.join(mdxnet_dir, stage["model"])
-            nxt = []
-            for inp in current:
-                out_dir = os.path.dirname(inp)
-                try:
-                    main_path, invert_path = run_mdx(model_params, out_dir, model_path,
-                                                     inp, keep_orig=True, **stage["kwargs"])
-                except Exception as e:
-                    self.log_lines.append(f"[MDX 失败] {stage['model']} 处理 {os.path.basename(inp)}: {e}")
-                    logger.error("[train-voice] MDX 分离异常", exc_info=True)
-                    return False
-                got = invert_path if stage["pick"] == "invert" else main_path
-                if not got or not os.path.exists(got):
-                    self.log_lines.append(f"[MDX 失败] {stage['model']} 未产出预期文件（{os.path.basename(inp)}）")
-                    return False
-                nxt.append(got)
-            current = nxt
-        # 干声落位：收集到 dataset_dir/mdx_vocals/（slice 目录输入语义，文件名去中间后缀）
-        vocals_dir = os.path.join(d, "mdx_vocals")
-        os.makedirs(vocals_dir, exist_ok=True)
-        self.mdx_outputs = []
-        for wav in current:
-            target = os.path.join(vocals_dir, os.path.basename(wav))
-            if os.path.abspath(wav) != os.path.abspath(target):
-                os.replace(wav, target)
-            self.mdx_outputs.append(target)
-        # 步间清理（用户指令）：MDX 是进程内直调——显式回收 onnxruntime/torch 显存
-        # 并等待回落到本步启动前基线，再进入下一步
-        self._release_local_gpu()
-        self._wait_vram_release(used_before)
-        names = ", ".join(os.path.basename(x) for x in self.mdx_outputs[:3])
-        self.log_lines.append(f"[MDX] 三阶段完成，{len(self.mdx_outputs)} 个干声入 {vocals_dir}（如 {names}）")
+        self.mdx_outputs = outputs
         return True
 
     def _st_slice(self) -> bool:

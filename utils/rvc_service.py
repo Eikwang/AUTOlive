@@ -21,12 +21,13 @@ HTTP_PORT_DEFAULT = 9391
 
 
 def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
-    """RVC 自带 runtime python（config 可覆盖；缺省 RVC 树内 runtime/）。"""
-    v = config.get("rvc_vc", "runtime_python")
-    if v:
-        return v
-    rvc_root = config.get("rvc_vc", "rvc_root") or r"D:\AI\RVC20240604Nvidia"
-    return os.path.join(rvc_root, "runtime", "python.exe")
+    """变声服务解释器（S-1/R-1 收敛，/autoplan 2026-10-14）：优先 paths.rvc_python
+    （runtime312 基准），rvc_vc.runtime_python 覆盖，最后 py39 外部树兜底——
+    禁止再从 rvc_root 派生（apps/rvc 副本翻转后派生值不存在）。"""
+    v = paths.rvc_python or None
+    if not v:
+        v = config.get("rvc_vc", "runtime_python")
+    return v or r"D:\AI\EDTalk\runtime312\python.exe"
 
 
 def build_rvc_vc_service(
@@ -40,7 +41,9 @@ def build_rvc_vc_service(
         logger.info("[rvc-vc] rvc_vc.hosted=false，跳过托管拉起")
         return None
 
-    rvc_root = config.get("rvc_vc", "rvc_root") or r"D:\AI\RVC20240604Nvidia"
+    # S-1 根收敛：副本根=paths.rvc_root（apps/rvc），config 可覆盖回外部树
+    rvc_root = getattr(paths, "rvc_root", None) or config.get("rvc_vc", "rvc_root") \
+        or r"D:\AI\AUTOlive\apps\rvc"
     http_port = int(config.get("rvc_vc", "http_port") or HTTP_PORT_DEFAULT)
 
     policies = dict(DEFAULT_POLICIES)
@@ -112,6 +115,11 @@ class RvcVcClient:
             "index_path": (index_path or "").replace("\\", "/") or None,
             "index_rate": index_rate,
         })
+
+    def update_params(self, updates: dict):
+        """R-2 参数链闭合（/autoplan 2026-10-14）：pitch/formant/index_rate/
+        protect/f0method 热更新。失败抛 RuntimeError（三要素），参数不变。"""
+        return self._post("/params", updates, timeout=15)
 
     def start_stream(self, input_device=None, output_device=None):
         return self._post("/start", {"input_device": input_device,
