@@ -173,6 +173,14 @@ class WebServer:
             register_danmaku_routes(self.app, self.config)
         except Exception:
             logger.error("DanmakuListener 控制面路由挂载失败（不影响其他 API）", exc_info=True)
+
+        # GPT-SoVITS 进程内引擎控制面（深化整合 F-2/R-5：试听+状态+重载；
+        # 前端进程无引擎，全部经本通道）
+        try:
+            from utils.gpt_sovits_inproc import register_tts_routes
+            register_tts_routes(self.app, self.config)
+        except Exception:
+            logger.error("TTS 控制面路由挂载失败（不影响其他 API）", exc_info=True)
             
         @self.app.post("/send")
         async def send(msg: SendMessage):

@@ -26,12 +26,12 @@ from utils.train_rvc_pipeline import TrainRvcPipeline
 _pipeline: TrainVoicePipeline | None = None
 _pipeline_lock = threading.Lock()
 
-# D1 录音指引文案（一屏内讲完）
+# D1 录音指引文案（一屏内讲完；深化整合后 MDXNet 分离已内置）
 _GUIDE_LINES = [
     "① 时长：最低 10 分钟，建议 30 分钟以上（越长效果越稳）",
     "② 条数：50 条以上短句（每句 3-10 秒），语速自然、情绪多样",
     "③ 环境：安静房间，无混响/背景音乐/电流声",
-    "④ 干声：请提供已分离人声的干声文件（本版不含 UVR5 分离）",
+    "④ 带 BGM/噪音的素材可直接使用：系统内置 MDXNet 分离（勾选『已是干声』则跳过分离）",
 ]
 
 
@@ -51,11 +51,11 @@ def create_train_voice_tab(
         for line in _GUIDE_LINES:
             ui.label(line).style("font-size:12px;color:var(--text-secondary)")
 
-    # ---------- 数据集与参数卡 ----------
+    # ---------- 数据集与参数卡（F-1：分组折叠——基础/高级，D-1 裁决 ASR 语言归基础组） ----------
     with ui.card().style(card_css):
         ui.label("数据集与训练参数")
         ds_input = ui.input(
-            label="数据集目录（含干声 wav）",
+            label="数据集目录（干声或带 BGM/噪音的原始素材）",
             value="",
             placeholder=r"例如 D:\datasets\my_voice",
         ).style("width:100%")
@@ -64,9 +64,22 @@ def create_train_voice_tab(
             placeholder="例如 ikaros_v2",
         ).style("width:100%")
         with ui.grid(columns=3):
-            epoch_input = ui.number(label="训练轮数", value=12, min=1, max=100)
-            batch_input = ui.number(label="批大小", value=8, min=1, max=64)
-            dry_check = ui.checkbox("已是干声（跳过 UVR5）", value=True)
+            batch_input = ui.number(label="批大小", value=4, min=1, max=64)
+            dry_check = ui.checkbox("已是干声（跳过 MDX 分离）", value=True)
+            # D-1：ASR 语言是素材属性（决定标注路由），归基础组——默认 zh 折叠收起会让
+            # 非中文素材静默走错路由，失败延迟到 40 分钟训练后才发现
+            asr_lang_sel = ui.select(
+                {k: v for k, v in [("zh", "中文"), ("yue", "粤语"), ("en", "英语"),
+                                   ("ja", "日语"), ("ko", "韩语"), ("auto", "多语自动")]},
+                label="素材语言（决定 ASR 模型）", value="zh")
+        with ui.expansion("高级参数（通常保持默认）").style("width:100%"):
+            with ui.grid(columns=3):
+                epoch_s2_input = ui.number(label="SoVITS 轮数", value=10, min=1, max=100)
+                epoch_s1_input = ui.number(label="GPT 轮数", value=20, min=1, max=100)
+                lr_input = ui.number(label="文本模块学习率权重", value=0.4, min=0.0, max=1.0, step=0.05)
+                save_s2_input = ui.number(label="SoVITS 每N轮保存", value=5, min=1, max=50)
+                save_s1_input = ui.number(label="GPT 每N轮保存", value=10, min=1, max=50)
+                dpo_check = ui.checkbox("DPO 训练（推荐）", value=True)
 
     # ---------- 管线切换（P3-1：GPT-SoVITS / RVC 双流共用一页） ----------
     pipeline_type_state = {"value": "gpt-sovits"}
@@ -105,6 +118,9 @@ def create_train_voice_tab(
             "我确认拥有录制/使用该声音的合法授权（将留档）")
         ui.label("注意：训练产出的声音当前仅可用于 TTS；变声/翻唱消费随后续版本开放。").style(
             "font-size:12px;color:var(--color-warning)")
+        ui.label("提示：训练与 AI 对话共享同一张显卡（进程内 TTS 常驻显存已计入准入预算）；"
+                 "训练期间对话合成可能变慢，建议避开直播时段训练。").style(
+            "font-size:12px;color:var(--text-secondary)")
 
         def _on_consent(change):
             authorized["value"] = bool(change.value)
@@ -158,17 +174,27 @@ def create_train_voice_tab(
                 _pipeline = TrainRvcPipeline(config, paths)
                 _pipeline.prepare(
                     dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
-                    total_epoch=int(epoch_input.value or 20),
+                    total_epoch=int(epoch_s1_input.value or 20),
                     batch_size=int(batch_input.value or 8),
                 )
             else:
                 _pipeline = TrainVoicePipeline(config, paths)
                 _pipeline.prepare(
                     dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
-                    total_epoch=int(epoch_input.value or 12),
-                    batch_size=int(batch_input.value or 8),
+                    batch_size=int(batch_input.value or 4),
                     already_dry=dry_check.value, authorized=True,
+                    asr_lang=asr_lang_sel.value or "zh",
+                    epochs_s2=int(epoch_s2_input.value or 10),
+                    epochs_s1=int(epoch_s1_input.value or 20),
+                    text_low_lr_rate=float(lr_input.value or 0.4),
+                    save_every_s2=int(save_s2_input.value or 5),
+                    save_every_s1=int(save_s1_input.value or 10),
+                    if_dpo=bool(dpo_check.value),
                 )
+                if getattr(_pipeline, "asset_issues", None):
+                    _msgs = "；".join(f"{n}({r})" for r, n, _ in _pipeline.asset_issues[:4])
+                    ui.notify(position="top", type="negative",
+                              message=f"资产预检未通过（{_pipeline.asset_issues.__len__()} 项缺失）：{_msgs}——详见日志")
         start_btn.set_enabled(False)
         stop_btn.set_enabled(True)
         _pipeline.run_all()
@@ -199,8 +225,8 @@ def create_train_voice_tab(
                     ui.label(f"{icon} {plan['name']}").style(f"color:{color};font-size:13px")
                     ui.label(state).style("font-size:11px;color:var(--text-secondary)")
                 if state == FAILED:
-                    # D5 失败三要素：原因摘要（日志尾）+ 日志定位 + 重跑入口
-                    ui.label("失败：请查看下方日志定位原因").style(
+                    # DX2 失败四要素：原因摘要（日志尾）+ 日志定位 + 重跑入口 + 查看帮助
+                    ui.label("失败：请查看下方日志定位原因（常见原因见录音指引卡与 docs/开发环境搭建.md）").style(
                         "font-size:11px;color:var(--color-danger)")
                     ui.button("重跑此步（覆盖下游）", on_click=lambda sid=sid: _rerun(sid)).props(
                         "dense unelevated no-caps")

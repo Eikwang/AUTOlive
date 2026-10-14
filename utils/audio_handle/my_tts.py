@@ -98,7 +98,54 @@ class MY_TTS:
                 logger.error("{type} 下载音频超时")
                 return None
 
+    # TTS.run 参数白名单（进程内直调；media_type/response_format/streaming_mode 为 HTTP 面专属，剥除）
+    _INPROC_PARAM_KEYS = (
+        "text_lang", "ref_audio_path", "aux_ref_audio_paths", "prompt_text", "prompt_lang",
+        "top_k", "top_p", "temperature", "text_split_method", "batch_size", "batch_threshold",
+        "split_bucket", "speed_factor", "fragment_interval", "seed", "parallel_infer",
+        "repetition_penalty", "return_fragment", "cut_punc",
+    )
+
+    async def _gpt_sovits_inproc(self, data):
+        """R-2：进程内合成。参数装配顺序=gpt_sovits.params（C-1 事实来源）>
+        v2_api_0821 节（过渡期兼容）> data 运行时值（身份参数随档案、风格参数页面级覆盖，DX-11）。"""
+        import asyncio
+        from utils.gpt_sovits_inproc import get_engine
+        engine = get_engine()
+        if engine is None:
+            logger.error("[TTS-inproc] 引擎未初始化（仅 main.py 核心进程可用）。"
+                         "若在错误进程调用属缺陷；可临时设 gpt_sovits.backend=api 走自备外部服务兜底")
+            return None
+        if engine.state == "red":  # 胶囊词汇=error
+            logger.error("[TTS-inproc] 引擎 error 态——problem: 模型加载/推理失败；"
+                         "cause: 见胶囊日志；fix: 工作台胶囊『重新加载模型』或设 backend=api 兜底")
+            return None
+        if not engine.ready:
+            logger.warning(f"[TTS-inproc] 引擎 {engine.raw_state()} 态，本次请求等待加载完成后执行")
+        gs = self.config.get("gpt_sovits") or {}
+        params_cfg = dict(gs.get("params") or {})
+        v2 = dict((data.get("v2_api_0821") or {}))  # 过渡期兼容：现网 v2 节参数透传
+        merged = {k: v2.get(k, params_cfg.get(k)) for k in self._INPROC_PARAM_KEYS
+                  if v2.get(k) is not None or params_cfg.get(k) is not None}
+        merged["text_lang"] = data.get("language") or merged.get("text_lang") or "zh"
+        text = data.get("content") or ""
+        file_name = 'gpt_sovits_inproc_' + self.common.get_bj_time(4) + '.wav'
+        voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
+        try:
+            return await asyncio.to_thread(engine.synthesize, text, merged, voice_tmp_path)
+        except Exception as e:
+            logger.error(f"[TTS-inproc] 合成失败——problem: {e}; "
+                         f"cause: 引擎态/模型/参数（详见 gsv-inproc 日志）; "
+                         f"fix: 检查胶囊状态与 ref_audio 配置，或 backend=api 兜底")
+            logger.error(traceback.format_exc())
+            return None
+
     async def gpt_sovits_api(self, data):
+        # R-2：backend=inproc（默认）走进程内引擎——executor 线程+引擎互斥锁，零 HTTP；
+        # backend=api 走既有 HTTP 兜底（用户自备外部 api_v2，F11 挂状态条）
+        backend = (self.config.get("gpt_sovits", "backend") or "inproc")
+        if backend == "inproc":
+            return await self._gpt_sovits_inproc(data)
         import base64
         import mimetypes
         import websockets

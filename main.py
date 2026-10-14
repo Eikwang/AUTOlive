@@ -117,16 +117,33 @@ class MainApplication:
         self.task_scheduler = get_task_scheduler(self.config, self.common, self.my_handle, platform)
         logger.info("任务调度器模块初始化完成")
 
-        # 托管服务（P1-1）：gpt_sovits.hosted=true 时随系统拉起 api_v2，
-        # 状态条（P1-3）经 ServiceRegistry 自动展示；失败不阻断主程序（可手动重启）
+        # 深化整合 R-5：GPT-SoVITS 推理进程内化（终门 uc1a）
+        # backend=inproc（默认）→ 引擎在 main.py 核心进程内初始化（严禁前端进程调用，显存双份+事件循环阻塞）
+        # backend=api → 用户自备外部 api_v2（F11：不拉起不托管，UI 文案明示）；api_v2 托管退役
+        # RVC/DanmakuListener 仍走 ManagedProcess 托管（不受本次退役影响）
         try:
             from utils.autolive_paths import AutolivePaths
-            from utils.gpt_sovits_service import build_gpt_sovits_service
             self.autolive_paths = AutolivePaths(self.config)
-            gpt_svc = build_gpt_sovits_service(self.config, self.autolive_paths)
-            if gpt_svc is not None:
-                threading.Thread(target=gpt_svc.start, name="svc-start-gpt-sovits", daemon=True).start()
-                logger.info("GPT-SoVITS 托管服务拉起已后台启动")
+            # R-6：直播运行信号接线（运行面近似=弹幕监听托管健康态；远优于既有恒 False）
+            from utils import gpu_policy
+            gpu_policy.set_live_flag_source(
+                lambda: getattr(self.danmaku_svc, "state", "") == "healthy"
+                if getattr(self, "danmaku_svc", None) else False)
+            backend = (self.config.get("gpt_sovits", "backend") or "inproc")
+            if backend == "inproc":
+                # TextPreprocessor 全局副作用落点（Eng P2-3）：cwd=AUTOlive 根
+                os.makedirs("音频输出", exist_ok=True)
+                from utils.gpt_sovits_inproc import init_engine
+                self.gsv_engine = init_engine(self.config, self.autolive_paths)
+                self.gsv_engine.start()  # 异步加载（胶囊 loading 态，不阻塞启动）
+                # R-5：引擎鸭子接入胶囊区（ManagedProcess 接口，audio_player builtin 先例同款）
+                from utils.service_orchestrator import ServiceRegistry
+                ServiceRegistry.instance().register(self.gsv_engine)
+                logger.info("GPT-SoVITS 进程内引擎初始化已启动（异步加载，backend=inproc）")
+                threading.Thread(target=self.gsv_engine.warmup, name="gsv-warmup", daemon=True).start()
+            else:
+                logger.info("gpt_sovits.backend=api：使用用户自备外部 api_v2（"
+                            f"{self.config.get('gpt_sovits', 'api_ip_port')}），AUTOlive 不拉起不托管")
             # RVC 变声服务（P2-1）：控制面常驻，音频流按需经前端启停
             from utils.rvc_service import build_rvc_vc_service
             rvc_svc = build_rvc_vc_service(self.config, self.autolive_paths)

@@ -55,13 +55,34 @@ def _vram_free_gb() -> float:
         return 999.0
 
 
-def is_background_task_allowed(vram_reserve_gb: float = 4.0) -> Tuple[bool, str]:
-    """背景任务（音频训练/翻唱）准入判定。返回 (允许, 原因)。"""
+def is_background_task_allowed(vram_reserve_gb: float = 4.0,
+                               inproc_tts_reserve_gb: float = 2.0) -> Tuple[bool, str]:
+    """背景任务（音频训练/翻唱）准入判定。返回 (允许, 原因)。
+
+    R-6 升级：inproc_tts_reserve_gb=进程内 TTS 常驻显存的额外预留——训练 OOM 会
+    拖死同进程的进程内 TTS（托管子进程时代仅是 TTS 短暂中断），故准入要求
+    空闲显存 ≥ vram_reserve_gb + inproc_tts_reserve_gb（引擎就绪时才加）。
+    """
     if _live_running():
         return False, "直播运行中"
     if _edtalk_busy():
         return False, "EDTalk 占用中（完成后可重试）"
     free = _vram_free_gb()
-    if free < vram_reserve_gb:
-        return False, f"显存余量 {free:.1f}GB 低于阈值 {vram_reserve_gb}GB"
+    reserve = vram_reserve_gb
+    if _inproc_engine_ready():
+        reserve += inproc_tts_reserve_gb
+    if free < reserve:
+        return False, (f"显存余量 {free:.1f}GB 低于阈值 {reserve:.1f}GB"
+                       f"（含进程内 TTS 常驻预留 {inproc_tts_reserve_gb}GB）"
+                       "——完成后可重试，或在对话页临时设 backend=api")
     return True, "GPU 空闲"
+
+
+def _inproc_engine_ready() -> bool:
+    """进程内 TTS 引擎是否就绪（仅 main.py 核心进程有引擎；其他进程恒 False）。"""
+    try:
+        from utils.gpt_sovits_inproc import get_engine
+        eng = get_engine()
+        return bool(eng and eng.state == "ready")
+    except Exception:
+        return False

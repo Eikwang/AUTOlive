@@ -47,9 +47,11 @@ class AutolivePaths:
             KEY_AUTOLIVE_HOME,
             os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
         )
-        # GPT-SoVITS 项目根与专用 runtime（Step 0 验证：runtime312-clone 可启动 api_v2）
+        # GPT-SoVITS 运行副本与专用 runtime（S-1：默认 apps/ 唯一副本，EDTalk/apps 范式；
+        # config 可覆盖回外部树，junction 资产由 copy 脚本建立）
         self.gpt_sovits_root: str = self._resolve(
-            KEY_GPT_SOVITS_ROOT, r"D:\AI\GPT-SoVITS"
+            KEY_GPT_SOVITS_ROOT,
+            os.path.join(self.autolive_home, "apps", "gpt-sovits"),
         )
         self.gpt_sovits_python: str = self._resolve(
             KEY_GPT_SOVITS_PYTHON, r"D:\AI\runtime312-clone\python.exe"
@@ -75,7 +77,11 @@ class AutolivePaths:
         return entries
 
     def subprocess_env(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """构造托管子进程环境：继承当前环境 + PYTHONPATH 注入 + 附加变量。"""
+        """构造托管子进程环境：继承当前环境 + PYTHONPATH 注入 + 上游训练约定变量 + 附加变量。
+
+        上游 env 约定（对齐 D:\\AI\\GPT-SoVITS\\开始训练.bat）：HF 镜像/缓存指向副本内
+        hf_download（S-1 后零外部树写入）、UTF-8、torch 2.9+ DDP 兼容开关。
+        """
         env = os.environ.copy()
         entries = self.gpt_sovits_pythonpath_entries()
         if entries:
@@ -83,6 +89,14 @@ class AutolivePaths:
             env["PYTHONPATH"] = os.pathsep.join(
                 filter(None, [existing] + entries)
             )
+        hf_home = os.path.join(self.gpt_sovits_root, "hf_download")
+        tf_cache = os.path.join(self.gpt_sovits_root, "tf_download")
+        os.makedirs(hf_home, exist_ok=True)
+        env.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        env["HF_HOME"] = hf_home
+        env["TRANSFORMERS_CACHE"] = tf_cache
+        env["PYTHONUTF8"] = "1"
+        env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         if extra:
             env.update(extra)
         return env

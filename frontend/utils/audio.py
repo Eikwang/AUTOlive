@@ -52,18 +52,30 @@ class Audio:
             return None
     
     async def _synthesis_gpt_sovits(self, content: str) -> Optional[str]:
-        """
-        使用GPT-SoVITS进行音频合成
-        
-        Args:
-            content: 待合成的文本内容
-            
-        Returns:
-            合成后的音频文件路径
-        """
-        # TODO: 实现GPT-SoVITS音频合成
-        logger.warning("GPT-SoVITS音频合成功能待实现")
-        return None
+        """使用GPT-SoVITS进行音频合成（F-2 接通：经 main.py 控制面 /tts/preview）。
+
+        前端进程无进程内引擎（显存双份+事件循环阻塞禁令），试听经控制面窄端点。"""
+        import aiohttp
+        base = None
+        try:
+            from frontend.ui.tabs.platform_config import _api_base
+            base = _api_base(self.config)
+        except Exception:
+            port = int(self.config.get("api_port") or 8000)
+            base = f"http://127.0.0.1:{port}"
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as session:
+                async with session.post(f"{base}/tts/preview", json={"text": content},
+                                        timeout=aiohttp.ClientTimeout(total=180)) as resp:
+                    body = await resp.json()
+                    if resp.status == 200 and body.get("success"):
+                        return body.get("path")
+                    logger.error(f"[audio-stub] 试听失败（problem）: {body.get('detail') or resp.status}；"
+                                 "cause/fix 详见 detail 文案或胶囊状态")
+                    return None
+        except Exception as e:
+            logger.error(f"[audio-stub] 试听请求异常（main 进程未启动？）: {e}")
+            return None
     
     async def _synthesis_vits(self, content: str) -> Optional[str]:
         """

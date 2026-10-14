@@ -342,3 +342,17 @@ apps/
 
 # v0.7.0 合并：登录态备份持久目录（DX-M5——不得落工具临时区）
 /backups/
+
+# GPT-SoVITS 进程内化（深化整合）：主进程 cwd 下的上游副作用目录与副本内缓存
+/GPT_SoVITS/
+/apps/gpt-sovits/hf_download/
+/apps/gpt-sovits/tf_download/
+/apps/gpt-sovits/logs/
+/apps/gpt-sovits/GPT_weights_v2ProPlus/
+/apps/gpt-sovits/SoVITS_weights_v2ProPlus/
+/models/mdxnet/*.onnx
+/config/gpt_sovits_inproc.yaml
+
+# 测试素材与运行产物（不入库）
+/tests/sound/
+/音频输出/

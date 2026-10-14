@@ -101,261 +101,78 @@ def create_tts_tab(
                 ui.label("此处显示生成的音频，仅显示最新合成的音频，可以在此操作删除合成的音频")
 
     # GPT-SoVITS配置
+    # GPT-SoVITS 语音引擎（F-2 重做：进程内参数面板 + backend 兜底折叠卡；
+    # 旧六选一 API 类型与四套死子卡退役——终门 D-1/D-3/D-4）
     with ui.card().style(card_css):
-        ui.label("GPT-SoVITS")
-        with ui.grid(columns=3):
+        ui.label("语音引擎（GPT-SoVITS 进程内）")
+        # DX-15：首次进入提示一次（旧 API 设置已被进程内引擎替代）
+        import os as _osf
+        _hint_flag = _osf.path.join(_osf.path.dirname(_osf.path.dirname(
+            _osf.path.dirname(_osf.path.abspath(__file__)))), "config", ".tts_inproc_hinted")
+        if not _osf.path.exists(_hint_flag):
+            ui.notify(position="top", type="info", timeout=8,
+                      message="语音合成已切换为进程内引擎（不再需要外部 GPT-SoVITS 服务）；旧 API 设置已折叠为兜底选项")
+            try:
+                open(_hint_flag, "w").close()
+            except OSError:
+                pass
+        with ui.grid(columns=2):
             FormField.create_select(
-                label='API类型', 
-                options={
-                    'api':'api', 
-                    'api_0322':'api_0322', 
-                    'api_0706':'api_0706', 
-                    'v2_api_0821': 'v2_api_0821', 
-                    'webtts':'WebTTS', 
-                    'gradio_0322':'gradio_0322',
-                }, 
-                value=get_nested_value(config, "gpt_sovits", "type"),
-                on_change=lambda e: set_config_callback("gpt_sovits", "type", e.value),
+                label='合成引擎（backend）',
+                options={'inproc': '进程内（推荐，无需外部服务）', 'api': '外部 API（自备服务兜底）'},
+                value=get_nested_value(config, "gpt_sovits", "backend") or "inproc",
+                on_change=lambda e: set_config_callback("gpt_sovits", "backend", e.value),
                 style="width:100%;"
             )
             FormField.create_input(
-                label='Gradio API地址', 
-                value=get_nested_value(config, "gpt_sovits", "gradio_ip_port"), 
-                placeholder='官方webui程序启动后gradio监听的地址',
-                on_change=lambda e: set_config_callback("gpt_sovits", "gradio_ip_port", e.value),
-                style="width:100%;"
-            )
-            FormField.create_input(
-                label='API地址（http）',
+                label='外部 API 地址（仅 backend=api 时生效）',
                 value=get_nested_value(config, "gpt_sovits", "api_ip_port"),
-                placeholder='官方API程序启动后监听的地址',
+                placeholder='http://127.0.0.1:9880（自备 api_v2 服务）',
                 on_change=lambda e: set_config_callback("gpt_sovits", "api_ip_port", e.value),
                 style="width:100%;"
             )
 
-        # 声音档案选择器（P2-4/D7：分组"我的声音档案/内置音色"，写入 gpt_sovits 节的
-        # 当前档案模型对；零档案空态指向训练页 B-6）
+        # 声音档案选择器（P2-4/D7：身份参数唯一入口——D-4 裁决双路径框退役）
         _render_voice_profile_selector(config, card_css)
-            
-        with ui.grid(columns=3):
-            FormField.create_input(
-                label='GPT模型路径', 
-                value=get_nested_value(config, "gpt_sovits", "gpt_model_path"), 
-                placeholder='GPT模型路径，填绝对路径',
-                on_change=lambda e: set_config_callback("gpt_sovits", "gpt_model_path", e.value),
-                style="width:100%;"
-            )
-            FormField.create_input(
-                label='SOVITS模型路径', 
-                value=get_nested_value(config, "gpt_sovits", "sovits_model_path"), 
-                placeholder='SOVITS模型路径，填绝对路径',
-                on_change=lambda e: set_config_callback("gpt_sovits", "sovits_model_path", e.value),
-                style="width:100%;"
-            )
-            ui.button('加载模型', on_click=lambda: _load_gpt_sovits_model(config), color=button_internal_color).style(button_internal_css)
-            
-        # api配置
-        with ui.card().style(card_css):
-            ui.label("api")
+
+        # 进程内参数面板（D-3：16 项清单，写入 gpt_sovits.params——身份参数随档案、
+        # 风格参数页面级覆盖 DX-11）
+        with ui.expansion("合成参数（进程内引擎）").style("width:100%"):
             with ui.grid(columns=3):
-                FormField.create_input(
-                    label='参考音频路径', 
-                    value=get_nested_value(config, "gpt_sovits", "ref_audio_path"), 
-                    placeholder='参考音频路径，建议填绝对路径',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "ref_audio_path", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='参考音频的文本', 
-                    value=get_nested_value(config, "gpt_sovits", "prompt_text"), 
-                    placeholder='参考音频的文本',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "prompt_text", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='参考音频的语种', 
-                    options={'中文':'中文', '日文':'日文', '英文':'英文'}, 
-                    value=get_nested_value(config, "gpt_sovits", "prompt_language"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "prompt_language", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='需要合成的语种', 
-                    options={'自动识别':'自动识别', '中文':'中文', '日文':'日文', '英文':'英文'}, 
-                    value=get_nested_value(config, "gpt_sovits", "language"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "language", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='语句切分', 
-                    options={
-                        '不切':'不切', 
-                        '凑四句一切':'凑四句一切', 
-                        '凑50字一切':'凑50字一切', 
-                        '按中文句号。切':'按中文句号。切', 
-                        '按英文句号.切':'按英文句号.切',
-                        '按标点符号切':'按标点符号切'
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "cut"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "cut", e.value),
-                    style="width:100%;"
-                )
-            
-        # api_0322 | gradio_0322配置
-        with ui.card().style(card_css):
-            ui.label("api_0322 | gradio_0322")
-            with ui.grid(columns=3):
-                FormField.create_input(
-                    label='参考音频路径', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "ref_audio_path"), 
-                    placeholder='参考音频路径，建议填绝对路径',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "ref_audio_path", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='参考音频的文本', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "prompt_text"), 
-                    placeholder='参考音频的文本',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "prompt_text", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='参考音频的语种', 
-                    options={'中文':'中文', '日文':'日文', '英文':'英文'}, 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "prompt_lang"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "prompt_lang", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='需要合成的语种', 
-                    options={
-                        '自动识别':'自动识别', 
-                        '中文':'中文', 
-                        '日文':'日文', 
-                        '英文':'英文', 
-                        '中英混合': '中英混合',
-                        '日英混合': '日英混合',
-                        '多语种混合': '多语种混合',
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "text_lang"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "text_lang", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='语句切分', 
-                    options={
-                        '不切':'不切', 
-                        '凑四句一切':'凑四句一切', 
-                        '凑50字一切':'凑50字一切', 
-                        '按中文句号。切':'按中文句号。切', 
-                        '按英文句号.切':'按英文句号.切',
-                        '按标点符号切':'按标点符号切'
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "text_split_method"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "text_split_method", e.value),
-                    style="width:100%;"
-                )
-            with ui.grid(columns=3):
-                FormField.create_input(
-                    label='top_k', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "top_k"), 
-                    placeholder='top_k',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "top_k", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='top_p', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "top_p"), 
-                    placeholder='top_p',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "top_p", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='temperature', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "temperature"), 
-                    placeholder='temperature',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "temperature", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='batch_size', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "batch_size"), 
-                    placeholder='batch_size',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "batch_size", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='speed_factor', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "speed_factor"), 
-                    placeholder='speed_factor',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "speed_factor", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='分段间隔(秒)', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "fragment_interval"), 
-                    placeholder='fragment_interval',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "fragment_interval", e.value),
-                    style="width:100%;"
-                )
-                ui.switch(
-                    'split_bucket', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "split_bucket"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "split_bucket", e.value)
-                ).style(switch_internal_css)
-                ui.switch(
-                    'return_fragment', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0322", "return_fragment"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0322", "return_fragment", e.value)
-                ).style(switch_internal_css)
-            
-        # api_0706配置
-        with ui.card().style(card_css):
-            ui.label("api_0706")
-            with ui.grid(columns=3):
-                FormField.create_input(
-                    label='参考音频路径', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0706", "refer_wav_path"), 
-                    placeholder='参考音频路径，建议填绝对路径',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0706", "refer_wav_path", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='参考音频的文本', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0706", "prompt_text"), 
-                    placeholder='参考音频的文本',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0706", "prompt_text", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='参考音频的语种', 
-                    options={'中文':'中文', '日文':'日文', '英文':'英文'}, 
-                    value=get_nested_value(config, "gpt_sovits", "api_0706", "prompt_language"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0706", "prompt_language", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='需要合成的语种', 
-                    options={
-                        '自动识别':'自动识别', 
-                        '中文':'中文', 
-                        '日文':'日文', 
-                        '英文':'英文', 
-                        '中英混合': '中英混合',
-                        '日英混合': '日英混合',
-                        '多语种混合': '多语种混合',
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "api_0706", "text_language"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0706", "text_language", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='文本切分', 
-                    value=get_nested_value(config, "gpt_sovits", "api_0706", "cut_punc"), 
-                    placeholder='文本切分符号设定, 符号范围,.;?!、，。？！；：…',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "api_0706", "cut_punc", e.value),
-                    style="width:100%;"
-                )
+                FormField.create_input(label='参考音频路径', value=get_nested_value(config, "gpt_sovits", "params", "ref_audio_path"),
+                    placeholder='参考音频 wav 绝对路径（档案选择会自动覆盖）',
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_audio_path", e.value), style="width:100%;")
+                FormField.create_input(label='参考音频文本', value=get_nested_value(config, "gpt_sovits", "params", "prompt_text"),
+                    placeholder='参考音频所说的文本',
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_text", e.value), style="width:100%;")
+                FormField.create_input(label='参考音频语言', value=get_nested_value(config, "gpt_sovits", "params", "prompt_lang"),
+                    placeholder='zh',
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_lang", e.value), style="width:100%;")
+                FormField.create_input(label='合成文本语言', value=get_nested_value(config, "gpt_sovits", "params", "text_lang"),
+                    placeholder='zh / auto',
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_lang", e.value), style="width:100%;")
+                FormField.create_input(label='top_k', value=get_nested_value(config, "gpt_sovits", "params", "top_k"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "top_k", e.value), style="width:100%;")
+                FormField.create_input(label='top_p', value=get_nested_value(config, "gpt_sovits", "params", "top_p"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "top_p", e.value), style="width:100%;")
+                FormField.create_input(label='temperature', value=get_nested_value(config, "gpt_sovits", "params", "temperature"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "temperature", e.value), style="width:100%;")
+                FormField.create_input(label='切分方式', value=get_nested_value(config, "gpt_sovits", "params", "text_split_method"),
+                    placeholder='cut5',
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_split_method", e.value), style="width:100%;")
+                FormField.create_input(label='批大小', value=get_nested_value(config, "gpt_sovits", "params", "batch_size"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "batch_size", e.value), style="width:100%;")
+                FormField.create_input(label='语速', value=get_nested_value(config, "gpt_sovits", "params", "speed_factor"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "speed_factor", e.value), style="width:100%;")
+                FormField.create_input(label='片段间隔', value=get_nested_value(config, "gpt_sovits", "params", "fragment_interval"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "fragment_interval", e.value), style="width:100%;")
+                FormField.create_input(label='重复惩罚', value=get_nested_value(config, "gpt_sovits", "params", "repetition_penalty"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "repetition_penalty", e.value), style="width:100%;")
+                FormField.create_input(label='seed', value=get_nested_value(config, "gpt_sovits", "params", "seed"),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "seed", e.value), style="width:100%;")
+            ui.button('重新加载模型（按当前参数）', on_click=lambda: _load_gpt_sovits_model(config),
+                      color=button_internal_color).style(button_internal_css)
+
             
         # v2_api_0821配置
         with ui.card().style(card_css):
@@ -554,14 +371,39 @@ def create_tts_tab(
 
 
 def _load_gpt_sovits_model(config: Dict[str, Any]):
-    """
-    加载GPT-SoVITS模型
-    
-    Args:
-        config: 配置字典
-    """
-    # TODO: 实现模型加载功能
-    logger.warning("GPT-SoVITS模型加载功能待实现")
+    """重新加载模型（F-2 接通）：经控制面 /tts/reload 触发引擎按当前 params 重建
+    （换模事务：失败保持旧模型并 notify——CEO-S2 平移）。前端进程无引擎，走窄端点。"""
+    import aiohttp
+    from nicegui import ui as _ui
+    try:
+        from frontend.ui.tabs.platform_config import _api_base
+        base = _api_base(config)
+    except Exception:
+        port = int(config.get("api_port") or 8000)
+        base = f"http://127.0.0.1:{port}"
+
+    async def _do():
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as session:
+                async with session.post(f"{base}/tts/reload",
+                                        timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                    body = await resp.json()
+                    if resp.status == 200 and body.get("success"):
+                        _ui.notify(position="top", type="positive", message=f"模型重载完成：{body.get('message')}")
+                    else:
+                        _ui.notify(position="top", type="negative",
+                                   message=f"重载失败（已保持旧模型）：{body.get('detail') or body.get('message')}")
+        except Exception as e:
+            _ui.notify(position="top", type="negative",
+                       message=f"无法连接主系统控制面（main 进程未启动？）：{e}")
+
+    import asyncio as _aio
+    try:
+        _loop = _aio.get_running_loop()
+        _loop.create_task(_do())
+    except RuntimeError:
+        import threading as _th
+        _th.Thread(target=lambda: _aio.run(_do()), daemon=True).start()
 
 def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
     """P2-4/D7/D8/B-6：声音档案分组选择器 + 模型对写入 gpt_sovits 节。
@@ -605,9 +447,13 @@ def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
 
 
 def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
-    """选用档案：模型对/参考音频写入 gpt_sovits 节 + 托管进程重启切换（R2 兜底）。"""
+    """选用档案：模型对/参考音频写入 gpt_sovits 节 + 进程内换模事务（R-4）。
+
+    换模语义：backend=inproc 时引擎实例重建式切换（新加载成功才 swap，失败保持旧模型
+    并 notify——CEO-S2 平移）；backend=api 时提示用户自行重载外部服务。
+    manual_restart() 托管重启依赖已退役（api_v2 托管不再存在）。
+    """
     from nicegui import ui as _ui
-    set_cb = None
     # gpt_sovits 节字段写入（经 config 回调持久化）
     try:
         from frontend.utils.common import notify_ok
@@ -635,14 +481,21 @@ def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
     _os.replace(tmp, cfg_path)
     # 重载共享 config 缓存（E-4 单写者：本处经 voice_profiles 同款原子替换）
     Config.reload(cfg_path)
-    # 托管进程重启完成切换（R2 兜底：api_v2 运行中换模不确定→重启秒级中断）
-    try:
-        from utils.service_orchestrator import ServiceRegistry
-        svc = ServiceRegistry.instance().get("gpt-sovits")
-        if svc is not None:
-            import threading as _th
-            _th.Thread(target=svc.manual_restart, daemon=True).start()
-    except Exception:
-        pass
+    # R-4：进程内换模事务（后台线程执行，切换中 UI loading 由调用方置禁）
+    import threading as _th
+
+    def _do_switch():
+        from utils.gpt_sovits_inproc import get_engine
+        eng = get_engine()
+        if eng is None:
+            _ui.notify(position="top", type="warning",
+                       message="进程内引擎不可用（backend=api 模式下请自行重载外部服务）")
+            return
+        ok, msg = eng.switch_model(prof.get("gpt_model", ""), prof.get("sovits_model", ""))
+        _ui.notify(position="top", type="positive" if ok else "negative",
+                   message=(f"声音档案「{prof.get('name', pid)}」切换成功" if ok
+                            else f"切换失败，已保持旧模型：{msg}"))
+
+    _th.Thread(target=_do_switch, daemon=True).start()
     _ui.notify(position="top", type="positive",
-               message=f"已选用声音档案「{prof.get('name', pid)}」，GPT-SoVITS 重载中")
+               message=f"已选用声音档案「{prof.get('name', pid)}」，模型切换中…")
