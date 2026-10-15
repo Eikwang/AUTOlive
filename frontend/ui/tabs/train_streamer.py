@@ -46,12 +46,15 @@ _pipeline_lock = threading.Lock()
 
 
 def _upload_dir_for(role: str, data_root: str = "") -> str:
-    """素材落点=配置化数据根（义务块：config.train_streamer.data_root，默认
-    <AUTOlive根>/data/edtalk_train/{role}/original_videos/）。data_root 由
-    调用方从 config 传入（本函数为模块级，不持有 tab 闭包的 config）。"""
+    """素材落点（original_videos 目录本身）。配置化数据根（义务块：
+    config.train_streamer.data_root，未配置时默认 <AUTOlive根>/data/
+    edtalk_train/{role}/original_videos/——基准取 get_edtalk_dir() 的
+    父目录即 AUTOlive 根，与 edtalk 副本/进度文件同一事实源；此前
+    dirname 层数算错落到 frontend/data/ 下，2026-10-15 修正）。
+    data_root 由调用方从 config 传入（本函数为模块级，不持有 tab 闭包
+    的 config）。"""
     if not data_root:
-        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        data_root = os.path.join(base, "data", "edtalk_train")
+        data_root = os.path.join(os.path.dirname(get_edtalk_dir()), "data", "edtalk_train")
     return os.path.join(data_root, role, "original_videos")
 
 
@@ -440,7 +443,10 @@ def create_train_streamer_tab(
             shutil.copy2(src, target)
             saved += 1
         picked_videos.clear()
-        return dest
+        # 返回 video_dir 语义=含 original_videos 的父目录（pipeline preflight
+        # 检查 {video_dir}/original_videos；此前直接返回 original_videos 本身
+        # 导致"目录中未找到 original_videos 子目录"必现，2026-10-15 修复）
+        return os.path.dirname(dest)
 
     async def _start_with_copy(video_dir: str, role: str):
         """确认后执行：复制素材（既有目录入口跳过）→ 启动训练线程。"""
