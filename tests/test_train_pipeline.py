@@ -249,3 +249,82 @@ def test_preflight_blocks_when_running_flag_true(tmp_path, monkeypatch):
     monkeypatch.setattr(pl, "training_running", True)
     p = _make_pipeline(tmp_path)
     assert "已有训练任务在进行中" in p.preflight()
+
+
+# ---------- 6. GPU 冲突判据回归（2026-10-15 配置意图误用修复） ----------
+
+
+def test_gpu_conflict_ignores_config_intent(tmp_path, monkeypatch):
+    """配置激活（EDTalk 驱动+enable=True）但端口空闲 → 不拦截。
+
+    回归锁：_check_gpu_conflict 原误用 is_edtalk_active（配置意图判定），
+    用户未启动系统也被拦"实时推理服务正在运行"（8000 无监听、GPU 空闲）。
+    判据必须是运行状态——配置开关≠进程在跑。"""
+    import requests as _rq
+    p = _make_pipeline(tmp_path)
+    p.config_data["visual_body"] = "edtalk_realtime"
+    p.config_data["edtalk_realtime"] = {"enable": True, "port": 8000}
+
+    def _refuse(*a, **k):
+        raise ConnectionError("refused")
+    monkeypatch.setattr(_rq, "get", _refuse)
+    assert p._check_gpu_conflict() is None
+
+
+def test_gpu_conflict_detects_running_service(tmp_path, monkeypatch):
+    """端口 /status 返回 200（真实运行）→ 拦截。"""
+    import requests as _rq
+    p = _make_pipeline(tmp_path)
+    p.config_data["edtalk_realtime"] = {"enable": False, "port": 8000}
+
+    class _R:
+        status_code = 200
+    monkeypatch.setattr(_rq, "get", lambda *a, **k: _R())
+    msg = p._check_gpu_conflict()
+    assert msg and "实时推理服务正在运行" in msg
+
+
+# ---------- 7. 训练锁存活探测回归（2026-10-15 Windows os.kill 危险语义修复） ----------
+
+
+def _pipeline_for_lock(tmp_path, role="lockrole"):
+    """解释器真实可用的 pipeline（让 preflight 走到锁判据——其在解释器/副本判据之后）。"""
+    video_dir = tmp_path / "videos"
+    (video_dir / "original_videos").mkdir(parents=True, exist_ok=True)
+    return TrainPipeline(
+        config_data={"edtalk_realtime": {"interpreter_path": sys.executable}},
+        video_dir=str(video_dir), role_name=role,
+        on_log=lambda line, stage=None: None,
+        on_complete=lambda ok, msg: None,
+    )
+
+
+def test_lock_blocks_alive_pid_without_killing(tmp_path, monkeypatch):
+    """锁文件指向存活进程 → 拦截，且探测不得杀死该进程。
+
+    Windows os.kill(pid, 0) 非 CTRL 信号实现是 TerminateProcess——原实现
+    探测存活时会把同用户进程真杀掉。修复后走 psutil/ctypes 只读查询。"""
+    import requests as _rq
+    monkeypatch.setattr(_rq, "get", lambda *a, **k: (_ for _ in ()).throw(ConnectionError()))
+    p = _pipeline_for_lock(tmp_path)
+    os.makedirs(os.path.dirname(p.lock_path), exist_ok=True)
+    with open(p.lock_path, "w", encoding="utf-8") as f:
+        json.dump({"pid": os.getpid(), "time": "2026-10-15"}, f)
+    msg = p.preflight()
+    assert "已有训练进程运行" in msg          # 拦截
+    assert os.getpid() in (int(x.pid) for x in __import__("psutil").process_iter(["pid"]))
+    assert os.path.exists(p.lock_path)       # 活锁不删
+    os.remove(p.lock_path)
+
+
+def test_stale_lock_auto_recovered(tmp_path, monkeypatch):
+    """锁文件指向不存在 PID → 自动恢复放行（陈旧锁删除，不拦截）。"""
+    import requests as _rq
+    monkeypatch.setattr(_rq, "get", lambda *a, **k: (_ for _ in ()).throw(ConnectionError()))
+    p = _pipeline_for_lock(tmp_path)
+    os.makedirs(os.path.dirname(p.lock_path), exist_ok=True)
+    with open(p.lock_path, "w", encoding="utf-8") as f:
+        json.dump({"pid": 999999, "time": "2020-01-01"}, f)
+    msg = p.preflight()
+    assert not (msg and "训练进程运行" in msg)
+    assert not os.path.exists(p.lock_path)   # 陈旧锁已自动清理

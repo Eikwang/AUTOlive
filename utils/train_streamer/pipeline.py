@@ -44,6 +44,38 @@ def get_interpreter(config_data: dict) -> str:
     )
 
 
+def pid_alive(pid: int) -> bool:
+    """跨平台进程存活探测（只查询、不触碰目标进程）。
+
+    Windows 下禁用 os.kill(pid, 0)：其非 CTRL 信号实现是
+    OpenProcess(PROCESS_ALL_ACCESS)+TerminateProcess——"探测"即杀死
+    同用户进程、对高权限进程（如 explorer）权限拒绝误报不存在。
+    2026-10-15 修复：psutil 优先，缺失时 ctypes 仅申请查询权限。"""
+    try:
+        import psutil
+        return psutil.pid_exists(int(pid))
+    except ImportError:
+        pass
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False  # 打不开=不存在；无权场景按不存在放行（宁可漏拦不误杀）
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 # 评估门槛（EDTalk RUNBOOK §单角色微调，底模校准值）
 EVAL_THRESHOLDS = {
     "pose_mae": 11.1,       # 姿势 MAE ≤ 11.1px
@@ -298,19 +330,14 @@ class TrainPipeline:
         conflict = self._check_gpu_conflict()
         if conflict:
             return conflict
-        # 跨会话互斥锁（native E4：PID+时间戳；Eng F-E3：陈旧锁自动恢复）
+        # 跨会话互斥锁（native E4：PID+时间戳；Eng F-E3：陈旧锁自动恢复；
+        # 存活探测用 pid_alive——Windows 下 os.kill(pid,0) 语义是 TerminateProcess）
         if os.path.exists(self.lock_path):
             try:
                 with open(self.lock_path, encoding="utf-8") as f:
                     lock = json.load(f)
                 pid = lock.get("pid")
-                alive = False
-                if pid:
-                    try:
-                        os.kill(pid, 0)
-                        alive = True
-                    except OSError:
-                        alive = False
+                alive = bool(pid) and pid_alive(pid)
                 if alive:
                     return (f"problem=该角色已有训练进程运行（PID {pid}，开始于 {lock.get('time')}）；"
                             f"cause=锁文件指向存活进程；fix=等待完成或停止该训练；确认无进程可手动删除 {self.lock_path}")
@@ -332,15 +359,25 @@ class TrainPipeline:
 
     def _check_gpu_conflict(self) -> str | None:
         """双向互斥组合判据（Eng F-E2）：反向（主系统运行中→拦训练）。
-        组合判据=EDTalk 端口活性+主系统子进程注册表+启动标志，任一为真即拦截。"""
+        组合判据=EDTalk 端口活性+主系统子进程注册表，任一为真即拦截。
+
+        2026-10-15 修复：首条判据原误用 is_edtalk_active——那是**配置意图**
+        判定（用户选择了 EDTalk 驱动且 enable=True），并非运行状态，导致用户
+        未启动系统也被拦"实时推理服务正在运行"（实测：8000 无监听、GPU 空闲
+        仍被拦）。配置开关≠进程在跑（同 danmaku 监听开关语义教训），改为端口
+        活性探测——与训练主播 tab 层 _check_gpu_conflict 同款判据。"""
+        # 1) 端口活性（真实运行状态探测）
         try:
-            from utils.edtalk_realtime import is_edtalk_active
-            if is_edtalk_active(self.config_data):
+            import requests as _requests
+            port = (self.config_data.get("edtalk_realtime", {}) or {}).get("port", 8000)
+            r = _requests.get(f"http://127.0.0.1:{port}/status", timeout=1)
+            if r.status_code == 200:
                 return ("problem=实时推理服务正在运行；cause=16GB 显存下训练与推理不可并存"
                         "（GPU 显存冲突）；fix=先在画面设置页停止实时推理，再启动训练")
-        except ImportError:
-            logger.warning("edtalk_realtime 模块不可用，跳过端口活性判据")
-        # 主系统子进程注册表（frontend/main.py my_subprocesses 非空即有子进程）
+        except Exception:
+            pass
+        # 2) 主系统子进程注册表（frontend/main.py my_subprocesses 非空即有子进程；
+        #    webui 进程内为模块缓存，注册表真实有效）
         try:
             from frontend.main import my_subprocesses
             alive = [n for n, p in (my_subprocesses or {}).items()
@@ -350,14 +387,6 @@ class TrainPipeline:
                         f"cause=显存可能被占用（16GB 卡训练与推理不可并存）；"
                         f"fix=先停止主系统再启动训练")
         except ImportError:
-            pass
-        # 启动链"正在启动"标志
-        try:
-            from frontend.main import starting_flag
-            if getattr(starting_flag, "value", False) or starting_flag:
-                return ("problem=主系统正在启动中；cause=启动过程会拉起推理服务占用显存；"
-                        f"fix=等待启动完成或取消后错峰训练")
-        except (ImportError, Exception):
             pass
         return None
 
