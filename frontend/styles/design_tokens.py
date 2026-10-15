@@ -84,6 +84,7 @@ LIGHT_TOKENS: Dict[str, str] = {
     # 语义色
     "color-success": "#16a34a",
     "color-danger": "#dc2626",
+    "color-danger-strong": "#b91c1c",  # 危险色加强面（警示横幅底色，白字对比度 ≥4.5:1）
     "color-warning": "#d97706",
     "color-info": "#0284c7",
 
@@ -123,6 +124,7 @@ DARK_TOKENS: Dict[str, str] = {
 
     "color-success": "#22c55e",
     "color-danger": "#ef4444",
+    "color-danger-strong": "#dc2626",  # 深色主题下用浅色主题的危险色做加强面，白字达 AA
     "color-warning": "#f59e0b",
     "color-info": "#38bdf8",
 

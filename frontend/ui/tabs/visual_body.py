@@ -105,7 +105,7 @@ def create_visual_body_tab(
         else:
             ui.label("⚠ 未检测到 UnityCapture 虚拟摄像头——数字人画面输出依赖它，请先安装").style(
                 "width:100%;padding:6px 10px;border-radius:6px;"
-                "background:var(--color-danger);color:#fff;font-size: var(--font-size-body)")
+                "background:var(--color-danger-strong);color:#fff;font-size: var(--font-size-body)")
             cam_name_input = FormField.create_input(
                 label="摄像头名称（字母/数字/空格/下划线/短横线，1-64 位；OBS 里按此名选择）",
                 value="AUTOlive 数字人",
@@ -138,8 +138,21 @@ def create_visual_body_tab(
                         "fix=重启系统后重开本页，或手动运行 InstallCustomName.bat")
                     cam_status_label.style("color: var(--color-warning)")
 
+            async def _do_recheck():
+                """就地重查注册表并刷新状态行（design 审查 FINDING-002：
+                原实现 ui.navigate.reload() 整页刷新会把用户踢回默认页）。"""
+                ok, got = await asyncio.to_thread(_query_unity_capture)
+                if ok:
+                    cam_status_label.set_text("检测到已安装：" + got)
+                    cam_status_label.style("color: var(--color-positive)")
+                else:
+                    cam_status_label.set_text(
+                        "problem=仍未检测到 UnityCapture 注册项；cause=尚未安装或被安全软件拦截；"
+                        "fix=点击『安装虚拟摄像头』，或手动运行 InstallCustomName.bat")
+                    cam_status_label.style("color: var(--color-warning)")
+
             ui.button("安装虚拟摄像头", on_click=_do_install).props("outline")
-            ui.button("重新检测", on_click=lambda: ui.navigate.reload()).props("flat")
+            ui.button("重新检测", on_click=_do_recheck).props("flat")
         ui.label("单读者限制：UnityCapture 为 DirectShow 滤镜，OBS 与 realtime_serve "
                  "不可同时读取同一设备；重装/改名=重新填写名称点击安装（覆盖注册）").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
