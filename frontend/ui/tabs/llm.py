@@ -231,7 +231,7 @@ def _create_fastrag_card(
             data = resp.json() if resp.status_code == 200 else {}
             health_label.set_text(
                 f"运行中 | 文本块:{data.get('chunks', '?')} | rerank:{data.get('rerank_enabled', '?')}"
-            ).style("color: var(--color-positive, #21ba45)")
+            ).style("color: var(--color-positive)")
         except Exception:
             health_label.set_text(
                 "服务未运行——开启开关并『运行系统』后自动拉起"

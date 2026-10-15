@@ -145,7 +145,7 @@ def create_train_streamer_tab(
 
         # 显存提示区（开始训练前双检测：8000 端口 + running_flag）
         gpu_warning = ui.label("").style(
-            "color: var(--color-warning, #b58900); display:none"
+            "color: var(--color-warning); display:none"
         )
 
         # ---------- 操作按钮 ----------
@@ -187,9 +187,9 @@ def create_train_streamer_tab(
             """state: pending/running/done/failed"""
             colors = {
                 "pending": ("var(--bg-hover)", "var(--text-secondary)"),
-                "running": ("var(--color-primary, #1976d2)", "#fff"),
-                "done": ("var(--color-positive, #21ba45)", "#fff"),
-                "failed": ("var(--color-negative, #c10015)", "#fff"),
+                "running": ("var(--color-primary)", "var(--text-on-primary)"),
+                "done": ("var(--color-positive)", "var(--text-on-primary)"),
+                "failed": ("var(--color-negative)", "var(--text-on-primary)"),
             }
             bg, fg = colors[state]
             stage_labels[idx].style(
@@ -313,7 +313,7 @@ def create_train_streamer_tab(
         gpu_msg = _check_gpu_conflict()
         if gpu_msg:
             gpu_warning.set_text(gpu_msg)
-            gpu_warning.style("color: var(--color-warning, #b58900); display:block")
+            gpu_warning.style("color: var(--color-warning); display:block")
         with ui.dialog() as dialog, ui.card():
             ui.label("确认开始训练？").style("font-weight: var(--font-weight-title)")
             ui.label(
@@ -492,7 +492,7 @@ def create_train_streamer_tab(
             return
         pipeline._confirm_dialog_shown = True
         with ui.dialog() as dialog, ui.card():
-            ui.label("评估未过门槛").style("font-weight: var(--font-weight-title)").style("color: var(--color-negative, #c10015)")
+            ui.label("评估未过门槛").style("font-weight: var(--font-weight-title)").style("color: var(--color-negative)")
             # D12：具体指标+两选项后果（全旅程情感最重时刻不盲选）
             summary = getattr(pipeline, "_last_eval_summary", None) or {}
             verdict = summary.get("verdict") or "未解析到评估指标"

@@ -44,7 +44,7 @@ def create_visual_body_tab(
                   "metahuman_stream = 文本 echo 由对端托管")
 
         # 驱动类型 × enable 四组合提示（常驻区）
-        combo_warning = ui.label("").style("color: var(--color-warning, #b58900); white-space: pre-wrap")
+        combo_warning = ui.label("").style("color: var(--color-warning); white-space: pre-wrap")
 
         def _update_combo_warning():
             body = get_nested_value(config, "visual_body", default="metahuman_stream")
@@ -105,7 +105,7 @@ def create_visual_body_tab(
         else:
             ui.label("⚠ 未检测到 UnityCapture 虚拟摄像头——数字人画面输出依赖它，请先安装").style(
                 "width:100%;padding:6px 10px;border-radius:6px;"
-                "background:var(--color-danger-strong);color:#fff;font-size: var(--font-size-body)")
+                "background:var(--color-danger-strong);color:var(--text-on-primary);font-size: var(--font-size-body)")
             cam_name_input = FormField.create_input(
                 label="摄像头名称（字母/数字/空格/下划线/短横线，1-64 位；OBS 里按此名选择）",
                 value="AUTOlive 数字人",
@@ -437,7 +437,7 @@ def create_visual_body_tab(
             status_label.set_text(
                 f"运行中 | 段:{seg} | preroll:{preroll} | 生产帧率:{fps} | "
                 f"欠载:{underruns} | 分辨率:{res}"
-            ).style("color: var(--color-positive, #21ba45)")
+            ).style("color: var(--color-positive)")
             control_expansion.value = True
             # capable 探测（义务块"推理热切 UI"：false 时禁用对应控件并提示——
             # off 启动的组件未构造，热切 409）
@@ -464,11 +464,11 @@ def create_visual_body_tab(
             if data.get("available"):
                 fc = data.get("failure_count", 0)
                 if fc == 0:
-                    push_health_label.set_text("EDTalk 推送：正常").style("color: var(--color-positive, #21ba45)")
+                    push_health_label.set_text("EDTalk 推送：正常").style("color: var(--color-positive)")
                 else:
                     push_health_label.set_text(
                         f"EDTalk 推送：最近 {fc} 次失败（{data.get('last_error', '')[:60]}）"
-                    ).style("color: var(--color-negative, #c10015)")
+                    ).style("color: var(--color-negative)")
             else:
                 push_health_label.set_text("EDTalk 推送：未知（音频模块未初始化）").style("color: var(--text-hint)")
         except Exception:
