@@ -2,15 +2,22 @@
 """
 训练主播标签页模块（EDTalk功能集成计划 §5.1）
 
-一键全链路训练：输入原始视频文件夹路径 → 开始 → 预处理编排(11子步) →
-底模微调 → 评估 → 口型微调。无开关、独立功能、不进 ENABLE_PATHS。
+选择素材视频（本地文件选择对话框，只记录路径） → 开始 → 素材复制到角色
+目录 → 预处理编排(11子步) → 底模微调 → 评估 → 口型微调。无开关、独立
+功能、不进 ENABLE_PATHS。
+
+素材选择逻辑（2026-10-15 用户裁决）：弃浏览器上传——webui 跑在本机，
+服务端直读文件系统只记录路径（无浏览器上传内存限制），用户可跨目录
+累计/移除已选文件，开始训练时才复制到 数据根/<角色名>/original_videos/。
 
 设计义务（design 阶段裁决）：常驻步骤条（4 大阶段+11 子步）、日志区空态
 引导、配色走设计令牌（--bg-log/--text-log）、窄屏 overflow-x、停止二次
 确认（代价文案）、训练完成 ui.notify + 产物路径高亮、评估"仍要继续"
 Quasar dialog、应用到数字人确认对话框（映射验证前置灰）。
 """
+import asyncio
 import os
+import re
 import shutil
 import threading
 import time
@@ -22,6 +29,7 @@ from nicegui import ui
 
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
+from frontend.ui.components.local_file_picker import LocalFilePicker, format_size
 from utils.my_log import logger
 from utils.train_streamer.pipeline import (
     TrainPipeline,
@@ -35,19 +43,16 @@ _LOG_BUFFER: deque = deque(maxlen=800)
 # 模块级单例（防多开）
 _pipeline: TrainPipeline | None = None
 _pipeline_lock = threading.Lock()
-# 上传暂存（auto_upload=False：用户点上传按钮后逐文件回调收集，开始训练时统一落盘）
-_pending_uploads: list = []
 
 
-def _upload_dir_for(role: str) -> str:
-    """上传落点=配置化数据根（义务块：config.train_streamer.data_root，默认
-    <AUTOlive根>/data/edtalk_train/{role}/original_videos/）。"""
-    from frontend.ui.components.config_helper import get_nested_value as _gnv
-    root = _gnv(config, "train_streamer", "data_root", default="") if config else ""
-    if not root:
+def _upload_dir_for(role: str, data_root: str = "") -> str:
+    """素材落点=配置化数据根（义务块：config.train_streamer.data_root，默认
+    <AUTOlive根>/data/edtalk_train/{role}/original_videos/）。data_root 由
+    调用方从 config 传入（本函数为模块级，不持有 tab 闭包的 config）。"""
+    if not data_root:
         base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        root = os.path.join(base, "data", "edtalk_train")
-    return os.path.join(root, role, "original_videos")
+        data_root = os.path.join(base, "data", "edtalk_train")
+    return os.path.join(data_root, role, "original_videos")
 
 
 def create_train_streamer_tab(
@@ -85,7 +90,7 @@ def create_train_streamer_tab(
                 "color: var(--text-hint); font-size: var(--font-size-body); width:100%"
             )
 
-        # ---------- 区②：上传与角色表单区（design D1：训练中禁用） ----------
+        # ---------- 区②：素材选择与角色表单区（design D1：训练中禁用） ----------
         def _validate_role_input(e):
             """角色名即时校验（design D4：非法输入即时拒绝）。"""
             err = validate_role_name(e.value or "")
@@ -103,43 +108,96 @@ def create_train_streamer_tab(
             style="width:100%;",
         )
         role_warning = ui.label("").style("color: var(--color-danger); display:none")
-        # 上传控件（义务块"上传视频落点"+design D5 状态五件套；NiceGUI 上传
-        # 为内存态——Eng F-E1：单文件上限 500MB，超限走下方受限路径入口降级）
-        upload_files_label = ui.label("尚未选择文件").style("color: var(--text-hint)")
-        def _collect_upload(e):
-            """逐文件收集（D5 状态五件套：文件名+大小列表；Eng F-E1 单文件上限）。"""
-            name = getattr(e, "name", "")
-            size = getattr(e, "size", 0) or 0
-            if size > 500 * 1024 * 1024:
-                ui.notify(position="top", type="negative",
-                          message=f"problem=文件超限；cause={name} 为 {size / 1024 / 1024:.0f}MB > 500MB；"
-                                  f"fix=使用下方高级路径入口填写既有目录（大文件逃生通道）")
-                return
-            _pending_uploads.append(e)
-            total = len(_pending_uploads)
-            upload_files_label.set_text(f"已选 {total} 个文件（开始训练时自动落盘）")
 
-        upload_btn = ui.upload(
-            label="上传视频（单文件 ≤500MB，开始训练时自动放入数据根）",
-            multiple=True,
-            auto_upload=False,
-            on_upload=_collect_upload,
-        ).props('accept="video/*,.mp4,.avi,.mov,.mkv"').style("width:100%")
-        # 受限路径入口（Eng F-E1：GB 级视频逃生通道；design D21：旧路径只读识别）
-        with ui.expansion("大文件/既有目录（高级路径入口）").style("width:100%"):
+        # 素材选择状态（闭包内局部态：选择只记录路径，开始训练时才复制落盘）
+        picked_videos: list = []      # 已选素材绝对路径（str）
+        last_browse: list = [None]    # 上次浏览目录（本会话记忆，对话框起点）
+        pick_row_btns: list = []      # 已选列表删除按钮引用（训练中锁定用）
+        _picker_open = [False]
+
+        def _render_picks():
+            """重绘已选素材列表（文件名+大小+删除；空态提示）。"""
+            pick_row_btns.clear()
+            picks_container.clear()
+            with picks_container:
+                if not picked_videos:
+                    ui.label("尚未选择素材（点击上方按钮，从本机选择视频文件，可多选）").style(
+                        "color: var(--text-hint); font-size: var(--font-size-body)")
+                    return
+                total_b = 0
+                for p in picked_videos:
+                    try:
+                        b = os.path.getsize(p)
+                        total_b += b
+                        size_txt = format_size(b)
+                    except OSError:
+                        size_txt = "（文件不存在）"
+                    with ui.row().style("width:100%;align-items:center;gap:8px"):
+                        ui.icon("movie").style("color: var(--text-hint); flex-shrink:0")
+                        ui.label(os.path.basename(p)).tooltip(p).style(
+                            "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+                            "white-space:nowrap;color: var(--text-body); font-size: var(--font-size-body)")
+                        ui.label(size_txt).style(
+                            "color: var(--text-secondary); font-size: var(--font-size-small); flex-shrink:0")
+                        _del = ui.button(
+                            icon="close", on_click=lambda _, pp=p: _remove_pick(pp)).props("flat dense round")
+                        _del.tooltip("移除该素材（不删除原文件）")
+                        pick_row_btns.append(_del)
+                ui.label(f"共 {len(picked_videos)} 个文件 · 合计 {format_size(total_b)}"
+                         "（仅记录路径，开始训练时才复制到角色目录）").style(
+                    "color: var(--text-secondary); font-size: var(--font-size-small)")
+
+        def _remove_pick(path: str):
+            if path in picked_videos:
+                picked_videos.remove(path)
+            _render_picks()
+
+        async def _open_picker():
+            """打开本地文件选择对话框（防重入；选择结果仅追加路径）。"""
+            if _picker_open[0]:
+                return
+            _picker_open[0] = True
+            pick_btn.set_enabled(False)
+            try:
+                result = await LocalFilePicker(last_browse[0], multiple=True, title="选择素材视频")
+            finally:
+                _picker_open[0] = False
+                pick_btn.set_enabled(True)
+            if not result:
+                return
+            added = 0
+            for p in result:
+                sp = str(p)
+                if sp not in picked_videos:
+                    picked_videos.append(sp)
+                    added += 1
+            last_browse[0] = str(result[0].parent)
+            _render_picks()
+            if added:
+                ui.notify(position="top", type="positive",
+                          message=f"已添加 {added} 个素材文件（仅记录路径，开始训练时复制）")
+
+        pick_btn = ui.button("选择素材视频（可多选）", icon="folder_open", on_click=_open_picker).props(
+            "size=lg").style("width:100%")
+        picks_container = ui.column().style("width:100%;gap:4px")
+        _render_picks()
+
+        # 受限路径入口（Eng F-E1 语义弱化：本机直读无浏览器上传内存限制后，
+        # 该入口服务"素材已组织好/批量目录"场景；design D21：旧路径只读识别）
+        with ui.expansion("既有目录（高级路径入口）").style("width:100%"):
             video_dir_input = FormField.create_input(
                 label="既有视频目录（含 original_videos 子目录）",
                 value="",
                 placeholder=r"例如 D:\videos\my_streamer（原始视频放其 original_videos 子目录）",
                 style="width:100%;",
             )
-            ui.label("大文件建议直接放入既有目录后填此路径（避开浏览器上传内存限制）；"
-                     "旧数据目录保持只读识别，训练原样可用").style(
+            ui.label("素材已组织为标准目录结构（含 original_videos 子目录）或需要批量复用"
+                     "整个目录时可直接填路径；旧数据目录保持只读识别，训练原样可用").style(
                 "color: var(--text-hint); font-size: var(--font-size-body)")
 
         # 素材要求提示（DX 义务③）
         ui.label(
-            "上传的视频将复制到 数据根/<角色名>/original_videos/；时长与数量参照 EDTalk 数据集处理流程"
+            "已选素材将在开始训练时复制到 数据根/<角色名>/original_videos/；时长与数量参照 EDTalk 数据集处理流程"
             "（wy 实例 = 529 视频 / 63055 clips；更少素材可训，口型质量预期下降）"
         ).style("color: var(--text-hint); font-size: var(--font-size-body)")
 
@@ -150,15 +208,20 @@ def create_train_streamer_tab(
 
         # ---------- 操作按钮 ----------
         with ui.row():
+            # lambda 延迟解析：_confirm_start 定义在本 card 构建块之后（async，
+            # NiceGUI 会 await handler 返回的 coroutine——events.should_await）
             start_btn = ui.button("开始训练", on_click=lambda: _confirm_start())
             stop_btn = ui.button("停止", on_click=lambda: _confirm_stop()).props("outline")
             stop_btn.set_enabled(False)
 
         def _set_form_locked(locked: bool):
-            """D1 义务落地：训练中锁定区②表单（角色名/上传/既有目录），
+            """D1 义务落地：训练中锁定区②表单（角色名/素材选择/既有目录），
             训练结束在 _poll 恢复——防训练中改角色名/路径造成进度文件与 UI 不一致。"""
-            for _el in (role_input, upload_btn, video_dir_input):
-                _el.set_enabled(not locked)
+            role_input.set_enabled(not locked)
+            pick_btn.set_enabled(not locked)
+            video_dir_input.set_enabled(not locked)
+            for _btn in pick_row_btns:
+                _btn.set_enabled(not locked)
 
         def _default_role(path: str) -> str:
             path = (path or "").strip().strip('"')
@@ -289,8 +352,8 @@ def create_train_streamer_tab(
     # ---------- 交互逻辑（card 外部，避免 NiceGUI 上下文问题） ----------
     pipeline_holder: list = [None]
 
-    def _confirm_start():
-        """开始训练二次确认（含上传落盘+角色名校验，义务块"上传视频落点"）。"""
+    async def _confirm_start():
+        """开始训练二次确认（含素材复制+角色名校验，义务块"上传视频落点"）。"""
         role = (role_input.value or "").strip()
         # 角色名校验（D4：前端即时+编排层二次）
         name_err = validate_role_name(role)
@@ -299,86 +362,95 @@ def create_train_streamer_tab(
             role_warning.style("color: var(--color-danger); display:block")
             ui.notify(position="top", type="negative", message=name_err)
             return
-        # 上传 vs 既有路径两条入口（Eng F-E1：GB 级降级）
-        uploads = list(getattr(upload_btn, "clients", []) or [])
+        # 素材 vs 既有路径两条入口（既有目录优先，与旧行为一致）
         video_dir = (video_dir_input.value or "").strip().strip('"')
         if video_dir:
-            # 既有路径入口：preflight 会做 original_videos 结构校验
-            pass
+            source_txt = f"既有目录入口：{video_dir}（已选素材将被忽略）"
+        elif picked_videos:
+            data_root = get_nested_value(config, "train_streamer", "data_root", default="")
+            dest = _upload_dir_for(role, data_root)
+            total_b = sum((os.path.getsize(p) for p in picked_videos if os.path.exists(p)), 0)
+            source_txt = f"已选素材 {len(picked_videos)} 个文件（合计 {format_size(total_b)}）→ 复制到 {dest}"
         else:
-            # 上传入口：落盘到 data_root/{role}/original_videos/（复制+磁盘预检）
-            try:
-                video_dir = _persist_uploads(role)
-            except ValueError as ve:
-                ui.notify(position="top", type="negative", message=str(ve))
-                return
-            if not video_dir:
-                ui.notify(position="top", type="warning",
-                          message="请先上传视频文件，或使用高级路径入口填写既有目录")
-                return
-        gpu_msg = _check_gpu_conflict()
+            ui.notify(position="top", type="warning",
+                      message="请先选择素材文件，或使用高级路径入口填写既有目录")
+            return
+        gpu_msg = await asyncio.to_thread(_check_gpu_conflict)
         if gpu_msg:
             gpu_warning.set_text(gpu_msg)
             gpu_warning.style("color: var(--color-warning); display:block")
         with ui.dialog() as dialog, ui.card():
             ui.label("确认开始训练？").style("font-weight: var(--font-weight-title)")
             ui.label(
-                f"角色：{role}\n目录：{video_dir}\n\n"
+                f"角色：{role}\n素材：{source_txt}\n\n"
                 "训练将连续执行 4 大阶段（预处理 / 底模微调 / 评估 / 口型微调），\n"
                 "耗时可达十余小时并占用 GPU（训练期间无法启动主系统直播）。\n"
                 "完成后自动部署为推理可用角色包。"
             ).style("white-space: pre-wrap")
             with ui.row():
-                def _do_start():
+                async def _do_start():
                     dialog.close()
-                    _start_pipeline(video_dir, role)
+                    await _start_with_copy(video_dir, role)
                 ui.button("开始", on_click=_do_start)
                 ui.button("取消", on_click=dialog.close).props("flat")
         dialog.open()
 
-    def _persist_uploads(role: str) -> str:
-        """把 ui.upload 选中的文件落盘到 data_root/{role}/original_videos/
-        （义务块"上传视频落点"：自动建目录+复制+磁盘预检；Eng F-E5 文件名清洗；
-        D5 五件套的失败含原因）。返回落点目录；无文件返回空串；失败抛 ValueError。"""
-        content = getattr(upload_btn, "content", None)
-        # NiceGUI multi 上传：e 为 UploadEventArguments 列表，存于 btn 的内部状态——
-        # 实际取法：遍历 ui.upload 的 events 不可行（auto_upload=False 时文件在
-        # 前端暂存，点击开始时经 handle_upload 回调逐个到达）。此处采用二次确认后
-        # 由 on_upload 回调累积到模块级列表，见 _collect_upload 注册。
-        files = list(_pending_uploads)
-        if not files:
+    def _persist_picks(role: str) -> str:
+        """把已选素材复制到 data_root/{role}/original_videos/（2026-10-15 用户
+        裁决：选择时只记录路径，开始训练时才复制；自动建目录+磁盘预检+文件名
+        清洗（Eng F-E5）+冲突唯一化）。返回落点目录；无素材返回空串；失败抛
+        ValueError。工作线程中执行，不碰 UI。"""
+        if not picked_videos:
             return ""
-        dest = _upload_dir_for(role)
+        data_root = get_nested_value(config, "train_streamer", "data_root", default="")
+        dest = _upload_dir_for(role, data_root)
         os.makedirs(dest, exist_ok=True)
-        # 磁盘预检（上传前义务；Eng F-E1）
-        total = sum(getattr(f, "size", 0) or 0 for f in files)
+        missing = [p for p in picked_videos if not os.path.isfile(p)]
+        if missing:
+            raise ValueError(
+                f"problem=素材文件不存在；cause={os.path.basename(missing[0])}（共 {len(missing)} 个失效）；"
+                f"fix=在已选列表中移除失效文件后重新开始")
+        total = sum(os.path.getsize(p) for p in picked_videos)
         free_gb = shutil.disk_usage(dest).free / (1024 ** 3)
         need_gb = total / (1024 ** 3) * 200  # 预处理产物放大系数保守 200x
         if free_gb < max(50, need_gb):
             raise ValueError(
                 f"problem=磁盘空间不足；cause=剩余 {free_gb:.0f}GB，预处理产物预估需 {max(50, need_gb):.0f}GB；"
                 f"fix=清理磁盘后重试")
-        import re as _re
         saved = 0
-        for f in files:
-            # 文件名清洗（Eng F-E5：Path.name 取尾+白名单扩展+冲突唯一化）
-            safe_name = os.path.basename(getattr(f, "name", "video.mp4"))
-            ext = os.path.splitext(safe_name)[1].lower()
+        for src in picked_videos:
+            name = os.path.basename(src)
+            ext = os.path.splitext(name)[1].lower()
             if ext not in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
-                raise ValueError(f"problem=不支持的文件类型；cause={safe_name}；fix=仅支持 mp4/avi/mov/mkv/webm")
-            stem = _re.sub(r"[^A-Za-z0-9_-]", "_", os.path.splitext(safe_name)[0]) or "video"
+                raise ValueError(f"problem=不支持的文件类型；cause={name}；fix=仅支持 mp4/avi/mov/mkv/webm")
+            stem = re.sub(r"[^A-Za-z0-9_-]", "_", os.path.splitext(name)[0]) or "video"
             target = os.path.join(dest, f"{stem}{ext}")
             n = 1
             while os.path.exists(target):  # 冲突唯一化（默认不覆盖）
                 target = os.path.join(dest, f"{stem}_{n}{ext}")
                 n += 1
-            with open(target, "wb") as out:
-                out.write(f.content.read())
+            shutil.copy2(src, target)
             saved += 1
-            upload_files_label.set_text(f"已落盘 {saved}/{len(files)}：{os.path.basename(target)}")
-        _pending_uploads.clear()
-        upload_files_label.set_text(f"共 {saved} 个文件已放入 {dest}")
+        picked_videos.clear()
         return dest
+
+    async def _start_with_copy(video_dir: str, role: str):
+        """确认后执行：复制素材（既有目录入口跳过）→ 启动训练线程。"""
+        if not video_dir:
+            start_btn.set_enabled(False)
+            status_text.set_text("正在复制素材到数据目录…")
+            try:
+                video_dir = await asyncio.to_thread(_persist_picks, role)
+            except ValueError as ve:
+                start_btn.set_enabled(True)
+                status_text.set_text("空闲")
+                ui.notify(position="top", type="negative", message=str(ve))
+                return
+            if not video_dir:  # 双保险（确认框已挡空素材）
+                start_btn.set_enabled(True)
+                status_text.set_text("空闲")
+                return
+        _start_pipeline(video_dir, role)
 
     def _confirm_stop():
         """停止二次确认——文案暴露代价（design 义务）。"""
