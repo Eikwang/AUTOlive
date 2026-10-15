@@ -217,3 +217,35 @@ def test_role_name_validation():
     assert validate_role_name("a/b") is not None
     assert validate_role_name("CON") is not None
     assert validate_role_name("x" * 33) is not None
+
+
+# ---------- 5. 防重入自锁回归（2026-10-15 实跑修复） ----------
+
+
+def test_run_preflight_fail_keeps_running_flag_false(tmp_path, monkeypatch):
+    """preflight 失败 → training_running 不被置位 + on_complete 仅一次。
+
+    防重入自锁修复：原先 run() 先置 training_running=True 再 preflight，
+    而 preflight 首条判据就是 training_running——每次启动训练必被自己
+    拦住"已有训练任务在进行中"（实跑必现）。
+    """
+    import utils.train_streamer.pipeline as pl
+    p = _make_pipeline(tmp_path)
+    calls = []
+    monkeypatch.setattr(TrainPipeline, "preflight",
+                        lambda self: "problem=模拟前置失败；cause=测试；fix=忽略")
+    monkeypatch.setattr(p, "on_complete", lambda ok, msg: calls.append((ok, msg)),
+                        raising=False)
+    monkeypatch.setattr(pl, "training_running", False)
+    p.run()
+    assert pl.training_running is False
+    # 单次回调且带前置校验原因（原先 preflight 失败被回调两次：err+"训练未完成"）
+    assert calls == [(False, "problem=模拟前置失败；cause=测试；fix=忽略")]
+
+
+def test_preflight_blocks_when_running_flag_true(tmp_path, monkeypatch):
+    """training_running=True（真实并发场景）→ preflight 防重入判据本身有效。"""
+    import utils.train_streamer.pipeline as pl
+    monkeypatch.setattr(pl, "training_running", True)
+    p = _make_pipeline(tmp_path)
+    assert "已有训练任务在进行中" in p.preflight()

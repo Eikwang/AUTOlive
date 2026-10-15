@@ -551,7 +551,7 @@ def create_train_streamer_tab(
                 progress_line.set_text(f"阶段 {pipeline.current_stage}/4 · 详细日志见下方")
             else:
                 # 训练结束（完成/失败/停止）：按钮恢复+状态卡+完成引导（D2/D12）
-                if start_btn.isEnabled() is False:
+                if start_btn.enabled is False:
                     start_btn.set_enabled(True)
                     stop_btn.set_enabled(False)
                     _set_form_locked(False)

@@ -460,8 +460,6 @@ class TrainPipeline:
     def run(self):
         """执行全链路训练。阻塞调用——请放后台线程。"""
         global training_running, training_role
-        training_running = True
-        training_role = self.role_name
         self.confirm_decision = None
         self.confirm_event.clear()
         success = False
@@ -470,8 +468,15 @@ class TrainPipeline:
             err = self.preflight()
             if err:
                 self._log(f"[前置校验] {err}")
-                self.on_complete(False, err)
+                # 不在此处调 on_complete——finally 统一调用（否则与 L626 区
+                # 重复，UI 收到两条"=== 结束 ==="，2026-10-15 修复）
+                message = err
                 return
+            # 前置校验通过后才置运行标志（2026-10-15 防重入自锁修复：原先
+            # 先置 True 再 preflight，而 preflight 首条判据就是 training_running
+            # ——每次启动训练必被自己拦住"已有训练任务在进行中"）
+            training_running = True
+            training_role = self.role_name
 
             # 获取锁
             os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
@@ -608,7 +613,7 @@ class TrainPipeline:
         except Exception as e:
             logger.error(traceback.format_exc())
             message = f"训练编排异常：{e}"
-            self.on_complete(False, message)
+            # on_complete 统一由 finally 调用（避免双调）
         finally:
             self._final_message = message or "训练未完成"
             self.current_stage = 0
