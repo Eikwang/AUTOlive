@@ -1,5 +1,18 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-15) — EDTalk 全面整合（正式接入批次）
+
+1. **片段编排能力**（P2, L）— 用户指示保留待办：realtime_serve 段播放调度增强（含 reaction_segment 弹幕→切段联动——配置键/UI/switch_segment 方法在但无回复分发点调用方，前端调查发现缺口）。依赖：本期推理模块托管+热切落地后评估。
+2. **训练断点续训增强**（P2, M）— 步骤级重跑（进度文件+start_stage）已兜底，本项为编排层状态记录增强（迭代级 checkpoint resume）。train_fine_tune/train_audio2mouth 原生支持 resume_ckpt，主要工作=编排层状态机。依赖：本期训练链路稳定。
+3. **多角色管理/训练队列**（P3, L）— 单角色全链路先落地；多角色需角色目录约定（名称派生表扩展）与训练排队 UI。依赖：第 2 条。
+4. **音频感知段边界切换**（P3, M）— 上游 EDTalk TODOS 既有项：播完当前音频再切段（替代按片段周期切）。依赖：上游音频播放优化。
+5. **EMBEDDING v0 缺口登记项**（P3, M）— 上游已登记：多角色 load_character/事件推送/参数持久化/gaze·repair off→on 懒初始化。依赖：上游演进。
+6. **解释器副本内 venv 方案评估**（P2, M）— F3 结构债带日期承诺（2026-Q1 前）：评估在 AUTOlive/edtalk 内建 venv 或首启引导创建，消除对 D:\AI\EDTalk\runtime312 的残余耦合。依赖：本期"唯一副本"纪律落地稳定后。
+7. **GPU 时间片方案**（P3, M）— F7 长期缓解：训练与直播的时间片调度（错峰自动化/资源预留），当前靠双向互斥+错峰引导。依赖：多角色队列。
+8. **训练四阶段接口化**（P3, M）— F2/F12 架构注记：preprocess→底模→评估→口型的可插拔接口，未来换口型引擎（MuseTalk/LatentSync 等快变量）时前端与编排复用。推理侧已有 EMBEDDING v0 契约，训练侧补齐等价边界。依赖：本期训练管线稳定运行一个版本。
+9. **虚拟摄像头选型分析**（P3, S）— F10：UnityCapture vs OBS Virtual Camera/pyvirtualcam/共享内存对比登记，以 F6 脆弱性（DirectShow 老滤镜+单读者）为重评触发条件。本期胜出理由=集成成本最低。
+10. **词表分离上游化 PR**（P2, S）— 既有项（2026-10-14 登记）：AUTOlive 的 send_blocked_keywords 分离提回上游 DanmakuListener。
+
 ## Deferred Items from /autoplan (2026-10-14) — DanmakuListener v0.8.0 模块更新
 
 1. **词表分离上游化 PR**（P2, S）— AUTOlive 的 send_blocked_keywords 词表分离（8926b9fe）是通用需求而非 AUTOlive 特有，提回上游 D:\AI\DanmakuListener 收编后永久消除该补丁的每轮重放债（v0.7.0→v0.8.0 已重放两次）。依赖：v0.8.0 同步落地后执行；落点=上游 wiring.py SendGuard 构造处支持 settings.send_blocked_keywords + 上游测试；同时维护 docs/danmaku_module.md 本地补丁台账作为未上游化期间的核对清单。

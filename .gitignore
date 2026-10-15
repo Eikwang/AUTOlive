@@ -356,3 +356,6 @@ apps/
 # 测试素材与运行产物（不入库）
 /tests/sound/
 /音频输出/
+edtalk/train/
+edtalk/UnityCapture-master/
+logs/

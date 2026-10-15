@@ -62,6 +62,88 @@ def create_visual_body_tab(
 
         _update_combo_warning()
 
+    # ================= 虚拟摄像头检测卡（义务块：检测=启动系统时触发+页面打开刷新；
+    #                  缺失态警示色最高视觉权重；安装编程化 regsvr32 静默+runas 提权） =================
+
+    import winreg as _winreg
+    import re as _re_cam
+
+    def _query_unity_capture():
+        r"""检测 UnityCapture 安装状态（其注册机制：DllInstall 写
+        HKCU\Software\UnityCapture\FilterName）。返回 (installed: bool, name: str)。"""
+        try:
+            with _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, r"Software\UnityCapture") as key:
+                name, _ = _winreg.QueryValueEx(key, "FilterName")
+                return True, str(name)
+        except OSError:
+            return False, ""
+
+    def _install_unity_capture(cam_name: str):
+        """编程化安装（义务块：regsvr32 静默注入名称+runas 提权；Eng F-E4：
+        名称白名单拒绝全部 shell 元字符+参数列表方式）。同步阻塞（线程池调用）。"""
+        if not _re_cam.match(r"^[A-Za-z0-9 _-]{1,64}$", cam_name or ""):
+            raise ValueError("problem=摄像头名含非法字符；cause=仅允许字母/数字/空格/下划线/短横线（1-64 位）；fix=改用合法名称")
+        import os as _os
+        dll = _os.path.join(str(get_base_path()), "edtalk", "UnityCapture-master", "Install", "UnityCaptureFilter64.dll")
+        if not _os.path.isfile(dll):
+            raise FileNotFoundError("problem=安装件缺失；cause=" + dll + "；fix=运行 Scripts/copy_edtalk.py 补复制")
+        import subprocess as _sp
+        # 参数列表传值（无 shell 拼接）；UAC 提权经 PowerShell -Verb RunAs（用户在场确认）
+        ps_cmd = "Start-Process regsvr32 -ArgumentList '/s','" + dll + "','/i:UnityCaptureName=" + cam_name + "' -Verb RunAs -Wait"
+        r = _sp.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, timeout=120, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("problem=安装命令失败；cause=" + (r.stderr or "").strip()[:200] + "；fix=查看日志或手动运行 InstallCustomName.bat")
+
+    _cam_installed, _cam_name = _query_unity_capture()
+
+    with ui.card().style(card_css):
+        if _cam_installed:
+            with ui.row().style("width:100%;align-items:center;gap:8px"):
+                ui.element("span").style("width:8px;height:8px;border-radius:50%;background:var(--color-success)")
+                ui.label("虚拟摄像头已安装：" + _cam_name).style("font-size: var(--font-size-body)")
+            cam_status_label = ui.label("").style("color: var(--text-hint)")
+        else:
+            ui.label("⚠ 未检测到 UnityCapture 虚拟摄像头——数字人画面输出依赖它，请先安装").style(
+                "width:100%;padding:6px 10px;border-radius:6px;"
+                "background:var(--color-danger);color:#fff;font-size: var(--font-size-body)")
+            cam_name_input = FormField.create_input(
+                label="摄像头名称（字母/数字/空格/下划线/短横线，1-64 位；OBS 里按此名选择）",
+                value="AUTOlive 数字人",
+                style="width:100%;",
+            )
+            cam_status_label = ui.label("").style("color: var(--text-hint)")
+
+            async def _do_install():
+                name = (cam_name_input.value or "").strip()
+                cam_status_label.set_text("安装中……（请在弹出的 UAC 窗口确认）")
+                cam_status_label.style("color: var(--color-warning)")
+                try:
+                    await asyncio.to_thread(_install_unity_capture, name)
+                except Exception as e:
+                    cam_status_label.set_text(str(e))
+                    cam_status_label.style("color: var(--color-danger)")
+                    ui.notify(position="top", type="negative", message="安装失败：" + str(e))
+                    return
+                ok, got = _query_unity_capture()
+                if ok:
+                    cam_status_label.set_text(
+                        "安装完成：" + got + "。如消费端未立即出现设备，请重启系统后重开本页（驱动签名/需重启场景）")
+                    cam_status_label.style("color: var(--color-positive)")
+                    ui.notify(position="top", type="positive",
+                              message="虚拟摄像头 " + got + " 安装完成；若设备未出现请重启后重试")
+                else:
+                    # "已安装未枚举"分支（DX F-6）
+                    cam_status_label.set_text(
+                        "problem=安装命令已执行但未检测到设备；cause=可能需重启或被安全软件拦截；"
+                        "fix=重启系统后重开本页，或手动运行 InstallCustomName.bat")
+                    cam_status_label.style("color: var(--color-warning)")
+
+            ui.button("安装虚拟摄像头", on_click=_do_install).props("outline")
+            ui.button("重新检测", on_click=lambda: ui.navigate.reload()).props("flat")
+        ui.label("单读者限制：UnityCapture 为 DirectShow 滤镜，OBS 与 realtime_serve "
+                 "不可同时读取同一设备；重装/改名=重新填写名称点击安装（覆盖注册）").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
+
     # ================= 卡片 2：EDTalk 实时推理配置区 =================
     with ui.card().style(card_css):
         ui.label("EDTalk 实时推理配置")
@@ -343,6 +425,19 @@ def create_visual_body_tab(
                 f"欠载:{underruns} | 分辨率:{res}"
             ).style("color: var(--color-positive, #21ba45)")
             control_expansion.open(True)
+            # capable 探测（义务块"推理热切 UI"：false 时禁用对应控件并提示——
+            # off 启动的组件未构造，热切 409）
+            for sel, cap_key, cap_label in (
+                (gaze_select, "gaze_capable", "视线纠正"),
+                (repair_select, "repair_capable", "面部修复"),
+            ):
+                capable = status.get(cap_key)
+                if capable is False:
+                    sel.set_enabled(False)
+                    sel.set_value(None)
+                    sel.props(f'label="{cap_label}热切（服务未启用该组件——off 启动无法热开）"')
+                else:
+                    sel.set_enabled(True)
         else:
             status_label.set_text("服务未运行").style("color: var(--text-hint)")
         # 2) 推送健康度（经 main.py API 代理——推送发生在运行时进程）

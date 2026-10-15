@@ -30,6 +30,7 @@ from utils.my_log import logger
 
 # 模块级训练状态（frontend/main.py start_programs 检测训练中标志用）
 training_running = False
+training_role: str | None = None  # 最近训练角色（D2/D20：启动拦截弹窗读进度用）
 
 
 def get_edtalk_dir() -> str:
@@ -51,21 +52,93 @@ EVAL_THRESHOLDS = {
     "mouth_ratio": (0.8, 1.25),  # 开合比 0.8-1.25
 }
 
-# 口型微调定稿配方（EDTalk 记忆：Audio2Mouth 优化最终记录，wy 发声版 2026-09-19）
-AUDIO2MOUTH_ARGS = [
-    "--preload_features",
-    "--epoch", "2",
-    "--batch_size", "4",
-    "--lr_schedule", "0.001,0.001",
-    "--lip_dim_weight", "5.0",
-    "--mouth_vgg_weight", "0.2",
-    "--vgg_weight", "0.2",
-    "--vgg_sparse_freq", "50",
-    "--smooth_weight", "0.2",
-    "--audio_encoder_unfreeze_from", "9",
-    "--audio_encoder_lr_mult", "0.1",
-    "--amp",
-]
+# 口型微调默认配方（终门 uc2b：epoch 默认 2；义务块"默认值单一事实源表"——
+# 配置键/默认/范围/生效时机：train_streamer.fine_tune_iter 默认 50000 范围 1000-1000000；
+# epoch 默认 2 范围 1-10；batch_size 默认 4 范围 1-32；lr_schedule 默认三段值；amp 默认开）
+AUDIO2MOUTH_DEFAULTS = {
+    "preload_features": True,
+    "epoch": 2,
+    "batch_size": 4,
+    "lr_schedule": "0.001,0.001,0.0001",
+    "lip_dim_weight": 5.0,
+    "mouth_vgg_weight": 0.2,
+    "vgg_weight": 0.2,
+    "vgg_sparse_freq": 50,
+    "smooth_weight": 0.2,
+    "audio_encoder_unfreeze_from": 9,
+    "audio_encoder_lr_mult": 0.1,
+    "amp": True,
+}
+
+# 底模微调默认（R3：实践推荐 50000；训练高级参数暴露义务）
+FINE_TUNE_DEFAULTS = {
+    "iter": 50000,
+}
+
+# 高级参数范围校验（Eng F-E8：非法值拒绝，不进子进程命令行）
+PARAM_RANGES = {
+    "iter": (1000, 1000000, int),
+    "epoch": (1, 10, int),
+    "batch_size": (1, 32, int),
+}
+
+# 角色名校验（design D4：角色名直接成为目录名，非法输入会炸落盘）
+import re as _re
+
+ROLE_NAME_RE = _re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# Windows 保留名（不区分大小写）
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def validate_role_name(role_name: str) -> str | None:
+    """校验角色名。返回 None=通过；字符串=拒绝原因（三段式语义）。"""
+    name = (role_name or "").strip()
+    if not name:
+        return "problem=角色名为空；cause=上传表单未填写；fix=输入 1-32 位字母/数字/下划线/短横线"
+    if name != role_name:
+        return "problem=角色名含首尾空格；cause=输入带空白；fix=去除首尾空格后重试"
+    if not ROLE_NAME_RE.match(name):
+        return ("problem=角色名含非法字符或超长；cause=仅允许字母/数字/下划线/短横线（1-32 位）；"
+                "fix=改用合法字符，中文可转拼音")
+    if name.upper() in _WINDOWS_RESERVED:
+        return f"problem=角色名是 Windows 保留名；cause={name} 为系统保留；fix=换一个名称"
+    return None
+
+
+def build_audio2mouth_args(form: dict) -> list:
+    """dict(DEFAULTS) 全量合并再覆盖表单值（rvc-e2e 学习：漏键=KeyError），
+    组装口型微调命令行参数。范围校验失败抛 ValueError（Eng F-E8）。"""
+    merged = dict(AUDIO2MOUTH_DEFAULTS)
+    for key in ("epoch", "batch_size", "lr_schedule", "amp"):
+        if key in form and form[key] is not None:
+            merged[key] = form[key]
+    for key, (lo, hi, typ) in PARAM_RANGES.items():
+        if key in merged:
+            try:
+                v = typ(merged[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"problem={key} 参数非法；cause=值 {merged[key]!r} 不是 {typ.__name__}；fix=恢复默认或输入 {lo}-{hi}")
+            if not (lo <= v <= hi):
+                raise ValueError(f"problem={key} 超出范围；cause={v} 不在 {lo}-{hi}；fix=输入 {lo}-{hi} 内的值")
+            merged[key] = v
+    args = ["--preload_features"] if merged["preload_features"] else []
+    args += ["--epoch", str(merged["epoch"]),
+             "--batch_size", str(merged["batch_size"]),
+             "--lr_schedule", str(merged["lr_schedule"]),
+             "--lip_dim_weight", str(merged["lip_dim_weight"]),
+             "--mouth_vgg_weight", str(merged["mouth_vgg_weight"]),
+             "--vgg_weight", str(merged["vgg_weight"]),
+             "--vgg_sparse_freq", str(merged["vgg_sparse_freq"]),
+             "--smooth_weight", str(merged["smooth_weight"]),
+             "--audio_encoder_unfreeze_from", str(merged["audio_encoder_unfreeze_from"]),
+             "--audio_encoder_lr_mult", str(merged["audio_encoder_lr_mult"])]
+    if merged["amp"]:
+        args.append("--amp")
+    return args
 
 
 class TrainPipeline:
@@ -97,9 +170,30 @@ class TrainPipeline:
 
         self.edtalk_dir = get_edtalk_dir()
         self.interpreter = get_interpreter(config_data)
-        self.iter_count = int((config_data.get("train_streamer", {}) or {}).get("fine_tune_iter", 30000))
+        # 高级参数：dict(DEFAULTS) 全量合并再覆盖表单值（义务块"训练高级参数暴露"；
+        # epoch 终门 uc2b 默认 2；iter R3 实践推荐 50000）
+        _ts = (config_data.get("train_streamer", {}) or {})
+        self.iter_count = int(_ts.get("fine_tune_iter", FINE_TUNE_DEFAULTS["iter"]) or FINE_TUNE_DEFAULTS["iter"])
+        self.a2m_form = {
+            "epoch": _ts.get("epoch", AUDIO2MOUTH_DEFAULTS["epoch"]),
+            "batch_size": _ts.get("batch_size", AUDIO2MOUTH_DEFAULTS["batch_size"]),
+            "lr_schedule": _ts.get("lr_schedule", AUDIO2MOUTH_DEFAULTS["lr_schedule"]),
+            "amp": bool(_ts.get("amp", AUDIO2MOUTH_DEFAULTS["amp"])),
+        }
+        # 训练数据根（上传落点义务：config.train_streamer.data_root）
+        self.data_root = _ts.get("data_root") or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "edtalk_train")
+        # 训练开始墙钟（ETA/总耗时义务）
+        self._t_start: float | None = None
+        self._stage_t0: float | None = None
+        # 显存清理状态（DX F-5/Eng F-E13/F-E14）
+        self._vram_baseline_gb: float | None = None
+        self._cleanup_timed_out = False
+        self._final_message = ""
 
         self._process: subprocess.Popen | None = None
+        self._last_proc: subprocess.Popen | None = None
         self._stop_requested = False
         self.confirm_event = threading.Event()
         self.confirm_decision = None  # None/"continue"/"stop"
@@ -139,9 +233,11 @@ class TrainPipeline:
             pass
 
     def _write_progress(self, stage: int, status: str):
-        """写进度文件（native F6：断点步号来源；损坏按无进度处理）。"""
+        """写进度文件（native F6：断点步号来源；损坏按无进度处理）。
+        Eng F-E12：写入原子化（临时文件+rename），读者扩展到任意页面+拦截弹窗。"""
         try:
             os.makedirs(os.path.dirname(self.progress_path), exist_ok=True)
+            elapsed_s = round(time.time() - self._t_start, 1) if self._t_start else None
             data = {
                 "role": self.role_name,
                 "video_dir": self.video_dir,
@@ -149,9 +245,12 @@ class TrainPipeline:
                 "current_stage": stage,
                 "status": status,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "elapsed_s": elapsed_s,
             }
-            with open(self.progress_path, "w", encoding="utf-8") as f:
+            tmp = self.progress_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.progress_path)  # 原子替换（Eng F-E12）
         except Exception as e:
             logger.warning(f"进度文件写入失败（不阻塞训练）：{e}")
 
@@ -168,30 +267,38 @@ class TrainPipeline:
     # ---------- 前置校验 ----------
 
     def preflight(self) -> str | None:
-        """启动前校验。返回错误消息（None=通过）。"""
+        """启动前校验。返回错误消息（None=通过）。三段式语义（D7）。"""
         global training_running
         if training_running:
-            return "已有训练任务在进行中（防重入）"
+            return "problem=已有训练任务在进行中；cause=防重入保护；fix=等待当前训练完成或先停止它"
+        # 角色名校验（design D4：目录名安全性）
+        name_err = validate_role_name(self.role_name)
+        if name_err:
+            return name_err
         if not self.video_dir or not os.path.isdir(self.video_dir):
-            return f"视频目录不存在：{self.video_dir}"
+            return f"problem=视频目录不存在；cause={self.video_dir}；fix=检查路径或重新上传视频"
         if not os.path.isdir(os.path.join(self.video_dir, "original_videos")):
             return (
-                f"目录中未找到 original_videos 子目录。problem=目录结构不符；"
+                f"problem=目录中未找到 original_videos 子目录。"
                 f"cause=原始视频需放入 <目录>\\original_videos\\ 下；"
                 f"fix=按 EDTalk 数据集处理流程组织目录后重试"
             )
         if not os.path.exists(self.interpreter):
             return (
-                f"解释器不存在：{self.interpreter}。problem=解释器缺失；"
-                f"cause=runtime312 未安装或路径变更；"
-                f"fix=修改画面设置页 interpreter_path 配置项"
+                f"problem=解释器不存在：{self.interpreter}。"
+                f"cause=runtime312 未安装或路径变更（源目录结构债，见资源清单）；"
+                f"fix=修改画面设置页『解释器路径』配置项指向可用解释器"
             )
         if not os.path.isfile(os.path.join(self.edtalk_dir, "data_preprocess", "data_preprocess_for_train", "run_preprocess.py")):
             return (
-                f"EDTalk 运行副本缺失：{self.edtalk_dir}。problem=副本未复制；"
-                f"cause=尚未执行复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
+                f"problem=EDTalk 运行副本缺失：{self.edtalk_dir}。"
+                f"cause=尚未执行复制；fix=运行 Scripts/copy_edtalk.py 一键复制脚本"
             )
-        # 跨会话互斥锁（native E4：PID+时间戳）
+        # 双向互斥组合判据（Eng F-E2：端口活性+子进程注册表+启动标志，任一为真即拦截）
+        conflict = self._check_gpu_conflict()
+        if conflict:
+            return conflict
+        # 跨会话互斥锁（native E4：PID+时间戳；Eng F-E3：陈旧锁自动恢复）
         if os.path.exists(self.lock_path):
             try:
                 with open(self.lock_path, encoding="utf-8") as f:
@@ -205,21 +312,53 @@ class TrainPipeline:
                     except OSError:
                         alive = False
                 if alive:
-                    return f"该角色已有训练进程运行（PID {pid}，开始于 {lock.get('time')}）。如确认无进程可手动删除 {self.lock_path}"
-                logger.warning("发现孤儿锁文件（进程已不存在），自动清除")
+                    return (f"problem=该角色已有训练进程运行（PID {pid}，开始于 {lock.get('time')}）；"
+                            f"cause=锁文件指向存活进程；fix=等待完成或停止该训练；确认无进程可手动删除 {self.lock_path}")
+                logger.warning(f"[{self.role_name}] 检测到陈旧训练锁（PID {pid} 已不存在），已自动恢复")
                 os.remove(self.lock_path)
             except Exception as e:
-                return f"锁文件读取失败：{e}（可手动删除 {self.lock_path}）"
+                return f"problem=锁文件读取失败；cause={e}；fix=可手动删除 {self.lock_path} 后重试"
         # 磁盘余量预检（native E4：拆帧产物巨大，建议 ≥50GB）
         try:
             free_gb = shutil.disk_usage(self.video_dir).free / (1024 ** 3)
             if free_gb < 50:
                 return (
-                    f"磁盘剩余空间不足（{free_gb:.0f}GB < 50GB）。problem=磁盘空间不足；"
+                    f"problem=磁盘剩余空间不足（{free_gb:.0f}GB < 50GB）。"
                     f"cause=预处理拆帧产物巨大（wy 基准 63055 clips）；fix=清理磁盘后重试"
                 )
         except Exception as e:
             logger.warning(f"磁盘余量检测失败（不阻塞）：{e}")
+        return None
+
+    def _check_gpu_conflict(self) -> str | None:
+        """双向互斥组合判据（Eng F-E2）：反向（主系统运行中→拦训练）。
+        组合判据=EDTalk 端口活性+主系统子进程注册表+启动标志，任一为真即拦截。"""
+        try:
+            from utils.edtalk_realtime import is_edtalk_active
+            if is_edtalk_active(self.config_data):
+                return ("problem=实时推理服务正在运行；cause=16GB 显存下训练与推理不可并存"
+                        "（GPU 显存冲突）；fix=先在画面设置页停止实时推理，再启动训练")
+        except ImportError:
+            logger.warning("edtalk_realtime 模块不可用，跳过端口活性判据")
+        # 主系统子进程注册表（frontend/main.py my_subprocesses 非空即有子进程）
+        try:
+            from frontend.main import my_subprocesses
+            alive = [n for n, p in (my_subprocesses or {}).items()
+                     if getattr(p, "poll", lambda: None)() is None]
+            if alive:
+                return (f"problem=主系统子进程运行中（{','.join(alive[:3])}）；"
+                        f"cause=显存可能被占用（16GB 卡训练与推理不可并存）；"
+                        f"fix=先停止主系统再启动训练")
+        except ImportError:
+            pass
+        # 启动链"正在启动"标志
+        try:
+            from frontend.main import starting_flag
+            if getattr(starting_flag, "value", False) or starting_flag:
+                return ("problem=主系统正在启动中；cause=启动过程会拉起推理服务占用显存；"
+                        f"fix=等待启动完成或取消后错峰训练")
+        except (ImportError, Exception):
+            pass
         return None
 
     # ---------- 子进程执行 ----------
@@ -236,6 +375,7 @@ class TrainPipeline:
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding="utf-8", errors="replace", bufsize=1,
             )
+            self._last_proc = self._process
             for line in self._process.stdout:
                 line = line.rstrip("\n")
                 self._log(line, stage)
@@ -256,12 +396,72 @@ class TrainPipeline:
             self._process = None
             return False
 
-    # ---------- 主流程（后台线程入口） ----------
+    # ---------- 显存清理（义务块"步骤间显存清理"；DX F-5 超时+Eng F-E13/F-E14 边界） ----------
+
+    # 显存回落轮询超时（秒）——超时转"清理失败"态，不死锁用户
+    VRAM_POLL_TIMEOUT_S = 120
+
+    def _cleanup_after_step(self, proc: subprocess.Popen | None, stage: int) -> None:
+        """阶段完成后清理子进程树并等待显存回落。
+
+        范式移植自 train_voice_pipeline（义务块）：taskkill /F /T 杀子进程树
+        + nvidia-smi 显存回落基线轮询。超时/降级路径（DX F-5/Eng F-E14）：
+        轮询 120s 超时→"清理失败"态三段式提示+强制解除出口标志；
+        nvidia-smi 不可用→仅 taskkill+日志，不阻塞。"""
+        if proc is not None and proc.poll() is None:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=15)
+                self._log(f"[清理] 子进程树 {proc.pid} 已终止", stage)
+            except Exception as e:
+                self._log(f"[清理] taskkill 失败（继续轮询）：{e}", stage)
+        # 显存基线=训练开始前采样值（Eng F-E14）
+        baseline_gb = self._vram_baseline_gb
+        t0 = time.time()
+        while time.time() - t0 < self.VRAM_POLL_TIMEOUT_S:
+            used = self._query_vram_gb()
+            if used is None:
+                # nvidia-smi 不可用（Eng F-E14 降级路径）
+                self._log("[清理] nvidia-smi 不可用，跳过显存轮询（仅进程清理）", stage)
+                return
+            if baseline_gb is None or used <= baseline_gb + 0.5:
+                self._log(f"[清理] 显存已回落基线（{used:.1f}GB）", stage)
+                return
+            time.sleep(3)
+        # 超时（DX F-5：清理失败态+强制解除出口，不死锁用户）
+        self._log(
+            f"[清理][失败] problem=显存 {self._query_vram_gb() or '?'}GB 超过 {self.VRAM_POLL_TIMEOUT_S}s 未回落基线；"
+            f"cause=可能有残留进程占用显存（nvidia-smi 查看）；"
+            f"fix=手动 taskkill 残留 python 进程，或点击『强制解除并继续』（警告：显存可能未释放，"
+            f"启动主系统可能失败）", stage)
+        self._cleanup_timed_out = True
+
+    def force_release_mutex(self) -> None:
+        """『强制解除并继续』出口（DX F-5）：用户显式确认后解除清理失败态。"""
+        self._cleanup_timed_out = False
+        self._log("[清理] 用户已确认强制解除显存互斥（Eng F-E13 警告：显存可能未释放）")
+
+    def _query_vram_gb(self) -> float | None:
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, timeout=10, text=True)
+            if out.returncode != 0:
+                return None
+            return float(out.stdout.strip().splitlines()[0]) / 1024.0
+        except Exception:
+            return None
+
+    def _sample_vram_baseline(self) -> None:
+        """训练开始前采样显存基线（Eng F-E14：基线非 0）。"""
+        self._vram_baseline_gb = self._query_vram_gb()
+        self._log(f"[基线] 训练前显存占用 {self._vram_baseline_gb if self._vram_baseline_gb is not None else '未知（降级）'}GB")
 
     def run(self):
         """执行全链路训练。阻塞调用——请放后台线程。"""
-        global training_running
+        global training_running, training_role
         training_running = True
+        training_role = self.role_name
         self.confirm_decision = None
         self.confirm_event.clear()
         success = False
@@ -280,6 +480,8 @@ class TrainPipeline:
 
             self._log(f"=== 训练开始：角色 {self.role_name}，目录 {self.video_dir}，从阶段 {self.start_stage} 开始 ===")
             t0 = time.time()
+            self._t_start = t0
+            self._sample_vram_baseline()
 
             # ---- 阶段 1：预处理编排 ----
             if self.start_stage <= 1:
@@ -287,8 +489,10 @@ class TrainPipeline:
                 self._write_progress(1, "running")
                 cmd = [self.interpreter, "data_preprocess/data_preprocess_for_train/run_preprocess.py",
                        "--base_dir", self.video_dir]
-                if not self._run_step(cmd, 1):
-                    message = "预处理失败，详见日志"
+                ok = self._run_step(cmd, 1)
+                self._cleanup_after_step(self._last_proc, 1)
+                if not ok or self._cleanup_timed_out:
+                    message = "预处理失败，详见日志" if not ok else "预处理后显存清理失败（可强制解除后重跑下一阶段）"
                     self._write_progress(1, "failed")
                     return
                 self._write_progress(1, "done")
@@ -302,8 +506,10 @@ class TrainPipeline:
                        "--exp_name", self.role_name,
                        "--only_fine_tune_dec",
                        "--iter", str(self.iter_count)]
-                if not self._run_step(cmd, 2):
-                    message = "底模微调失败，详见日志"
+                ok = self._run_step(cmd, 2)
+                self._cleanup_after_step(self._last_proc, 2)
+                if not ok or self._cleanup_timed_out:
+                    message = "底模微调失败，详见日志" if not ok else "底模微调后显存清理失败（可强制解除后重跑下一阶段）"
                     self._write_progress(2, "failed")
                     return
                 self._write_progress(2, "done")
@@ -322,10 +528,17 @@ class TrainPipeline:
                     self._write_progress(3, "failed")
                     return
                 metrics = self._parse_eval_results(os.path.join(self.edtalk_dir, eval_out))
+                # D12：评估指标摘要（确认框展示具体数字，不盲选）
+                self._last_eval_summary = {
+                    "candidate": metrics.get("candidate") or {},
+                    "base": metrics.get("base") or {},
+                    "verdict": None,
+                }
                 verdict = self._judge_eval(metrics)
+                self._last_eval_summary["verdict"] = verdict
+                self._cleanup_after_step(self._last_proc, 3)
                 if verdict is not None:
-                    # 门槛不过：默认停止，UI 提供"仍要继续"显式确认
-                    self._log(f"[评估] 未过门槛：{verdict}。等待用户确认（5 分钟内未确认将自动停止）")
+                    # 门槛不过：默认停止，UI 提供"仍要继续"显式确认（D12 义务：确认框带指标与两选项后果）
                     self.confirm_decision = None
                     self.confirm_event.clear()
                     try:
@@ -345,21 +558,51 @@ class TrainPipeline:
             if self.start_stage <= 4:
                 self.current_stage = 4
                 self._write_progress(4, "running")
+                try:
+                    a2m_args = build_audio2mouth_args(self.a2m_form)
+                except ValueError as ve:
+                    message = f"problem=高级参数校验失败；{ve}"
+                    self._log(f"[口型微调] {message}", 4)
+                    self._write_progress(4, "failed")
+                    return
                 cmd = [self.interpreter, "train/train_audio2mouth.py",
                        "--data_path", self.role_name,
                        "--resume_ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
                        "--audio2lip_ckpt", "ckpts/Audio2Lip.pt",
-                       "--exp_name", self.role_name] + AUDIO2MOUTH_ARGS
-                if not self._run_step(cmd, 4):
-                    message = "口型微调失败，详见日志"
+                       "--exp_name", self.role_name] + a2m_args
+                ok = self._run_step(cmd, 4)
+                self._cleanup_after_step(self._last_proc, 4)
+                if not ok or self._cleanup_timed_out:
+                    message = "口型微调失败，详见日志" if not ok else "口型微调后显存清理失败（可强制解除后重试部署）"
                     self._write_progress(4, "failed")
                     return
                 self._write_progress(4, "done")
 
             elapsed = time.time() - t0
-            self._log(f"=== 训练完成：产物 ckpt_models/{self.role_name}/checkpoint/（耗时 {elapsed/3600:.1f}h）===")
-            message = f"训练完成（耗时 {elapsed/3600:.1f} 小时），产物：ckpt_models/{self.role_name}/checkpoint/"
+            # ---- checkpoint 自动部署（义务块：评估通过/用户确认继续两路径均部署；
+            #      DX F-4：失败三段式+产物保留+手动兜底指引） ----
+            deploy_ok = False
+            try:
+                character_dir = (self.config_data.get("edtalk_realtime", {}) or {}).get(
+                    "character_dir") or self.role_name
+                deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count)
+                deploy_ok = True
+                self._log(f"[部署] {deploy_msg}", 4)
+            except Exception as de:
+                self._log(
+                    f"[部署][失败] problem=checkpoint 自动部署失败；cause={de}；"
+                    f"fix=检查上方日志；手动兜底：将 ckpt_models/{self.role_name}/checkpoint/"
+                    f"{self.iter_count:06d}.pt 的 gen 键导出为角色包 checkpoint/new.pt"
+                    f"（训练产物已保留，不丢失）", 4)
+                deploy_msg = f"自动部署失败：{de}"
+
+            stage_times = ""
+            self._log(f"=== 训练完成：产物 ckpt_models/{self.role_name}/checkpoint/（总耗时 {elapsed/3600:.1f}h，"
+                      f"部署{'成功' if deploy_ok else '失败（手动兜底可用）'}）===")
+            message = (f"训练完成（总耗时 {elapsed/3600:.1f} 小时）。"
+                       f"{'已自动部署，重启实时推理后生效。' if deploy_ok else deploy_msg}")
             self._completed_ok = True
+            self._final_message = message  # D2/D17：完成通知+状态卡尾部呈现
             success = True
             self.on_complete(True, message)
         except Exception as e:
@@ -367,6 +610,7 @@ class TrainPipeline:
             message = f"训练编排异常：{e}"
             self.on_complete(False, message)
         finally:
+            self._final_message = message or "训练未完成"
             self.current_stage = 0
             try:
                 if os.path.exists(self.lock_path):

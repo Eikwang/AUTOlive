@@ -21,3 +21,5 @@
 | ckpts | ckpts | ignore | 底模权重（大文件） | 3.25 |
 | ckpt_models/wy_runC | ckpt_models/wy_runC | ignore | RunC resume 产物（Eng F7） | 0.61 |
 | fastrag | fastrag | ignore-exe | fastrag 服务（exe+模型） | 13.77 |
+| train | train | track | 口型微调模块（train_audio2mouth 等，2026-10-15 补复制 R1） | 0.001 |
+| UnityCapture-master | UnityCapture-master | track | 虚拟摄像头安装件（InstallCustomName.bat+Filter64.dll，R2） | 0.0013 |

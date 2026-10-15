@@ -426,20 +426,10 @@ class AutoliveApp:
         except Exception as e:
             logger.error(f"启动 fastrag 失败: {e}")
 
-        # 启动主程序 main.py（E3：用 webui 自身解释器，避免 PATH 解析到错误 python——
-        # 定时任务/其它 shell 启动 webui 时尤其危险；原实现沿用 webui-bak 的 "python" 硬编码）
-        name = "main"
-        base_path = str(get_base_path())
-        try:
-            # 根据操作系统的不同，微调参数
-            if sys.platform not in ['win32']:
-                process = subprocess.Popen([sys.executable, "main.py"], cwd=base_path, shell=False)
-            else:
-                process = subprocess.Popen([sys.executable, "main.py"], cwd=base_path, shell=True)
-            self.my_subprocesses[name] = process
-            logger.info(f"运行程序: {name}")
-        except Exception as e:
-            logger.error(f"启动主程序失败: {e}")
+        # 注意（2026-10-15 EDTalk 整合义务修复）：此处曾残留 webui-bak 移植的
+        # main.py 拉起代码——fastrag.enable=true 时 main.py 双拉起、首个进程成孤儿
+        # （my_subprocesses["main"] 被覆盖，stop_programs 只杀得到第二个）。
+        # main.py 的拉起由 run_external_program → _start_main_system 唯一负责，此处不再拉起。
 
     def stop_program(self, name):
         """停止一个正在运行的程序及其所有子进程（与原文件 webui-bak.py L246-269 一致）
@@ -485,6 +475,30 @@ class AutoliveApp:
             if type == "webui":
                 ui.notify(position="top", type="warning", message="运行中，请勿重复运行")
             return
+
+        # 训练中启动主系统拦截（义务块"双向显存互斥拦截"升级：阻止整个启动而非
+        # 仅跳过 EDTalk 拉起——design D2/D20：弹窗展示训练阶段+ETA+"前往训练页"跳转）
+        try:
+            from utils.train_streamer import pipeline as _train_pipeline
+            if getattr(_train_pipeline, "training_running", False):
+                prog = _train_pipeline.TrainPipeline.read_progress(
+                    getattr(_train_pipeline, "training_role", "") or "")
+                stage = (prog or {}).get("current_stage")
+                stage_txt = f"阶段 {stage}/4" if stage else "进行中"
+                eta_txt = ""
+                if prog and prog.get("eta_s"):
+                    eta_txt = f"，预计剩余约 {prog['eta_s'] // 60} 分钟"
+                logger.warning("训练进行中，用户尝试启动主系统——已阻止（显存冲突防护）")
+                ui.notify(
+                    position="top", type="warning",
+                    message=f"训练进行中（{stage_txt}{eta_txt}），主系统启动已阻止。"
+                            f"请先停止训练或等其完成；可先用现有角色体验实时推理。",
+                    actions=[{"label": "前往训练页", "type": "route",
+                              "handler": lambda: ui.navigate.to("/train_streamer", new_tab=True)}],
+                )
+                return
+        except ImportError:
+            pass
 
         try:
             self.running_flag = True

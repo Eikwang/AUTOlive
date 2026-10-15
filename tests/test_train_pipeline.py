@@ -12,7 +12,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.train_streamer.pipeline import (  # noqa: E402
-    AUDIO2MOUTH_ARGS,
+    AUDIO2MOUTH_DEFAULTS,
+    build_audio2mouth_args,
+    validate_role_name,
     TrainPipeline,
 )
 
@@ -54,7 +56,7 @@ def test_preflight_missing_original_videos(tmp_path):
 
 
 def test_preflight_missing_interpreter(tmp_path):
-    """解释器缺失 → 指向配置键的修复动作（DX 义务）。"""
+    """解释器缺失 → 三段式含修复动作（D7 义务+F3 报错验证）。"""
     video_dir = tmp_path / "videos"
     (video_dir / "original_videos").mkdir(parents=True)
     p = TrainPipeline(
@@ -62,7 +64,8 @@ def test_preflight_missing_interpreter(tmp_path):
         video_dir=str(video_dir), role_name="x",
     )
     msg = p.preflight()
-    assert "解释器" in msg and "interpreter_path" in msg.replace("『", "").replace("』", "")
+    assert "problem=" in msg and "cause=" in msg and "fix=" in msg  # 三段式（D7）
+    assert "解释器" in msg and ("解释器路径" in msg or "interpreter_path" in msg)
 
 
 # ---------- 2. 步骤编排：失败即停 ----------
@@ -170,11 +173,47 @@ def test_judge_eval_unparseable_defers_to_human():
 
 
 def test_audio2mouth_args_match_official_recipe():
-    """口型微调定稿配方参数与 EDTalk 记忆一致（防回归）。"""
-    args = " ".join(AUDIO2MOUTH_ARGS)
+    """口型微调默认配方参数与 EDTalk 记忆一致（防回归；终门 uc2b：epoch 默认 2）。"""
+    args = " ".join(build_audio2mouth_args({}))
     assert "--lip_dim_weight 5.0" in args
     assert "--mouth_vgg_weight 0.2" in args
     assert "--smooth_weight 0.2" in args
     assert "--epoch 2" in args
     assert "--audio_encoder_unfreeze_from 9" in args
     assert "--preload_features" in args
+
+
+# ---------- 高级参数与校验（2026-10-15 义务块新增） ----------
+
+
+def test_default_epoch_is_2_uc2b():
+    """终门 uc2b：epoch 默认 2（用户裁决，覆盖实践命令 3）。"""
+    assert AUDIO2MOUTH_DEFAULTS["epoch"] == 2
+    args = build_audio2mouth_args({})
+    assert "--epoch 2" in " ".join(args)
+
+
+def test_form_override_epoch_3():
+    """表单覆盖：epoch=3 进命令行（dict(DEFAULTS) 合并语义）。"""
+    args = " ".join(build_audio2mouth_args({"epoch": 3}))
+    assert "--epoch 3" in args
+
+
+def test_param_range_reject():
+    """Eng F-E8：范围校验拒绝非法值。"""
+    import pytest
+    with pytest.raises(ValueError):
+        build_audio2mouth_args({"epoch": 99})
+    with pytest.raises(ValueError):
+        build_audio2mouth_args({"batch_size": 0})
+
+
+def test_role_name_validation():
+    """design D4：角色名校验（目录名安全）。"""
+    assert validate_role_name("wy") is None
+    assert validate_role_name("wy_v2") is None
+    assert validate_role_name("") is not None
+    assert validate_role_name("张三") is not None
+    assert validate_role_name("a/b") is not None
+    assert validate_role_name("CON") is not None
+    assert validate_role_name("x" * 33) is not None

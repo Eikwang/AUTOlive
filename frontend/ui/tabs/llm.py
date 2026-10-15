@@ -20,6 +20,9 @@ from frontend.utils.common import is_url_check
 from frontend.config.paths import get_base_path
 from utils.my_log import logger
 
+# fastrag 文档上传暂存（auto_upload=False：逐文件收集，落盘按钮统一写入 knowledgebase）
+_pending_docs: list = []
+
 
 def create_llm_tab(
     config: Dict[str, Any],
@@ -166,9 +169,18 @@ def _create_fastrag_card(
         PermissionError）。在 webui 进程内无法直接拿到 my_subprocesses 的
         场景下用 taskkill 按映像名兜底。"""
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "server.exe"], capture_output=True, timeout=10
+            # 终门 uc1a：python 路线——按命令行特征精确杀 python server.py（避免误伤其他 python）
+            out = subprocess.run(
+                ["wmic", "process", "where",
+                 "name='python.exe' and commandline like '%fastrag-python%server.py%'",
+                 "get", "processid"],
+                capture_output=True, text=True, timeout=15,
             )
+            for line in (out.stdout or "").splitlines():
+                pid = line.strip()
+                if pid.isdigit():
+                    subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                                   capture_output=True, timeout=10)
         except Exception as e:
             logger.warning(f"停止 fastrag server 失败（可能未运行）：{e}")
 
@@ -177,9 +189,12 @@ def _create_fastrag_card(
         try:
             import subprocess
             _stop_fastrag_server_if_running()
+            # 终门 uc1a：python 路线——build_index_native.py（runtime312 解释器）
+            interpreter = get_nested_value(config, "edtalk_realtime", "interpreter_path",
+                                           default="D:\\AI\\EDTalk\\runtime312\\python.exe")
             proc = subprocess.Popen(
-                [os.path.join(_fastrag_dir(), "build-index.exe")],
-                cwd=_fastrag_dir(), shell=False,
+                [interpreter, os.path.join(_fastrag_dir(), "fastrag-python", "build_index_native.py")],
+                cwd=os.path.join(_fastrag_dir(), "fastrag-python"), shell=False,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding="utf-8", errors="replace", bufsize=1,
             )
@@ -333,7 +348,120 @@ def _create_fastrag_card(
                 os.path.join(str(get_base_path()), "config.custom_llm.bak.json")
             ))
 
+        # ---------- 上传文档 UI（义务块"fastrag 系统级整合"：多文档+文件名清洗 F-E5+五件套） ----------
+        upload_docs_label = ui.label("尚未选择文档").style("color: var(--text-hint)")
+
+        def _collect_doc(e):
+            name = getattr(e, "name", "")
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in (".md", ".txt"):
+                ui.notify(position="top", type="negative",
+                          message=f"problem=不支持的格式；cause={name}；fix=仅支持 .md/.txt（其他格式随路线能力扩展）")
+                return
+            _pending_docs.append(e)
+            upload_docs_label.set_text(f"已选 {len(_pending_docs)} 份文档（点下方按钮落盘）")
+
+        def _persist_docs():
+            kb = os.path.join(_fastrag_dir(), "knowledgebase")
+            os.makedirs(kb, exist_ok=True)
+            import re as _re
+            saved = 0
+            for f in list(_pending_docs):
+                safe = os.path.basename(getattr(f, "name", "doc.md"))
+                stem = _re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff-]", "_", os.path.splitext(safe)[0]) or "doc"
+                target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
+                n = 1
+                while os.path.exists(target):
+                    target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
+                    n += 1
+                with open(target, "wb") as out:
+                    out.write(f.content.read())
+                _pending_docs.remove(f)
+                saved += 1
+            upload_docs_label.set_text(f"已落盘 {saved} 份到 edtalk/fastrag/knowledgebase/（点击构建生效）")
+
+        ui.upload(
+            label="上传知识库文档（.md/.txt，可多选）",
+            multiple=True, auto_upload=False, on_upload=_collect_doc,
+        ).props('accept=".md,.txt"').style("width:100%")
+        ui.button("落盘所选文档", on_click=lambda: _persist_docs()).props("outline")
+
+        # ---------- 请求模板参数页（R9 义务：六参数暴露+落盘 override+应用重启+脏标记 D6） ----------
+        with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%").open(False):
+            tpl_dirty = {"v": False}
+            _TPL_KEYS = [
+                ("system_role", "人设（SYSTEM_ROLE）", "你是一位专业、友好的线上销售，现在正在进行直播。"),
+                ("answer_rules", "回答规则（ANSWER_RULES）", ""),
+                ("temperature", "生成温度 temperature（0-1）", 0.3),
+                ("top_p", "Top-p（0-1）", 0.9),
+                ("max_new_tokens", "最大生成 token 数", 128),
+                ("max_answer_length", "答案最大字符数", 80),
+            ]
+            tpl_inputs = {}
+            with ui.grid(columns=2):
+                for key, label, default in _TPL_KEYS:
+                    tpl_inputs[key] = FormField.create_input(
+                        label=label,
+                        value=str(get_nested_value(config, "fastrag", "template", key, default=default)),
+                        on_change=lambda e: _mark_tpl_dirty(),
+                        style="width:100%;",
+                    )
+            tpl_dirty_label = ui.label("").style("color: var(--color-warning); display:none")
+
+            def _mark_tpl_dirty():
+                tpl_dirty["v"] = True
+                tpl_dirty_label.set_text("有未生效修改——点击『应用并重启 fastrag 服务』生效")
+                tpl_dirty_label.style("color: var(--color-warning); display:block")
+
+            def _apply_template_and_restart():
+                """模板生效（D6：保存落盘 override+显式重启+脏标记清零；DX F-7 失败回滚）。"""
+                try:
+                    # 落盘 config_override.py（fastrag-python 侧 P3 补丁加载）
+                    py_dir = os.path.join(_fastrag_dir(), "fastrag-python")
+                    override = os.path.join(py_dir, "config_override.py")
+                    backup = override + ".bak"
+                    if os.path.exists(override):
+                        shutil.copy2(override, backup)
+                    lines = []
+                    vals = {k: (i.value or "") for k, i in tpl_inputs.items()}
+                    lines.append(f"SYSTEM_ROLE = {vals['system_role']!r}")
+                    if vals["answer_rules"]:
+                        lines.append(f"ANSWER_RULES = {vals['answer_rules']!r}")
+                    lines.append(f"LLM_TEMPERATURE = {float(vals['temperature'] or 0.3)}")
+                    lines.append(f"LLM_TOP_P = {float(vals['top_p'] or 0.9)}")
+                    lines.append(f"LLM_MAX_NEW_TOKENS = {int(vals['max_new_tokens'] or 128)}")
+                    lines.append(f"MAX_ANSWER_LENGTH = {int(vals['max_answer_length'] or 80)}")
+                    with open(override, "w", encoding="utf-8") as f:
+                        f.write("\n".join(lines) + "\n")
+                except Exception as e:
+                    ui.notify(position="top", type="negative", message=f"模板落盘失败：{e}")
+                    return
+                # 重启服务（python 路线：杀 server.py+由系统重启或手动拉起）
+                _stop_fastrag_server_if_running()
+                import requests
+                try:
+                    requests.get(f"http://127.0.0.1:{get_nested_value(config, 'fastrag', 'port', default=11420)}/health", timeout=2)
+                    # 仍在运行（其他实例）——回滚 override（DX F-7）
+                    if os.path.exists(backup):
+                        shutil.copy2(backup, override)
+                    ui.notify(position="top", type="negative",
+                              message="problem=服务重启失败；cause=旧服务仍在运行；fix=停止系统后重新运行系统（模板已回滚）")
+                    return
+                except Exception:
+                    pass  # 已停止=正常
+                tpl_dirty["v"] = False
+                tpl_dirty_label.style("display:none")
+                ui.notify(position="top", type="positive",
+                          message="模板已生效（fastrag 服务将随下次『运行系统』拉起；直播中重启请错峰）")
+
+            ui.button("应用并重启 fastrag 服务", on_click=_apply_template_and_restart).props("outline")
+
+        # ---------- 区分文案（native F8：两处固定防"改错一侧"） ----------
+        ui.label("两处模板分工：本页『对话人设与生成参数』= fastrag 生成行为（语气/长度）——保存后需应用重启；"
+                 "『应用 fastrag 请求模板』按钮 = custom_llm 请求通道（端点/格式）——修改后即作用于新请求。"
+                 "改错一侧会出现『模板不生效』。").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
         ui.label(
             "知识库格式：Markdown 按标题分块（H1=文档名，H2/H3=分块边界）；"
-            "LLM 人设在 edtalk/fastrag/Config.toml 的 prompt.system_role 配置"
+            "人设与生成参数在上方『对话人设与生成参数』折叠区配置（python 路线经 config_override.py 生效）"
         ).style("color: var(--text-hint); font-size: var(--font-size-body)")

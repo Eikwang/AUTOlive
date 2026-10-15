@@ -165,3 +165,11 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 - **风控基线**：限速 3s/平台（虎牙 35s 内置兜底，可被 `send_min_interval_overrides` 胜出，但下调须对证风控实测——虎牙 10-14s 实测失败）；连续失败 5 次熔断；`sent` 回执证明发出、不证明未被平台影子限流——实发可见性人工抽检为例行运维节奏。
 - **浸泡门槛（R8）**：上线后连续 7 个直播时段主进程零"组件致重启"方视为整合完成。日志锚点：`[danmaku_listener]`（守护重建/停机）、`[send-guard]`（熔断/限速/overrides 解析）、sender 异常栈（审计 result 行 reason_code）、`web_console_error` 事件；**发送常驻会话异常单列计数**（守护重建计数仅覆盖监听 Bridge）。两周内 ≥2 次主进程异常（组件致）→ 自动复议独立进程形态（UC-1 复议，输入=R8 故障域数据）。
 - 运维详单：上游 `D:\AI\DanmakuListener\docs\ops\send-runbook.md`（不随拷贝，仅供对证）。
+
+## fastrag-python 本地补丁台账（2026-10-15 EDTalk 整合批次，Eng F-E10 纪律）
+
+| # | 文件 | 变更 | 原因 | 上游 HEAD |
+|---|---|---|---|---|
+| P1 | fastrag-python/config.py | KB_DIR/INDEX_DIR 改指父级（knowledgebase/kbindex_py 统一） | 数据位置与 rust 版统一+python 索引格式隔离 | （fastrag 无 git 仓，副本基线 2026-07-24） |
+| P2 | fastrag-python/server.py | uvicorn host 0.0.0.0→127.0.0.1 | Eng F-E7 高危绑定收敛 | （同 P1） |
+| P3 | fastrag-python/config.py | 末尾加载 config_override.py 外部覆盖 | 参数页落盘重启即生效（F-E10 优先方案） | （同 P1） |

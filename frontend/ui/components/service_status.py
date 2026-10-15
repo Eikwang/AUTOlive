@@ -26,6 +26,10 @@ _STATE_COLOR = {
     "crashed": "var(--color-warning)",
     "red": "var(--color-danger)",
     "stopped": "var(--border-color)",
+    # 训练态（design D2 义务：训练任务全局可见性——训练中/完成/失败）
+    "training": "var(--color-warning)",
+    "train_done": "var(--color-success)",
+    "train_failed": "var(--color-danger)",
 }
 _STATE_LABEL = {
     "healthy": "运行中",
@@ -33,9 +37,12 @@ _STATE_LABEL = {
     "crashed": "重拉中",
     "red": "已置红",
     "stopped": "已停止",
+    "training": "训练中",
+    "train_done": "训练完成",
+    "train_failed": "训练失败",
 }
 # 异常优先排序权重（D3）：越小越靠前
-_STATE_ORDER = {"red": 0, "crashed": 1, "starting": 2, "healthy": 3, "stopped": 4}
+_STATE_ORDER = {"red": 0, "train_failed": 1, "crashed": 2, "starting": 3, "training": 3, "healthy": 4, "train_done": 4, "stopped": 5}
 
 _MAX_VISIBLE = 4  # D3：超过 4 个折叠为 +N
 
@@ -71,8 +78,43 @@ class ServiceStatusStrip:
         try:
             self._render_banner()
             self._render_capsules()
+            self._render_training_capsule()
         except Exception:
             logger.error("[service-strip] 刷新异常", exc_info=True)
+
+    # ---------- 训练态胶囊（design D2 义务：训练任务全局可见性） ----------
+
+    def _render_training_capsule(self):
+        """训练任务胶囊（design D2 义务：训练任务全局可见性——任意页面可见）。
+        数据源=utils.train_streamer.pipeline 模块级 training_running（webui 进程内
+        唯一事实源）；进度细节在训练页，此处只呈现"训练中"存在性（D11：侧边栏
+        常驻胶囊跨页面可见，不依赖前端内存态的页面组件）。完成/失败通知由
+        TrainPipeline.on_complete 回调触发（不在轮询里重复）。"""
+        try:
+            from utils.train_streamer import pipeline as _tp
+        except ImportError:
+            return
+        if not getattr(_tp, "training_running", False):
+            return
+        self._render_simple_capsule("训练-训练中", _STATE_COLOR["training"],
+                                    detail="前往 数字人-训练主播 页查看进度与 ETA")
+
+    def _render_simple_capsule(self, label: str, color: str, detail: str = ""):
+        """渲染一枚只读胶囊（训练态等非注册表数据源复用）。"""
+        with self._capsules_area:
+            with ui.row().style(
+                "width:100%;align-items:center;gap:6px;padding:4px 6px;"
+                "border-radius:6px;background:var(--surface-alt,transparent);"
+                "cursor:default;"
+            ):
+                ui.element("span").style(
+                    f"width:8px;height:8px;border-radius:50%;background:{color};flex-shrink:0;"
+                )
+                ui.label(label).style(
+                    "font-size:12px;color:var(--text-primary);white-space:nowrap;overflow:hidden;"
+                )
+                if detail:
+                    ui.icon("chevron_right", size="xs").tooltip(detail)
 
     def _render_banner(self):
         """B-5：任一服务置红 → 胶囊区顶部常驻警示横幅；恢复后自动消失。"""
