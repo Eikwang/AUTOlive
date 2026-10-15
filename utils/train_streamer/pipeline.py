@@ -180,7 +180,7 @@ class TrainPipeline:
 
     def __init__(self, config_data: dict, video_dir: str, role_name: str,
                  on_log=None, on_complete=None, on_confirm_needed=None,
-                 start_stage: int = 1):
+                 start_stage: int = 1, stages=None):
         """
         Args:
             config_data: config.json 全量字典
@@ -190,7 +190,11 @@ class TrainPipeline:
             on_complete: 完成回调 fn(success: bool, message: str)
             on_confirm_needed: 评估确认回调 fn()——UI 弹"仍要继续"确认框后调
                 self.confirm_continue() / self.confirm_stop()
-            start_stage: 起始阶段（1-4，步骤级重跑）
+            start_stage: 起始阶段（1-4，步骤级重跑；stages 未传时按
+                "从 start_stage 连续跑到 4" 生成——2026-10-15 前的语义）
+            stages: 要执行的阶段集合（2026-10-15 UI 流程多选：任意子集，
+                如 {3,4}=跳过预处理与底模直接评估+口型微调；None=沿用
+                start_stage 连续语义）
         """
         self.config_data = config_data
         self.video_dir = os.path.abspath(video_dir)
@@ -199,6 +203,8 @@ class TrainPipeline:
         self.on_complete = on_complete or (lambda ok, msg: None)
         self.on_confirm_needed = on_confirm_needed or (lambda: None)
         self.start_stage = max(1, min(4, start_stage))
+        self.stages = set(int(s) for s in stages) if stages else set(range(self.start_stage, 5))
+        self.stages = {s for s in self.stages if 1 <= s <= 4}
 
         self.edtalk_dir = get_edtalk_dir()
         self.interpreter = get_interpreter(config_data)
@@ -517,13 +523,13 @@ class TrainPipeline:
             with open(self.lock_path, "w", encoding="utf-8") as f:
                 json.dump({"pid": os.getpid(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
 
-            self._log(f"=== 训练开始：角色 {self.role_name}，目录 {self.video_dir}，从阶段 {self.start_stage} 开始 ===")
+            self._log(f"=== 训练开始：角色 {self.role_name}，目录 {self.video_dir}，执行阶段 {sorted(self.stages)} ===")
             t0 = time.time()
             self._t_start = t0
             self._sample_vram_baseline()
 
             # ---- 阶段 1：预处理编排 ----
-            if self.start_stage <= 1:
+            if 1 in self.stages:
                 self.current_stage = 1
                 self._write_progress(1, "running")
                 # -u：非 tty stdout 默认块缓冲，无 -u 时逐行回显会延迟到缓冲满
@@ -538,7 +544,7 @@ class TrainPipeline:
                 self._write_progress(1, "done")
 
             # ---- 阶段 2：底模微调 ----
-            if self.start_stage <= 2:
+            if 2 in self.stages:
                 self.current_stage = 2
                 self._write_progress(2, "running")
                 # --datapath 语义=预处理产物根（train_fine_tune 在其下找 count/
@@ -558,7 +564,7 @@ class TrainPipeline:
                 self._write_progress(2, "done")
 
             # ---- 阶段 3：评估 ----
-            if self.start_stage <= 3:
+            if 3 in self.stages:
                 self.current_stage = 3
                 self._write_progress(3, "running")
                 eval_out = "tools/eval_results"
@@ -581,8 +587,9 @@ class TrainPipeline:
                 verdict = self._judge_eval(metrics)
                 self._last_eval_summary["verdict"] = verdict
                 self._cleanup_after_step(self._last_proc, 3)
-                if verdict is not None:
+                if verdict is not None and 4 in self.stages:
                     # 门槛不过：默认停止，UI 提供"仍要继续"显式确认（D12 义务：确认框带指标与两选项后果）
+                    # 仅当选了阶段 4（有"继续"的下一站）才弹确认；只评不调则直接停
                     self.confirm_decision = None
                     self.confirm_event.clear()
                     try:
@@ -596,10 +603,15 @@ class TrainPipeline:
                         self._write_progress(3, "failed")
                         return
                     self._log("[评估] 用户确认继续——进入口型微调")
+                elif verdict is not None:
+                    self._log(f"[评估] 未过门槛且所选阶段不含口型微调——直接停止：{verdict}")
+                    message = f"评估未过门槛已停止：{verdict}"
+                    self._write_progress(3, "failed")
+                    return
                 self._write_progress(3, "done")
 
             # ---- 阶段 4：口型微调 ----
-            if self.start_stage <= 4:
+            if 4 in self.stages:
                 self.current_stage = 4
                 self._write_progress(4, "running")
                 try:
@@ -628,19 +640,24 @@ class TrainPipeline:
             # ---- checkpoint 自动部署（义务块：评估通过/用户确认继续两路径均部署；
             #      DX F-4：失败三段式+产物保留+手动兜底指引） ----
             deploy_ok = False
-            try:
-                character_dir = (self.config_data.get("edtalk_realtime", {}) or {}).get(
-                    "character_dir") or self.role_name
-                deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count)
-                deploy_ok = True
-                self._log(f"[部署] {deploy_msg}", 4)
-            except Exception as de:
-                self._log(
-                    f"[部署][失败] problem=checkpoint 自动部署失败；cause={de}；"
-                    f"fix=检查上方日志；手动兜底：将 ckpt_models/{self.role_name}/checkpoint/"
-                    f"{self.iter_count:06d}.pt 的 gen 键导出为角色包 checkpoint/new.pt"
-                    f"（训练产物已保留，不丢失）", 4)
-                deploy_msg = f"自动部署失败：{de}"
+            deploy_msg = ""
+            if self.stages & {2, 4}:
+                # 有训练产物（底模 ckpt 或口型产物）才部署；纯评估跑完无新 ckpt
+                try:
+                    character_dir = (self.config_data.get("edtalk_realtime", {}) or {}).get(
+                        "character_dir") or self.role_name
+                    deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count)
+                    deploy_ok = True
+                    self._log(f"[部署] {deploy_msg}", 4)
+                except Exception as de:
+                    self._log(
+                        f"[部署][失败] problem=checkpoint 自动部署失败；cause={de}；"
+                        f"fix=检查上方日志；手动兜底：将 ckpt_models/{self.role_name}/checkpoint/"
+                        f"{self.iter_count:06d}.pt 的 gen 键导出为角色包 checkpoint/new.pt"
+                        f"（训练产物已保留，不丢失）", 4)
+                    deploy_msg = f"自动部署失败：{de}"
+            else:
+                self._log("[部署] 所选阶段无训练产物（仅评估），跳过自动部署")
 
             stage_times = ""
             self._log(f"=== 训练完成：产物 ckpt_models/{self.role_name}/checkpoint/（总耗时 {elapsed/3600:.1f}h，"

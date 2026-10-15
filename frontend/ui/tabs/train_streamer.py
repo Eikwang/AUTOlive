@@ -198,9 +198,11 @@ def create_train_streamer_tab(
                      "整个目录时可直接填路径；旧数据目录保持只读识别，训练原样可用").style(
                 "color: var(--text-hint); font-size: var(--font-size-body)")
 
-        # 素材要求提示（DX 义务③）
+        # 素材要求提示（DX 义务③；2026-10-15 补续训说明）
         ui.label(
-            "已选素材将在开始训练时复制到 数据根/<角色名>/original_videos/；时长与数量参照 EDTalk 数据集处理流程"
+            "全新训练（勾选阶段 1）时，已选素材将在开始训练时复制到 数据根/<角色名>/original_videos/；"
+            "仅勾选阶段 2-4（续训）则无需素材，直接使用该角色已处理的数据集。"
+            "素材时长与数量参照 EDTalk 数据集处理流程"
             "（wy 实例 = 529 视频 / 63055 clips；更少素材可训，口型质量预期下降）"
         ).style("color: var(--text-hint); font-size: var(--font-size-body)")
 
@@ -218,13 +220,16 @@ def create_train_streamer_tab(
             stop_btn.set_enabled(False)
 
         def _set_form_locked(locked: bool):
-            """D1 义务落地：训练中锁定区②表单（角色名/素材选择/既有目录），
-            训练结束在 _poll 恢复——防训练中改角色名/路径造成进度文件与 UI 不一致。"""
+            """D1 义务落地：训练中锁定区②表单（角色名/素材选择/既有目录/
+            流程选择按钮），训练结束在 _poll 恢复——防训练中改角色名/路径
+            造成进度文件与 UI 不一致。"""
             role_input.set_enabled(not locked)
             pick_btn.set_enabled(not locked)
             video_dir_input.set_enabled(not locked)
             for _btn in pick_row_btns:
                 _btn.set_enabled(not locked)
+            for _sb in stage_buttons:  # 运行时查找：本函数定义于流程条之前
+                _sb.set_enabled(not locked)
 
         def _default_role(path: str) -> str:
             path = (path or "").strip().strip('"')
@@ -244,19 +249,41 @@ def create_train_streamer_tab(
                 pass
             return ""
 
-        # ---------- 步骤条（常驻，4 大阶段） ----------
-        stage_labels = []
-        with ui.row().classes("q-mt-md q-gutter-sm"):
-            for name in TrainPipeline.STAGE_NAMES:
-                lbl = ui.label(name).style(
-                    "padding: 4px 10px; border-radius: var(--radius-md); "
-                    "background: var(--bg-hover); color: var(--text-secondary); "
-                    "font-size: var(--font-size-body)"
-                )
-                stage_labels.append(lbl)
+        # ---------- 流程选择条（常驻；2026-10-15 用户裁决：步骤条改为多选
+        #           按钮——默认全选，可任意子集（如只勾 2-4 续训跳过预处理），
+        #           按序执行；运行中锁定，染色由 _poll 接管为运行状态） ----------
+        selected_stages: list = [1, 2, 3, 4]
+        stage_buttons = []
+
+        def _toggle_stage(idx: int):
+            s = idx + 1
+            if s in selected_stages:
+                selected_stages.remove(s)
+            else:
+                selected_stages.append(s)
+            _render_stage_btn(idx)
+
+        def _render_stage_btn(idx: int):
+            """选中=主色底白字；未选=灰底半透明。"""
+            stage_buttons[idx].style(
+                "padding: 6px 12px; border-radius: var(--radius-md); "
+                + ("background: var(--color-primary); color: var(--text-on-primary); "
+                   if (idx + 1) in selected_stages else
+                   "background: var(--bg-hover); color: var(--text-secondary); opacity: 0.55; ")
+                + "font-size: var(--font-size-body); cursor: pointer")
+
+        with ui.row().classes("q-mt-sm q-gutter-sm"):
+            for _i, _name in enumerate(TrainPipeline.STAGE_NAMES):
+                _btn = ui.button(_name, on_click=lambda _, i=_i: _toggle_stage(i)).props(
+                    "flat dense no-caps").style(
+                    "padding: 6px 12px; border-radius: var(--radius-md); "
+                    "background: var(--color-primary); color: var(--text-on-primary); "
+                    "font-size: var(--font-size-body)")
+                _btn.tooltip("点击选择/取消该阶段；可任意组合，按序号顺序执行")
+                stage_buttons.append(_btn)
 
         def _set_stage_state(idx: int, state: str):
-            """state: pending/running/done/failed"""
+            """state: pending/running/done/failed（运行态染色，覆盖选中样式）"""
             colors = {
                 "pending": ("var(--bg-hover)", "var(--text-secondary)"),
                 "running": ("var(--color-primary)", "var(--text-on-primary)"),
@@ -264,7 +291,7 @@ def create_train_streamer_tab(
                 "failed": ("var(--color-negative)", "var(--text-on-primary)"),
             }
             bg, fg = colors[state]
-            stage_labels[idx].style(
+            stage_buttons[idx].style(
                 f"padding: 4px 10px; border-radius: var(--radius-md); "
                 f"background: {bg}; color: {fg}; font-size: var(--font-size-body)"
             )
@@ -320,12 +347,6 @@ def create_train_streamer_tab(
                         value=bool(get_nested_value(config, "train_streamer", "amp", default=True)),
                         on_change=lambda e: set_config_callback("train_streamer", "amp", value=bool(e.value)),
                     )
-                FormField.create_input(
-                    label="起始阶段（1-4，断点重跑）",
-                    value=str(get_nested_value(config, "train_streamer", "start_stage", default=1)),
-                    on_change=lambda e: set_config_callback("train_streamer", "start_stage", value=int(e.value or 1)),
-                    style="width:100%;",
-                )
             ui.label("--only_fine_tune_dec 保持强制启用（实践最佳配方：小数据集全参训练易崩，"
                      "且判别器链路未启用时 dis 仅注入噪声梯度）").style(
                 "color: var(--text-hint); font-size: var(--font-size-body)")
@@ -374,10 +395,22 @@ def create_train_streamer_tab(
             role_warning.style("color: var(--color-danger); display:block")
             ui.notify(position="top", type="negative", message=name_err)
             return
-        # 素材 vs 既有路径两条入口（既有目录优先，与旧行为一致）
+        # 素材 vs 既有路径 vs 续训三条入口（2026-10-15 用户裁决：起始阶段>1
+        # 即续训——直接使用该角色已有数据集，无需再选素材/填路径）
+        stage_min = min(selected_stages) if selected_stages else 1
         video_dir = (video_dir_input.value or "").strip().strip('"')
         if video_dir:
             source_txt = f"既有目录入口：{video_dir}（已选素材将被忽略）"
+        elif stage_min > 1:
+            data_root = get_nested_value(config, "train_streamer", "data_root", default="")
+            ds_dir = os.path.dirname(_upload_dir_for(role, data_root))
+            if not os.path.isdir(ds_dir):
+                ui.notify(position="top", type="negative",
+                          message=f"problem=未找到角色数据集；cause={ds_dir} 不存在；"
+                                  f"fix=检查角色名，或先勾选阶段 1 执行预处理编排")
+                return
+            video_dir = ds_dir
+            source_txt = f"续训模式（从阶段 {stage_min} 起）：使用已有数据集 {ds_dir}"
         elif picked_videos:
             data_root = get_nested_value(config, "train_streamer", "data_root", default="")
             dest = _upload_dir_for(role, data_root)
@@ -391,19 +424,14 @@ def create_train_streamer_tab(
         if gpu_msg:
             gpu_warning.set_text(gpu_msg)
             gpu_warning.style("color: var(--color-warning); display:block")
-        # 断点重跑防呆（2026-10-15 修起始阶段写回链条时补）：>1 时在确认框明示，
-        # 防止重跑后忘记改回 1 导致下次全新训练跳过预处理/底模阶段
-        try:
-            _ss = max(1, min(4, int(get_nested_value(config, "train_streamer", "start_stage", default=1) or 1)))
-        except (TypeError, ValueError):
-            _ss = 1
-        stage_note = f"起始阶段：第 {_ss} 阶段（断点重跑模式；全新训练请先改回 1）\n" if _ss > 1 else ""
         with ui.dialog() as dialog, ui.card():
             ui.label("确认开始训练？").style("font-weight: var(--font-weight-title)")
+            sel_names = " → ".join(
+                TrainPipeline.STAGE_NAMES[i - 1] for i in sorted(set(selected_stages) or {1, 2, 3, 4}))
             ui.label(
                 f"角色：{role}\n素材：{source_txt}\n"
-                + (stage_note + "\n" if stage_note else "")
-                + "训练将连续执行 4 大阶段（预处理 / 底模微调 / 评估 / 口型微调），\n"
+                + f"本次执行：{sel_names}\n\n"
+                "训练将按所选阶段顺序执行，\n"
                 "耗时可达十余小时并占用 GPU（训练期间无法启动主系统直播）。\n"
                 "完成后自动部署为推理可用角色包。"
             ).style("white-space: pre-wrap")
@@ -506,10 +534,6 @@ def create_train_streamer_tab(
                 ui.notify(position="top", type="warning", message="已有训练任务进行中")
                 return
             try:
-                start_stage = 1
-                # 高级参数中的起始阶段（读 config）
-                start_stage = int(get_nested_value(config, "train_streamer", "start_stage", default=1) or 1)
-
                 pipeline = TrainPipeline(
                     config_data=config._config if hasattr(config, "_config") else config,
                     video_dir=video_dir,
@@ -520,7 +544,7 @@ def create_train_streamer_tab(
                         _LOG_BUFFER.append((f"=== {'完成' if ok else '结束'}：{msg} ===", None)),
                     ),
                     on_confirm_needed=lambda: setattr(pipeline_holder[0], "_confirm_pending", True),
-                    start_stage=max(1, start_stage),
+                    stages=set(selected_stages) or {1, 2, 3, 4},
                 )
                 pipeline._start_time = time.time()
                 _pipeline = pipeline
@@ -545,7 +569,7 @@ def create_train_streamer_tab(
             line, stage = _LOG_BUFFER.popleft()
             log_area.push(line)
             if stage is not None and pipeline is not None:
-                for i in range(len(stage_labels)):
+                for i in range(len(stage_buttons)):
                     if i + 1 < pipeline.current_stage:
                         _set_stage_state(i, "done")
                     elif i + 1 == pipeline.current_stage:

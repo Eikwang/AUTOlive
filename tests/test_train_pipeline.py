@@ -328,3 +328,47 @@ def test_stale_lock_auto_recovered(tmp_path, monkeypatch):
     msg = p.preflight()
     assert not (msg and "训练进程运行" in msg)
     assert not os.path.exists(p.lock_path)   # 陈旧锁已自动清理
+
+
+
+# ---------- 8. 流程多选 stages（2026-10-15 UI 阶段按钮改造配套） ----------
+
+
+def test_stages_explicit_subset():
+    """显式 stages 子集（如 {3,4} 续训跳过预处理）按传入生效。"""
+    video_dir_p = None
+    import tempfile
+    td = tempfile.mkdtemp()
+    import os as _os
+    _os.makedirs(_os.path.join(td, "original_videos"), exist_ok=True)
+    p = TrainPipeline(
+        config_data={"edtalk_realtime": {}}, video_dir=td, role_name="s",
+        stages={3, 4},
+    )
+    assert p.stages == {3, 4}
+
+
+def test_stages_default_from_start_stage():
+    """未传 stages → 沿用 start_stage 连续语义（向后兼容）。"""
+    import tempfile
+    td = tempfile.mkdtemp()
+    import os as _os
+    _os.makedirs(_os.path.join(td, "original_videos"), exist_ok=True)
+    p = TrainPipeline(
+        config_data={"edtalk_realtime": {}}, video_dir=td, role_name="s",
+        start_stage=2,
+    )
+    assert p.stages == {2, 3, 4}
+
+
+def test_stages_out_of_range_filtered():
+    """越界阶段值（0/5）被过滤。"""
+    import tempfile
+    td = tempfile.mkdtemp()
+    import os as _os
+    _os.makedirs(_os.path.join(td, "original_videos"), exist_ok=True)
+    p = TrainPipeline(
+        config_data={"edtalk_realtime": {}}, video_dir=td, role_name="s",
+        stages={0, 2, 5},
+    )
+    assert p.stages == {2}
