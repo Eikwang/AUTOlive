@@ -87,6 +87,10 @@ LIGHT_TOKENS: Dict[str, str] = {
     "color-danger-strong": "#b91c1c",  # 危险色加强面（警示横幅底色，白字对比度 ≥4.5:1）
     "color-warning": "#d97706",
     "color-info": "#0284c7",
+    # Quasar positive/negative 词汇别名（与 success/danger 同值；Tab 层沿用
+    # Quasar 语义词汇——2026-10-15 审查补齐：此前未定义，引用全部落兜底/失色）
+    "color-positive": "#16a34a",
+    "color-negative": "#dc2626",
 
     # 灰阶
     "gray-50": "#f9fafb",
@@ -127,6 +131,8 @@ DARK_TOKENS: Dict[str, str] = {
     "color-danger-strong": "#dc2626",  # 深色主题下用浅色主题的危险色做加强面，白字达 AA
     "color-warning": "#f59e0b",
     "color-info": "#38bdf8",
+    "color-positive": "#22c55e",
+    "color-negative": "#ef4444",
 
     "gray-50": "#1a202c",
     "gray-100": "#1e242f",
@@ -221,6 +227,12 @@ def inject_design_tokens() -> str:
         --input-width-sm: {INPUT_WIDTH_SM};
         --input-width-md: {INPUT_WIDTH_MD};
         --input-width-lg: {INPUT_WIDTH_LG};
+
+        /* 日志区（终端式恒暗=有意设计，双主题下底色不变；此前三个变量
+           从未定义、引用全靠内联兜底——2026-10-15 审查补齐为真实令牌） */
+        --bg-log: #1e1e1e;
+        --text-log: #d4d4d4;
+        --font-family-mono: ui-monospace, Consolas, "Courier New", monospace;
     }}
 
     /* 深色主题覆盖 */
