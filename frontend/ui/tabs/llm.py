@@ -387,7 +387,7 @@ def _create_fastrag_card(
         ui.button("落盘所选文档", on_click=lambda: _persist_docs()).props("outline")
 
         # ---------- 请求模板参数页（R9 义务：六参数暴露+落盘 override+应用重启+脏标记 D6） ----------
-        with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%").open(False):
+        with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%"):
             tpl_dirty = {"v": False}
             _TPL_KEYS = [
                 ("system_role", "人设（SYSTEM_ROLE）", "你是一位专业、友好的线上销售，现在正在进行直播。"),

@@ -126,7 +126,7 @@ def create_train_streamer_tab(
             on_upload=_collect_upload,
         ).props('accept="video/*,.mp4,.avi,.mov,.mkv"').style("width:100%")
         # 受限路径入口（Eng F-E1：GB 级视频逃生通道；design D21：旧路径只读识别）
-        with ui.expansion("大文件/既有目录（高级路径入口）").style("width:100%").open(False):
+        with ui.expansion("大文件/既有目录（高级路径入口）").style("width:100%"):
             video_dir_input = FormField.create_input(
                 label="既有视频目录（含 original_videos 子目录）",
                 value="",
@@ -209,7 +209,7 @@ def create_train_streamer_tab(
 
         # ---------- 区③：高级参数折叠区（义务块"训练高级参数暴露"；
         #           默认值单一事实源表：iter=50000/epoch=2(uc2b)/batch=4/lr 三段/amp 开） ----------
-        with ui.expansion("高级参数").style("width:100%").open(False):
+        with ui.expansion("高级参数").style("width:100%"):
             with ui.grid(columns=3):
                 FormField.create_input(
                     label="底模微调 iter（1000-1000000）",

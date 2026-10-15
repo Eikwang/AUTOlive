@@ -268,7 +268,7 @@ def create_visual_body_tab(
     # ================= 卡片 3：运行控制区（立即生效，不保存） =================
     with ui.card().style(card_css):
         control_expansion = ui.expansion(
-            "运行时控制（立即生效，不保存）").style("width:100%").open(False)
+            "运行时控制（立即生效，不保存）").style("width:100%")
         with control_expansion:
             status_label = ui.label("服务未运行").style("color: var(--text-hint)")
             push_health_label = ui.label("").style("color: var(--text-hint)")
@@ -303,7 +303,8 @@ def create_visual_body_tab(
     with ui.card().style(card_css):
         mh_expansion = ui.expansion(
             "metahuman_stream 参数" + ("（当前使用 EDTalk 实时推理，以下参数不生效）" if edtalk_selected else "")
-        ).style("width:100%").open(not edtalk_selected)
+        ).style("width:100%")
+        mh_expansion.value = not edtalk_selected
         with mh_expansion:
             with ui.grid(columns=3):
                 FormField.create_select(
@@ -424,7 +425,7 @@ def create_visual_body_tab(
                 f"运行中 | 段:{seg} | preroll:{preroll} | 生产帧率:{fps} | "
                 f"欠载:{underruns} | 分辨率:{res}"
             ).style("color: var(--color-positive, #21ba45)")
-            control_expansion.open(True)
+            control_expansion.value = True
             # capable 探测（义务块"推理热切 UI"：false 时禁用对应控件并提示——
             # off 启动的组件未构造，热切 409）
             for sel, cap_key, cap_label in (
