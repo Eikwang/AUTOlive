@@ -115,28 +115,36 @@ def create_visual_body_tab(
 
             async def _do_install():
                 name = (cam_name_input.value or "").strip()
-                cam_status_label.set_text("安装中……（请在弹出的 UAC 窗口确认）")
-                cam_status_label.style("color: var(--color-warning)")
+                # 防重入（审查 FINDING-012）：安装期间禁用两按钮，防连点叠发
+                # 多个 UAC 提权流程；结束（含失败路径）finally 恢复
+                install_btn.set_enabled(False)
+                recheck_btn.set_enabled(False)
                 try:
-                    await asyncio.to_thread(_install_unity_capture, name)
-                except Exception as e:
-                    cam_status_label.set_text(str(e))
-                    cam_status_label.style("color: var(--color-danger)")
-                    ui.notify(position="top", type="negative", message="安装失败：" + str(e))
-                    return
-                ok, got = _query_unity_capture()
-                if ok:
-                    cam_status_label.set_text(
-                        "安装完成：" + got + "。如消费端未立即出现设备，请重启系统后重开本页（驱动签名/需重启场景）")
-                    cam_status_label.style("color: var(--color-positive)")
-                    ui.notify(position="top", type="positive",
-                              message="虚拟摄像头 " + got + " 安装完成；若设备未出现请重启后重试")
-                else:
-                    # "已安装未枚举"分支（DX F-6）
-                    cam_status_label.set_text(
-                        "problem=安装命令已执行但未检测到设备；cause=可能需重启或被安全软件拦截；"
-                        "fix=重启系统后重开本页，或手动运行 InstallCustomName.bat")
+                    cam_status_label.set_text("安装中……（请在弹出的 UAC 窗口确认）")
                     cam_status_label.style("color: var(--color-warning)")
+                    try:
+                        await asyncio.to_thread(_install_unity_capture, name)
+                    except Exception as e:
+                        cam_status_label.set_text(str(e))
+                        cam_status_label.style("color: var(--color-danger)")
+                        ui.notify(position="top", type="negative", message="安装失败：" + str(e))
+                        return
+                    ok, got = _query_unity_capture()
+                    if ok:
+                        cam_status_label.set_text(
+                            "安装完成：" + got + "。如消费端未立即出现设备，请重启系统后重开本页（驱动签名/需重启场景）")
+                        cam_status_label.style("color: var(--color-positive)")
+                        ui.notify(position="top", type="positive",
+                                  message="虚拟摄像头 " + got + " 安装完成；若设备未出现请重启后重试")
+                    else:
+                        # "已安装未枚举"分支（DX F-6）
+                        cam_status_label.set_text(
+                            "problem=安装命令已执行但未检测到设备；cause=可能需重启或被安全软件拦截；"
+                            "fix=重启系统后重开本页，或手动运行 InstallCustomName.bat")
+                        cam_status_label.style("color: var(--color-warning)")
+                finally:
+                    install_btn.set_enabled(True)
+                    recheck_btn.set_enabled(True)
 
             async def _do_recheck():
                 """就地重查注册表并刷新状态行（design 审查 FINDING-002：
@@ -151,8 +159,10 @@ def create_visual_body_tab(
                         "fix=点击『安装虚拟摄像头』，或手动运行 InstallCustomName.bat")
                     cam_status_label.style("color: var(--color-warning)")
 
-            ui.button("安装虚拟摄像头", on_click=_do_install).props("outline")
-            ui.button("重新检测", on_click=_do_recheck).props("flat")
+            # 页面唯一前进动作=实心主按钮（审查 FINDING-014：原 outline 权重
+            # 不足——摄像头缺失态下安装是整页的关键下一步）
+            install_btn = ui.button("安装虚拟摄像头", on_click=_do_install)
+            recheck_btn = ui.button("重新检测", on_click=_do_recheck).props("flat")
         ui.label("单读者限制：UnityCapture 为 DirectShow 滤镜，OBS 与 realtime_serve "
                  "不可同时读取同一设备；重装/改名=重新填写名称点击安装（覆盖注册）").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
@@ -309,7 +319,7 @@ def create_visual_body_tab(
                     "立即切换",
                     on_click=lambda: _switch_segment(segment_switch_input.value),
                 ).props("outline")
-                ui.button("刷新状态", on_click=lambda: _poll_status_once()).props("outline")
+                ui.button("刷新状态", on_click=lambda: _poll_status_once()).props("flat")
 
     # ================= 卡片 4：metahuman_stream 参数（保留，edtalk 时收起） =================
     edtalk_selected = is_edtalk_selected(config)
@@ -345,11 +355,15 @@ def create_visual_body_tab(
         token = (get_nested_value(config, "edtalk_realtime", "api_token", default="") or "").strip()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
-    def _fetch_segments(area):
-        """从 /status 获取可用段填入多行框。"""
+    async def _fetch_segments(area):
+        """从 /status 获取可用段填入多行框（to_thread 异步——审查 FINDING-013：
+        原实现同步 requests 阻塞 UI 线程至 3s，与同卡 _apply_gaze 模式相悖）。"""
         try:
             import requests
-            resp = requests.get(f"{_edtalk_api()}/status", headers=_auth_headers(), timeout=3)
+            resp = await asyncio.to_thread(
+                requests.get, f"{_edtalk_api()}/status",
+                headers=_auth_headers(), timeout=3,
+            )
             segs = (resp.json() or {}).get("available_segments") or []
             if segs:
                 area.set_value("\n".join(str(s) for s in segs))
