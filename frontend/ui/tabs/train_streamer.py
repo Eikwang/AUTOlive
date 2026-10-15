@@ -66,6 +66,7 @@ def create_train_streamer_tab(
     """创建训练主播标签页。"""
     card_css = theme_config.get("card", "")
     pipeline_ref: list = [None]
+    pipeline_holder: list = [None]  # 与 pipeline_ref 同置 card 内：刷新恢复段需要挂接
 
     with ui.card().style(card_css):
         ui.label("训练主播")
@@ -344,6 +345,16 @@ def create_train_streamer_tab(
                         f"检测到进行中的训练：角色 {prog.get('role')}，阶段 {prog.get('current_stage')}/4"
                         f"（{status_txt}，已耗时 {prog.get('elapsed_s', 0) / 60:.0f} 分钟）"
                     )
+                    # 2026-10-15 补：按钮/表单/引用同步恢复——原实现只恢复提示
+                    # 文本，刷新后 stop 仍灰（无法停止训练）、start 仍可点（被
+                    # 防重入拦）——用户被迫手动杀 python 进程
+                    _live = _pipeline  # 模块级单例：训练线程仍在跑
+                    if _live is not None:
+                        pipeline_ref[0] = _live
+                        pipeline_holder[0] = _live
+                        start_btn.set_enabled(False)
+                        stop_btn.set_enabled(True)
+                        _set_form_locked(True)
                 elif prog.get("status") in ("running", "failed"):
                     resume_hint.set_text(
                         f"上次进行到第 {prog.get('current_stage')} 阶段（{status_txt}，{prog.get('timestamp')}）"
@@ -353,7 +364,6 @@ def create_train_streamer_tab(
             pass
 
     # ---------- 交互逻辑（card 外部，避免 NiceGUI 上下文问题） ----------
-    pipeline_holder: list = [None]
 
     async def _confirm_start():
         """开始训练二次确认（含素材复制+角色名校验，义务块"上传视频落点"）。"""

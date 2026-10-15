@@ -399,10 +399,14 @@ class TrainPipeline:
         self._log(f"[步骤 {stage}/4] {' '.join(cmd[:6])}…", stage)
         self._log(f"[步骤 {stage}/4] 开始：{self.STAGE_NAMES[stage - 1]}", stage)
         try:
+            # PYTHONIOENCODING：Windows 中文环境子进程 stdout 非 tty 默认 cp936，
+            # 父进程按 utf-8 逐行解码必乱码（2026-10-15 用户实测）——统一强制
+            # 子进程 UTF-8 输出（子进程内部再起的子进程继承 env）
+            _env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             self._process = subprocess.Popen(
                 cmd, cwd=cwd or self.edtalk_dir, shell=False,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                encoding="utf-8", errors="replace", bufsize=1,
+                encoding="utf-8", errors="replace", bufsize=1, env=_env,
             )
             self._last_proc = self._process
             for line in self._process.stdout:
@@ -521,7 +525,8 @@ class TrainPipeline:
             if self.start_stage <= 1:
                 self.current_stage = 1
                 self._write_progress(1, "running")
-                cmd = [self.interpreter, "data_preprocess/data_preprocess_for_train/run_preprocess.py",
+                # -u：非 tty stdout 默认块缓冲，无 -u 时逐行回显会延迟到缓冲满
+                cmd = [self.interpreter, "-u", "data_preprocess/data_preprocess_for_train/run_preprocess.py",
                        "--base_dir", self.video_dir]
                 ok = self._run_step(cmd, 1)
                 self._cleanup_after_step(self._last_proc, 1)
