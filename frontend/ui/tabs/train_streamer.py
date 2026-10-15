@@ -154,6 +154,12 @@ def create_train_streamer_tab(
             stop_btn = ui.button("停止", on_click=lambda: _confirm_stop()).props("outline")
             stop_btn.set_enabled(False)
 
+        def _set_form_locked(locked: bool):
+            """D1 义务落地：训练中锁定区②表单（角色名/上传/既有目录），
+            训练结束在 _poll 恢复——防训练中改角色名/路径造成进度文件与 UI 不一致。"""
+            for _el in (role_input, upload_btn, video_dir_input):
+                _el.set_enabled(not locked)
+
         def _default_role(path: str) -> str:
             path = (path or "").strip().strip('"')
             return os.path.basename(os.path.normpath(path)) if path else ""
@@ -427,6 +433,7 @@ def create_train_streamer_tab(
                 log_empty_hint.style("display:none")
                 start_btn.set_enabled(False)
                 stop_btn.set_enabled(True)
+                _set_form_locked(True)
                 ui.notify(position="top", type="positive", message="训练已开始，进度见下方日志")
             except Exception as e:
                 logger.error(traceback.format_exc())
@@ -467,6 +474,7 @@ def create_train_streamer_tab(
                 if start_btn.isEnabled() is False:
                     start_btn.set_enabled(True)
                     stop_btn.set_enabled(False)
+                    _set_form_locked(False)
                     ok = getattr(pipeline, "_completed_ok", False)
                     status_icon.style(
                         "background: var(--color-success)" if ok else "background: var(--color-danger)")
