@@ -234,6 +234,12 @@ class DrawerLayout:
             box-shadow: var(--shadow-sm);
             transition: box-shadow var(--transition-normal);
         }}
+        /* 配置区卡片统一撑满内容列宽（design 审查 FINDING-006：q-card 在
+           flex 列默认 fit-content，短内容卡片（如折叠条标题）比同页邻居窄，
+           同页卡片宽窄不一） */
+        .config-content .q-card {{
+            width: 100%;
+        }}
         .q-card:hover {{
             box-shadow: var(--shadow-md);
         }}
