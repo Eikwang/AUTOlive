@@ -198,14 +198,18 @@ def create_train_streamer_tab(
             )
 
         # ---------- 日志区 ----------
-        log_area = ui.log(max_lines=500).classes("w-full").style(
-            f"background: var(--bg-log, #1e1e1e); color: var(--text-log, #d4d4d4); "
-            f"min-height: 220px; max-height: 420px; overflow-x: auto; "
-            f"font-family: var(--font-family-mono, monospace); font-size: 13px"
-        )
-        log_empty_hint = ui.label("输入路径后点击开始训练").style(
-            "color: var(--text-hint); text-align: center; width:100%"
-        )
+        # 空态提示覆盖在日志区中央（design 审查 FINDING-004：原实现排在日志区
+        # 下方，220px 空黑盒读作死区）；开始训练后 display:none（下方启动链）
+        with ui.column().style("width:100%;position:relative;gap:0"):
+            log_area = ui.log(max_lines=500).classes("w-full").style(
+                f"background: var(--bg-log, #1e1e1e); color: var(--text-log, #d4d4d4); "
+                f"min-height: 220px; max-height: 420px; overflow-x: auto; "
+                f"font-family: var(--font-family-mono, monospace); font-size: 13px"
+            )
+            log_empty_hint = ui.label("输入路径后点击开始训练").style(
+                "position:absolute;top:100px;left:50%;transform:translateX(-50%);"
+                "color: var(--text-hint); pointer-events:none; white-space:nowrap"
+            )
 
         # ---------- 区③：高级参数折叠区（义务块"训练高级参数暴露"；
         #           默认值单一事实源表：iter=50000/epoch=2(uc2b)/batch=4/lr 三段/amp 开） ----------
@@ -235,11 +239,15 @@ def create_train_streamer_tab(
                     on_change=lambda e: set_config_callback("train_streamer", "lr_schedule", value=e.value),
                     style="width:100%;",
                 )
-                amp_switch = ui.switch(
-                    "混合精度 amp",
-                    value=bool(get_nested_value(config, "train_streamer", "amp", default=True)),
-                    on_change=lambda e: set_config_callback("train_streamer", "amp", value=bool(e.value)),
-                )
+                # 混合精度开关：label 置顶与相邻字段对齐（design 审查 FINDING-005：
+                # ui.switch 自带 label 在控件右侧，三列网格里与 label 在上的输入框错位）
+                with ui.column().style("gap:0;width:100%"):
+                    ui.label("混合精度 amp").style(
+                        "font-size: var(--font-size-field-label); color: var(--text-secondary)")
+                    amp_switch = ui.switch(
+                        value=bool(get_nested_value(config, "train_streamer", "amp", default=True)),
+                        on_change=lambda e: set_config_callback("train_streamer", "amp", value=bool(e.value)),
+                    )
                 FormField.create_input(
                     label="起始阶段（1-4，断点重跑）",
                     value="1",
