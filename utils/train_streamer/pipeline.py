@@ -230,6 +230,7 @@ class TrainPipeline:
         self.confirm_event = threading.Event()
         self.confirm_decision = None  # None/"continue"/"stop"
         self.current_stage = 0
+        self._finished = False  # 实例级完成标志（UI _poll 判定用；跨模块 training_running 是值绑定不可靠）
         self._log_file = None
         # UI 轮询状态标志（train_streamer 页面消费）
         self._completed_ok = False
@@ -540,8 +541,11 @@ class TrainPipeline:
             if self.start_stage <= 2:
                 self.current_stage = 2
                 self._write_progress(2, "running")
-                cmd = [self.interpreter, "train_fine_tune.py",
-                       "--datapath", self.role_name,
+                # --datapath 语义=预处理产物根（train_fine_tune 在其下找 count/
+                # 子目录；facemark 取其同级目录）——原传 role_name 相对名在
+                # edtalk cwd 下不存在必 FileNotFoundError（2026-10-15 实测）
+                cmd = [self.interpreter, "-u", "train_fine_tune.py",
+                       "--datapath", self.video_dir,
                        "--exp_name", self.role_name,
                        "--only_fine_tune_dec",
                        "--iter", str(self.iter_count)]
@@ -558,9 +562,10 @@ class TrainPipeline:
                 self.current_stage = 3
                 self._write_progress(3, "running")
                 eval_out = "tools/eval_results"
-                cmd = [self.interpreter, "tools/eval_finetune.py",
+                # --datapath 同阶段 2 语义=产物根（eval_finetune 同样在其下找 count/）
+                cmd = [self.interpreter, "-u", "tools/eval_finetune.py",
                        "--cand-ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
-                       "--datapath", self.role_name,
+                       "--datapath", self.video_dir,
                        "--out-dir", eval_out]
                 if not self._run_step(cmd, 3):
                     message = "评估执行失败，详见日志"
@@ -604,8 +609,10 @@ class TrainPipeline:
                     self._log(f"[口型微调] {message}", 4)
                     self._write_progress(4, "failed")
                     return
-                cmd = [self.interpreter, "train/train_audio2mouth.py",
-                       "--data_path", self.role_name,
+                # --data_path 同语义=产物根（Audio2LipDataset 在其下找
+                # lmdb_features/ 与 lmdb/，均为阶段 1 产物）
+                cmd = [self.interpreter, "-u", "train/train_audio2mouth.py",
+                       "--data_path", self.video_dir,
                        "--resume_ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
                        "--audio2lip_ckpt", "ckpts/Audio2Lip.pt",
                        "--exp_name", self.role_name] + a2m_args
@@ -649,6 +656,7 @@ class TrainPipeline:
             message = f"训练编排异常：{e}"
             # on_complete 统一由 finally 调用（避免双调）
         finally:
+            self._finished = True  # UI _poll 据此走"训练结束"分支（置位先于按钮恢复判定）
             self._final_message = message or "训练未完成"
             self.current_stage = 0
             try:

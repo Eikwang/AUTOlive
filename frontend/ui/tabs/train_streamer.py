@@ -34,7 +34,6 @@ from utils.my_log import logger
 from utils.train_streamer.pipeline import (
     TrainPipeline,
     get_edtalk_dir,
-    training_running,
     validate_role_name,
 )
 
@@ -501,7 +500,9 @@ def create_train_streamer_tab(
         """启动后台训练线程。"""
         global _pipeline
         with _pipeline_lock:
-            if _pipeline is not None and training_running:
+            # 实例级 _finished 判定（2026-10-15 修复：from-import 的
+            # training_running 是值绑定，run() 置 True 不可见→防重入失效）
+            if _pipeline is not None and not getattr(_pipeline, "_finished", True):
                 ui.notify(position="top", type="warning", message="已有训练任务进行中")
                 return
             try:
@@ -553,7 +554,10 @@ def create_train_streamer_tab(
                         _set_stage_state(i, "pending")
         # 状态同步 + ETA/已耗时（义务块"训练 ETA 呈现"/design D17：进行中显示已耗时+预计剩余）
         if pipeline is not None:
-            if training_running:
+            # 运行判定用实例级 _finished（2026-10-15 修复：from-import 的
+            # training_running 是值绑定——run() 置 True 后这里仍读到 False，
+            # _poll 首轮即走"结束分支"把 start/stop 复位，停止按钮 0.5s 内熄灭）
+            if not getattr(pipeline, "_finished", False):
                 # 置顶状态卡更新（design D1）
                 status_icon.style("background: var(--color-warning)")
                 stage_name = TrainPipeline.STAGE_NAMES[max(0, pipeline.current_stage - 1)]
