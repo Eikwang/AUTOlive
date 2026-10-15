@@ -341,9 +341,9 @@ def _create_fastrag_card(
         with ui.row():
             build_btn = ui.button("构建知识库", on_click=_on_build_click).props("outline")
             build_spinner = ui.label("").style("color: var(--text-hint)")
-            ui.button("检查服务状态", on_click=_on_health_check).props("outline")
+            ui.button("检查服务状态", on_click=_on_health_check).props("flat")
             ui.button("应用 fastrag 请求模板", on_click=_on_apply_template).props("outline")
-            restore_btn = ui.button("还原上次配置", on_click=_on_restore).props("outline flat")
+            restore_btn = ui.button("还原上次配置", on_click=_on_restore).props("flat")
             restore_btn.set_enabled(os.path.exists(
                 os.path.join(str(get_base_path()), "config.custom_llm.bak.json")
             ))
