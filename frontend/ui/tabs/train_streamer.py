@@ -319,8 +319,8 @@ def create_train_streamer_tab(
                     )
                 FormField.create_input(
                     label="起始阶段（1-4，断点重跑）",
-                    value="1",
-                    on_change=lambda e: None,  # 读取在开始时
+                    value=str(get_nested_value(config, "train_streamer", "start_stage", default=1)),
+                    on_change=lambda e: set_config_callback("train_streamer", "start_stage", value=int(e.value or 1)),
                     style="width:100%;",
                 )
             ui.label("--only_fine_tune_dec 保持强制启用（实践最佳配方：小数据集全参训练易崩，"
@@ -379,11 +379,19 @@ def create_train_streamer_tab(
         if gpu_msg:
             gpu_warning.set_text(gpu_msg)
             gpu_warning.style("color: var(--color-warning); display:block")
+        # 断点重跑防呆（2026-10-15 修起始阶段写回链条时补）：>1 时在确认框明示，
+        # 防止重跑后忘记改回 1 导致下次全新训练跳过预处理/底模阶段
+        try:
+            _ss = max(1, min(4, int(get_nested_value(config, "train_streamer", "start_stage", default=1) or 1)))
+        except (TypeError, ValueError):
+            _ss = 1
+        stage_note = f"起始阶段：第 {_ss} 阶段（断点重跑模式；全新训练请先改回 1）\n" if _ss > 1 else ""
         with ui.dialog() as dialog, ui.card():
             ui.label("确认开始训练？").style("font-weight: var(--font-weight-title)")
             ui.label(
-                f"角色：{role}\n素材：{source_txt}\n\n"
-                "训练将连续执行 4 大阶段（预处理 / 底模微调 / 评估 / 口型微调），\n"
+                f"角色：{role}\n素材：{source_txt}\n"
+                + (stage_note + "\n" if stage_note else "")
+                + "训练将连续执行 4 大阶段（预处理 / 底模微调 / 评估 / 口型微调），\n"
                 "耗时可达十余小时并占用 GPU（训练期间无法启动主系统直播）。\n"
                 "完成后自动部署为推理可用角色包。"
             ).style("white-space: pre-wrap")
