@@ -391,3 +391,29 @@ def test_latest_ckpt_discovery(tmp_path):
     shutil.rmtree(ck)
     # 回退：旧假设（iter_count=30000 → 030000.pt），供前置校验报缺失
     assert p._latest_ckpt().endswith("030000.pt")
+
+
+# ---------- 10. 口型产物发现（2026-10-16 部署路径修复） ----------
+
+
+def test_find_latest_a2l_ckpt_new_layout():
+    """实际布局 logs/Audio2Lip/<角色>/<时间戳>/checkpoint/<iter>.pt：
+    取最新时间戳+最大编号。"""
+    import os
+    root = os.path.join(str(tmp_path_factory_dir := __import__("pathlib").Path(__import__("tempfile").mkdtemp())))
+    role = "R"
+    for date_dir, iters in (("20261016_0903", ("020000.pt",)),
+                            ("20261016_0913", ("020000.pt", "024000.pt"))):
+        ck = os.path.join(root, "logs", "Audio2Lip", role, date_dir, "checkpoint")
+        os.makedirs(ck)
+        for f in iters:
+            open(os.path.join(ck, f), "wb").close()
+    got = TrainPipeline._find_latest_a2l_ckpt(root, role)
+    assert got and got.endswith("024000.pt") and "0913" in got
+
+
+def test_find_latest_a2l_ckpt_missing():
+    """无任何产物 → None（部署消息保持'未找到口型微调产物'）。"""
+    import tempfile, pathlib
+    root = str(pathlib.Path(tempfile.mkdtemp()))
+    assert TrainPipeline._find_latest_a2l_ckpt(root, "NOPE") is None

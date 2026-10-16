@@ -816,6 +816,33 @@ class TrainPipeline:
     # ---------- 应用到数字人（训练→开播接线，A1 映射已验证） ----------
 
     @staticmethod
+    def _find_latest_a2l_ckpt(edtalk_dir: str, role_name: str) -> str | None:
+        """口型微调最新产物路径（部署用），无则 None。
+
+        实际布局（2026-10-16 实测）：logs/Audio2Lip/<角色>/<运行时间戳
+        YYYYMMDD_HHMM>/checkpoint/<iter:06d>.pt——按时间戳目录倒序取最新、
+        其 checkpoint 下最大编号；兼容旧布局 Audio2Lip/<角色>/ 直下
+        （历史冒烟验证时的假设，原部署因此一直'未找到口型微调产物'）。"""
+        root = os.path.join(edtalk_dir, "logs", "Audio2Lip", role_name)
+        if os.path.isdir(root):
+            date_dirs = sorted(
+                d for d in os.listdir(root)
+                if os.path.isdir(os.path.join(root, d)))
+            for d in reversed(date_dirs):  # 最新时间戳优先
+                ck = os.path.join(root, d, "checkpoint")
+                if os.path.isdir(ck):
+                    pts = sorted(f for f in os.listdir(ck) if f.endswith(".pt"))
+                    if pts:
+                        return os.path.join(ck, pts[-1])
+        legacy = os.path.join(edtalk_dir, "Audio2Lip", role_name)
+        if os.path.isdir(legacy):
+            for r, _, files in os.walk(legacy):
+                pts = sorted(f for f in files if f.endswith(".pt"))
+                if pts:
+                    return os.path.join(r, pts[-1])
+        return None
+
+    @staticmethod
     def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000,
                                ckpt_rel: str | None = None) -> str:
         """把训练产物应用到实时推理（打通"训练→开播"最后一公里）。
@@ -853,14 +880,7 @@ class TrainPipeline:
         torch.save({"gen": cand["gen"]}, new_pt_path)
 
         # 2) 口型权重：口型微调产物 → audio2lip.pt
-        a2l_dir = os.path.join(edtalk_dir, "Audio2Lip", role_name)
-        a2l_src = None
-        if os.path.isdir(a2l_dir):
-            # 取该角色最新口型微调产物
-            for root, _, files in os.walk(a2l_dir):
-                pts = sorted(f for f in files if f.endswith(".pt"))
-                if pts:
-                    a2l_src = os.path.join(root, pts[-1])
+        a2l_src = TrainPipeline._find_latest_a2l_ckpt(edtalk_dir, role_name)
         if a2l_src:
             shutil.copy2(a2l_src, os.path.join(char_root, "audio2lip.pt"))
             a2l_msg = f"口型权重 {a2l_src} → audio2lip.pt"
