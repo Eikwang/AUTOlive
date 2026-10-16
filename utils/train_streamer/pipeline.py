@@ -497,6 +497,22 @@ class TrainPipeline:
         self._vram_baseline_gb = self._query_vram_gb()
         self._log(f"[基线] 训练前显存占用 {self._vram_baseline_gb if self._vram_baseline_gb is not None else '未知（降级）'}GB")
 
+    def _latest_ckpt(self) -> str:
+        """底模微调最后产物（相对 edtalk_dir 的路径）。
+
+        训练循环 0 起计数，终点保存编号为 iter_count-1（实测 iter=20000
+        产物为 019999.pt，无 020000.pt）——动态取最大编号文件，不硬编码
+        off-by-one；目录缺失/为空时退回旧假设路径，让前置校验/下游报出
+        明确的文件缺失信息。"""
+        ckpt_dir = os.path.join(self.edtalk_dir, "ckpt_models", self.role_name, "checkpoint")
+        try:
+            pts = [f for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
+        except OSError:
+            pts = []
+        if pts:
+            return f"ckpt_models/{self.role_name}/checkpoint/{max(pts)}"
+        return f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt"
+
     def run(self):
         """执行全链路训练。阻塞调用——请放后台线程。"""
         global training_running, training_role
@@ -527,6 +543,22 @@ class TrainPipeline:
             t0 = time.time()
             self._t_start = t0
             self._sample_vram_baseline()
+
+            # 底模产物前置校验（阶段 3/4 依赖；2026-10-15：硬编码
+            # {iter_count:06d} 曾致 020000.pt 找不到、评估静默空过、
+            # 口型微调深处才报 FileNotFoundError——现动态发现+提前拦截）
+            self._ckpt_rel = None
+            if self.stages & {3, 4}:
+                self._ckpt_rel = self._latest_ckpt()
+                if not os.path.exists(os.path.join(self.edtalk_dir, self._ckpt_rel)):
+                    stage_hit = min(self.stages & {3, 4})
+                    message = (f"problem=底模微调产物缺失；cause={self._ckpt_rel} 不存在"
+                               f"（阶段 2 未完成或产物目录异常）；"
+                               f"fix=先执行底模微调（勾选阶段 2）或检查 "
+                               f"ckpt_models/{self.role_name}/checkpoint/ 目录")
+                    self._log(f"[前置校验] {message}")
+                    self._write_progress(stage_hit, "failed")
+                    return
 
             # ---- 阶段 1：预处理编排 ----
             if 1 in self.stages:
@@ -570,7 +602,7 @@ class TrainPipeline:
                 eval_out = "tools/eval_results"
                 # --datapath 同阶段 2 语义=产物根（eval_finetune 同样在其下找 count/）
                 cmd = [self.interpreter, "-u", "tools/eval_finetune.py",
-                       "--cand-ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
+                       "--cand-ckpt", self._ckpt_rel,
                        "--datapath", self.video_dir,
                        "--out-dir", eval_out]
                 if not self._run_step(cmd, 3):
@@ -625,7 +657,7 @@ class TrainPipeline:
                 # lmdb_features/ 与 lmdb/，均为阶段 1 产物）
                 cmd = [self.interpreter, "-u", "train/train_audio2mouth.py",
                        "--data_path", self.video_dir,
-                       "--resume_ckpt", f"ckpt_models/{self.role_name}/checkpoint/{self.iter_count:06d}.pt",
+                       "--resume_ckpt", self._ckpt_rel,
                        "--audio2lip_ckpt", "ckpts/Audio2Lip.pt",
                        "--exp_name", self.role_name] + a2m_args
                 ok = self._run_step(cmd, 4)
@@ -646,7 +678,8 @@ class TrainPipeline:
                 try:
                     character_dir = (self.config_data.get("edtalk_realtime", {}) or {}).get(
                         "character_dir") or self.role_name
-                    deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count)
+                    deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count,
+                                                             ckpt_rel=self._ckpt_rel)
                     deploy_ok = True
                     self._log(f"[部署] {deploy_msg}", 4)
                 except Exception as de:
@@ -783,7 +816,8 @@ class TrainPipeline:
     # ---------- 应用到数字人（训练→开播接线，A1 映射已验证） ----------
 
     @staticmethod
-    def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000) -> str:
+    def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000,
+                               ckpt_rel: str | None = None) -> str:
         """把训练产物应用到实时推理（打通"训练→开播"最后一公里）。
 
         映射（2026-09-24 迷你冒烟 strict 加载验证通过）：
@@ -794,7 +828,8 @@ class TrainPipeline:
         Args:
             role_name: 训练角色名
             character_dir: realtime_serve 角色素材目录名（config.edtalk_realtime.character_dir）
-            iter_count: 底模微调 iter（定位产物文件名）
+            iter_count: 底模微调 iter（定位产物文件名；ckpt_rel 未传时的旧假设）
+            ckpt_rel: 底模产物相对 edtalk_dir 的路径（动态发现，优先于 iter_count 假设）
 
         Returns:
             成功消息；失败抛异常（调用方 catch 后 notify）。
@@ -807,7 +842,8 @@ class TrainPipeline:
         os.makedirs(ckpt_dir, exist_ok=True)
 
         # 1) Generator 权重：gen 键 → new.pt（仅自产 ckpt 校验，native S2）
-        cand_path = os.path.join(edtalk_dir, "ckpt_models", role_name, "checkpoint", f"{iter_count:06d}.pt")
+        cand_path = (os.path.join(edtalk_dir, ckpt_rel) if ckpt_rel else
+                     os.path.join(edtalk_dir, "ckpt_models", role_name, "checkpoint", f"{iter_count:06d}.pt"))
         if not os.path.exists(cand_path):
             raise FileNotFoundError(f"训练产物不存在：{cand_path}")
         cand = torch.load(cand_path, map_location="cpu", weights_only=False)

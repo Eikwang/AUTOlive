@@ -5,6 +5,7 @@
 """
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -372,3 +373,21 @@ def test_stages_out_of_range_filtered():
         stages={0, 2, 5},
     )
     assert p.stages == {2}
+
+
+# ---------- 9. 底模产物动态发现（2026-10-15 iter off-by-one 修复） ----------
+
+
+def test_latest_ckpt_discovery(tmp_path):
+    """动态发现最大编号产物（终点保存编号= iter_count-1，实测 020000 iter
+    产物为 019999.pt）；目录缺失时回退 iter_count 假设路径。"""
+    p = _make_pipeline(tmp_path)
+    p.edtalk_dir = str(tmp_path)  # 隔离真实 edtalk 目录
+    ck = os.path.join(p.edtalk_dir, "ckpt_models", "testrole", "checkpoint")
+    os.makedirs(ck)
+    for n in ("000000.pt", "005000.pt", "019999.pt"):
+        open(os.path.join(ck, n), "wb").close()
+    assert p._latest_ckpt().endswith("019999.pt")
+    shutil.rmtree(ck)
+    # 回退：旧假设（iter_count=30000 → 030000.pt），供前置校验报缺失
+    assert p._latest_ckpt().endswith("030000.pt")
