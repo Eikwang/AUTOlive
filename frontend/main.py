@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -390,9 +391,19 @@ class AutoliveApp:
 
         try:
             # 显式 shell=False + list 传参（native H1：路径含空格/中文不会被 cmd.exe 打碎）
-            process = subprocess.Popen(cmd, cwd=edtalk_dir, shell=False)
+            # stdout/stderr 落盘（2026-10-16 排障缺口：realtime_serve 全 print 输出
+            # 随 webui 控制台丢失，出画失败无从取证）
+            log_dir = str(get_log_dir())
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "edtalk_realtime.log")
+            log_f = open(log_path, "ab", buffering=0)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_f.write(f"\n===== 启动 {stamp} 端口 {port} =====\n".encode("utf-8"))
+            process = subprocess.Popen(cmd, cwd=edtalk_dir, shell=False,
+                                       stdout=log_f, stderr=subprocess.STDOUT)
             self.my_subprocesses["edtalk_realtime"] = process
-            logger.info(f"运行程序: edtalk_realtime（PID {process.pid}，端口 {port}）")
+            self._edtalk_log_f = log_f  # 保引用防 GC 关闭句柄
+            logger.info(f"运行程序: edtalk_realtime（PID {process.pid}，端口 {port}，日志 {log_path}）")
         except Exception as e:
             logger.error(f"启动 EDTalk realtime_serve 失败: {e}")
 

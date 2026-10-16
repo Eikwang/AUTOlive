@@ -417,3 +417,66 @@ def test_find_latest_a2l_ckpt_missing():
     import tempfile, pathlib
     root = str(pathlib.Path(tempfile.mkdtemp()))
     assert TrainPipeline._find_latest_a2l_ckpt(root, "NOPE") is None
+
+
+# ---------- 11. 部署数据联接（2026-10-16 推理数据断层修复） ----------
+
+
+def _make_train_data(tmp_path, names=("orifra", "count", "metadata", "facemark", "gaze_data")):
+    """构造训练产物数据根 data/edtalk_train/WY/ 与角色包骨架。"""
+    import utils.train_streamer.pipeline as pl
+    data_root = tmp_path / "data" / "edtalk_train" / "WY"
+    for n in names:
+        (data_root / n).mkdir(parents=True, exist_ok=True)
+    char_root = tmp_path / "char" / "wy"
+    (char_root / "checkpoint").mkdir(parents=True, exist_ok=True)
+    edtalk_dir = tmp_path / "edtalk"
+    edtalk_dir.mkdir(exist_ok=True)
+    return char_root, data_root, pl
+
+
+def test_ensure_serve_data_creates_junctions(tmp_path, monkeypatch):
+    """训练产物齐全 → 角色包缺的子目录建 junction（真 mklink /J）。"""
+    char_root, _, pl = _make_train_data(tmp_path)
+    monkeypatch.setattr(pl, "get_edtalk_dir", lambda: str(tmp_path / "edtalk"))
+    msg = TrainPipeline._ensure_serve_data(str(char_root), "WY")
+    for n in ("orifra", "count", "metadata", "facemark", "gaze_data"):
+        assert (char_root / n).is_dir(), n
+    assert "推理数据联接" in msg
+
+
+def test_ensure_serve_data_missing_required(tmp_path, monkeypatch):
+    """缺必需子目录（metadata）→ FileNotFoundError 三段式。"""
+    char_root, _, pl = _make_train_data(
+        tmp_path, names=("orifra", "count", "facemark"))
+    monkeypatch.setattr(pl, "get_edtalk_dir", lambda: str(tmp_path / "edtalk"))
+    with pytest.raises(FileNotFoundError, match="metadata"):
+        TrainPipeline._ensure_serve_data(str(char_root), "WY")
+
+
+def test_ensure_serve_data_missing_gaze_optional(tmp_path, monkeypatch):
+    """缺可选 gaze_data → 跳过不报错，其余正常联接。"""
+    char_root, _, pl = _make_train_data(
+        tmp_path, names=("orifra", "count", "metadata", "facemark"))
+    monkeypatch.setattr(pl, "get_edtalk_dir", lambda: str(tmp_path / "edtalk"))
+    msg = TrainPipeline._ensure_serve_data(str(char_root), "WY")
+    assert not (char_root / "gaze_data").exists()
+    assert (char_root / "orifra").is_dir()
+
+
+def test_ensure_serve_data_existing_skipped(tmp_path, monkeypatch):
+    """角色包已有同名子目录 → 全部跳过（消息'已齐全'）。"""
+    char_root, _, pl = _make_train_data(tmp_path)
+    monkeypatch.setattr(pl, "get_edtalk_dir", lambda: str(tmp_path / "edtalk"))
+    for n in ("orifra", "count", "metadata", "facemark", "gaze_data"):
+        (char_root / n).mkdir()
+    msg = TrainPipeline._ensure_serve_data(str(char_root), "WY")
+    assert "已齐全" in msg
+
+
+def test_ensure_serve_data_root_missing(tmp_path, monkeypatch):
+    """训练产物数据根不存在 → FileNotFoundError 三段式（指向阶段 1）。"""
+    char_root, _, pl = _make_train_data(tmp_path, names=())
+    monkeypatch.setattr(pl, "get_edtalk_dir", lambda: str(tmp_path / "edtalk"))
+    with pytest.raises(FileNotFoundError, match="数据根"):
+        TrainPipeline._ensure_serve_data(str(char_root), "WY")

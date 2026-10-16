@@ -842,15 +842,73 @@ class TrainPipeline:
                     return os.path.join(r, pts[-1])
         return None
 
+    # realtime_serve 角色包必需的数据子目录（sequence_frame_pack.CharacterDataPack
+    # 启动即查：orifra/count/metadata/facemark 任一缺失 FileNotFoundError）；
+    # gaze_data 可选（--gaze-correction off 时不需要）
+    _SERVE_DATA_DIRS = ("orifra", "count", "metadata", "facemark")
+    _SERVE_DATA_OPTIONAL = ("gaze_data",)
+
+    @staticmethod
+    def _ensure_serve_data(char_root: str, role_name: str) -> str:
+        """补齐角色包的推理数据子目录（NTFS junction 到训练产物，零拷贝）。
+
+        整合断层（2026-10-16 实测）：部署只落模型权重（new.pt/audio2lip.pt），
+        realtime_serve 启动第 1 步就因 "orifra directory not found" 崩溃且
+        print 输出丢失无人看见——角色包还需要预处理数据。训练产物根
+        data/edtalk_train/<角色>/ 有全套，目录联接引入并随训练重跑自动更新。
+        已存在的子目录（真目录或旧联接）不动。
+
+        Raises:
+            FileNotFoundError: 必需子目录在训练产物中缺失（三段式）。
+            RuntimeError: 联接创建失败（三段式）。
+        """
+        data_root = os.path.join(
+            os.path.dirname(get_edtalk_dir()), "data", "edtalk_train", role_name)
+        if not os.path.isdir(data_root):
+            raise FileNotFoundError(
+                f"problem=训练产物数据根不存在；cause={data_root}；"
+                f"fix=先完成阶段 1 预处理（或核对角色名大小写）")
+        linked, skipped = [], []
+        for name in TrainPipeline._SERVE_DATA_DIRS + TrainPipeline._SERVE_DATA_OPTIONAL:
+            link = os.path.join(char_root, name)
+            target = os.path.join(data_root, name)
+            if os.path.exists(link):
+                skipped.append(name)
+                continue
+            if not os.path.isdir(target):
+                if name in TrainPipeline._SERVE_DATA_OPTIONAL:
+                    skipped.append(name)  # gaze_data 缺失仅提示（gaze 可关）
+                    continue
+                raise FileNotFoundError(
+                    f"problem=训练产物缺少 {name}/ 子目录；cause={target}；"
+                    f"fix=重新执行阶段 1 预处理")
+            r = subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.isdir(link):
+                raise RuntimeError(
+                    f"problem=数据目录联接创建失败（{name}）；"
+                    f"cause={(r.stderr or r.stdout or '').strip()[:200]}；"
+                    f"fix=手动运行 cmd /c mklink /J \"{link}\" \"{target}\"")
+            linked.append(name)
+        if not linked:
+            return f"推理数据子目录已齐全（{', '.join(skipped)}）"
+        msg = f"推理数据联接：{', '.join(linked)} ← data/edtalk_train/{role_name}"
+        if skipped:
+            msg += f"（已有：{', '.join(skipped)}）"
+        return msg
+
     @staticmethod
     def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000,
                                ckpt_rel: str | None = None) -> str:
         """把训练产物应用到实时推理（打通"训练→开播"最后一公里）。
 
-        映射（2026-09-24 迷你冒烟 strict 加载验证通过）：
+        映射（2026-09-24 迷你冒烟 strict 加载验证通过；2026-10-16 补数据联接）：
         - ckpt_models/<角色>/checkpoint/<iter:06d>.pt 的 ['gen'] state_dict
           → <character_dir>/checkpoint/new.pt（realtime_serve Generator 权重）
-        - 口型微调产物 audio2lip ckpt → <character_dir>/audio2lip.pt
+        - 口型微调产物 audio2lip ckpt → <character_dir>/checkpoint/audio2lip.pt
+          （get_model_paths 约定与 new.pt 并排于 checkpoint/ 下）
+        - 推理数据子目录 orifra/count/metadata/facemark(+gaze_data)
+          junction ← data/edtalk_train/<角色>/（缺了服务启动第 1 步即崩）
 
         Args:
             role_name: 训练角色名
@@ -879,15 +937,23 @@ class TrainPipeline:
         new_pt_path = os.path.join(ckpt_dir, "new.pt")
         torch.save({"gen": cand["gen"]}, new_pt_path)
 
-        # 2) 口型权重：口型微调产物 → audio2lip.pt
+        # 2) 口型权重：口型微调产物 → checkpoint/audio2lip.pt
+        #    （get_model_paths 约定：checkpoint/ 下 audio2lip.pt + new.pt 并排；
+        #    2026-10-16 实测曾错放角色包根 → "Audio2Lip model not found"）
         a2l_src = TrainPipeline._find_latest_a2l_ckpt(edtalk_dir, role_name)
         if a2l_src:
-            shutil.copy2(a2l_src, os.path.join(char_root, "audio2lip.pt"))
-            a2l_msg = f"口型权重 {a2l_src} → audio2lip.pt"
+            a2l_dst = os.path.join(ckpt_dir, "audio2lip.pt")
+            shutil.copy2(a2l_src, a2l_dst)
+            a2l_msg = f"口型权重 {a2l_src} → {a2l_dst}"
         else:
             a2l_msg = "未找到口型微调产物（audio2lip.pt 保持不变）"
 
+        # 3) 推理数据子目录（2026-10-16 断层修复）：orifra/count/metadata/
+        #    facemark(+gaze_data) junction 自训练产物——缺了 realtime_serve
+        #    启动第 1 步即崩（orifra directory not found）
+        data_msg = TrainPipeline._ensure_serve_data(char_root, role_name)
+
         return (
-            f"已应用：gen → {new_pt_path}；{a2l_msg}。"
+            f"已应用：gen → {new_pt_path}；{a2l_msg}；{data_msg}。"
             f"重启 realtime_serve 后生效（停止并重新『运行系统』）"
         )
