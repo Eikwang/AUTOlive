@@ -359,3 +359,10 @@ apps/
 edtalk/train/
 edtalk/UnityCapture-master/
 logs/
+
+# EDTalk 训练产物与角色包（大文件，2026-10-16 E2E 收官补充；
+# data/ 只挡训练数据根——已有 data/vector_base 等细粒度规则+反排除，
+# 整目录 data/ 会使其失效）
+data/edtalk_train/
+edtalk/train_progress/
+edtalk/wy/
