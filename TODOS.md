@@ -129,3 +129,9 @@
 4. **三段式错误前缀 UI 格式化**（note, M）— `problem=/cause=/fix=` 机器格式直出用户界面（训练校验/摄像头重测等本批多处一致，属 /autoplan 义务口径）；如需人话排版另立任务统一改渲染层。
 5. **间距/字号令牌 Tab 层零引用**（仓库级既有债, M）— /design-review 子代理审计：三 Tab 文件对 --spacing-*/--font-size-* 零引用、全内联 px，与 tts/train_voice/svc 老基线一脉相承；系统性收敛属全局任务（本批数值多贴近档位、视觉不发散，不构成回归）。
 6. **三段式消息渲染面与覆盖面裁决**（M）— train/llm 走 toast、visual_body 落行内标签双通道并存，且同类错误约半数为自由文本（"获取失败/服务未连接"）；与延期项 4（三段式 UI 格式化）合并：统一渲染通道+格式化+覆盖清单。
+
+## Deferred Items from E2E 出画排障 (2026-10-16) — EDTalk 推理整合收官
+
+1. **全量测试套件 149 项存量失败（features 历史验收测试漂移）**（P2, M）— tests/features/test_task_01~27（约 145 项，如 function_groups 断言 8 组实际 7 组）+ 全量跑时 test_edtalk_client 4 项（单独跑全绿=测试间状态污染）。均为存量：在已推送 HEAD（2847a138）上即失败，与 EDTalk 整合批次改动无关；docs-refresh（2026-10-12）已标注"全面测试待用户执行"。整理任务=按现行功能现实重写/退役过期断言+排查污染源（模块单例/共享端口）。
+2. **虚拟摄像头"已安装"态无重装/改名入口**（P3, S）— visual_body 摄像头卡仅在未安装态渲染安装按钮；改名/重装需手动 regsvr32。旧安装 dll 指向 D:\AI\EDTalk\UNITYC~1（仍有效），清理该目录前须先重装（安装件在 edtalk/UnityCapture-master/Install/）。
+3. **test_cover_queue GPU 环境依赖**（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
