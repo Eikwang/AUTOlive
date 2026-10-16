@@ -20,7 +20,11 @@ from typing import Any, Callable, Dict
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
 from utils.my_log import logger
-from utils.edtalk_realtime.helpers import is_edtalk_active, is_edtalk_selected
+from utils.edtalk_realtime.helpers import (
+    is_edtalk_active,
+    is_edtalk_selected,
+    query_unity_capture,
+)
 
 
 def create_visual_body_tab(
@@ -65,18 +69,7 @@ def create_visual_body_tab(
     # ================= 虚拟摄像头检测卡（义务块：检测=启动系统时触发+页面打开刷新；
     #                  缺失态警示色最高视觉权重；安装编程化 regsvr32 静默+runas 提权） =================
 
-    import winreg as _winreg
     import re as _re_cam
-
-    def _query_unity_capture():
-        r"""检测 UnityCapture 安装状态（其注册机制：DllInstall 写
-        HKCU\Software\UnityCapture\FilterName）。返回 (installed: bool, name: str)。"""
-        try:
-            with _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, r"Software\UnityCapture") as key:
-                name, _ = _winreg.QueryValueEx(key, "FilterName")
-                return True, str(name)
-        except OSError:
-            return False, ""
 
     def _install_unity_capture(cam_name: str):
         """编程化安装（义务块：regsvr32 静默注入名称+runas 提权；Eng F-E4：
@@ -94,7 +87,7 @@ def create_visual_body_tab(
         if r.returncode != 0:
             raise RuntimeError("problem=安装命令失败；cause=" + (r.stderr or "").strip()[:200] + "；fix=查看日志或手动运行 InstallCustomName.bat")
 
-    _cam_installed, _cam_name = _query_unity_capture()
+    _cam_installed, _cam_name = query_unity_capture()
 
     with ui.card().style(card_css):
         if _cam_installed:
@@ -129,7 +122,7 @@ def create_visual_body_tab(
                         cam_status_label.style("color: var(--color-danger)")
                         ui.notify(position="top", type="negative", message="安装失败：" + str(e))
                         return
-                    ok, got = _query_unity_capture()
+                    ok, got = query_unity_capture()
                     if ok:
                         cam_status_label.set_text(
                             "安装完成：" + got + "。如消费端未立即出现设备，请重启系统后重开本页（驱动签名/需重启场景）")
@@ -149,7 +142,7 @@ def create_visual_body_tab(
             async def _do_recheck():
                 """就地重查注册表并刷新状态行（design 审查 FINDING-002：
                 原实现 ui.navigate.reload() 整页刷新会把用户踢回默认页）。"""
-                ok, got = await asyncio.to_thread(_query_unity_capture)
+                ok, got = await asyncio.to_thread(query_unity_capture)
                 if ok:
                     cam_status_label.set_text("检测到已安装：" + got)
                     cam_status_label.style("color: var(--color-positive)")

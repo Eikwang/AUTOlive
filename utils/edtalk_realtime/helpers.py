@@ -39,3 +39,42 @@ def is_edtalk_selected(config) -> bool:
         return config.get("visual_body") == "edtalk_realtime"
     except Exception:
         return False
+
+
+# UnityCapture 服务类 CLSID（64 位构建末字节 0x10、32 位 0x20；多设备按末字节
+# 偏移，本项目固定 cap 0）。regsvr32 安装把摄像头名写进该 CLSID 的默认值
+# （提权写 HKLM、免提权写 HKCU），不产生 Software\UnityCapture 键。
+_UNITY_CAPTURE_SERVICE_CLSIDS = (
+    "{5C2CD55C-92AD-4999-8666-912BD3E70010}",
+    "{5C2CD55C-92AD-4999-8666-912BD3E70020}",
+)
+
+try:
+    import winreg as _winreg
+except ImportError:  # 非 Windows 平台：无虚拟摄像头概念，检测恒为未安装
+    _winreg = None
+
+
+def query_unity_capture():
+    """检测 UnityCapture 虚拟摄像头安装状态，返回 (installed, 摄像头名)。
+
+    注册机制（UnityCaptureFilter.cpp RegisterFilters）：regsvr32
+    /i:UnityCaptureName=名字 经命令行解析写进服务 CLSID 默认值，并在
+    DirectShow 摄像头类别下注册 Instance；DllInstall 为空实现——不存在
+    HKCU\\Software\\UnityCapture\\FilterName（旧实现查此处，永远 False）。
+
+    Returns:
+        (True, 名字) 任一 UnityCapture 服务 CLSID 已注册；否则 (False, "")。
+    """
+    if _winreg is None:
+        return False, ""
+    for hive in (_winreg.HKEY_LOCAL_MACHINE, _winreg.HKEY_CURRENT_USER):
+        for clsid in _UNITY_CAPTURE_SERVICE_CLSIDS:
+            try:
+                with _winreg.OpenKey(hive, "Software\\Classes\\CLSID\\" + clsid) as key:
+                    name, _ = _winreg.QueryValueEx(key, "")
+            except OSError:
+                continue
+            if str(name or "").strip():
+                return True, str(name)
+    return False, ""
