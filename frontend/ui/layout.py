@@ -325,6 +325,7 @@ class DrawerLayout:
         self.current_function = None  # 当前选中的功能名称
         self.function_list_container = None
         self.function_items = {}
+        self.group_nav_container = None  # 缺省态防御（门禁A批2观察项）：create_navigation_groups 之前调用 select_group 时 None 早退而非 AttributeError
         self.config_page_container = None
         self.config_values = {}
         self.save_notification = None
