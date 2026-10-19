@@ -35,6 +35,8 @@ PROJECTS = {
             ("GPT_SoVITS", "GPT_SoVITS", True, "核心包全量（skip-big 排除 pretrained_models/G2PWModel）",
              ["pretrained_models", "text/G2PWModel"]),
             ("config.py", "config.py", False, "上游配置", []),
+            ("多音字.txt", "多音字.txt", False, "中文多音字词典（g2pw pyd 按 cwd 相对路径读取，缺失=文本前端 Errno 2 风暴+bert 特征空 torch.cat 炸，2026-10-16 训练实测）", []),
+            ("念法纠正.txt", "念法纠正.txt", False, "念法纠正词典（文本前端同款 cwd 相对依赖）", []),
             ("tools", "tools", True, "训练/ASR 工具链（slice_audio/asr/filters/AP_BWE_main；skip-big 排除模型资产）",
              ["asr/models", "uvr5/uvr5_weights"]),
         ],

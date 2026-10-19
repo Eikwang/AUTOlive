@@ -242,6 +242,8 @@ def create_audio_play_tab(
             status_label.text = '运行系统后可用（内置播放器随主系统启动）'
 
     # 设备选择写回 config（自动保存绑定之外的动态控件）
+    # on_value_change（有 .value）；底层 .on('update:value') 的事件对象无 .value，
+    # int(e.value) 抛 AttributeError 被下方 except 静默吞掉 → 设备选择从不落盘
     def _on_device_change(e):
         try:
             cfg_section = config.setdefault("audio_player", {}) if isinstance(config, dict) else None
@@ -250,7 +252,7 @@ def create_audio_play_tab(
                 set_config_callback()
         except Exception:
             pass
-    device_select.on('update:value', _on_device_change)
+    device_select.on_value_change(_on_device_change)
 
     player_select.on('update:value', lambda e: _refresh_visibility())
     _refresh_visibility()

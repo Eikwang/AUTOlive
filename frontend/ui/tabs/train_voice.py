@@ -9,6 +9,7 @@
 """
 import os
 import threading
+import time
 from typing import Any, Callable, Dict
 
 from nicegui import ui
@@ -25,6 +26,8 @@ from utils.train_rvc_pipeline import TrainRvcPipeline
 # 模块级单例（防多开；与 train_streamer 同款范式）
 _pipeline: TrainVoicePipeline | None = None
 _pipeline_lock = threading.Lock()
+# P3-1 修订：串行编排的管线链（[(名称, pipeline)]，启动后由编排线程顺序消费）
+_pipes: list = []
 
 # D1 录音指引文案（一屏内讲完；深化整合后 MDXNet 分离已内置）
 _GUIDE_LINES = [
@@ -88,19 +91,37 @@ def create_train_voice_tab(
                 ui.label("RVC 规格：40k · v2 · f0 指导 · rmvpe_gpu · CPU 进程 10 · 说话人 0").style(
                     "font-size:11px;color:var(--text-secondary);align-self:center")
 
-    # ---------- 管线切换（P3-1：GPT-SoVITS / RVC 双流共用一页） ----------
-    pipeline_type_state = {"value": "gpt-sovits"}
-    with ui.card().style(card_css):
-        ui.label("训练管线")
-        with ui.row():
-            ui.button("GPT-SoVITS (TTS)", on_click=lambda: _set_pipeline("gpt-sovits")).props(
-                "unelevated no-caps").style("font-size:12px")
-            ui.button("RVC (变声/翻唱)", on_click=lambda: _set_pipeline("rvc")).props(
-                "unelevated no-caps").style("font-size:12px")
+    # ---------- 管线开关（P3-1 修订：双开关默认全开，可单独关闭；串行编排） ----------
+    pipe_enabled = {"gpt-sovits": True, "rvc": True}
+    pipe_btns: dict = {}
 
-    def _set_pipeline(t):
-        pipeline_type_state["value"] = t
-        ui.notify(position="top", type="info", message=f"训练管线已切换: {t}")
+    with ui.card().style(card_css):
+        ui.label("训练管线（默认全开，点击切换启用/关闭；实心=启用，描边=关闭）").style(
+            "font-weight:var(--font-weight-emphasis)")
+        ui.label("启用多条时串行执行：先 GPT-SoVITS 后 RVC；某条失败不影响另一条继续").style(
+            "font-size:11px;color:var(--text-secondary)")
+        with ui.row():
+            pipe_btns["gpt-sovits"] = ui.button(
+                "GPT-SoVITS (TTS)", on_click=lambda: _toggle_pipe("gpt-sovits")
+            ).props("unelevated no-caps").style("font-size:12px")
+            pipe_btns["rvc"] = ui.button(
+                "RVC (变声/翻唱)", on_click=lambda: _toggle_pipe("rvc")
+            ).props("unelevated no-caps").style("font-size:12px")
+
+    def _toggle_pipe(t: str):
+        if pipe_enabled[t]:
+            if not any(v for k, v in pipe_enabled.items() if k != t):
+                ui.notify(position="top", type="warning", message="至少保留一条训练管线")
+                return
+            pipe_enabled[t] = False
+        else:
+            pipe_enabled[t] = True
+        for k, btn in pipe_btns.items():
+            btn.props("unelevated no-caps" if pipe_enabled[k] else "outline no-caps")
+        on_txt = "、".join(
+            ("GPT-SoVITS" if k == "gpt-sovits" else "RVC")
+            for k, v in pipe_enabled.items() if v)
+        ui.notify(position="top", type="info", message=f"本次训练将执行：{on_txt}")
 
     # ---------- GPU 状态卡 ----------
     gpu_label: dict = {}
@@ -148,7 +169,13 @@ def create_train_voice_tab(
                 except Exception:
                     logger.error("[train-voice] 授权留档失败", exc_info=True)
 
-        consent.on("update:model-value", _on_consent)
+        # 值变化必须走 on_value_change（ValueChangeEventArguments 才有 .value）；
+        # 底层 .on("update:model-value") 的事件对象只有 sender/client/args——
+        # handler 读 change.value 抛 AttributeError 被 NiceGUI 吞掉，
+        # authorized 永远 False → 勾选后点开始仍提示未确认（2026-10-16 用户实测）
+        consent.on_value_change(_on_consent)
+
+    started_ts = {"value": 0.0}  # 启动时刻（防 _poll 在编排线程置位 running_stage 前误判"已结束"）
 
     # ---------- 步骤清单（五态）+ 控制按钮 ----------
     with ui.card().style(card_css):
@@ -161,9 +188,9 @@ def create_train_voice_tab(
         stop_btn.set_enabled(False)
 
     def _start():
-        global _pipeline
+        global _pipeline, _pipes
         with _pipeline_lock:
-            if _pipeline is not None and _pipeline.running_stage:
+            if any(p.running_stage for _, p in _pipes):
                 ui.notify(position="top", type="warning", message="训练进行中")
                 return
             if not authorized["value"]:
@@ -177,24 +204,11 @@ def create_train_voice_tab(
             if not exp_input.value.strip():
                 ui.notify(position="top", type="negative", message="请填写实验名")
                 return
-            pipeline_type = pipeline_type_state.get("value", "gpt-sovits")
-            if pipeline_type == "rvc":
-                _pipeline = TrainRvcPipeline(config, paths)
-                _pipeline.prepare(
-                    dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
-                    batch_size=int(batch_input.value or 8),
-                    total_epoch=int(epoch_rvc_input.value or 20),
-                    save_every=int(save_rvc_input.value or 8),
-                    already_dry=dry_check.value,
-                    authorized=True,
-                )
-                if getattr(_pipeline, "asset_issues", None):
-                    _msgs = "；".join(f"{n}({r})" for r, n, _ in _pipeline.asset_issues[:4])
-                    ui.notify(position="top", type="negative",
-                              message=f"RVC 资产预检未通过（{_pipeline.asset_issues.__len__()} 项）：{_msgs}——详见日志")
-            else:
-                _pipeline = TrainVoicePipeline(config, paths)
-                _pipeline.prepare(
+            started_ts["value"] = time.time()
+            pipes: list = []
+            if pipe_enabled["gpt-sovits"]:
+                p = TrainVoicePipeline(config, paths)
+                p.prepare(
                     dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
                     batch_size=int(batch_input.value or 4),
                     already_dry=dry_check.value, authorized=True,
@@ -206,53 +220,98 @@ def create_train_voice_tab(
                     save_every_s1=int(save_s1_input.value or 10),
                     if_dpo=bool(dpo_check.value),
                 )
-                if getattr(_pipeline, "asset_issues", None):
-                    _msgs = "；".join(f"{n}({r})" for r, n, _ in _pipeline.asset_issues[:4])
+                if getattr(p, "asset_issues", None):
+                    _msgs = "；".join(f"{n}({r})" for r, n, _ in p.asset_issues[:4])
                     ui.notify(position="top", type="negative",
-                              message=f"资产预检未通过（{_pipeline.asset_issues.__len__()} 项缺失）：{_msgs}——详见日志")
+                              message=f"资产预检未通过（{p.asset_issues.__len__()} 项缺失）：{_msgs}——详见日志")
+                pipes.append(("GPT-SoVITS (TTS)", p))
+            if pipe_enabled["rvc"]:
+                p = TrainRvcPipeline(config, paths)
+                p.prepare(
+                    dataset_dir=ds_input.value, exp_name=exp_input.value.strip(),
+                    batch_size=int(batch_input.value or 8),
+                    total_epoch=int(epoch_rvc_input.value or 20),
+                    save_every=int(save_rvc_input.value or 8),
+                    already_dry=dry_check.value,
+                    authorized=True,
+                )
+                if getattr(p, "asset_issues", None):
+                    _msgs = "；".join(f"{n}({r})" for r, n, _ in p.asset_issues[:4])
+                    ui.notify(position="top", type="negative",
+                              message=f"RVC 资产预检未通过（{p.asset_issues.__len__()} 项）：{_msgs}——详见日志")
+                pipes.append(("RVC (变声/翻唱)", p))
+            _pipes = pipes
+            _pipeline = pipes[0][1]
+            _chain_run(pipes)
         start_btn.set_enabled(False)
         stop_btn.set_enabled(True)
-        _pipeline.run_all()
+
+    def _chain_run(pipes):
+        """串行编排：先 GPT-SoVITS 后 RVC（单卡 GPU 不能并行训练）。
+        管线相互独立（资产/产物不同源），某条失败不影响另一条继续——
+        失败项由页面红字+重跑按钮呈现，续跑代价上限≈另一条的 MDX 段时长。"""
+
+        def _worker():
+            global _pipeline
+            for name, p in pipes:
+                _pipeline = p
+                p.run_all()
+                while p.running_stage is not None:
+                    time.sleep(0.5)
+                if FAILED in p.stage_states().values():
+                    logger.error(f"[train-voice] {name} 管线存在失败步骤（详见页面红字），继续后续管线")
+            logger.info("[train-voice] 全部启用管线执行完毕（失败项见页面标注）")
+
+        threading.Thread(target=_worker, name="train-voice-chain", daemon=True).start()
 
     def _stop():
-        if _pipeline:
-            _pipeline.stop()
-            ui.notify(position="top", type="warning", message="已请求停止（当前步骤跑完即止）")
+        for _, p in _pipes:
+            p.stop()
+        ui.notify(position="top", type="warning", message="已请求停止（当前步骤跑完即止）")
 
-    # ---------- 状态轮询（0.5s，train_streamer 同款） ----------
+    # ---------- 状态轮询（0.5s，train_streamer 同款；多管线分组渲染） ----------
     def _poll():
         global _pipeline
-        p = _pipeline
-        if p is None:
+        if not _pipes:
             return
-        states = p.stage_states()
         steps_column.clear()
         with steps_column:
-            for sid, state in states.items():
-                plan = p._plan()[sid]
-                icon = {PENDING: "·", RUNNING: "▶", SUCCESS: "✔",
-                        FAILED: "✖", "skipped": "—"}[state]
-                color = {"running": "var(--color-warning)",
-                         "success": "var(--color-success)",
-                         "failed": "var(--color-danger)"}.get(
-                    state, "var(--text-secondary)")
-                with ui.row().style("width:100%;justify-content:space-between;padding:2px 6px"):
-                    ui.label(f"{icon} {plan['name']}").style(f"color:{color};font-size:13px")
-                    ui.label(state).style("font-size:11px;color:var(--text-secondary)")
-                if state == FAILED:
-                    # DX2 失败四要素：原因摘要（日志尾）+ 日志定位 + 重跑入口 + 查看帮助
-                    ui.label("失败：请查看下方日志定位原因（常见原因见录音指引卡与 docs/开发环境搭建.md）").style(
-                        "font-size:11px;color:var(--color-danger)")
-                    ui.button("重跑此步（覆盖下游）", on_click=lambda sid=sid: _rerun(sid)).props(
-                        "dense unelevated no-caps")
-        log_box.set_content("\n".join(p.log_lines[-30:]))
-        if p.running_stage is None and start_btn.enabled is False:
+            for name, p in _pipes:
+                ui.label(name).style(
+                    "font-size:11px;color:var(--text-secondary);margin-top:4px")
+                for sid, state in p.stage_states().items():
+                    plan = p._plan()[sid]
+                    icon = {PENDING: "·", RUNNING: "▶", SUCCESS: "✔",
+                            FAILED: "✖", "skipped": "—"}[state]
+                    color = {"running": "var(--color-warning)",
+                             "success": "var(--color-success)",
+                             "failed": "var(--color-danger)"}.get(
+                        state, "var(--text-secondary)")
+                    with ui.row().style("width:100%;justify-content:space-between;padding:2px 6px"):
+                        ui.label(f"{icon} {plan['name']}").style(f"color:{color};font-size:13px")
+                        ui.label(state).style("font-size:11px;color:var(--text-secondary)")
+                    if state == FAILED:
+                        # DX2 失败四要素：原因摘要（日志尾）+ 日志定位 + 重跑入口 + 查看帮助
+                        ui.label("失败：请查看下方日志定位原因（常见原因见录音指引卡与 docs/开发环境搭建.md）").style(
+                            "font-size:11px;color:var(--color-danger)")
+                        ui.button("重跑此步（覆盖下游）",
+                                  on_click=lambda p=p, sid=sid: _rerun(p, sid)).props(
+                            "dense unelevated no-caps")
+        active = next((p for _, p in _pipes if p.running_stage), None)
+        if active is not None:
+            _pipeline = active
+        shown = active or _pipes[-1][1]
+        log_box.set_content("\n".join(shown.log_lines[-30:]))
+        if (not any(p.running_stage for _, p in _pipes)
+                and start_btn.enabled is False
+                and time.time() - started_ts["value"] > 1.0):
             start_btn.set_enabled(True)
             stop_btn.set_enabled(False)
 
-    def _rerun(sid: str):
-        if _pipeline:
-            _pipeline.reset_from(sid)
-            _pipeline.run_all()
+    def _rerun(p, sid: str):
+        global _pipeline
+        _pipeline = p
+        p.reset_from(sid)
+        p.run_all()
 
     ui.timer(0.5, _poll)

@@ -1,0 +1,10 @@
+curl https://maas-api.cn-huabei-1.xf-yun.com/v2/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SPARK_API_PASSWORD" \
+  -d '{
+    "model": "spark-x2.5",
+    "messages": [
+      {"role": "user", "content": "你好。"}
+    ],
+    "stream": false
+  }'

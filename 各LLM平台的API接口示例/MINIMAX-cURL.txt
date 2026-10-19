@@ -1,0 +1,13 @@
+curl --request POST \
+  --url https://api.minimax.cn/v1/responses \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '
+{
+  "model": "MiniMax-M3.1-Flash-Preview",
+  "input": "你好！",
+  "reasoning": {
+    "effort": "max"
+  }
+}
+'

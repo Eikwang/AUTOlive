@@ -45,6 +45,21 @@ _GPT_SOVITS_PYTHONPATH_SUBDIRS = [
 ]
 
 
+def config_get(config, *keys):
+    """双形态 config 读取（2026-10-16 实测修复）：前端进程持有 dict、主进程持有
+    Config——dict.get 的第二参数是"默认值"而非"第二键"，dict.get("paths",
+    "rvc_python") 会把整个 paths 节当值返回，str(dict) 被拼进路径后全部资产
+    预检误报缺失。dict 走逐键下钻，Config 走变长键 get(*keys)，两形态同语义。"""
+    if isinstance(config, dict):
+        node = config
+        for k in keys:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(k)
+        return node
+    return config.get(*keys)
+
+
 class AutolivePaths:
     """外部路径统一解析器。所有路径先取 config `paths` 节，缺省回落本机布局。"""
 
@@ -80,7 +95,7 @@ class AutolivePaths:
 
     def _resolve(self, key: str, default: str) -> str:
         """从 config paths 节读值；空值/缺键回落默认并记日志。"""
-        value = self.config.get("paths", key)
+        value = config_get(self.config, "paths", key)
         if not value or not str(value).strip():
             logger.info(f"[paths] 未配置 paths.{key}，使用默认值: {default}")
             return default

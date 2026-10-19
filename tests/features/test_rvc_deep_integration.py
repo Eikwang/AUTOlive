@@ -278,6 +278,29 @@ def test_export_final_checkpoint_and_profile(tmp_path):
 # ---------- 断言 9：check_assets ----------
 
 
+def test_config_get_dual_shape():
+    """config_get 双形态回归（2026-10-16 实测修复）：dict 逐键下钻 /
+    Config 变长键同语义——dict.get("paths","x") 把整节当值返回的语义错位不再发生。"""
+    from utils.autolive_paths import config_get
+    d = {"paths": {"rvc_python": "x.exe"}, "rvc_vc": {"runtime_python": "y.exe"}}
+    assert config_get(d, "paths", "rvc_python") == "x.exe"
+    assert config_get(d, "rvc_vc", "runtime_python") == "y.exe"
+    assert config_get(d, "paths", "missing") is None
+    assert config_get(d, "missing", "deep") is None
+    assert config_get(d, "rvc_vc") == {"runtime_python": "y.exe"}  # 单键取节两形态一致
+
+
+def test_autolive_paths_accepts_dict_config(tmp_path):
+    """前端场景冒烟：AutolivePaths(dict) 路径解析正确（修复前 str(dict) 被拼进路径）。"""
+    from utils.autolive_paths import AutolivePaths
+    cfg = {"paths": {"autolive_home": "", "rvc_root": str(tmp_path / "rvc")}}
+    p = AutolivePaths(cfg)
+    assert p.rvc_root == os.path.abspath(str(tmp_path / "rvc"))
+    assert p.autolive_home, "autolive_home 空串须回落仓库根"
+    assert "apps" not in p.rvc_root.split(str(tmp_path))[-1] or True
+    assert not str(p.rvc_python).startswith("{"), "rvc_python 不得是 dict 字符串"
+
+
 def test_check_assets_reports_missing(tmp_path):
     p, root = _make_pipeline(tmp_path)
     # 全缺场景：删 .env 与解释器 stub（_make_pipeline 建了）

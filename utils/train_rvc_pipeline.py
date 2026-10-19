@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
-from utils.autolive_paths import AutolivePaths
+from utils.autolive_paths import AutolivePaths, config_get
 from utils.my_log import logger
 from utils.train_process_utils import (
     cleanup_after_step,
@@ -470,7 +470,8 @@ class TrainRvcPipeline:
         shutil.copy2(final_pth, dst_pth)
         shutil.copy2(idx_src, dst_idx)
         # py39 翻唱 runtime 双冒烟（P-11+outside 发现 5：.pth load+faiss.read_index）
-        smoke_py = (self.config.get("rvc_vc", "runtime_python")
+        # config_get：前端 dict config 下 dict.get("rvc_vc", "x") 会返回整个节
+        smoke_py = (config_get(self.config, "rvc_vc", "runtime_python")
                     or r"D:\AI\RVC20240604Nvidia\runtime\python.exe")
         code = ("import sys, torch, faiss\n"
                 f"torch.load(r'{dst_pth}', map_location='cpu')\n"

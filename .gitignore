@@ -366,3 +366,4 @@ logs/
 data/edtalk_train/
 edtalk/train_progress/
 edtalk/wy/
+frontend/config/.tts_inproc_hinted

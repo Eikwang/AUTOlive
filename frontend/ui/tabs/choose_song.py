@@ -93,8 +93,14 @@ def create_choose_song_tab(
                 opts = {pid: (p.get("name") or pid) for pid, p in profs.items() if p.get("rvc_model")}
                 if not opts:
                     opts = {"default": "（默认：models/rvc/ 第一个模型）"}
+                # NiceGUI select 的 value 必须是 options 的键：config 未存过档案 id 时
+                # 旧代码回落 "default"——有档案后 options 不含该键，页面加载即
+                # "Invalid value: default"。归一到首个可用键（空档案时即 "default"）。
+                saved_pid = get_nested_value(config, "choose_song", "cover_profile_id")
+                if saved_pid not in opts:
+                    saved_pid = next(iter(opts))
                 _auto_save(ui.select(label='翻唱音色档案（RVC）',
-                                     value=get_nested_value(config, "choose_song", "cover_profile_id") or "default",
+                                     value=saved_pid,
                                      options=opts).style("width:100%;"),
                            keys=("choose_song", "cover_profile_id"))
                 with ui.column().style("width:100%"):
