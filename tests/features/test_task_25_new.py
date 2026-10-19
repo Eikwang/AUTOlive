@@ -56,6 +56,8 @@ def mock_drawer():
 @pytest.fixture
 def layout(config, mock_drawer):
     """创建 DrawerLayout 实例"""
+    from frontend.styles.themes import init_theme_manager
+    init_theme_manager(config)  # _render_tab_content 依赖全局主题管理器
     with patch('frontend.ui.layout.ui') as mock_ui:
         mock_ui.left_drawer.return_value = mock_drawer
         from frontend.ui.layout import DrawerLayout
@@ -73,41 +75,34 @@ def layout(config, mock_drawer):
         return layout
 
 def test_show_config_page_displays_config_items(layout):
-    """测试显示配置页面显示配置项"""
+    """测试显示配置页面按 tab_key 分发到对应 tab 模块"""
     # 先设置 function_items
     layout.function_items = {
-        "通用配置": {"enabled": True, "tab_key": "common_config"}
+        "通用配置": {"tab_key": "common_config"}
     }
 
-    with patch('frontend.ui.layout.ui') as mock_ui:
-        mock_column = MagicMock()
-        mock_ui.column.return_value = mock_column
-
+    with patch('frontend.ui.tabs.common_config.create_common_config_tab') as mock_tab:
         layout.show_config_page("通用配置")
 
-        # 验证配置页面被渲染到 splitter.after 中
-        layout.config_page.clear.assert_called()
+        # 验证配置渲染分发到 common_config tab 模块（现行契约：布局层只分发）
+        mock_tab.assert_called_once()
 
 def test_show_config_page_clears_previous_content(layout):
     """测试显示配置页面时清除之前的内容"""
-    # 设置之前的容器
-    mock_container = MagicMock()
-    layout.config_page_container = mock_container
-
     # 设置 function_items
     layout.function_items = {
-        "通用配置": {"enabled": True, "tab_key": "common_config"}
+        "通用配置": {"tab_key": "common_config"}
     }
 
-    with patch('frontend.ui.layout.ui') as mock_ui:
-        mock_column = MagicMock()
-        mock_ui.column.return_value = mock_column
-
+    with patch('frontend.ui.tabs.common_config.create_common_config_tab'):
         layout.show_config_page("通用配置")
 
         # 验证清除了之前的内容（可能被调用多次）
-        assert mock_container.clear.call_count >= 1
+        assert layout.config_page.clear.call_count >= 1
 
+@pytest.mark.skip(reason="退役：布局层不再直接渲染 ui.input/ui.switch，配置控件已下沉到 "
+                        "frontend/ui/tabs/ 各 tab 模块（任务26 tab 化），旧 config_items "
+                        "通用渲染契约消亡（门禁A 2026-10-19）")
 def test_show_config_page_displays_input_fields(layout):
     """测试显示配置页面显示输入框"""
     # 设置 function_items
@@ -124,6 +119,9 @@ def test_show_config_page_displays_input_fields(layout):
         # 验证调用了 ui.input
         assert mock_ui.input.call_count >= 1
 
+@pytest.mark.skip(reason="退役：布局层不再直接渲染 ui.input/ui.switch，配置控件已下沉到 "
+                        "frontend/ui/tabs/ 各 tab 模块（任务26 tab 化），旧 config_items "
+                        "通用渲染契约消亡（门禁A 2026-10-19）")
 def test_show_config_page_displays_switch_fields(layout):
     """测试显示配置页面显示开关"""
     # 设置 function_items

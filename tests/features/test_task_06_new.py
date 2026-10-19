@@ -7,6 +7,13 @@ TDD RED 阶段：先写测试，确认失败
 import pytest
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+
+def _init_theme(config):
+    """初始化全局主题管理器（_render_tab_content 依赖）"""
+    from frontend.styles.themes import init_theme_manager
+    init_theme_manager(config)
 
 
 class TestFunctionListDisplay:
@@ -61,7 +68,10 @@ class TestFunctionListDisplay:
         mock_cp.__enter__ = MagicMock(return_value=mock_cp)
         mock_cp.__exit__ = MagicMock(return_value=False)
         layout.config_page = mock_cp
-        layout.show_function_list("基础设置")
+        _init_theme(config)
+        # 布局层按 tab_key 分发到 tab 模块（任务26），patch 掉避免真实渲染
+        with patch('frontend.ui.tabs.common_config.create_common_config_tab'):
+            layout.show_function_list("基础设置")
         # Then: function_list.clear 被调用
         layout.function_list.clear.assert_called()
 
@@ -102,8 +112,10 @@ class TestFunctionListDisplay:
         mock_cp.__enter__ = MagicMock(return_value=mock_cp)
         mock_cp.__exit__ = MagicMock(return_value=False)
         layout.config_page = mock_cp
-        layout.show_function_list("基础设置")
-        layout.show_function_list("直播互动")
+        _init_theme(config)
+        with patch('frontend.ui.tabs.common_config.create_common_config_tab'):
+            layout.show_function_list("基础设置")
+            layout.show_function_list("直播互动")
         # Then: function_list.clear 被调用两次
         assert mock_fl.clear.call_count >= 2
 
@@ -158,7 +170,9 @@ class TestFunctionListDisplay:
         mock_cp.__enter__ = MagicMock(return_value=mock_cp)
         mock_cp.__exit__ = MagicMock(return_value=False)
         layout.config_page = mock_cp
-        layout.show_function_list("基础设置")
+        _init_theme(config)
+        with patch('frontend.ui.tabs.common_config.create_common_config_tab'):
+            layout.show_function_list("基础设置")
         # Then: function_items 包含功能项
         assert "通用配置" in layout.function_items
         assert "页面配置" in layout.function_items
@@ -193,10 +207,12 @@ class TestFunctionListDisplay:
         mock_cp.__enter__ = MagicMock(return_value=mock_cp)
         mock_cp.__exit__ = MagicMock(return_value=False)
         layout.config_page = mock_cp
-        layout.show_function_list("基础设置")
+        _init_theme(config)
+        with patch('frontend.ui.tabs.common_config.create_common_config_tab'):
+            layout.show_function_list("基础设置")
         # Then: function_items 存储功能信息
-        assert layout.function_items["通用配置"]["enabled"] is True
-        assert layout.function_items["通用配置"]["tab_key"] == "common_config"
+        # （任务6：enabled 随迁移退役，仅存 tab_key）
+        assert layout.function_items["通用配置"] == {"tab_key": "common_config"}
 
     def test_show_function_list_for_unknown_group(self):
         """测试 show_function_list 处理未知分组"""

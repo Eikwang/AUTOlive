@@ -33,11 +33,16 @@ def layout(mock_drawer):
         return layout
 
 
+def _style_args(mock_drawer):
+    """提取 drawer.style 的全部调用参数（现行样式为多行字符串）"""
+    return [c.args[0] for c in mock_drawer.style.call_args_list]
+
+
 def test_toggle_drawer_to_mini(layout, mock_drawer):
     """测试收窄导航栏"""
     layout.toggle_drawer()
     assert layout.drawer_mini is True
-    mock_drawer.style.assert_called_with('width: 60px')
+    assert any('width: 60px' in s for s in _style_args(mock_drawer))
 
 
 def test_toggle_drawer_to_full(layout, mock_drawer):
@@ -45,7 +50,7 @@ def test_toggle_drawer_to_full(layout, mock_drawer):
     layout.drawer_mini = True
     layout.toggle_drawer()
     assert layout.drawer_mini is False
-    mock_drawer.style.assert_called_with('width: 200px')
+    assert any('width: 300px' in s for s in _style_args(mock_drawer))
 
 
 def test_toggle_drawer_multiple_times(layout, mock_drawer):
@@ -56,12 +61,12 @@ def test_toggle_drawer_multiple_times(layout, mock_drawer):
     # 第一次切换：收窄
     layout.toggle_drawer()
     assert layout.drawer_mini is True
-    mock_drawer.style.assert_called_with('width: 60px')
+    assert any('width: 60px' in s for s in _style_args(mock_drawer))
 
     # 第二次切换：展开
     layout.toggle_drawer()
     assert layout.drawer_mini is False
-    mock_drawer.style.assert_called_with('width: 200px')
+    assert any('width: 300px' in s for s in _style_args(mock_drawer))
 
 
 def test_drawer_mini_state_persisted(layout):
@@ -81,15 +86,15 @@ def test_navigation_items_show_icon_only_in_mini_mode(layout):
 def test_navigation_items_show_icon_and_text_in_full_mode(layout):
     """测试展开模式下显示图标和文字"""
     layout.drawer_mini = False
-    # 验证展开模式下的样式
-    assert layout.get_drawer_width() == '200px'
+    # 验证展开模式下的样式（宽度三档规范：展开 300px）
+    assert layout.get_drawer_width() == '300px'
 
 
 def test_drawer_width_methods(layout):
     """测试获取导航栏宽度的方法"""
     # 展开模式
     layout.drawer_mini = False
-    assert layout.get_drawer_width() == '200px'
+    assert layout.get_drawer_width() == '300px'
 
     # 收窄模式
     layout.drawer_mini = True

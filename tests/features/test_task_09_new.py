@@ -1,13 +1,23 @@
 # -*- coding: UTF-8 -*-
 """
 Task-09: 实现配置页面显示 测试
-TDD RED 阶段：先写测试，确认失败
+2026-10-19 门禁A 重写：对齐现行渲染契约——
+render_config_page 已重构为"清空 config_page → 标题行 → DG-B1 状态条 →
+按 tab_key 调用真实 tab 模块函数"；未知 tab_key 走"暂无配置页面"兜底。
+config_items 驱动的 input/switch/select/textarea 通用渲染与 config_values
+副本存储已消亡（值经 set_config 回调直接写 config，唯一状态源）。
+测试环境须先 init_theme_manager（业务全局单例，_render_tab_content 依赖）。
 """
 
 import pytest
-import json
-from pathlib import Path
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(autouse=True)
+def _init_theme_manager():
+    """初始化全局主题管理器（render_config_page → _render_tab_content 依赖）"""
+    from frontend.styles.themes import init_theme_manager
+    init_theme_manager({"webui": {"theme": {"choose": "default"}}})
 
 
 def _create_layout(config):
@@ -26,108 +36,44 @@ def _create_layout(config):
 
 
 class TestConfigPageDisplay:
-    """测试配置页面显示"""
+    """测试配置页面显示（现行契约：tab 模块函数渲染）"""
 
     def test_drawer_layout_has_render_config_page_method(self):
         """测试 DrawerLayout 有 render_config_page 方法"""
         from frontend.ui.layout import DrawerLayout
         assert hasattr(DrawerLayout, 'render_config_page')
 
-    def test_render_config_page_displays_input(self):
-        """测试 render_config_page 显示输入框"""
-        config = {
-            "webui": {
-                "theme": {"choose": "default"},
-                "config_items": {
-                    "test_function": {
-                        "label": "测试功能",
-                        "type": "group",
-                        "items": {
-                            "test_input": {
-                                "label": "测试输入",
-                                "type": "input",
-                                "value": "test_value"
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    def test_render_config_page_clears_page_before_render(self):
+        """测试 render_config_page 渲染前清空 config_page"""
+        config = {"webui": {"theme": {"choose": "default"}}}
         layout = _create_layout(config)
         layout.render_config_page("test_function")
         layout.config_page.clear.assert_called()
 
-    def test_render_config_page_displays_switch(self):
-        """测试 render_config_page 显示开关"""
-        config = {
-            "webui": {
-                "theme": {"choose": "default"},
-                "config_items": {
-                    "test_function": {
-                        "label": "测试功能",
-                        "type": "group",
-                        "items": {
-                            "test_switch": {
-                                "label": "测试开关",
-                                "type": "switch",
-                                "value": True
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    def test_render_config_page_survives_unknown_tab_key(self):
+        """测试 render_config_page 对未知 tab_key 走兜底不抛异常"""
+        config = {"webui": {"theme": {"choose": "default"}}}
         layout = _create_layout(config)
-        layout.render_config_page("test_function")
-        layout.config_page.clear.assert_called()
+        # 不在 tab_mapping 的 tab_key 走"暂无配置页面"提示分支
+        layout.render_config_page("unknown_function")
 
-    def test_render_config_page_displays_select(self):
-        """测试 render_config_page 显示下拉选择框"""
-        config = {
-            "webui": {
-                "theme": {"choose": "default"},
-                "config_items": {
-                    "test_function": {
-                        "label": "测试功能",
-                        "type": "group",
-                        "items": {
-                            "test_select": {
-                                "label": "测试选择",
-                                "type": "select",
-                                "options": ["option1", "option2"],
-                                "value": "option1"
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    def test_render_config_page_resets_enable_path_state(self):
+        """测试 render_config_page 重置 DG-B1 启用开关状态条引用"""
+        config = {"webui": {"theme": {"choose": "default"}}}
         layout = _create_layout(config)
+        # 预置脏状态，渲染后应被重置（tab_key 无 ENABLE_PATHS 映射）
+        layout._current_page_enable_path = ("stale", "path")
+        layout.config_status_label = MagicMock()
         layout.render_config_page("test_function")
-        layout.config_page.clear.assert_called()
+        assert layout._current_page_enable_path is None
+        assert layout.config_status_label is None
 
     def test_render_config_page_displays_textarea(self):
-        """测试 render_config_page 显示多行文本框"""
-        config = {
-            "webui": {
-                "theme": {"choose": "default"},
-                "config_items": {
-                    "test_function": {
-                        "label": "测试功能",
-                        "type": "group",
-                        "items": {
-                            "test_textarea": {
-                                "label": "测试文本",
-                                "type": "textarea",
-                                "value": "test_content"
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        """测试 render_config_page 走真实 tab 渲染（以 log_config 为例，仅验证不抛异常）"""
+        config = {"webui": {"theme": {"choose": "default"}}}
         layout = _create_layout(config)
-        layout.render_config_page("test_function")
+        # 现行渲染按 tab_key 调用真实 tab 模块函数；选轻量 tab 验证链路可达
+        layout.render_config_page("log_config")
         layout.config_page.clear.assert_called()
 
     def test_render_config_page_for_unknown_function(self):
@@ -192,8 +138,8 @@ class TestConfigPageDisplay:
         layout = DrawerLayout(config)
         assert layout.config_values == {}
 
-    def test_render_config_page_stores_config_values(self):
-        """测试 render_config_page 存储配置值"""
+    def test_render_config_page_does_not_store_config_values(self):
+        """测试渲染不再向 config_values 存副本（现行契约：config 为唯一状态源）"""
         config = {
             "webui": {
                 "theme": {"choose": "default"},
@@ -214,5 +160,6 @@ class TestConfigPageDisplay:
         }
         layout = _create_layout(config)
         layout.render_config_page("test_function")
-        assert "test_input" in layout.config_values
-        assert layout.config_values["test_input"]["value"] == "test_value"
+        # 旧契约（渲染时把 config_items 值复制进 config_values）已消亡：
+        # 现行值经 set_config 回调直接写 config，config_values 恒为空
+        assert layout.config_values == {}

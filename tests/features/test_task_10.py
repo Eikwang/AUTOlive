@@ -6,6 +6,7 @@ Task-10: 实现配置保存 测试
 import pytest
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_auto_save():
     """测试 webui_new 包含自动保存功能"""
     with open("webui_new.py", "r", encoding="utf-8") as f:
@@ -18,6 +19,7 @@ def test_webui_new_has_auto_save():
     assert has_config_set, "webui_new.py 缺少配置保存功能"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_textarea_save():
     """测试 webui_new 包含文案保存功能"""
     with open("webui_new.py", "r", encoding="utf-8") as f:
@@ -30,6 +32,7 @@ def test_webui_new_has_textarea_save():
     assert has_save_button, "webui_new.py 缺少保存按钮"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_save_notification():
     """测试 webui_new 包含保存通知"""
     with open("webui_new.py", "r", encoding="utf-8") as f:

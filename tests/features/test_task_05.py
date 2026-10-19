@@ -6,6 +6,7 @@ Task-05: 创建功能分组数据结构 测试
 import pytest
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_config_groups():
     """测试 webui_new 包含功能分组数据结构"""
     with open("webui_new.py", "r", encoding="utf-8") as f:
@@ -26,6 +27,7 @@ def test_webui_new_has_config_groups():
     assert has_advanced, "webui_new.py 缺少高级功能分组"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_function_items():
     """测试 webui_new 包含功能项数据结构"""
     with open("webui_new.py", "r", encoding="utf-8") as f:

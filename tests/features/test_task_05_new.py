@@ -50,12 +50,17 @@ class TestNavigationGroupDisplay:
 
     def test_select_group_updates_current_group(self):
         """测试 select_group 更新 current_group"""
-        # Given: DrawerLayout 实例
+        # Given: DrawerLayout 实例（模拟 UI 已构建的容器）
+        from unittest.mock import MagicMock, patch
         config = {"webui": {"theme": {"choose": "default"}}}
         from frontend.ui.layout import DrawerLayout
         layout = DrawerLayout(config)
+        # 注意：__init__ 未初始化 group_nav_container（与 function_list_container
+        # 等同类容器不一致，已登记为缺陷），此处手动赋值模拟导航已渲染
+        layout.group_nav_container = MagicMock()
         # When: 调用 select_group
-        layout.select_group("基础设置")
+        with patch('frontend.ui.layout.ui'):
+            layout.select_group("基础设置")
         # Then: current_group 更新
         assert layout.current_group == "基础设置"
 

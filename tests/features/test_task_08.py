@@ -6,6 +6,7 @@ Task-08: 创建配置项数据结构 测试
 import pytest
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_config_item_types():
     """测试 webui_new 包含配置项类型"""
     with open("webui_new.py", "r", encoding="utf-8") as f:
@@ -22,6 +23,7 @@ def test_webui_new_has_config_item_types():
     assert has_textarea, "webui_new.py 缺少 textarea 类型配置"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_config_path():
     """测试 webui_new 包含配置路径"""
     with open("webui_new.py", "r", encoding="utf-8") as f:

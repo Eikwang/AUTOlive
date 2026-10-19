@@ -6,6 +6,7 @@ Task-09: 实现配置页面显示 测试
 import pytest
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_show_config_page():
     """测试 webui_new 包含显示配置页面函数"""
     with open("webui_new.py", "r", encoding="utf-8") as f:
@@ -18,6 +19,7 @@ def test_webui_new_has_show_config_page():
     assert has_config_container, "webui_new.py 缺少配置页面容器"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_config_rendering():
     """测试 webui_new 包含配置渲染逻辑"""
     with open("webui_new.py", "r", encoding="utf-8") as f:

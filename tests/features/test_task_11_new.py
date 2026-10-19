@@ -1,17 +1,26 @@
 # -*- coding: UTF-8 -*-
 """
 Task-11: 实现文案配置手动保存 测试
-TDD RED 阶段：先写测试，确认失败
+2026-10-19 门禁A 退役：DrawerLayout.manual_save 集中式手动保存机制已消亡，
+现行 textarea 保存走各 tab 内 _auto_save 自动保存（frontend/ui/tabs/*）；
+且测试主体依赖已裁决移除的 copywriting 模块。
 """
 
 import pytest
 import json
 from pathlib import Path
 
+_SKIP_REASON = (
+    "退役：DrawerLayout.manual_save 集中式手动保存机制已消亡，"
+    "现行 textarea 保存走各 tab 内 _auto_save 自动保存；"
+    "且依赖已裁决移除的 copywriting 模块（门禁A 2026-10-19）"
+)
+
 
 class TestTextareaManualSave:
-    """测试文案配置手动保存"""
+    """测试文案配置手动保存（已退役，仅存 save_button_text 现行属性断言）"""
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_drawer_layout_has_manual_save_method(self):
         """测试 DrawerLayout 有 manual_save 方法"""
         # Given: DrawerLayout 类
@@ -20,6 +29,7 @@ class TestTextareaManualSave:
         from frontend.ui.layout import DrawerLayout
         assert hasattr(DrawerLayout, 'manual_save')
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_updates_config(self):
         """测试 manual_save 更新配置"""
         # Given: 配置字典
@@ -48,6 +58,7 @@ class TestTextareaManualSave:
         # Then: 配置中的值更新
         assert config["webui"]["config_items"]["copywriting"]["items"]["content"]["value"] == "new_content"
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_for_unknown_function(self):
         """测试 manual_save 处理未知功能"""
         # Given: 配置字典
@@ -63,6 +74,7 @@ class TestTextareaManualSave:
         layout.manual_save("unknown_function", "content", "new_content")
         # Then: 不抛出异常
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_for_unknown_item(self):
         """测试 manual_save 处理未知配置项"""
         # Given: 配置字典
@@ -84,6 +96,7 @@ class TestTextareaManualSave:
         layout.manual_save("copywriting", "unknown_item", "new_content")
         # Then: 不抛出异常
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_updates_config_values(self):
         """测试 manual_save 更新 config_values"""
         # Given: 配置字典
@@ -113,6 +126,7 @@ class TestTextareaManualSave:
         # Then: config_values 中的值更新
         assert layout.config_values["content"]["value"] == "new_content"
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_for_non_textarea(self):
         """测试 manual_save 处理非 textarea 类型"""
         # Given: 配置字典
@@ -161,6 +175,7 @@ class TestTextareaManualSave:
         # Then: save_button_text 初始值为 "保存"
         assert layout.save_button_text == "保存"
 
+    @pytest.mark.skip(reason=_SKIP_REASON)
     def test_manual_save_changes_button_text(self):
         """测试 manual_save 改变按钮文本"""
         # Given: 配置字典

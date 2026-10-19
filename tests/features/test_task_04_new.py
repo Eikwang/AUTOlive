@@ -59,32 +59,38 @@ class TestThemeToggle:
 
     def test_css_variables_has_dark_theme(self):
         """测试 CSS 变量有深色主题定义"""
-        # Given: frontend.styles.themes 模块
-        # When: 检查 CSS 变量
-        # Then: 包含深色主题定义
-        from frontend.styles.themes import CSS_VARIABLES
-        assert ".dark" in CSS_VARIABLES
+        # Given: design_tokens 模块（设计令牌统一定义处，themes.py 引用其变量）
+        # When: 生成注入的 CSS 变量
+        # Then: 包含深色主题覆盖段
+        from frontend.styles.design_tokens import inject_design_tokens
+        css = inject_design_tokens()
+        assert "body--dark" in css
 
     def test_css_variables_has_light_theme(self):
         """测试 CSS 变量有浅色主题定义"""
-        # Given: frontend.styles.themes 模块
-        # When: 检查 CSS 变量
-        # Then: 包含浅色主题定义
-        from frontend.styles.themes import CSS_VARIABLES
-        assert ":root" in CSS_VARIABLES
+        # Given: design_tokens 模块
+        # When: 生成注入的 CSS 变量
+        # Then: 包含浅色主题 :root 段
+        from frontend.styles.design_tokens import inject_design_tokens
+        css = inject_design_tokens()
+        assert ":root" in css
 
     def test_css_variables_has_bg_color(self):
         """测试 CSS 变量有背景色定义"""
-        # Given: frontend.styles.themes 模块
-        # When: 检查 CSS 变量
-        # Then: 包含背景色定义
-        from frontend.styles.themes import CSS_VARIABLES
-        assert "--bg-color" in CSS_VARIABLES
+        # Given: design_tokens 模块
+        # When: 生成注入的 CSS 变量
+        # Then: 包含背景色变量（--bg-*）
+        from frontend.styles.design_tokens import inject_design_tokens
+        css = inject_design_tokens()
+        assert "--bg-page" in css
+        assert "--bg-card" in css
 
     def test_css_variables_has_text_color(self):
         """测试 CSS 变量有文字色定义"""
-        # Given: frontend.styles.themes 模块
-        # When: 检查 CSS 变量
-        # Then: 包含文字色定义
-        from frontend.styles.themes import CSS_VARIABLES
-        assert "--text-color" in CSS_VARIABLES
+        # Given: design_tokens 模块
+        # When: 生成注入的 CSS 变量
+        # Then: 包含文字色变量（--text-*）
+        from frontend.styles.design_tokens import inject_design_tokens
+        css = inject_design_tokens()
+        assert "--text-title" in css
+        assert "--text-body" in css

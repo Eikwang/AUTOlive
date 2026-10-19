@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_drawer_toggle():
     """测试 webui_new 包含导航栏折叠功能"""
     # Given: webui_new.py 存在
@@ -24,6 +25,7 @@ def test_webui_new_has_drawer_toggle():
     assert has_drawer_mini, "webui_new.py 缺少导航栏状态变量"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_drawer_state_persistence():
     """测试 webui_new 包含导航栏状态持久化"""
     # Given: webui_new.py 存在
@@ -38,6 +40,7 @@ def test_webui_new_has_drawer_state_persistence():
     assert has_save_state, "webui_new.py 缺少导航栏状态持久化功能"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_drawer_collapse_button():
     """测试 webui_new 包含导航栏折叠按钮"""
     # Given: webui_new.py 存在
@@ -52,6 +55,7 @@ def test_webui_new_has_drawer_collapse_button():
     assert has_collapse_button, "webui_new.py 缺少导航栏折叠按钮"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），源码文本断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_drawer_width_change():
     """测试 webui_new 包含导航栏宽度变化"""
     # Given: webui_new.py 存在

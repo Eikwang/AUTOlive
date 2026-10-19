@@ -28,6 +28,7 @@ def test_config_has_webui_section():
     assert "webui" in config, "配置文件缺少 webui 配置节"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_file_exists():
     """测试 webui_new.py 文件存在"""
     # Given: 项目根目录
@@ -37,6 +38,7 @@ def test_webui_new_file_exists():
     assert file_path.exists(), "webui_new.py 文件不存在"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_drawer_components():
     """测试 webui_new 包含导航栏组件"""
     # Given: webui_new.py 存在
@@ -53,6 +55,7 @@ def test_webui_new_has_drawer_components():
     assert has_splitter, "webui_new.py 缺少分割布局组件"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_card_components():
     """测试 webui_new 包含卡片组件"""
     # Given: webui_new.py 存在
@@ -67,6 +70,7 @@ def test_webui_new_has_card_components():
     assert has_card, "webui_new.py 缺少卡片组件"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_theme_toggle():
     """测试 webui_new 包含主题切换功能"""
     # Given: webui_new.py 存在
@@ -83,6 +87,7 @@ def test_webui_new_has_theme_toggle():
     assert has_dark_mode, "webui_new.py 缺少暗色模式支持"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_search_function():
     """测试 webui_new 包含搜索功能"""
     # Given: webui_new.py 存在
@@ -99,6 +104,7 @@ def test_webui_new_has_search_function():
     assert has_search_input, "webui_new.py 缺少搜索输入框"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_system_control():
     """测试 webui_new 包含系统控制功能"""
     # Given: webui_new.py 存在
@@ -115,6 +121,7 @@ def test_webui_new_has_system_control():
     assert has_run_button, "webui_new.py 缺少运行/停止按钮"
 
 
+@pytest.mark.skip(reason="退役：webui_new.py 已随模块化重构移除（现行入口 webui.py + frontend/ 包），断言对象消亡，功能由 test_task_*_new.py 验收（门禁A 2026-10-19）")
 def test_webui_new_has_config_groups():
     """测试 webui_new 包含功能分组"""
     # Given: webui_new.py 存在

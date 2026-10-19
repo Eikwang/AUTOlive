@@ -109,14 +109,16 @@ class TestCSSVariables:
         assert themes is not None
 
     def test_themes_module_has_light_theme_variables(self):
-        """测试 themes 模块有浅色主题变量"""
+        """测试 themes 模块背景样式走现行 CSS 变量令牌"""
         # Given: frontend.styles.themes 模块
         # When: 检查内容
-        # Then: 包含浅色主题变量
+        # Then: 背景样式经现行令牌 --bg-page/--bg-card 引用
+        # （设计令牌重构后旧 --bg-color 已退役，令牌权威定义见
+        #   frontend/styles/design_tokens.py，浅深两套各含 bg-page/bg-card）
         from frontend.styles import themes
         import inspect
         source = inspect.getsource(themes)
-        assert "--bg-color" in source or "bg_color" in source
+        assert "--bg-page" in source or "--bg-card" in source
 
     def test_themes_module_has_dark_theme_variables(self):
         """测试 themes 模块有深色主题变量"""
