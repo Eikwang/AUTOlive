@@ -19,6 +19,14 @@ class My_Translate:
         self.baidu_config = self.config.get("translate", "baidu")
         self.google_config = self.config.get("translate", "google")
 
+        # uc2/LLM 翻译接线（切片 3 收尾）：my_handle 在 GPT 通道就绪后注入回调
+        # fn(text) -> str 或 None；未注入时 custom_llm_trans 按未翻译处理
+        self._llm_translator = None
+
+    def set_llm_translator(self, fn) -> None:
+        """注入 LLM 翻译回调（fn(text)->str；异常/None 由调用方按失败处理）。"""
+        self._llm_translator = fn
+
 
     # 重载config
     def reload_config(self, config_path):
@@ -29,7 +37,7 @@ class My_Translate:
 
         Args:
             text (str): 待翻译的文本
-            type (str): 翻译类型（baidu/google)
+            type (str): 翻译类型（baidu/google/argos/custom_llm）
 
         Returns:
             (str)：翻译后的文本
@@ -46,6 +54,11 @@ class My_Translate:
             return self.baidu_trans(text)
         elif type == "google":
             return self.google_trans(text)
+        elif type == "argos":
+            # P27：argos 离线兜底翻译（不可用返回 None，调用方按翻译失败降级）
+            return self.argos_trans(text)
+        elif type == "custom_llm":
+            return self.custom_llm_trans(text)
         else:
             return self.google_trans(text)
         
@@ -140,4 +153,38 @@ class My_Translate:
         except Exception as e:
             logger.error(traceback.format_exc())
 
+            return None
+
+    def argos_trans(self, text):
+        """argos 离线翻译（P27：开源 argos-translate 整合，离线兜底定位）
+
+        Args:
+            text (str): 待翻译的文本
+
+        Return:
+            (str)：翻译后的文本；argos 不可用（未安装/离线模型缺失/语言对不支持）
+                   返回 None——T4 降级：调用方按翻译失败处理
+        """
+        from utils.translate_argos import translate_argos
+        from_lang = self.config.get("translate", "argos", "from_lang") or "auto"
+        to_lang = self.config.get("translate", "argos", "to_lang") or "zh"
+        return translate_argos(text, from_lang=from_lang, to_lang=to_lang)
+
+    def custom_llm_trans(self, text):
+        """自定义LLM翻译（uc2 终门裁决：LLM 翻译为默认首选新增选项）
+
+        回调由 my_handle 在 GPT 通道就绪后经 set_llm_translator 注入；未注入或
+        回调返回空/抛错时返回 None（调用方按翻译失败处理，弹幕原文直通 LLM
+        主链路，不阻塞），不返回占位串以免污染下游。
+        """
+        if self._llm_translator is None:
+            logger.warning(
+                "[translate-llm] 自定义LLM翻译回调未注入——"
+                "翻译请求按未翻译处理（返回原文走主链路）")
+            return None
+        try:
+            out = self._llm_translator(text)
+            return out or None
+        except Exception as e:
+            logger.error(f"[translate-llm] LLM 翻译失败，原文直通主链路：{e}")
             return None

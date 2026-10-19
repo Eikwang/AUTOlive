@@ -139,6 +139,8 @@ class ProcessingMixin:
                 "api_0706": self.config.get("gpt_sovits", "api_0706"),
                 "v2_api_0821": self.config.get("gpt_sovits", "v2_api_0821"),
                 "webtts": self.config.get("gpt_sovits", "webtts"),
+                # P26 变速迁移：合成请求构造处接 speed（合成参数变速，优先于 pydub 回退）
+                "speed": self.config.get("gpt_sovits", "params", "speed_factor"),
                 "content": content
             }
                     

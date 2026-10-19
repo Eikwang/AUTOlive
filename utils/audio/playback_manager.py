@@ -84,8 +84,16 @@ class PlaybackMixin:
                         await asyncio.sleep(normal_interval)
 
                     # 音频变速
+                    # P26 门禁：变速迁移双路径并存——合成侧已应用语速（synth_speed 标记，
+                    # ≠1.0）时跳过 pydub 变速避免双重变速；pydub speedup 为回退路径，
+                    # 仅对无 speed 参数的旧路径生效
+                    # （P26 spike：inproc speed_factor 生效性需 GPU 环境启动 inproc 实测；
+                    # 实测失败时此 pydub 路径过渡一个批次后按迁移开关退役）
+                    _synth_speed = data_json.get("synth_speed")
                     random_speed = 1
-                    if self.config.get("audio_random_speed", "normal", "enable"):
+                    if _synth_speed is not None and float(_synth_speed) != 1.0:
+                        logger.debug(f"合成侧已应用语速 synth_speed={_synth_speed}，跳过 pydub 随机变速")
+                    elif self.config.get("audio_random_speed", "normal", "enable"):
                         random_speed = self.common.get_random_value(self.config.get("audio_random_speed", "normal", "speed_min"),
                                                                     self.config.get("audio_random_speed", "normal", "speed_max"))
                         voice_tmp_path = self.audio_speed_change(voice_tmp_path, random_speed)

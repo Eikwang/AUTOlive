@@ -61,10 +61,8 @@
       "talk": 15,
       "idle_time_task": 10,
       "schedule": 10,
-      "image_recognition_schedule": 10,
       "trends_copywriting": 10,
-      "abnormal_alarm": 5,
-      "copywriting": 1
+      "abnormal_alarm": 5
     },
     "api_ip_port": "http://127.0.0.1:5602"
   },
@@ -121,8 +119,6 @@
     "schedule_forget_reserve_num": 1,
     "idle_time_task_forget_duration": 0.1,
     "idle_time_task_forget_reserve_num": 1,
-    "image_recognition_schedule_forget_duration": 0.1,
-    "image_recognition_schedule_forget_reserve_num": 1,
     "limited_time_deduplication": {
       "enable": true,
       "comment": 10,
@@ -133,12 +129,10 @@
     "voice_tmp_path_queue_max_len": 100,
     "voice_tmp_path_queue_min_start_play": 0,
     "priority_mapping": {
-      "copywriting": 1,
       "abnormal_alarm": 1,
       "trends_copywriting": 10,
       "schedule": 10,
       "idle_time_task": 10,
-      "image_recognition_schedule": 10,
       "local_qa_audio": 20,
       "entrance": 20,
       "comment": 20,
@@ -157,7 +151,8 @@
     "blacklist": {
       "enable": true,
       "username": []
-    }
+    },
+    "filter_master_enable": true
   },
   "thanks": {
     "entrance_enable": true,
@@ -307,35 +302,6 @@
   "gpt_sovits": {
     "backend": "inproc",
     "api_ip_port": "http://127.0.0.1:9880",
-    "v2_api_0821": {
-      "text_lang": "zh",
-      "ref_audio_path": "F:\\GPT-SoVITS-0304\\output\\slicer_opt\\smoke1.wav",
-      "aux_ref_audio_paths": [],
-      "prompt_lang": "zh",
-      "prompt_text": "整整策划了半年了，终于现在有结果了",
-      "top_k": 5,
-      "top_p": 1.0,
-      "temperature": 1.0,
-      "text_split_method": "cut0",
-      "batch_size": 1,
-      "batch_threshold": 0.75,
-      "split_bucket": true,
-      "speed_factor": 1.0,
-      "fragment_interval": 0.3,
-      "seed": -1,
-      "media_type": "wav",
-      "streaming_mode": false,
-      "parallel_infer": true,
-      "repetition_penalty": 1.35
-    },
-    "webtts": {
-      "version": "1",
-      "api_ip_port": "http://127.0.0.1:8080",
-      "spk": "sanyueqi",
-      "lang": "zh",
-      "speed": "1.0",
-      "emotion": "正常"
-    },
     "params": {
       "version": "v2ProPlus",
       "device": "cuda",
@@ -348,16 +314,10 @@
       "ref_audio_path": "D:\\AI\\GPT-SoVITS\\参考音频\\1.古灵精怪Haa.wav",
       "prompt_text": "マスター、どうりょくろか、いいえ、なんでもありません",
       "prompt_lang": "ja",
-      "top_k": 5,
-      "top_p": 1.0,
-      "temperature": 1.0,
       "text_split_method": "cut0",
-      "batch_size": 1,
       "speed_factor": 1.0,
-      "fragment_interval": 0.3,
-      "repetition_penalty": 1.35,
-      "seed": -1,
-      "parallel_infer": true
+      "ref_audio_paths": [],
+      "ref_free": true
     }
   },
   "choose_song": {
@@ -381,7 +341,8 @@
       "唱首歌吧"
     ],
     "song_path": "song",
-    "match_fail_copy": "抱歉，我还没学会唱{content}"
+    "match_fail_copy": "抱歉，我还没学会唱{content}",
+    "gift_song_map": {}
   },
   "header": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.42"
@@ -987,6 +948,10 @@
       "proxy": "http://localhost:10809",
       "src_lang": "auto",
       "tgt_lang": "en"
+    },
+    "argos": {
+      "from_lang": "auto",
+      "to_lang": "zh"
     }
   },
   "abnormal_alarm": {
@@ -1736,5 +1701,11 @@
     "fine_tune_iter": 20000,
     "start_stage": 2,
     "epoch": 2
-  }
+  },
+  "edge_tts": {
+    "voice": "zh-CN-XiaoxiaoNeural",
+    "rate": "100%",
+    "extra_args_json": ""
+  },
+  "schedule_groups": []
 }

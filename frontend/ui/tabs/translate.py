@@ -28,11 +28,20 @@ def create_translate_tab(
 
     with ui.grid(columns=3):
         with ui.column().style("width:100%;"):
+            # 类型选项（uc2 终门裁决：LLM 翻译为默认首选新增；argos 为系统内置
+            # 离线兜底；百度/谷歌退役时点由终门裁决——本批保留选项）
             _auto_save(ui.select(
                 label='类型',
-                options={'baidu': '百度翻译', 'google': '谷歌翻译'},
+                options={
+                    'custom_llm': '自定义LLM翻译',
+                    'argos': 'argos（离线兜底）',
+                    'baidu': '百度翻译',
+                    'google': '谷歌翻译',
+                },
                 value=get_nested_value(config, "translate", "type")
-            ).style("width:100%;"), ("translate", "type"))
+            ).style("width:100%;").tooltip(
+                '自定义LLM翻译：把文本发给自定义LLM（带翻译提示词，默认首选）；'
+                'argos：离线翻译（需安装 argostranslate 与语言包，缺模型时自动降级）'), ("translate", "type"))
         _auto_save(ui.select(
             label='翻译类型',
             options={'弹幕': '弹幕', '回复': '回复', '弹幕+回复': '弹幕+回复'},

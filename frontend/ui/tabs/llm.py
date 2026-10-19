@@ -239,6 +239,7 @@ def _create_fastrag_card(
 
         # ---------- 上传文档 UI（义务块"fastrag 系统级整合"：多文档+文件名清洗 F-E5+五件套） ----------
         upload_docs_label = ui.label("尚未选择文档").style("color: var(--text-hint)")
+        doc_status_col = ui.column().style("width:100%;gap:2px")  # 逐文件状态行（D4）
 
         def _collect_doc(e):
             name = getattr(e, "name", "")
@@ -254,26 +255,79 @@ def _create_fastrag_card(
             kb = os.path.join(_fastrag_dir(), "knowledgebase")
             os.makedirs(kb, exist_ok=True)
             import re as _re
-            saved = 0
-            for f in list(_pending_docs):
-                safe = os.path.basename(getattr(f, "name", "doc.md"))
-                stem = _re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff-]", "_", os.path.splitext(safe)[0]) or "doc"
-                target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
-                n = 1
-                while os.path.exists(target):
-                    target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
-                    n += 1
-                with open(target, "wb") as out:
-                    out.write(f.content.read())
-                _pending_docs.remove(f)
-                saved += 1
-            upload_docs_label.set_text(f"已落盘 {saved} 份到 edtalk/fastrag/knowledgebase/（点击构建生效）")
+            saved, failed = 0, 0
+            doc_status_col.clear()
+            with doc_status_col:
+                for f in list(_pending_docs):
+                    safe = os.path.basename(getattr(f, "name", "doc.md"))
+                    stem = _re.sub(r"[^A-Za-z0-9_一-鿿-]", "_", os.path.splitext(safe)[0]) or "doc"
+                    target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
+                    n = 1
+                    while os.path.exists(target):
+                        target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
+                        n += 1
+                    try:
+                        with open(target, "wb") as out:
+                            out.write(f.content.read())
+                        _pending_docs.remove(f)
+                        saved += 1
+                        # 逐文件状态行（D4）：已保存
+                        ui.label(f"✓ 已保存：{os.path.basename(target)}").style(
+                            "font-size: var(--font-size-assist, 12px); color: var(--color-positive, #16a34a);")
+                    except Exception as e:
+                        failed += 1
+                        # 逐文件状态行（D4）：失败原因
+                        ui.label(f"✗ 失败：{safe}——{e}").style(
+                            "font-size: var(--font-size-assist, 12px); color: var(--color-danger, #dc2626);")
+            if failed:
+                upload_docs_label.set_text(f"已落盘 {saved} 份、失败 {failed} 份（原因见下方状态行）；点击构建生效")
+            else:
+                upload_docs_label.set_text(f"已落盘 {saved} 份到 edtalk/fastrag/knowledgebase/（点击构建生效）")
+            _refresh_kb_list()
 
         ui.upload(
             label="上传知识库文档（.md/.txt，可多选）",
             multiple=True, auto_upload=False, on_upload=_collect_doc,
         ).props('accept=".md,.txt"').style("width:100%")
         ui.button("落盘所选文档", on_click=lambda: _persist_docs()).props("outline")
+
+        # ---------- 已入库文档列表（D4：读 knowledgebase/ 目录+删除按钮） ----------
+        # 说明：utils/fastrag 服务端点仅 /health /query /batch_query /clear_cache，无上传 API——
+        # 前端直写 knowledgebase/ 目录即入库源（构建索引后生效），无需动 utils/fastrag。
+        ui.label("已入库文档（edtalk/fastrag/knowledgebase/）").style(
+            "font-size: var(--font-size-body, 14px);")
+        ui.label("删除文档后需重新『构建知识库』生成索引").style(
+            "color: var(--text-hint); font-size: var(--font-size-assist, 12px);")
+        kb_list_col = ui.column().style("width:100%;gap:2px;max-height:200px;overflow:auto")
+
+        def _refresh_kb_list():
+            kb = os.path.join(_fastrag_dir(), "knowledgebase")
+            files = sorted(
+                fn for fn in (os.listdir(kb) if os.path.isdir(kb) else [])
+                if fn.endswith((".md", ".txt"))
+            )
+            kb_list_col.clear()
+            with kb_list_col:
+                if not files:
+                    ui.label("（空）——上传文档并落盘后在此列出").style(
+                        "color: var(--text-hint); font-size: var(--font-size-assist, 12px);")
+                for fn in files:
+                    with ui.row().style("width:100%;align-items:center;gap:4px"):
+                        ui.label(f"📄 {fn}").style("font-size: var(--font-size-assist, 12px);")
+
+                        def _del_doc(name=fn):
+                            try:
+                                os.remove(os.path.join(kb, name))
+                                ui.notify(position="top", type="positive",
+                                          message=f"已删除 {name}（重新构建索引后生效）")
+                            except Exception as e:
+                                ui.notify(position="top", type="negative",
+                                          message=f"删除失败：{e}")
+                            _refresh_kb_list()
+
+                        ui.button(icon='delete', on_click=_del_doc).props('flat dense round')
+
+        _refresh_kb_list()
 
         # ---------- 请求模板参数页（R9 义务：六参数暴露+落盘 override+应用重启+脏标记 D6） ----------
         with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%"):

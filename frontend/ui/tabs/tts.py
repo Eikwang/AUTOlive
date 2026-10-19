@@ -11,6 +11,9 @@ import os
 from frontend.ui.components import FormField
 from frontend.utils.common import is_url_check
 from frontend.utils.audio import Audio
+from utils.audio_handle.tts_params import (
+    EDGE_TTS_VOICES, EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
+    filter_edge_voices, normalize_ref_paths)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ def create_tts_tab(
 ):
     """
     创建文本转语音标签页
-    
+
     Args:
         config: 配置字典
         theme_config: 主题配置
@@ -34,13 +37,12 @@ def create_tts_tab(
     switch_internal_css = theme_config.get("switch_internal", "")
     button_internal_color = get_nested_value(config, "button_internal_color", "primary")
     button_internal_css = theme_config.get("button_internal_css", "")
-    
-    # 音频合成类型选项
+
+    # 音频合成类型选项（D-19：与通用配置"语音合成"下拉共用同一 config 键
+    # audio_synthesis_type；任务书：GPT_SoVITS / edge-tts 两选项）
     audio_synthesis_type_options = {
-        'vits': 'VITS',
         'gpt_sovits': 'GPT-SoVITS',
-        'tts_api': 'TTS API',
-        'other': '其他',
+        'edge_tts': 'edge-tts',
     }
     
     # 通用-合成试听音频
@@ -136,239 +138,85 @@ def create_tts_tab(
         # 声音档案选择器（P2-4/D7：身份参数唯一入口——D-4 裁决双路径框退役）
         _render_voice_profile_selector(config, card_css)
 
-        # 进程内参数面板（D-3：16 项清单，写入 gpt_sovits.params——身份参数随档案、
-        # 风格参数页面级覆盖 DX-11）
+        # 进程内参数面板（切片 3 参数精简：任务书"只保留参考音频/参考语种/合成语种/
+        # 切分方式四项，其余使用系统默认"——top_k/top_p/temperature/batch_size/
+        # speed_factor/fragment_interval/repetition_penalty/seed 等 UI 项移除，
+        # 合成时引擎取系统默认值（my_tts 透传白名单同步精简）；
+        # P25：多参考音频（ref_audio_paths）+ 无参考文本模式（ref_free 默认开，
+        # 参考文本输入项随之移除）——inproc 通道生效性 P25 spike 需 GPU 环境实测，
+        # 失败自动降级单参考（my_tts 层回退预案，log warning 一次））
         with ui.expansion("合成参数（进程内引擎）").style("width:100%"):
+            with ui.grid(columns=2):
+                _ref_paths_cfg = normalize_ref_paths(
+                    get_nested_value(config, "gpt_sovits", "params", "ref_audio_paths"))
+                if not _ref_paths_cfg:
+                    _legacy_single = get_nested_value(config, "gpt_sovits", "params", "ref_audio_path")
+                    _ref_paths_cfg = [_legacy_single] if _legacy_single else []
+                ui.textarea(
+                    label='参考音频（多参考，每行一个路径）',
+                    value="\n".join(_ref_paths_cfg),
+                    placeholder='每行一个参考音频绝对路径；第一行为主参考，其余为辅助参考（实测 3 个以上音色质量最佳）',
+                    on_change=lambda e: set_config_callback(
+                        "gpt_sovits", "params", "ref_audio_paths",
+                        normalize_ref_paths(e.value)),
+                ).style("width:100%;")
+                ui.switch(
+                    '无参考文本模式（ref_free）',
+                    value=bool(get_nested_value(config, "gpt_sovits", "params", "ref_free", default=True)),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_free", e.value),
+                ).style(switch_internal_css)
             with ui.grid(columns=3):
-                FormField.create_input(label='参考音频路径', value=get_nested_value(config, "gpt_sovits", "params", "ref_audio_path"),
-                    placeholder='参考音频 wav 绝对路径（档案选择会自动覆盖）',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_audio_path", e.value), style="width:100%;")
-                FormField.create_input(label='参考音频文本', value=get_nested_value(config, "gpt_sovits", "params", "prompt_text"),
-                    placeholder='参考音频所说的文本',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_text", e.value), style="width:100%;")
-                FormField.create_input(label='参考音频语言', value=get_nested_value(config, "gpt_sovits", "params", "prompt_lang"),
-                    placeholder='zh',
+                FormField.create_select(label='参考语种', options={'zh':'中文', 'ja':'日文', 'en':'英文', 'ko':'韩文', 'yue':'粤语', 'auto':'自动'},
+                    value=get_nested_value(config, "gpt_sovits", "params", "prompt_lang") or "zh",
                     on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_lang", e.value), style="width:100%;")
-                FormField.create_input(label='合成文本语言', value=get_nested_value(config, "gpt_sovits", "params", "text_lang"),
-                    placeholder='zh / auto',
+                FormField.create_select(label='合成语种', options={
+                        "all_zh": "中文", "all_yue": "粤语", "en": "英文", "all_ja": "日文",
+                        "all_ko": "韩文", "zh": "中英混合", "yue": "粤英混合", "ja": "日英混合",
+                        "ko": "韩英混合", "auto": "多语种混合", "auto_yue": "多语种混合(粤语)",
+                    },
+                    value=get_nested_value(config, "gpt_sovits", "params", "text_lang") or "zh",
                     on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_lang", e.value), style="width:100%;")
-                FormField.create_input(label='top_k', value=get_nested_value(config, "gpt_sovits", "params", "top_k"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "top_k", e.value), style="width:100%;")
-                FormField.create_input(label='top_p', value=get_nested_value(config, "gpt_sovits", "params", "top_p"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "top_p", e.value), style="width:100%;")
-                FormField.create_input(label='temperature', value=get_nested_value(config, "gpt_sovits", "params", "temperature"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "temperature", e.value), style="width:100%;")
-                FormField.create_input(label='切分方式', value=get_nested_value(config, "gpt_sovits", "params", "text_split_method"),
-                    placeholder='cut5',
+                FormField.create_select(label='切分方式', options={
+                        'cut0':'不切', 'cut1':'凑四句一切', 'cut2':'凑50字一切',
+                        'cut3':'按中文句号。切', 'cut4':'按英文句号.切', 'cut5':'按标点符号切'
+                    },
+                    value=get_nested_value(config, "gpt_sovits", "params", "text_split_method") or "cut5",
                     on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_split_method", e.value), style="width:100%;")
-                FormField.create_input(label='批大小', value=get_nested_value(config, "gpt_sovits", "params", "batch_size"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "batch_size", e.value), style="width:100%;")
-                FormField.create_input(label='语速', value=get_nested_value(config, "gpt_sovits", "params", "speed_factor"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "speed_factor", e.value), style="width:100%;")
-                FormField.create_input(label='片段间隔', value=get_nested_value(config, "gpt_sovits", "params", "fragment_interval"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "fragment_interval", e.value), style="width:100%;")
-                FormField.create_input(label='重复惩罚', value=get_nested_value(config, "gpt_sovits", "params", "repetition_penalty"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "repetition_penalty", e.value), style="width:100%;")
-                FormField.create_input(label='seed', value=get_nested_value(config, "gpt_sovits", "params", "seed"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "seed", e.value), style="width:100%;")
             ui.button('重新加载模型（按当前参数）', on_click=lambda: _load_gpt_sovits_model(config),
                       color=button_internal_color).style(button_internal_css)
 
-            
-        # v2_api_0821配置
+        # edge-tts 配置（切片 3：WebTTS 退役改用 EDGE-TTS——任务书；
+        # D-18：voice 搜索式下拉（内置常见 zh 声音清单+关键字过滤），默认值写明具体 voice 名；
+        # 语速 rate 对接 P26 音频播放变速改造，默认 100%；其余参数系统默认不设配置项，
+        # 高级参数 JSON 透传字段为 escape hatch（默认空=全默认））
         with ui.card().style(card_css):
-            ui.label("v2_api_0821")
+            ui.label("edge-tts 配置")
             with ui.grid(columns=3):
+                ui.select(
+                    label='音色（voice，输入关键字过滤）',
+                    options={v: v for v in EDGE_TTS_VOICES},
+                    value=get_nested_value(config, "edge_tts", "voice") or EDGE_TTS_DEFAULT_VOICE,
+                    with_input=True,
+                    new_value_mode='add',
+                    on_change=lambda e: set_config_callback("edge_tts", "voice", e.value),
+                ).style("width:100%;").tooltip('输入关键字过滤（如 xiaoxiao / zh）；支持键入清单外音色名')
                 FormField.create_input(
-                    label='参考音频路径', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "ref_audio_path"), 
-                    placeholder='参考音频路径，建议填绝对路径',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "ref_audio_path", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='参考音频的文本', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "prompt_text"), 
-                    placeholder='参考音频的文本',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "prompt_text", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='参考音频的语种', 
-                    options={'zh':'中文', 'ja':'日文', 'en':'英文'}, 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "prompt_lang"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "prompt_lang", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='需要合成的语种', 
-                    options={
-                        "all_zh": "中文",
-                        "all_yue": "粤语",
-                        "en": "英文",
-                        "all_ja": "日文",
-                        "all_ko": "韩文",
-                        "zh": "中英混合",
-                        "yue": "粤英混合",
-                        "ja": "日英混合",
-                        "ko": "韩英混合",
-                        "auto": "多语种混合",
-                        "auto_yue": "多语种混合(粤语)",
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "text_lang"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "text_lang", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='语句切分', 
-                    options={
-                        'cut0':'不切', 
-                        'cut1':'凑四句一切', 
-                        'cut2':'凑50字一切', 
-                        'cut3':'按中文句号。切', 
-                        'cut4':'按英文句号.切',
-                        'cut5':'按标点符号切'
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "text_split_method"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "text_split_method", e.value),
-                    style="width:100%;"
-                )
-            with ui.grid(columns=3):
-                FormField.create_input(
-                    label='top_k', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "top_k"), 
-                    placeholder='top_k',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "top_k", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='top_p', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "top_p"), 
-                    placeholder='top_p',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "top_p", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='temperature', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "temperature"), 
-                    placeholder='temperature',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "temperature", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='batch_size', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "batch_size"), 
-                    placeholder='batch_size',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "batch_size", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='batch_threshold', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "batch_threshold"), 
-                    placeholder='batch_threshold',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "batch_threshold", e.value),
-                    style="width:100%;"
-                )
-                ui.switch(
-                    'split_bucket', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "split_bucket"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "split_bucket", e.value)
-                ).style(switch_internal_css)
-                FormField.create_input(
-                    label='speed_factor', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "speed_factor"), 
-                    placeholder='speed_factor',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "speed_factor", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='分段间隔(秒)', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "fragment_interval"), 
-                    placeholder='fragment_interval',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "fragment_interval", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='seed', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "seed"), 
-                    placeholder='seed',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "seed", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='media_type', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "media_type"), 
-                    placeholder='media_type',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "media_type", e.value),
-                    style="width:100%;"
-                )
-                ui.switch(
-                    'parallel_infer', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "parallel_infer"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "parallel_infer", e.value)
-                ).style(switch_internal_css)
-                FormField.create_input(
-                    label='repetition_penalty', 
-                    value=get_nested_value(config, "gpt_sovits", "v2_api_0821", "repetition_penalty"), 
-                    placeholder='repetition_penalty',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "v2_api_0821", "repetition_penalty", e.value),
-                    style="width:100%;"
-                )
+                    label='语速 rate（默认 100%）',
+                    value=get_nested_value(config, "edge_tts", "rate") or EDGE_TTS_DEFAULT_RATE,
+                    placeholder='加快 1.2 倍填 +20%，减慢 0.9 倍填 -10%',
+                    on_change=lambda e: set_config_callback("edge_tts", "rate", e.value),
+                    style="width:100%;")
+                ui.textarea(
+                    label='高级参数 JSON 透传（默认空=全默认）',
+                    value=get_nested_value(config, "edge_tts", "extra_args_json") or "",
+                    placeholder='{"pitch": "+0Hz", "volume": "+0%"}',
+                    on_change=lambda e: set_config_callback("edge_tts", "extra_args_json", e.value),
+                ).style("width:100%;")
+
             
-        # WebTTS配置
-        with ui.card().style(card_css):
-            ui.label("WebTTS相关配置")
-            with ui.grid(columns=3):
-                FormField.create_select(
-                    label='版本', 
-                    options={
-                        '1':'1', 
-                        '1.4':'1.4', 
-                        '2':'2'
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "version"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "version", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='API地址', 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "api_ip_port"), 
-                    placeholder='API监听地址',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "api_ip_port", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='音色', 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "spk"), 
-                    placeholder='音色',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "spk", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_select(
-                    label='语言', 
-                    options={
-                        'zh':'中文', 
-                        'en':'英文', 
-                        'jp':'日文'
-                    }, 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "lang"),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "lang", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='语速', 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "speed"), 
-                    placeholder='语速',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "speed", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='情感', 
-                    value=get_nested_value(config, "gpt_sovits", "webtts", "emotion"), 
-                    placeholder='情感',
-                    on_change=lambda e: set_config_callback("gpt_sovits", "webtts", "emotion", e.value),
-                    style="width:100%;"
-                )
+        # v2_api_0821 配置卡与 WebTTS 配置卡已随切片 3 参数精简移除
+        # （任务书：v2_api_0821 旧参数与 WebTTS 相关配置退役，改用 EDGE-TTS；
+        # config 残留键由收尾批次键迁移清单处置，此处不再渲染）
 
 
 def _load_gpt_sovits_model(config: Dict[str, Any]):

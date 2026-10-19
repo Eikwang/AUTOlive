@@ -359,10 +359,19 @@ class SynthesisMixin:
                     "api_0706": message["data"]["api_0706"],
                     "v2_api_0821": message["data"]["v2_api_0821"],
                     "webtts": message["data"]["webtts"],
+                    # P26 变速迁移：运行时语速透传（合成参数变速；无值=系统默认）
+                    "speed": message["data"].get("speed"),
                     "content": message["content"]
                 }
 
                 voice_tmp_path = await self.my_tts.gpt_sovits_api(data)
+            elif message["tts_type"] == "edge_tts":
+                # edge-tts 合成（切片 3：WebTTS 退役改用 EDGE-TTS；P26 语速经 rate 映射）
+                _edge_data = message.get("data") or {}
+                voice_tmp_path = await self.my_tts.edge_tts_api({
+                    "content": message["content"],
+                    "speed": _edge_data.get("speed"),
+                })
             elif message["tts_type"] == "none":
                 # Audio.voice_tmp_path_queue.put(message)
                 voice_tmp_path = None
@@ -372,6 +381,13 @@ class SynthesisMixin:
                 "msg": "合成成功",
                 "audio_path": voice_tmp_path
             }
+            # P26：合成侧已应用语速时随结果透传（播放侧据此跳过 pydub 变速，双路径并存）
+            _speed = message.get("data", {}).get("speed")
+            if voice_tmp_path and _speed is not None:
+                try:
+                    message["result"]["synth_speed"] = float(_speed)
+                except (TypeError, ValueError):
+                    pass
         except Exception as e:
             logger.error(traceback.format_exc())
             message["result"] = {
@@ -450,13 +466,17 @@ class SynthesisMixin:
         
 
         # 判断消息类型，再变声并封装数据发到队列 减少冗余
-        async def voice_change_and_put_to_queue(message, voice_tmp_path):
+        async def voice_change_and_put_to_queue(message, voice_tmp_path, synth_speed=None):
             # 拼接json数据，存入队列
             data_json = {
                 "type": message['type'],
                 "voice_path": voice_tmp_path,
                 "content": message["content"]
             }
+
+            # P26：合成侧已应用语速时随条目透传（playback_manager 据此跳过 pydub 变速）
+            if synth_speed is not None:
+                data_json["synth_speed"] = synth_speed
 
             if "insert_index" in message:
                 data_json["insert_index"] = message["insert_index"]
@@ -499,7 +519,9 @@ class SynthesisMixin:
             return False
         
         logger.info(f"[{message['tts_type']}]合成成功，合成内容：【{message['content']}】，音频存储在 {voice_tmp_path}")
-                 
-        await voice_change_and_put_to_queue(message, voice_tmp_path)  
+
+        await voice_change_and_put_to_queue(
+            message, voice_tmp_path,
+            synth_speed=resp_json.get("result", {}).get("synth_speed"))
 
         return True

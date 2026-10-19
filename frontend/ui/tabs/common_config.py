@@ -43,7 +43,7 @@ def create_common_config_tab(
     # 漏列曾致通用配置页 "Invalid value: edtalk_realtime"（2026-10-06 基线既有问题，2026-10-12 修复）
     visual_body_options = {'metahuman_stream': 'metahuman_stream',
                            'edtalk_realtime': 'EDTalk 实时驱动'}
-    audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS'}
+    audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS', 'edge_tts': 'edge-tts'}  # D-19：与合成测试处下拉保持一致
 
     # 基础配置（3列网格）
     with ui.grid(columns=3):

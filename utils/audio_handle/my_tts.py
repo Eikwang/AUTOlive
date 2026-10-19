@@ -98,19 +98,36 @@ class MY_TTS:
                 logger.error("{type} 下载音频超时")
                 return None
 
-    # TTS.run 参数白名单（进程内直调；media_type/response_format/streaming_mode 为 HTTP 面专属，剥除）
+    # TTS.run 参数白名单（进程内直调；切片 3 参数精简——任务书"只保留参考音频/
+    # 参考语种/合成语种/切分方式四项，其余使用系统默认"：top_k/top_p/temperature/
+    # batch_size/fragment_interval/seed 等不再透传，引擎侧取默认值。
+    # speed_factor 保留= P26 变速迁移（合成参数变速，优先于 pydub 回退路径）；
+    # media_type/response_format/streaming_mode 为 HTTP 面专属，剥除）
     _INPROC_PARAM_KEYS = (
         "text_lang", "ref_audio_path", "aux_ref_audio_paths", "prompt_text", "prompt_lang",
-        "top_k", "top_p", "temperature", "text_split_method", "batch_size", "batch_threshold",
-        "split_bucket", "speed_factor", "fragment_interval", "seed", "parallel_infer",
-        "repetition_penalty", "return_fragment", "cut_punc",
+        "text_split_method", "speed_factor",
     )
+
+    # P25 降级一次性告警标记（多参考/ref_free 降级单参考时 log+notify 一次，防刷屏）
+    _ref_fallback_warned = False
 
     async def _gpt_sovits_inproc(self, data):
         """R-2：进程内合成。参数装配顺序=gpt_sovits.params（C-1 事实来源）>
-        v2_api_0821 节（过渡期兼容）> data 运行时值（身份参数随档案、风格参数页面级覆盖，DX-11）。"""
+        data 运行时值（P25 多参考/ref_free、P26 speed 运行时覆盖）。
+
+        P25 静态部分：参考音频支持列表（ref_audio_paths，第一行为主参考、
+        其余进 aux_ref_audio_paths——上游 TTS.run 原生参数）+ ref_free
+        无参考文本模式（默认开；装配层消化为 prompt_text=""，上游无 ref_free 键）。
+        P25 spike（需 GPU 环境启动 inproc 实测）：N>1 参考 + 空参考文本的
+        生效性——实测失败走降级单参考回退（log warning 一次）。
+
+        P26 静态部分：data["speed"]（运行时语速）优先写入 speed_factor；
+        pydub 变速为回退路径（playback_manager 仅对无 speed 参数的旧路径生效）。
+        P26 spike（需 GPU 环境实测）：inproc speed_factor 生效性。
+        """
         import asyncio
         from utils.gpt_sovits_inproc import get_engine
+        from utils.audio_handle.tts_params import normalize_ref_paths, build_inproc_refs
         engine = get_engine()
         if engine is None:
             logger.error("[TTS-inproc] 引擎未初始化（仅 main.py 核心进程可用）。"
@@ -124,20 +141,113 @@ class MY_TTS:
             logger.warning(f"[TTS-inproc] 引擎 {engine.raw_state()} 态，本次请求等待加载完成后执行")
         gs = self.config.get("gpt_sovits") or {}
         params_cfg = dict(gs.get("params") or {})
-        v2 = dict((data.get("v2_api_0821") or {}))  # 过渡期兼容：现网 v2 节参数透传
-        merged = {k: v2.get(k, params_cfg.get(k)) for k in self._INPROC_PARAM_KEYS
-                  if v2.get(k) is not None or params_cfg.get(k) is not None}
+        merged = {k: params_cfg.get(k) for k in self._INPROC_PARAM_KEYS
+                  if params_cfg.get(k) is not None}
         merged["text_lang"] = data.get("language") or merged.get("text_lang") or "zh"
+
+        # P25 多参考装配：ref_audio_paths 列表（运行时 > params 节）> 单值 ref_audio_path 兜底
+        ref_paths = normalize_ref_paths(
+            data.get("ref_audio_paths") or params_cfg.get("ref_audio_paths"))
+        if not ref_paths and merged.get("ref_audio_path"):
+            ref_paths = [merged["ref_audio_path"]]
+        # ref_free 默认开（任务书：原系统支持无参考文本模式，直接使用该模式）
+        ref_free = bool(params_cfg.get("ref_free", True))
+        ref_fragments = build_inproc_refs(
+            ref_paths, ref_free, merged.get("prompt_text") or "")
+        merged.update(ref_fragments)
+        if not ref_paths and "ref_audio_path" not in merged:
+            logger.error("[TTS-inproc] 参考音频未配置——problem: ref_audio_path/ref_audio_paths 均缺失；"
+                         "fix: 在 TTS 页配置参考音频或选用声音档案")
+            return None
+
+        # P26 变速迁移：运行时 speed 参数优先（合成参数变速）
+        speed = data.get("speed")
+        if speed is not None:
+            try:
+                merged["speed_factor"] = float(speed)
+            except (TypeError, ValueError):
+                pass
+
         text = data.get("content") or ""
         file_name = 'gpt_sovits_inproc_' + self.common.get_bj_time(4) + '.wav'
         voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
         try:
             return await asyncio.to_thread(engine.synthesize, text, merged, voice_tmp_path)
-        except Exception as e:
-            logger.error(f"[TTS-inproc] 合成失败——problem: {e}; "
+        except Exception as first_err:
+            # P25 降级预案：多参考/ref_free（空参考文本）实测失败 → 降级单参考重试一次
+            degraded = dict(merged)
+            fallback_used = False
+            if degraded.get("aux_ref_audio_paths"):
+                degraded.pop("aux_ref_audio_paths", None)
+                fallback_used = True
+            if ref_free:
+                legacy_prompt = params_cfg.get("prompt_text") or ""
+                if legacy_prompt:
+                    degraded["prompt_text"] = legacy_prompt
+                    fallback_used = True
+                else:
+                    degraded.pop("prompt_text", None)
+            if fallback_used:
+                if not MY_TTS._ref_fallback_warned:
+                    MY_TTS._ref_fallback_warned = True
+                    logger.warning(
+                        "[TTS-inproc] 多参考音频/无参考文本模式合成失败，已降级单参考重试"
+                        f"——problem: {first_err}；P25 spike 需在 GPU 环境实测 inproc 通道扩展性，"
+                        "通道扩展任务将登记 TODOS")
+                try:
+                    return await asyncio.to_thread(engine.synthesize, text, degraded, voice_tmp_path)
+                except Exception:
+                    logger.error(traceback.format_exc())
+            logger.error(f"[TTS-inproc] 合成失败——problem: {first_err}; "
                          f"cause: 引擎态/模型/参数（详见 gsv-inproc 日志）; "
                          f"fix: 检查胶囊状态与 ref_audio 配置，或 backend=api 兜底")
-            logger.error(traceback.format_exc())
+            return None
+
+    async def edge_tts_api(self, data):
+        """edge-tts 合成（切片 3 静态部分：WebTTS 退役，改用 EDGE-TTS——任务书）。
+
+        配置：edge_tts 节（voice/rate/extra_args_json）；
+        P26：data["speed"] 运行时语速经 speed_to_edge_rate 映射为 rate（优先于配置 rate）。
+        高级参数 JSON 透传（escape hatch）：默认空=全默认，解析失败仅告警不阻塞。
+        spike（需运行环境实测）：edge-tts 网络出网与音色可用性（P26/P27 批次外）。
+        """
+        try:
+            import edge_tts  # 延迟导入：依赖可选
+        except ImportError:
+            logger.warning("[TTS-edge] edge-tts 未安装——fix: pip install edge-tts")
+            return None
+        from utils.audio_handle.tts_params import (
+            EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
+            speed_to_edge_rate, parse_edge_extra_args)
+
+        text = data.get("content") or ""
+        if not text:
+            logger.error("[TTS-edge] 合成文本为空")
+            return None
+        edge_cfg = self.config.get("edge_tts") or {}
+        voice = data.get("voice") or edge_cfg.get("voice") or EDGE_TTS_DEFAULT_VOICE
+
+        speed = data.get("speed")
+        if speed is not None:
+            rate = speed_to_edge_rate(speed)  # P26：运行时 speed → rate 百分比映射
+        else:
+            rate = edge_cfg.get("rate") or EDGE_TTS_DEFAULT_RATE
+
+        extra_args, extra_err = parse_edge_extra_args(edge_cfg.get("extra_args_json"))
+        if extra_err:
+            logger.warning(f"[TTS-edge] 高级参数 JSON 无效（已忽略，走全默认）——{extra_err}")
+
+        file_name = 'edge_tts_' + self.common.get_bj_time(4) + '.mp3'
+        voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
+        try:
+            communicate = edge_tts.Communicate(text, voice, rate=rate, **extra_args)
+            await communicate.save(voice_tmp_path)
+            logger.info(f"[TTS-edge] 合成成功 voice={voice} rate={rate} → {voice_tmp_path}")
+            return voice_tmp_path
+        except Exception as e:
+            logger.error(f"[TTS-edge] 合成失败——problem: {e}; "
+                         f"cause: 网络/音色名无效（详见上方配置）; "
+                         f"fix: 检查出网与 voice 拼写，或切换语音合成为 gpt_sovits")
             return None
 
     async def gpt_sovits_api(self, data):

@@ -185,6 +185,24 @@ class My_handle(metaclass=SingletonMeta):
         # 设置GPT_Model全局模型列表
         GPT_MODEL.set_model_config("custom_llm", My_handle.config.get("custom_llm"))
 
+        # uc2/LLM 翻译接线（切片 3 收尾）：GPT 通道就绪后注入翻译回调——
+        # 译文目标语言跟随翻译模块既有 to_lang 配置（baidu.to_lang 缺省 zh）
+        if My_handle.my_translate is not None:
+            to_lang = "zh"
+            try:
+                to_lang = (My_handle.config.get("translate", "baidu", "to_lang") or "zh")
+            except Exception:
+                pass
+
+            def _llm_translate(text, _to=to_lang):
+                from utils.gpt_model.custom_llm import Custom_LLM
+                llm = Custom_LLM(My_handle.config.get("custom_llm"))
+                prompt = (f"将以下文本翻译为{_to}，只输出译文，不要任何解释：\n{text}")
+                return llm.get_resp_sync({"prompt": prompt})
+
+            My_handle.my_translate.set_llm_translator(_llm_translate)
+            logger.info("自定义LLM翻译回调已注入（uc2 默认首选）")
+
         # 聊天相关类实例化
         self.handle_chat_type()
 
