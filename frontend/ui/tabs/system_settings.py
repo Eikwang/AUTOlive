@@ -111,17 +111,94 @@ def create_account_manage_tab(config, theme_config, set_config_callback):
 # 动态配置
 # ============================================================
 def create_trends_config_tab(config, theme_config, set_config_callback):
-    """创建动态配置页面"""
+    """创建动态配置页面（/autoplan 批准批次：保存回调补全+模板默认路径固化）。
+
+    任务书指令：模板保存到系统默认路径（config_templates/），保存/调用均直接
+    选取不再填写路径；配置模板页迁移至此（旧 tab 移除延后至门禁 A 删除批）。
+    应用模板走 set_config 同通道（与 _auto_save 一致）；各模板差异项的生效
+    语义（即时/需重启）须在 D-20 参数生效语义矩阵登记（D-21）。
+    """
+    import os
+
     card_css = theme_config.get("card", "")
-    switch_internal_css = theme_config.get("switch_internal", "")
+    button_internal_color = theme_config.get("button_internal_color", "primary")
+    button_internal_css = theme_config.get("button_internal_css", "")
     _auto_save = _get_auto_save(config, set_config_callback, tab_key="trends_config")
+
+    def _templates_dir() -> str:
+        from frontend.config.paths import get_base_path
+        d = os.path.join(str(get_base_path()), "config_templates")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _list_templates() -> dict:
+        d = _templates_dir()
+        return {f[:-5]: f[:-5] for f in os.listdir(d) if f.endswith(".json")}
 
     with ui.card().style(card_css):
         ui.label('动态配置')
+        ui.label('按观看人数段保存配置模板，运行中按人数自动切换（D-21：新事件走新模板，在途任务自然流干）').classes('text-xs')
+
+        # 人数段→模板绑定（既有数据结构保留，路径改为模板名引用默认目录）
         for index, trends_config_path in enumerate(config.get("trends_config", {}).get("path", [])):
             with ui.grid(columns=3):
-                ui.input(label="在线人数范围", value=trends_config_path.get("online_num", "0-999999999"), placeholder='在线人数范围').style("width:100%;")
-                ui.input(label="配置路径", value=trends_config_path.get("path", "config.json"), placeholder='配置文件路径').style("width:100%;")
+                _auto_save(
+                    ui.input(label="在线人数范围", value=trends_config_path.get("online_num", "0-999999999"), placeholder='在线人数范围').style("width:100%;"),
+                    ("trends_config", "path", index, "online_num"))
+                _auto_save(
+                    ui.input(label="模板名", value=os.path.splitext(os.path.basename(trends_config_path.get("path", "")))[0], placeholder='模板名（存于 config_templates/）').style("width:100%;"),
+                    ("trends_config", "path", index, "path"))
+
+        ui.separator()
+        with ui.grid(columns=3):
+            template_name = ui.input(label='模板名', placeholder='例如：高人数档', value='').style("width:100%;")
+            ui.button('保存当前配置为模板', color=button_internal_color, on_click=lambda: _save_template(template_name.value)).style(button_internal_css)
+            template_select = ui.select(label='选择模板', options=_list_templates(), value=None, with_input=True).style("width:100%;")
+            ui.button('应用模板（慎点，覆盖当前配置）', color=button_internal_color, on_click=lambda: _apply_template(template_select.value)).style(button_internal_css)
+
+    def _save_template(name: str):
+        import json
+        from nicegui import ui as _ui
+        name = (name or "").strip()
+        if not name:
+            _ui.notify(position="top", type="warning", message="请先填写模板名")
+            return
+        path = os.path.join(_templates_dir(), f"{name}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        template_select.options = _list_templates()
+        template_select.update()
+        _ui.notify(position="top", type="positive", message=f"模板已保存：config_templates/{name}.json")
+
+    def _apply_template(name: str):
+        import json
+        from nicegui import ui as _ui
+        if not name:
+            _ui.notify(position="top", type="warning", message="请先选择模板")
+            return
+        path = os.path.join(_templates_dir(), f"{name}.json")
+        if not os.path.exists(path):
+            _ui.notify(position="top", type="negative", message=f"模板不存在：{path}")
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            template = json.load(f)
+        applied = 0
+
+        def _walk(src, dst, prefix=()):
+            nonlocal applied
+            if not isinstance(src, dict):
+                return
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _walk(v, dst[k], prefix + (k,))
+                elif k in dst:
+                    if dst[k] != v:
+                        set_config_callback(*prefix, k, value=v)
+                        applied += 1
+
+        _walk(template, config)
+        _ui.notify(position="top", type="positive",
+                   message=f"模板已应用（更新 {applied} 项）。重启后完全生效；各差异项生效语义见参数矩阵（D-20）")
 
 
 # ============================================================

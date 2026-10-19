@@ -907,6 +907,51 @@ class AutoliveApp:
         if get_nested_value(self.config._config, "webui", "auto_run"):
             logger.info("自动运行 已启用")
             self.run_external_program(type="api")
+
+        # 子进程存活监控（/autoplan 批准批次 C6 项；TODOS 2026-09-23 P1 候选落地：
+        # 深夜长播中 main 子进程静默崩溃 = 直播间黑场数小时且启动按钮持续禁用）。
+        # poll() 非阻塞探活——Windows 禁用 os.kill 探测（学习条目
+        # windows-os-kill-probe-terminates：TerminateProcess 语义会真杀目标进程）。
+        ui.timer(10, self._monitor_subprocesses)
+
+    def _monitor_subprocesses(self):
+        """子进程存活监控：main 死亡→running_flag 复位+告警（auto_run 时自动重拉）。
+
+        仅在 running_flag=True（运行中）时动作——主动停止流程已复位则静默跳过。
+        main 重拉仅拉主系统（coordination/edtalk/fastrag 为独立进程各自存活，
+        不经 run_external_program 重拉以免双实例）；重拉前查训练显存互斥
+        （与 run_external_program 同判据），训练中跳过并保持告警等人工处理。
+        """
+        if not self.running_flag:
+            return
+        for name, proc in list(self.my_subprocesses.items()):
+            try:
+                code = proc.poll()
+            except Exception:
+                continue
+            if code is None:
+                continue  # 存活
+            logger.error(f"子进程退出监控：{name} 已退出（exit={code}）")
+            self.my_subprocesses.pop(name, None)
+            if name == "main":
+                self.running_flag = False
+                ui.notify(position="top", type="negative",
+                          message=f"主系统进程已退出（exit={code}）——请查看日志；启动按钮已恢复")
+                if get_nested_value(self.config._config, "webui", "auto_run"):
+                    try:
+                        from utils.train_streamer import pipeline as _train_pipeline
+                        if getattr(_train_pipeline, "training_running", False):
+                            logger.warning("auto_run 自动重拉跳过：训练进行中（显存互斥），请训练完成后手动启动")
+                            continue
+                    except Exception:
+                        pass
+                    logger.warning("auto_run 已启用：自动重拉主系统 main")
+                    self._start_main_system()
+                    if "main" in self.my_subprocesses:
+                        self.running_flag = True
+            else:
+                ui.notify(position="top", type="warning",
+                          message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")
     
     def _create_control_buttons(self):
         """创建底部控制按钮 - 已移除重启和关灯按钮"""
