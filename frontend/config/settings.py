@@ -329,6 +329,17 @@ def _ensure_defaults(config: "Settings") -> None:
         if "api_ip_port" in cfg["web_captions_printer"]:
             del cfg["web_captions_printer"]["api_ip_port"]
             changed = True
+    # custom_llm OpenAI-compatible 收敛（C4，2026-10）：旧 url/headers/body/data_analysis
+    # → base_url/model/api_key（S2 裁决：响应解析固定 OpenAI schema，不留求值后门）。
+    # 运行时（utils 侧 Custom_LLM.__init__）有同函数内存迁移兜底；此处负责磁盘落盘。
+    from utils.gpt_model.custom_llm import migrate_legacy_config
+    _llm_section = cfg.get("custom_llm")
+    _migrated, _migrated_changed = migrate_legacy_config(
+        _llm_section if isinstance(_llm_section, dict) else None
+    )
+    if _migrated_changed:
+        cfg["custom_llm"] = _migrated
+        changed = True
     if changed:
         try:
             config.save()

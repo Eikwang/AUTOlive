@@ -205,10 +205,27 @@ def create_trends_config_tab(config, theme_config, set_config_callback):
 # 异常报警
 # ============================================================
 def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
-    """创建异常报警页面"""
+    """创建异常报警页面
+
+    D1/D-14（2026-10-19 批次切片 2）：新增报警通道配置（notify_enable/sound_enable），
+    控制子进程监控告警的弹出通道；最近异常明细（脱敏后）在侧边栏底部运行状态条
+    实时呈现。既有 6 类错误计数配置保留（存量行为不变）。
+    """
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
     _auto_save = _get_auto_save(config, set_config_callback, tab_key="abnormal_alarm")
+
+    with ui.card().style(card_css):
+        ui.label('报警通道')
+        ui.label('子进程崩溃/启动失败时是否弹出告警通知；最近异常明细见侧边栏底部运行状态条').classes('text-xs')
+        with ui.grid(columns=3):
+            _auto_save(
+                ui.switch('弹出告警通知', value=get_nested_value(config, "abnormal_alarm", "notify_enable", default=True)).style(switch_internal_css),
+                ("abnormal_alarm", "notify_enable"))
+            _auto_save(
+                ui.switch('报警声音', value=get_nested_value(config, "abnormal_alarm", "sound_enable", default=False)).style(switch_internal_css),
+                ("abnormal_alarm", "sound_enable"))
+        ui.label('注：声音报警通道暂未接线，开关配置先行').classes('text-xs')
 
     with ui.card().style(card_css):
         ui.label('异常报警')

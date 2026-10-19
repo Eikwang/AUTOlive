@@ -6,7 +6,6 @@ from frontend.ui.components.config_helper import get_nested_value
 布局规范：
 - 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
 """
-import json
 import os
 import shutil
 import subprocess
@@ -39,101 +38,68 @@ def create_llm_tab(
     """
     card_css = theme_config.get("card", "")
 
-    # 自定义LLM配置
+    # ================= 自定义LLM（C4 收敛：OpenAI-compatible 三字段+可选参数） =================
     with ui.card().style(card_css):
         ui.label("自定义LLM")
 
         with ui.grid(columns=3):
-            # API URL
-            FormField.create_textarea(
-                label="API URL",
-                value=get_nested_value(config, "custom_llm", "url"),
-                placeholder='发送HTTP请求的API链接',
-                on_change=lambda e: set_config_callback("custom_llm", "url", e.value),
-                tooltip='发送HTTP请求的API链接',
+            # 服务地址
+            FormField.create_input(
+                label="服务地址（base_url）",
+                value=get_nested_value(config, "custom_llm", "base_url"),
+                placeholder="如 http://127.0.0.1:11434/v1 或 https://api.deepseek.com/v1",
+                on_change=lambda e: set_config_callback("custom_llm", "base_url", e.value),
+                tooltip='OpenAI-compatible 服务前缀，系统自动拼接 /chat/completions',
                 style="width:100%;"
             )
 
-            # API类型
-            FormField.create_select(
-                label="API类型",
-                options={"GET": "GET", "POST": "POST"},
-                value=get_nested_value(config, "custom_llm", "method"),
-                on_change=lambda e: set_config_callback("custom_llm", "method", e.value),
-                tooltip='API类型',
+            # 模型
+            FormField.create_input(
+                label="模型（model）",
+                value=get_nested_value(config, "custom_llm", "model"),
+                placeholder="如 qwen:latest / deepseek-chat",
+                on_change=lambda e: set_config_callback("custom_llm", "model", e.value),
+                tooltip='模型名（Ollama 用 ollama list 查看）',
                 style="width:100%;"
             )
 
-            # 请求头
-            FormField.create_textarea(
-                label="请求头",
-                value=get_nested_value(config, "custom_llm", "headers"),
-                placeholder='换行分隔，例：Content-Type:application/json\nAuthorization:Bearer sk',
-                on_change=lambda e: set_config_callback("custom_llm", "headers", e.value),
-                tooltip='换行分隔，例：Content-Type:application/json\nAuthorization:Bearer sk',
+            # API Key（密码型输入）
+            FormField.create_input(
+                label="API Key",
+                value=get_nested_value(config, "custom_llm", "api_key"),
+                placeholder="云端平台必填；本地 Ollama 留空",
+                on_change=lambda e: set_config_callback("custom_llm", "api_key", e.value),
+                tooltip='以 Authorization: Bearer <key> 发送；Ollama 等本地服务无需填写',
+                style="width:100%;"
+            ).props("type=password")
+
+        with ui.grid(columns=2):
+            # 可选：max_tokens
+            FormField.create_input(
+                label="max_tokens（可选，留空不限制）",
+                value=str(get_nested_value(config, "custom_llm", "max_tokens") or ""),
+                placeholder="如 1024",
+                on_change=lambda e: set_config_callback("custom_llm", "max_tokens", e.value),
+                tooltip='回复最大 token 数；留空则不发送该参数',
+                style="width:100%;"
+            )
+            # 可选：temperature
+            FormField.create_input(
+                label="temperature（可选，留空用服务默认）",
+                value=str(get_nested_value(config, "custom_llm", "temperature") or ""),
+                placeholder="如 0.7",
+                on_change=lambda e: set_config_callback("custom_llm", "temperature", e.value),
+                tooltip='采样温度 0-2；留空则不发送该参数',
                 style="width:100%;"
             )
 
-            # 代理
-            FormField.create_textarea(
-                label="代理",
-                value=get_nested_value(config, "custom_llm", "proxies"),
-                placeholder='requests库代理配置方法，json数据用"双引号',
-                on_change=lambda e: set_config_callback("custom_llm", "proxies", e.value),
-                tooltip='requests库代理配置方法，json数据用"双引号',
-                style="width:100%;"
-            )
-
-        with ui.grid(columns=3):
-            # 请求体类型
-            FormField.create_select(
-                label="请求体类型",
-                options={"json": "json", "raw": "raw"},
-                value=get_nested_value(config, "custom_llm", "body_type"),
-                on_change=lambda e: set_config_callback("custom_llm", "body_type", e.value),
-                tooltip='请求体类型',
-                style="width:100%;"
-            )
-
-            # 请求体
-            FormField.create_textarea(
-                label="请求体",
-                value=get_nested_value(config, "custom_llm", "body"),
-                placeholder='请求体，写字符串，注意变量需要两个大括号包裹{{}}，json数据的话用"双引号',
-                on_change=lambda e: set_config_callback("custom_llm", "body", e.value),
-                tooltip='请求体，写字符串，注意变量需要两个大括号包裹{{}}，json数据的话用"双引号',
-                style="width:100%;"
-            )
-
-            # 请求返回数据类型
-            FormField.create_select(
-                label="请求返回数据类型",
-                options={"json": "json", "content": "content"},
-                value=get_nested_value(config, "custom_llm", "resp_data_type"),
-                on_change=lambda e: set_config_callback("custom_llm", "resp_data_type", e.value),
-                tooltip='请求返回数据类型',
-                style="width:100%;"
-            )
-
-            # 数据解析
-            FormField.create_textarea(
-                label="数据解析（eval执行）",
-                value=get_nested_value(config, "custom_llm", "data_analysis"),
-                placeholder='数据解析，请不要随意修改resp变量，会被用于最后返回数据内容的解析',
-                on_change=lambda e: set_config_callback("custom_llm", "data_analysis", e.value),
-                tooltip='数据解析，请不要随意修改resp变量，会被用于最后返回数据内容的解析',
-                style="width:100%;"
-            )
-
-            # 返回内容模板
-            FormField.create_textarea(
-                label="返回内容模板",
-                value=get_nested_value(config, "custom_llm", "resp_template"),
-                placeholder='请不要随意删除data变量，支持动态变量，最终会合并成完成内容进行音频合成',
-                on_change=lambda e: set_config_callback("custom_llm", "resp_template", e.value),
-                tooltip='请不要随意删除data变量，支持动态变量，最终会合并成完成内容进行音频合成',
-                style="width:100%;"
-            )
+        # {{prompt}} 变量说明（C4：请求模板退役，弹幕内容自动注入 user 消息）
+        ui.label(
+            "请求固定为 OpenAI-compatible 协议：POST {base_url}/chat/completions；"
+            "弹幕内容自动作为 user 消息发送（等价旧版请求体模板中的 {{prompt}} 变量，无需再手写请求体）；"
+            "响应固定解析 choices[0].message.content。"
+            "各平台差异仅在 base_url / model / api_key 三项，示例见 docs/llm-request-template.md。"
+        ).style("color: var(--text-hint); font-size: var(--font-size-body)")
 
     # ================= fastrag 知识库卡片（EDTalk功能集成计划 §6.1） =================
     _create_fastrag_card(config, theme_config, set_config_callback)
@@ -237,82 +203,9 @@ def _create_fastrag_card(
                 "服务未运行——开启开关并『运行系统』后自动拉起"
             ).style("color: var(--text-hint)")
 
-    def _on_apply_template():
-        """应用 fastrag 请求模板到 custom_llm（native F6/F8/F10）：
-        ①实测 /query 校验 answer 键；②确认框展示将被覆盖的配置；
-        ③原配置落盘备份；④应用后提供还原按钮；⑤端口引用配置变量。"""
-        import requests
-        port = get_nested_value(config, "fastrag", "port", default=11420)
-
-        # ①实测 /query 校验响应字段
-        try:
-            resp = requests.post(
-                f"http://127.0.0.1:{port}/query", json={"question": "测试"},
-                timeout=30,
-            )
-            data = resp.json() if resp.status_code == 200 else {}
-            if "answer" not in data:
-                ui.notify(position="top", type="warning",
-                          message=f"/query 响应无 answer 字段，模板不适用（实际响应键：{list(data.keys())}）")
-                return
-        except Exception as e:
-            ui.notify(position="top", type="negative",
-                      message=f"fastrag 服务未连接（{e}）——请先启动服务再应用模板")
-            return
-
-        # ②确认框展示将被覆盖的配置 + ③备份
-        old_cfg = {
-            "url": get_nested_value(config, "custom_llm", "url", default=""),
-            "body": get_nested_value(config, "custom_llm", "body", default=""),
-            "data_analysis": get_nested_value(config, "custom_llm", "data_analysis", default=""),
-        }
-        with ui.dialog() as dialog, ui.card():
-            ui.label("应用 fastrag 请求模板？").style("font-weight: var(--font-weight-title)")
-            ui.label(
-                f"将覆盖 custom_llm 当前配置：\n"
-                f"  url: {old_cfg['url']}\n"
-                f"  body: {old_cfg['body'][:60]}\n"
-                f"  data_analysis: {old_cfg['data_analysis']}\n\n"
-                f"原配置将备份到 config.custom_llm.bak.json（可一键还原）。"
-            ).style("white-space: pre-wrap")
-            with ui.row():
-                def _do_apply():
-                    dialog.close()
-                    # ③落盘备份
-                    try:
-                        base = str(get_base_path())
-                        shutil.copy2(
-                            os.path.join(base, "config.json"),
-                            os.path.join(base, "config.custom_llm.bak.json"),
-                        )
-                    except Exception as e:
-                        logger.warning(f"备份 custom_llm 失败：{e}")
-                    # ④应用模板（端口引用配置变量，永不硬编码——native F8）
-                    set_config_callback("custom_llm", "url",
-                                        value=f"http://127.0.0.1:{port}/query")
-                    set_config_callback("custom_llm", "body",
-                                        value='{"question":"{{prompt}}"}')
-                    set_config_callback("custom_llm", "data_analysis",
-                                        value='resp["answer"]')
-                    restore_btn.set_enabled(True)
-                    ui.notify(position="top", type="positive",
-                              message="fastrag 模板已应用（chat_type 保持 custom_llm）")
-                ui.button("应用", on_click=_do_apply)
-                ui.button("取消", on_click=dialog.close).props("flat")
-        dialog.open()
-
-    def _on_restore():
-        """从 config.custom_llm.bak.json 还原 custom_llm 配置（native F10）。"""
-        try:
-            base = str(get_base_path())
-            bak = json.load(open(os.path.join(base, "config.custom_llm.bak.json"), encoding="utf-8"))
-            old = bak.get("custom_llm", {})
-            for key in ("url", "body", "data_analysis", "resp_data_type", "resp_template", "headers", "method"):
-                if key in old:
-                    set_config_callback("custom_llm", key, value=old[key])
-            ui.notify(position="top", type="positive", message="已还原上次 custom_llm 配置")
-        except Exception as e:
-            ui.notify(position="top", type="negative", message=f"还原失败：{e}")
+    # （C4 收敛注：原『应用 fastrag 请求模板』/『还原上次配置』按钮已退役——
+    #  fastrag /query 为私有 schema（{"question"}→{"answer"}），S2 裁决响应解析
+    #  固定 OpenAI schema 后其配置载体 url/body/data_analysis 全部退役，通道不再适用。）
 
     with ui.card().style(card_css):
         ui.label("fastrag 知识库")
@@ -320,8 +213,9 @@ def _create_fastrag_card(
             "启用 fastrag 服务（随系统启动）",
             value=bool(get_nested_value(config, "fastrag", "enable", default=False)),
             on_change=lambda e: set_config_callback("fastrag", "enable", value=e.value),
-        ).tooltip("服务进程级开关：关闭后不随系统启动 server.exe；"
-                  "LLM 侧仍需 chat_type=custom_llm 且 url 指向 /query 才会实际调用")
+        ).tooltip("服务进程级开关：关闭后不随系统启动 server；"
+                  "fastrag /query 为私有 schema，C4 收敛后不再作为 custom_llm 端点"
+                  "（custom_llm 固定 OpenAI-compatible 协议）")
 
         with ui.grid(columns=3):
             FormField.create_input(
@@ -342,11 +236,6 @@ def _create_fastrag_card(
             build_btn = ui.button("构建知识库", on_click=_on_build_click).props("outline")
             build_spinner = ui.label("").style("color: var(--text-hint)")
             ui.button("检查服务状态", on_click=_on_health_check).props("flat")
-            ui.button("应用 fastrag 请求模板", on_click=_on_apply_template).props("outline")
-            restore_btn = ui.button("还原上次配置", on_click=_on_restore).props("flat")
-            restore_btn.set_enabled(os.path.exists(
-                os.path.join(str(get_base_path()), "config.custom_llm.bak.json")
-            ))
 
         # ---------- 上传文档 UI（义务块"fastrag 系统级整合"：多文档+文件名清洗 F-E5+五件套） ----------
         upload_docs_label = ui.label("尚未选择文档").style("color: var(--text-hint)")
@@ -456,10 +345,10 @@ def _create_fastrag_card(
 
             ui.button("应用并重启 fastrag 服务", on_click=_apply_template_and_restart).props("outline")
 
-        # ---------- 区分文案（native F8：两处固定防"改错一侧"） ----------
-        ui.label("两处模板分工：本页『对话人设与生成参数』= fastrag 生成行为（语气/长度）——保存后需应用重启；"
-                 "『应用 fastrag 请求模板』按钮 = custom_llm 请求通道（端点/格式）——修改后即作用于新请求。"
-                 "改错一侧会出现『模板不生效』。").style(
+        # ---------- 区分文案（native F8；C4 收敛后仅余生成参数一侧） ----------
+        ui.label("本页『对话人设与生成参数』= fastrag 生成行为（语气/长度）——保存后需应用重启；"
+                 "LLM 请求通道（端点/格式）在上方『自定义LLM』卡片配置（OpenAI-compatible 固定协议）。"
+                 "两侧分工勿混淆，改错一侧会出现『模板不生效』。").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
         ui.label(
             "知识库格式：Markdown 按标题分块（H1=文档名，H2/H3=分块边界）；"

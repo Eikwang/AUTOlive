@@ -256,15 +256,11 @@
     "history_max_len": 4096
   },
   "custom_llm": {
-    "url": "http://127.0.0.1:11434/v1/chat/completions",
-    "headers": "Content-Type:application/json\nAuthorization:Bearer sk",
-    "method": "POST",
-    "proxies": "{}",
-    "body_type": "json",
-    "body": "{\"model\":\"qwen:latest\",\"messages\":[{\"role\":\"user\",\"content\":\"{{prompt}}\"}]}",
-    "resp_data_type": "json",
-    "data_analysis": "resp[\"choices\"][0][\"message\"][\"content\"]",
-    "resp_template": "{data}"
+    "base_url": "http://127.0.0.1:11434/v1",
+    "model": "qwen:latest",
+    "api_key": "sk",
+    "max_tokens": "",
+    "temperature": ""
   },
   "local_qa": {
     "periodic_trigger": {

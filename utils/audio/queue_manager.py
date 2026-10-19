@@ -68,6 +68,41 @@ class QueueMixin:
             "wait_synthesis_msg_num": len(self.message_queue),
         }
 
+    def flush_starved_playback_queue(self):
+        """E2 饥饿路径 flush：首次播放阈值门的保底放行
+
+        规则（D-20 矩阵"音频播放队列首次触发阈值"行的 flush 规则）：
+        待合成消息队列已空（本次突发全部合成完毕；待播放队列的唯一生产者
+        就是合成线程自身，故此时亦无在途合成）且待播放队列仍有音频、
+        首次播放触发标志 voice_tmp_path_queue_not_empty_flag 尚未置位
+        （本次突发总量未达阈值 filter.voice_tmp_path_queue_min_start_play=N）
+        时，立即置位标志并唤醒消费者放行积压音频。
+
+        否则首次突发仅产出 N-1 条时，生产者永不 notify（生产者只在队列
+        达到 N 或标志已置位时通知），消费者无限期 wait——积压的 N-1 条
+        音频将永远不播，直到下一次突发把队列重新顶过阈值。
+
+        只应在合成线程消费完一条消息（含合成失败）后调用；调用点在
+        SynthesisMixin.message_queue_thread 循环尾。
+
+        Returns:
+            bool: 是否执行了放行（置位标志+notify）
+        """
+        # 快路径无锁初筛：待合成队列非空（突发未结束）/待播放队列空/
+        # 标志已置位（阈值门已开，生产者自行 notify）均无需放行
+        if self.message_queue or not self.voice_tmp_path_queue or self.voice_tmp_path_queue_not_empty_flag:
+            return False
+        with self.voice_tmp_path_queue_lock:
+            # 锁内复核：标志与队列的写入方（data_priority_insert/本方法）
+            # 均持同一把锁，避免与生产者置位竞争
+            if self.voice_tmp_path_queue_not_empty_flag or not self.voice_tmp_path_queue:
+                return False
+            self.voice_tmp_path_queue_not_empty_flag = True
+            # 生产者通过notify()通知消费者列表中有新的消息
+            self.voice_tmp_path_queue_not_empty.notify()
+        logger.info(f"E2 flush：待合成队列已空，放行未达首次播放阈值的积压音频 {len(self.voice_tmp_path_queue)} 条")
+        return True
+
     def is_audio_queue_empty(self):
         """判断等待合成和已经合成的队列是否为空
 

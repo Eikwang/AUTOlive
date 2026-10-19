@@ -27,7 +27,7 @@ from .common import Common
 from .audio import Audio
 from .gpt_model.gpt import GPT_MODEL
 from .base import logger
-from .db import SQLiteDB
+from .db import SQLiteDB, ensure_integral_unique_index
 from .my_translate import My_Translate
 
 # 导入 handler 模块
@@ -254,11 +254,16 @@ class My_handle(metaclass=SingletonMeta):
                 sign_num INT NOT NULL,
                 last_sign_ts DATETIME NOT NULL,
                 total_price INT NOT NULL,
-                last_ts DATETIME NOT NULL
+                last_ts DATETIME NOT NULL,
+                UNIQUE(platform, username, uid)
             )
             '''
             self.db.execute(create_table_sql)
             logger.debug('创建integral（积分）表')
+
+            # A1（/autoplan 放行前置）：integral 表幂等迁移——补 UNIQUE(platform, username, uid)
+            # 唯一索引（UPSERT 计分写入依赖该索引，见 utils/db.ensure_integral_unique_index）
+            ensure_integral_unique_index(self.db)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f'数据库 {My_handle.config.get("database", "path")} 创建失败，请查看日志排查问题！！！')

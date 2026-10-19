@@ -33,10 +33,15 @@ class EventHandler:
         try:
             username = data["username"]
             gift_name = data["gift_name"]
-            gift_num = data["gift_num"]
-            
+            # 弹幕链路（danmaku_consumer）礼物载荷键为 num（webui 侧为 gift_num），
+            # 兼容取值避免 KeyError 使礼物积分计分与礼物表记录双双失效
+            gift_num = data.get("gift_num", data.get("num", 1))
+
             logger.info(f"[{username}]送出了 {gift_num} 个 {gift_name}")
-            
+
+            # 0、积分机制运转（C1：礼物行为计分；写库失败不中断礼物主流程）
+            self.my_handle.integral_handle("gift", data)
+
             # 记录数据库
             if self.my_handle.config.get("database", "gift_enable"):
                 from datetime import datetime
@@ -57,9 +62,12 @@ class EventHandler:
         """
         try:
             username = data["username"]
-            
+
             logger.info(f"[{username}]进入了直播间")
-            
+
+            # 0、积分机制运转（C1：入场行为计分；写库失败不中断入场主流程）
+            self.my_handle.integral_handle("entrance", data)
+
             # 记录数据库
             if self.my_handle.config.get("database", "entrance_enable"):
                 from datetime import datetime
@@ -80,8 +88,11 @@ class EventHandler:
         """
         try:
             username = data["username"]
-            
+
             logger.info(f"[{username}]关注了直播间")
+
+            # 0、积分机制运转（C1：关注行为计分，新增规则键缺键走安全默认；写库失败不中断主流程）
+            self.my_handle.integral_handle("follow", data)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"关注处理失败：{e}")

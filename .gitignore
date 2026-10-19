@@ -367,3 +367,9 @@ data/edtalk_train/
 edtalk/train_progress/
 edtalk/wy/
 frontend/config/.tts_inproc_hinted
+
+# D-20 参数生效语义矩阵：实施中枢工件（A6 守卫引用），强制入库
+!docs/参数生效语义矩阵.md
+
+# C4 LLM 收敛：请求模板文档（OpenAI-compatible 标准协议，UI 指引引用）
+!docs/llm-request-template.md

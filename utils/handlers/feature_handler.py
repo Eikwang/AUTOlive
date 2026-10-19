@@ -6,9 +6,125 @@
 """
 
 import os
+import time
 import traceback
+from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
+
+
+# ============ 积分链路（C1 链路补全，/autoplan 批准切片 2） ============
+
+# 积分 UPSERT（A1）：依赖 integral 表 UNIQUE(platform, username, uid) 唯一索引
+# （迁移见 utils/db.ensure_integral_unique_index，索引缺失时本语句报错）。
+# 逐列累加语义：
+#   integral     累加（excluded.integral = 本次行为得分）
+#   view_num     累加——字段语义=累计观看（入场）次数，入场事件传 1、其余行为传 0；
+#                「覆盖或累加」二选一按字段语义定为累加（观看次数天然只增，覆盖会丢历史）
+#   sign_num     条件自增——签到事件传 1、其余行为传 0，即仅签到时 +1
+#   last_sign_ts 仅签到时覆盖（excluded.sign_num > 0），其余行为保留原值
+#   total_price  累加（excluded.total_price = 本次礼物总价，非礼物行为传 0）
+#   last_ts      每次行为覆盖
+INTEGRAL_UPSERT_SQL = '''
+INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, last_sign_ts, total_price, last_ts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(platform, username, uid) DO UPDATE SET
+    integral = integral + excluded.integral,
+    view_num = view_num + excluded.view_num,
+    sign_num = sign_num + excluded.sign_num,
+    last_sign_ts = CASE WHEN excluded.sign_num > 0 THEN excluded.last_sign_ts ELSE last_sign_ts END,
+    total_price = total_price + excluded.total_price,
+    last_ts = excluded.last_ts
+'''
+
+# 积分写库重试退避（E3/CAP6）：失败按 0.1*2^k 秒退避，最多 3 次尝试；
+# WAL 与 busy_timeout 已在 utils/db.py 连接初始化处统一设置。
+INTEGRAL_DB_MAX_ATTEMPTS = 3
+
+# 内置默认档位表（D-17：阈值+文案，至少 2 档）。仅当 config 缺少
+# integral.<behavior>.copywriting 时启用；config 中的 copywriting 块本身即档位表
+# （<metric>_interval=阈值区间，copywriting=该档文案列表），块内可选
+# "get_integral"（签到/入场/关注，绝对分）或 "get_integral_proportion"（礼物，
+# 比例×礼物价值后取整）覆盖该档积分；块内不配则回退平铺规则键。
+_DEFAULT_TIERS = {
+    "sign": [
+        {"sign_num_interval": "0-30", "get_integral": 1,
+         "copywriting": ["{username}打卡成功，获得{get_integral}点积分，您已打卡{sign_num}天"]},
+        {"sign_num_interval": "31-999999999", "get_integral": 2,
+         "copywriting": ["{username}打卡成功喵，获得{get_integral}点积分，感谢您{sign_num}天的陪伴"]},
+    ],
+    "gift": [
+        # 礼物积分默认按 get_integral_proportion×礼物总价 取整（不随档位变化），
+        # 档位内可配 get_integral（绝对分）或 get_integral_proportion（比例）覆盖
+        {"gift_price_interval": "0-10",
+         "copywriting": ["感谢{username}的{gift_name}，获得{get_integral}点积分"]},
+        {"gift_price_interval": "10.01-999999999",
+         "copywriting": ["感谢{username}的{gift_name}，老板大气，获得{get_integral}点积分"]},
+    ],
+    "entrance": [
+        {"entrance_num_interval": "0-30", "get_integral": 1,
+         "copywriting": ["欢迎{username}，获得{get_integral}点积分"]},
+        {"entrance_num_interval": "31-999999999", "get_integral": 2,
+         "copywriting": ["非常感谢{username}的陪伴，获得{get_integral}点积分"]},
+    ],
+}
+
+# D-12：积分查询对无记录用户的分支文案（不静默）；config 可用
+# integral.crud.query.no_record_copywriting（列表）覆盖
+_DEFAULT_QUERY_NO_RECORD_COPY = "{username}，您暂无积分，签到、互动都可以赚取积分哦"
+
+# 查询库不可达时的通用失败文案（DX CAP6：查询失败不静默）
+_DEFAULT_QUERY_ERROR_COPY = "积分查询失败，请稍后再试"
+
+
+def parse_interval(interval_str):
+    """解析 "lo-hi" 区间字符串为 (lo, hi) 浮点闭区间；格式非法返回 None。"""
+    try:
+        lo_str, hi_str = str(interval_str).split("-", 1)
+        lo, hi = float(lo_str), float(hi_str)
+        if lo > hi:
+            return None
+        return (lo, hi)
+    except (ValueError, AttributeError):
+        return None
+
+
+def interval_contains(interval_str, value):
+    """值是否落在 "lo-hi" 闭区间内；区间非法视为不命中。"""
+    bounds = parse_interval(interval_str)
+    if bounds is None:
+        return False
+    lo, hi = bounds
+    return lo <= float(value) <= hi
+
+
+def match_tier_block(blocks, interval_key, value):
+    """档位匹配（D-17）：返回第一个 interval_key 区间包含 value 的档位块，无则 None。
+
+    区间空洞容忍：无命中块返回 None，由调用方回退平铺积分/首个含文案的档位。
+    """
+    if not blocks:
+        return None
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if interval_contains(block.get(interval_key), value):
+            return block
+    return None
+
+
+def resolve_gift_points(block, proportion, total_price):
+    """礼物积分解析：档位块 get_integral（绝对分）> get_integral_proportion（比例）> 平铺比例。
+
+    比例计分显式取整规则 = int() 向下取整（非负价值域内 int() 即向下取整；
+    D-20 矩阵登记项：浮点比例×礼物价值 → 整数积分列）。
+    """
+    if block is not None:
+        if block.get("get_integral") is not None:
+            return int(block["get_integral"])
+        if block.get("get_integral_proportion") is not None:
+            return int(float(block["get_integral_proportion"]) * float(total_price))
+    return int(float(proportion) * float(total_price))
 
 
 class FeatureHandler:
@@ -17,11 +133,13 @@ class FeatureHandler:
     def __init__(self, my_handle):
         """
         初始化功能处理器
-        
+
         Args:
             my_handle: My_handle 实例
         """
         self.my_handle = my_handle
+        # 积分缺键告警去重（每个键仅警告一次，避免直播期间刷屏）
+        self._integral_warned_keys = set()
     
     def find_answer(self, question, file_path, similarity=0.6):
         """
@@ -389,27 +507,350 @@ class FeatureHandler:
 
     def integral_handle(self, type, data):
         """
-        积分处理
-        
+        积分处理（C1 链路补全）：签到/礼物/入场/关注四类行为计分 + 查询命令回复
+
         Args:
-            type (str): 类型
-            data (dict): 数据
-            
+            type (str): 行为类型（comment=签到检测 / gift / entrance / follow / crud=查询）
+            data (dict): 行为数据（platform/username/uid/content/gift_name/total_price 等）
+
         Returns:
-            bool: 是否触发并处理
+            bool: 是否触发并处理。失败语义（CAP6）：写库失败 log 后返回 False，
+                  不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）
         """
         try:
             # 检查是否启用积分
             if not self.my_handle.config.get("integral", "enable"):
                 return False
-            
-            # TODO: 实现积分处理逻辑
-            
+
+            if type == "crud":
+                return self._integral_query_handle(data)
+            if type == "comment":
+                return self._integral_sign_handle(data)
+            if type == "gift":
+                return self._integral_gift_handle(data)
+            if type == "entrance":
+                return self._integral_entrance_handle(data)
+            if type == "follow":
+                return self._integral_follow_handle(data)
             return False
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"积分处理失败：{e}")
             return False
+
+    def _integral_identity(self, data):
+        """提取积分身份三元组 (platform, username, uid)。
+
+        uid：弹幕链路当前无 uid 载荷（danmaku_consumer/webui 均只带 platform+username），
+        落空串占位——唯一键退化为 (platform, username)，与现有数据面一致。
+        """
+        platform = str(data.get("platform", "") or "")
+        username = str(data.get("username", "") or "")
+        uid = str(data.get("uid", "") or "")
+        return platform, username, uid
+
+    def _integral_warn_once(self, key, message):
+        """积分配置缺键告警（每个键仅一次）。"""
+        if key not in self._integral_warned_keys:
+            self._integral_warned_keys.add(key)
+            logger.warning(message)
+
+    def _integral_db_write(self, sql, args):
+        """积分写库（E3/CAP6）：指数退避重试包住写库（0.1*2^k 秒，最多 3 次尝试）。
+
+        最终失败返回 False 不抛出，由调用方按「写库失败不中断直播主流程」处理。
+        """
+        for attempt in range(INTEGRAL_DB_MAX_ATTEMPTS):
+            try:
+                if self.my_handle.db.execute(sql, args):
+                    return True
+            except Exception:
+                logger.error(traceback.format_exc())
+            if attempt < INTEGRAL_DB_MAX_ATTEMPTS - 1:
+                time.sleep(0.1 * (2 ** attempt))  # 退避 0.1s → 0.2s
+        return False
+
+    def _integral_db_probe(self):
+        """库可达性探测（区分「查询失败」与「无记录」：fetch_one 对两者都返回 None）。"""
+        try:
+            return bool(self.my_handle.db.execute("SELECT 1"))
+        except Exception:
+            logger.error(traceback.format_exc())
+            return False
+
+    def _integral_fetch_row(self, platform, username, uid):
+        """查询积分行，返回 (integral, view_num, sign_num, total_price) 或 None（无记录/查询失败）。"""
+        sql = ("SELECT integral, view_num, sign_num, total_price FROM integral "
+               "WHERE platform = ? AND username = ? AND uid = ?")
+        try:
+            return self.my_handle.db.fetch_one(sql, (platform, username, uid))
+        except Exception:
+            logger.error(traceback.format_exc())
+            return None
+
+    def _integral_tier_blocks(self, behavior):
+        """读取行为档位表（D-17）：config 的 copywriting 块即档位表，缺键回退内置默认 2 档。"""
+        blocks = self.my_handle.config.get("integral", behavior, "copywriting")
+        if not blocks:
+            logger.debug(f"积分配置缺少 integral.{behavior}.copywriting，使用内置默认档位表（2 档）")
+            return _DEFAULT_TIERS[behavior]
+        return blocks
+
+    def _integral_reply(self, data, resp_content):
+        """积分回复（复用弹幕回复通道：TTS 播报 + webui 聊天日志）。"""
+        message = {
+            "type": "comment",
+            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+            "config": self.my_handle.config.get("filter"),
+            "username": data.get("username", ""),
+            "content": resp_content,
+        }
+        self.my_handle.audio_synthesis_handle(message)
+        self.my_handle.webui_show_chat_log_callback("积分", data, resp_content)
+
+    def _integral_format_and_reply(self, copy_list, data, variables):
+        """随机选文案 + 变量替换 + 回复。
+
+        Returns:
+            bool: False=回复缺失（CAP6 partial 语义由调用方记录：积分已计入、文案缺失可接受）
+        """
+        result = self.my_handle.common.get_random_str_in_list_and_format(None, copy_list, variables)
+        resp_content = result.get("content") if result and result.get("ret") == 0 else None
+        if not resp_content:
+            logger.warning("积分文案变量替换失败，本行为积分已计入但不回复")
+            return False
+        try:
+            self._integral_reply(data, resp_content)
+        except Exception:
+            # CAP6 partial：写库成功而回复失败——积分已计入，log 记录，不算失败
+            logger.error(traceback.format_exc())
+            logger.error("积分回复失败（partial：积分已计入，回复缺失）")
+            return False
+        return True
+
+    def _integral_tier_reply(self, blocks, interval_key, metric_value, data, variables):
+        """按档位选取文案并回复（D-17：回复文案按档位选取）。"""
+        block = match_tier_block(blocks, interval_key, metric_value)
+        if block is None:
+            # 区间空洞容忍：无命中档位时取首个含文案的档位（积分已按平铺规则计入）
+            for candidate in blocks or []:
+                if isinstance(candidate, dict) and candidate.get("copywriting"):
+                    block = candidate
+                    break
+        copy_list = block.get("copywriting") if isinstance(block, dict) else None
+        if not copy_list:
+            logger.warning("积分档位文案缺失，本行为积分已计入但不回复")
+            return False
+        return self._integral_format_and_reply(copy_list, data, variables)
+
+    def _integral_sign_handle(self, data):
+        """签到计分：弹幕命中签到命令词 → UPSERT 计分（sign_num 自增）+ 按签到次数档位回复。"""
+        enable = self.my_handle.config.get("integral", "sign", "enable")
+        if enable is None:
+            self._integral_warn_once("integral.sign.enable", "积分配置缺少 integral.sign.enable，按默认开启处理")
+            enable = True
+        if not enable:
+            return False
+
+        content = str(data.get("content", "") or "").strip()
+        sign_cmds = self.my_handle.config.get("integral", "sign", "cmd")
+        if not sign_cmds:
+            sign_cmds = ["签到", "打卡"]
+            self._integral_warn_once("integral.sign.cmd", "积分配置缺少 integral.sign.cmd，使用默认签到命令词：签到/打卡")
+        # 命令词精确匹配（避免「签到啦」等前缀弹幕误触发计分回复）
+        if content not in sign_cmds:
+            return False
+
+        platform, username, uid = self._integral_identity(data)
+        if not username:
+            return False
+
+        row = self._integral_fetch_row(platform, username, uid)
+        old_sign_num = int(row[2]) if row else 0
+        new_sign_num = old_sign_num + 1
+
+        # 积分按档位取值（D-17）：签到档位 metric=累计签到次数
+        blocks = self._integral_tier_blocks("sign")
+        block = match_tier_block(blocks, "sign_num_interval", new_sign_num)
+        flat_points = self.my_handle.config.get("integral", "sign", "get_integral")
+        if flat_points is None:
+            flat_points = 1
+            self._integral_warn_once("integral.sign.get_integral", "积分配置缺少 integral.sign.get_integral，使用默认值 1")
+        points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
+
+        now = datetime.now()
+        args = (platform, username, uid, points, 0, 1, now, 0, now)
+        if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
+            # CAP6：写库失败不中断直播主流程——返回 False（状态条告警标记），弹幕继续走常规链路
+            logger.error(f"签到积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
+            return False
+
+        # CAP6 定序=先写库后回复；写库成功回复失败=partial（积分已计入，log 记录）
+        self._integral_tier_reply(blocks, "sign_num_interval", new_sign_num, data, {
+            "username": username,
+            "get_integral": points,
+            "sign_num": new_sign_num,
+        })
+        return True
+
+    def _integral_gift_handle(self, data):
+        """礼物计分：积分=int(比例×礼物总价)（显式取整，规则进 D-20），按礼物价值档位回复。"""
+        enable = self.my_handle.config.get("integral", "gift", "enable")
+        if enable is None:
+            self._integral_warn_once("integral.gift.enable", "积分配置缺少 integral.gift.enable，按默认开启处理")
+            enable = True
+        if not enable:
+            return False
+
+        platform, username, uid = self._integral_identity(data)
+        if not username:
+            return False
+
+        total_price = float(data.get("total_price", 0) or 0)
+
+        # 积分按档位取值（D-17）：礼物档位 metric=本次礼物价值；档位可覆盖比例/绝对分
+        blocks = self._integral_tier_blocks("gift")
+        block = match_tier_block(blocks, "gift_price_interval", total_price)
+        proportion = self.my_handle.config.get("integral", "gift", "get_integral_proportion")
+        if proportion is None:
+            proportion = 10.0
+            self._integral_warn_once("integral.gift.get_integral_proportion",
+                                     "积分配置缺少 integral.gift.get_integral_proportion，使用默认比例 10.0")
+        points = resolve_gift_points(block, proportion, total_price)
+
+        now = datetime.now()
+        args = (platform, username, uid, points, 0, 0, now, total_price, now)
+        if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
+            logger.error(f"礼物积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
+            return False
+
+        self._integral_tier_reply(blocks, "gift_price_interval", total_price, data, {
+            "username": username,
+            "gift_name": data.get("gift_name", "礼物"),
+            "gift_num": data.get("gift_num", data.get("num", 1)),
+            "unit_price": data.get("unit_price", 0),
+            "total_price": total_price,
+            "get_integral": points,
+        })
+        return True
+
+    def _integral_entrance_handle(self, data):
+        """入场计分：view_num（累计观看次数）+1，积分按入场次数档位累加。"""
+        enable = self.my_handle.config.get("integral", "entrance", "enable")
+        if enable is None:
+            self._integral_warn_once("integral.entrance.enable", "积分配置缺少 integral.entrance.enable，按默认开启处理")
+            enable = True
+        if not enable:
+            return False
+
+        platform, username, uid = self._integral_identity(data)
+        if not username:
+            return False
+
+        row = self._integral_fetch_row(platform, username, uid)
+        old_view_num = int(row[1]) if row else 0
+        new_view_num = old_view_num + 1
+
+        # 积分按档位取值（D-17）：入场档位 metric=累计入场（观看）次数
+        blocks = self._integral_tier_blocks("entrance")
+        block = match_tier_block(blocks, "entrance_num_interval", new_view_num)
+        flat_points = self.my_handle.config.get("integral", "entrance", "get_integral")
+        if flat_points is None:
+            flat_points = 1
+            self._integral_warn_once("integral.entrance.get_integral", "积分配置缺少 integral.entrance.get_integral，使用默认值 1")
+        points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
+
+        now = datetime.now()
+        args = (platform, username, uid, points, 1, 0, now, 0, now)
+        if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
+            logger.error(f"入场积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
+            return False
+
+        self._integral_tier_reply(blocks, "entrance_num_interval", new_view_num, data, {
+            "username": username,
+            "get_integral": points,
+            "entrance_num": new_view_num,
+        })
+        return True
+
+    def _integral_follow_handle(self, data):
+        """关注计分（新增规则键）：config 缺 integral.follow 节时用安全默认并仅告警一次。"""
+        platform, username, uid = self._integral_identity(data)
+        if not username:
+            return False
+
+        enable = self.my_handle.config.get("integral", "follow", "enable")
+        if enable is None:
+            self._integral_warn_once("integral.follow.enable",
+                                     "积分配置缺少 integral.follow 节（新增规则键），按默认开启处理")
+            enable = True
+        if not enable:
+            return False
+
+        points = self.my_handle.config.get("integral", "follow", "get_integral")
+        if points is None:
+            points = 1
+            self._integral_warn_once("integral.follow.get_integral",
+                                     "积分配置缺少 integral.follow.get_integral，使用默认值 1")
+        points = int(points)
+
+        copy_list = self.my_handle.config.get("integral", "follow", "copywriting")
+        if not copy_list:
+            copy_list = ["{username}感谢关注，获得{get_integral}点积分"]
+            self._integral_warn_once("integral.follow.copywriting", "积分配置缺少 integral.follow.copywriting，使用默认关注文案")
+
+        now = datetime.now()
+        args = (platform, username, uid, points, 0, 0, now, 0, now)
+        if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
+            logger.error(f"关注积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
+            return False
+
+        self._integral_format_and_reply(copy_list, data, {
+            "username": username,
+            "get_integral": points,
+        })
+        return True
+
+    def _integral_query_handle(self, data):
+        """查询回复链路：命中查询命令 → SELECT 积分 → 文案回复；无记录回复「暂无积分」（D-12）。"""
+        query_cfg = self.my_handle.config.get("integral", "crud", "query") or {}
+        enable = query_cfg.get("enable")
+        if enable is None:
+            enable = True
+        if not enable:
+            return False
+
+        content = str(data.get("content", "") or "").strip()
+        cmds = query_cfg.get("cmd")
+        if not cmds:
+            cmds = ["我的积分", "查询积分"]
+            self._integral_warn_once("integral.crud.query.cmd", "积分配置缺少 integral.crud.query.cmd，使用默认查询命令词：我的积分/查询积分")
+        if content not in cmds:
+            return False
+
+        platform, username, uid = self._integral_identity(data)
+        if not username:
+            return False
+
+        variables = {"username": username}
+        # 查询为只读链路（无写库定序问题）；先探活区分「库不可达」与「无记录」
+        # （CAP6/DX：查询失败回复通用失败文案，不静默）
+        if not self._integral_db_probe():
+            self._integral_format_and_reply([_DEFAULT_QUERY_ERROR_COPY], data, variables)
+            return True
+
+        row = self._integral_fetch_row(platform, username, uid)
+        if row is None:
+            # D-12：无记录用户回复「暂无积分」分支文案（不静默）
+            copy_list = query_cfg.get("no_record_copywriting") or [_DEFAULT_QUERY_NO_RECORD_COPY]
+            variables["integral"] = 0
+        else:
+            copy_list = query_cfg.get("copywriting") or ["{username}，您当前的积分是{integral}"]
+            variables["integral"] = int(row[0])
+
+        self._integral_format_and_reply(copy_list, data, variables)
+        return True
     
     def key_mapping_handle(self, type, data):
         """

@@ -258,6 +258,10 @@ class ChatHandler:
             resp_content = resp_content.replace('\n', '。')
             
             # LLM回复的内容进行违禁判断
+            # S4 合规核查（D-20 矩阵登记点）：LLM 回复（含 RAG/知识库内容
+            # 进 LLM 后的回复）在 TTS 合成（下方 audio_synthesis_handle）前
+            # 经过此处 prohibitions_handle 违禁词过滤（丢弃式）——回复侧
+            # 过滤已有实现，本批仅标注位置，不另加过滤链。
             resp_content = self.my_handle.prohibitions_handle(resp_content)
             if resp_content is None:
                 return

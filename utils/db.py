@@ -397,6 +397,48 @@ class SQLiteDB:
         logger.info(f"数据库连接已关闭: {self.db_file}")
 
 
+# A1（/autoplan 2026-10-13 放行前置）：integral 表唯一索引迁移。
+# UPSERT（INSERT...ON CONFLICT(platform, username, uid)）依赖该唯一索引：缺失时
+# ON CONFLICT 子句直接报错，积分写入链路瘫痪；且直插会产生重复行/积分翻倍。
+INTEGRAL_UNIQUE_INDEX_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_integral_platform_username_uid "
+    "ON integral (platform, username, uid)"
+)
+
+
+def ensure_integral_unique_index(db) -> bool:
+    """为 integral 表幂等加 UNIQUE(platform, username, uid) 唯一索引（A1 放行前置）。
+
+    不重建表：CREATE UNIQUE INDEX IF NOT EXISTS 本身幂等，可重复执行。若存量数据
+    已有重复行（历史上表无 UNIQUE 也无 UPSERT，手工导入等场景），建索引会因唯一
+    冲突失败，此时保留每组 (platform, username, uid) 中最后写入的一行（MAX(rowid)，
+    即最近事件）、折叠其余重复行后重试建索引。
+
+    Args:
+        db: SQLiteDB 实例（integral 表须已创建）
+
+    Returns:
+        bool: 唯一索引是否就位
+    """
+    if db.execute(INTEGRAL_UNIQUE_INDEX_SQL):
+        return True
+    # 建索引失败：大概率存量重复行，折叠后重试（幂等：无重复行时不会走进本分支）
+    dedup_sql = '''
+    DELETE FROM integral
+    WHERE rowid NOT IN (
+        SELECT MAX(rowid) FROM integral GROUP BY platform, username, uid
+    )
+    '''
+    if not db.execute(dedup_sql):
+        logger.error("integral 表唯一索引迁移失败：重复行折叠未执行成功（表不存在或库不可写），UPSERT 写入将不可用")
+        return False
+    if not db.execute(INTEGRAL_UNIQUE_INDEX_SQL):
+        logger.error("integral 表唯一索引迁移失败：折叠重复行后仍无法创建唯一索引")
+        return False
+    logger.info("integral 表唯一索引迁移完成（折叠存量重复行后创建 UNIQUE(platform, username, uid)）")
+    return True
+
+
 # 向后兼容的旧版本SQLiteDB类
 class SQLiteDBLegacy:
     """旧版本的SQLiteDB类，用于向后兼容"""

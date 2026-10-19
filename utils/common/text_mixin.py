@@ -68,22 +68,39 @@ class TextMixin:
         return text[:max_char_len]
 
 
+    # 读取违禁词/违禁拼音词表文件（E4 编码边界：check_sensitive_words 1/2/3 共用）
+    def read_sensitive_word_file(self, file_path):
+        """读取违禁词/违禁拼音词表文件，返回按行拆分的词表
+
+        编码规则（D-20 矩阵 E4 条目）：指定 utf-8-sig——容忍 UTF-8 BOM；
+        Windows 下若文件实为 GBK 等非 UTF-8 编码，解码失败时**行内报错并上抛**，
+        绝不静默回退空表——静默空表=违禁词过滤失效（D-24 风险：过滤形同虚设
+        而系统无任何告警）。异常上抛后由调用方显式处置，保持"功能禁用"可见。
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8-sig') as file:
+                return [line.strip() for line in file.readlines()]
+        except UnicodeDecodeError:
+            logger.error(
+                f"违禁词文件解码失败（要求 UTF-8 编码，容忍 BOM）：{file_path}"
+                f"——违禁词过滤已禁用！静默空表=违禁词过滤失效，请将文件转存为 UTF-8 编码后重启"
+            )
+            raise
+
     # 本地敏感词检测 传入敏感词库文件路径和待检查的文本
     def check_sensitive_words(self, file_path, text):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            sensitive_words = [line.strip() for line in file.readlines()]
+        sensitive_words = self.read_sensitive_word_file(file_path)
 
         for word in sensitive_words:
             if word in text:
                 return True
 
         return False
-    
+
 
     # 本地敏感词检测 Aho-Corasick 算法 传入敏感词库文件路径和待检查的文本
     def check_sensitive_words2(self, file_path, text):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            sensitive_words = [line.strip() for line in file.readlines()]
+        sensitive_words = self.read_sensitive_word_file(file_path)
 
         # 创建 Aho-Corasick 自动机
         automaton = ahocorasick.Automaton()
@@ -105,8 +122,7 @@ class TextMixin:
 
     # 本地敏感词转拼音检测 传入敏感词库文件路径和待检查的文本
     def check_sensitive_words3(self, file_path, text):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            sensitive_words = [line.strip() for line in file.readlines()]
+        sensitive_words = self.read_sensitive_word_file(file_path)
 
         pinyin_text = self.text2pinyin(text)
 

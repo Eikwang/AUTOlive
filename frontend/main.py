@@ -6,10 +6,12 @@ AUTOlive 主入口文件
 import sys
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
 import traceback
+from collections import deque
 from pathlib import Path
 
 # 添加项目根目录到Python路径
@@ -92,6 +94,11 @@ class AutoliveApp:
     _shared_running = False
     _shared_subprocesses = {}
 
+    # 最近异常环形缓冲（D1 状态条数据源）：类级 deque（script mode 重入共享），
+    # 监控（_monitor_subprocesses）与启动编排（run_external_program / D-14）都写入，
+    # 消息入缓冲前经 redact_exception 脱敏（DX 义务）。
+    _shared_exception_buffer = deque(maxlen=10)
+
     @property
     def running_flag(self) -> bool:
         return AutoliveApp._shared_running
@@ -108,6 +115,48 @@ class AutoliveApp:
     def my_subprocesses(self, value: dict) -> None:
         # 测试与重置路径用赋值换新 dict；类级引用替换保持跨重入共享
         AutoliveApp._shared_subprocesses = value if isinstance(value, dict) else {}
+
+    # ============ D1 运行状态条数据源（类级运行态的读取/写入便捷层） ============
+
+    @classmethod
+    def push_exception(cls, module: str, message: str, *, fix_hint: str = "") -> dict:
+        """异常入环形缓冲（D1）：脱敏后追加，供状态条展示。
+
+        Args:
+            module: 模块名（main / edtalk_realtime / fastrag …）
+            message: 异常消息（入缓冲前经 redact_exception 脱敏）
+            fix_hint: 修复指引（D-14 三类：重登录/改端口/查路径）
+
+        Returns:
+            入缓冲的条目 dict（ts/module/message/fix_hint）
+        """
+        from frontend.utils.redact import redact_exception
+        entry = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "module": module,
+            "message": redact_exception(message),
+            "fix_hint": str(fix_hint or ""),
+        }
+        cls._shared_exception_buffer.append(entry)
+        return entry
+
+    @classmethod
+    def recent_exceptions(cls) -> list:
+        """最近异常列表（时间正序，最新在末尾；上限 10 条）。"""
+        return list(cls._shared_exception_buffer)
+
+    def subprocess_health(self) -> list:
+        """子进程健康快照（D1 状态条数据源）：[(name, alive)]。
+
+        alive: True=存活 / False=已退出 / None=探测失败未知。
+        """
+        snap = []
+        for name, proc in list(self.my_subprocesses.items()):
+            try:
+                snap.append((name, proc.poll() is None))
+            except Exception:
+                snap.append((name, None))
+        return snap
 
     def __init__(self):
         """初始化应用程序
@@ -230,20 +279,38 @@ class AutoliveApp:
             ui.notify(position="top", type="negative", message=f"配置保存失败: {e}")
             logger.error(f"配置保存失败: {e}")
     
-    def start_programs(self):
-        """启动外围服务（EDTalk 实时推理 + fastrag 知识库）。
+    # 外围模块显示名（D-14 部分启动 notify 文案用）
+    _MODULE_LABELS = {
+        "main": "主系统",
+        "edtalk_realtime": "EDTalk 推理",
+        "fastrag": "知识库服务",
+    }
+
+    def start_programs(self) -> list:
+        """启动外围服务（EDTalk 实时推理 + fastrag 知识库），返回启动失败列表。
 
         coordination_program 配置驱动拉起已随模块退役移除（/autoplan 批准批次
         删除批，任务书"联动程序此功能已弃用，直接移除"）；EDTalk/fastrag 的
         拉起均显式 shell=False + list 传参（native H1）。
+
+        Returns:
+            [(module, reason, fix_hint), ...]——D-14 外围失败分级：调用方
+            （run_external_program）降级继续（拉起主系统），仅告警不中断。
         """
         config_data = self.config._config
+        failures = []
 
         # EDTalk 实时推理服务器（计划 §4.2：开关双检 + 端口幂等 + 身份验证）
-        self._start_edtalk_realtime(config_data)
+        ok, reason, fix_hint = self._start_edtalk_realtime(config_data)
+        if not ok:
+            failures.append(("edtalk_realtime", reason, fix_hint))
 
         # fastrag 知识库服务（计划 §6.2）
-        self._start_fastrag(config_data)
+        ok, reason, fix_hint = self._start_fastrag(config_data)
+        if not ok:
+            failures.append(("fastrag", reason, fix_hint))
+
+        return failures
 
     def _start_main_system(self):
         """拉起主系统 main.py 子进程（编排层，启动链假启动修复 2026-10-12）。
@@ -251,19 +318,25 @@ class AutoliveApp:
         start_programs 只负责配置驱动的外围程序（coordination/edtalk/fastrag，
         tests/test_startup_wiring.py 锁定其行为）；main.py 主系统的拉起属启动
         编排。shell=False + list 传参（native H1 规范）。
+
+        Returns:
+            (ok, reason, fix_hint)——D-14：关键模块失败 → 调用方复位 running_flag
+            并弹 negative 通知（主系统失败=整体失败，不做降级）。
         """
         main_py = os.path.join(str(getattr(self, "base_path", os.getcwd())), "main.py")
         if not os.path.exists(main_py):
             logger.error(f"主系统入口不存在: {main_py}（problem=入口缺失；fix=检查仓库完整性）")
-            return
+            return False, f"主系统入口不存在: {main_py}", "请检查安装完整性（main.py 缺失）"
         logger.info(f"运行程序: main 主系统 位于: {os.path.dirname(main_py)}")
         try:
             process = subprocess.Popen(
                 [sys.executable, main_py],
                 cwd=str(os.path.dirname(main_py)), shell=False)
             self.my_subprocesses["main"] = process
+            return True, "", ""
         except Exception as e:
             logger.error(f"启动主系统 main 失败: {e}")
+            return False, f"启动主系统进程失败: {e}", "请查看完整日志；若提示端口占用请修改端口配置"
 
     def _start_edtalk_realtime(self, config_data: dict):
         """拉起 EDTalk realtime_serve 服务（计划 §4.2 + Eng 义务⑨⑬）。
@@ -273,13 +346,18 @@ class AutoliveApp:
         - 端口幂等探测 + GET /status 身份验证（占用者未必是 realtime_serve）
         - 训练进行中检测（双向显存防护）
         - 显式 shell=False + list 传参（native H1）
+
+        Returns:
+            (ok, reason, fix_hint)——D-14：ok=False 时由调用方（start_programs
+            → run_external_program）降级继续并汇总告警；开关未启用/训练中/
+            已在运行等"主动跳过"不算失败。
         """
         try:
             ed_cfg = config_data.get("edtalk_realtime", {})
         except Exception:
             ed_cfg = {}
         if config_data.get("visual_body") != "edtalk_realtime" or not ed_cfg.get("enable"):
-            return
+            return True, "", ""
 
         interpreter = ed_cfg.get("interpreter_path") or "D:\\AI\\EDTalk\\runtime312\\python.exe"
         if not os.path.exists(interpreter):
@@ -288,7 +366,7 @@ class AutoliveApp:
                 f"cause=runtime312 未安装或路径变更；"
                 f"fix=修改画面设置页『解释器路径』配置项指向可用解释器"
             )
-            return
+            return False, f"EDTalk 解释器不存在：{interpreter}", "请在画面设置页修改『解释器路径』配置项"
 
         # 训练进行中检测（双向显存防护，16GB 卡训练与推理不可并存）
         try:
@@ -299,7 +377,7 @@ class AutoliveApp:
                 )
                 ui.notify(position="top", type="warning",
                           message="训练进行中，实时推理服务未启动（显存冲突风险），建议错开")
-                return
+                return True, "", ""
         except ImportError:
             pass
 
@@ -309,7 +387,7 @@ class AutoliveApp:
                 f"EDTalk 运行副本目录不存在：{edtalk_dir}。problem=副本缺失；"
                 f"cause=尚未执行复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
             )
-            return
+            return False, f"EDTalk 运行副本目录不存在：{edtalk_dir}", "请运行 scripts/copy_edtalk.py 一键复制脚本"
 
         port = int(ed_cfg.get("port", 8000))
         host = ed_cfg.get("host", "127.0.0.1")
@@ -328,16 +406,14 @@ class AutoliveApp:
                     f"problem=端口冲突；cause=端口被未知服务占用；"
                     f"fix=修改画面设置页『端口』配置项或结束占用进程"
                 )
-                ui.notify(position="top", type="negative",
-                          message=f"端口 {port} 被非 EDTalk 服务占用，实时推理未启动")
-                return
+                return False, f"端口 {port} 被非 EDTalk 服务占用", "请在画面设置页修改『端口』配置或结束占用进程"
         except Exception:
             pass  # 连接失败 = 端口空闲，正常走拉起
 
         if already_running:
             ui.notify(position="top", type="warning",
                       message=f"EDTalk 服务已在运行（端口 {port}），跳过重复拉起")
-            return
+            return True, "", ""
 
         # 参数映射（config.edtalk_realtime → RUNBOOK 启动参数表）
         cmd = [interpreter, "-m", "realtime_serve.main"]
@@ -378,14 +454,22 @@ class AutoliveApp:
             self.my_subprocesses["edtalk_realtime"] = process
             self._edtalk_log_f = log_f  # 保引用防 GC 关闭句柄
             logger.info(f"运行程序: edtalk_realtime（PID {process.pid}，端口 {port}，日志 {log_path}）")
+            return True, "", ""
         except Exception as e:
             logger.error(f"启动 EDTalk realtime_serve 失败: {e}")
+            return False, f"启动 EDTalk realtime_serve 失败: {e}", "请查看完整日志（log/edtalk_realtime.log）定位原因"
 
     def _start_fastrag(self, config_data: dict):
-        """拉起 fastrag server（计划 §6.2 + Eng 义务⑬：端口环境变量注入）。"""
+        """拉起 fastrag server（计划 §6.2 + Eng 义务⑬：端口环境变量注入）。
+
+        Returns:
+            (ok, reason, fix_hint)——D-14：ok=False 由调用方降级继续并汇总告警；
+            未启用不算失败。端口预检用 connect_ex 试探（任务书 D-14：端口占用
+            =启动失败，fix=修改端口配置）。
+        """
         fastrag_cfg = config_data.get("fastrag", {})
         if not fastrag_cfg.get("enable"):
-            return
+            return True, "", ""
 
         base = str(get_base_path())
         fastrag_dir = os.path.join(base, "edtalk", "fastrag")
@@ -395,9 +479,23 @@ class AutoliveApp:
                 f"fastrag server.exe 不存在：{server_exe}。problem=可执行文件缺失；"
                 f"cause=fastrag 未复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
             )
-            return
+            return False, f"fastrag server.exe 不存在：{server_exe}", "请运行 scripts/copy_edtalk.py 一键复制脚本"
 
         port = int(fastrag_cfg.get("port", 11420))
+
+        # 端口预检（D-14：connect_ex 连接试探，被监听即占用）
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
+                _probe.settimeout(0.5)
+                if _probe.connect_ex(("127.0.0.1", port)) == 0:
+                    logger.error(
+                        f"fastrag 端口 {port} 已被占用。problem=端口冲突；"
+                        f"cause=端口被其他进程监听；fix=修改系统设置页 fastrag『端口』配置"
+                    )
+                    return False, f"fastrag 端口 {port} 已被占用", "请修改 fastrag『端口』配置项"
+        except Exception:
+            pass  # 探测失败不阻断拉起（保持宽容，Popen 层兜底）
+
         env = os.environ.copy()
         # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2）
         env["FASTRAG__SERVER__PORT"] = str(port)
@@ -408,8 +506,10 @@ class AutoliveApp:
             )
             self.my_subprocesses["fastrag"] = process
             logger.info(f"运行程序: fastrag（PID {process.pid}，端口 {port}）")
+            return True, "", ""
         except Exception as e:
             logger.error(f"启动 fastrag 失败: {e}")
+            return False, f"启动 fastrag 失败: {e}", "请查看完整日志定位原因"
 
         # 注意（2026-10-15 EDTalk 整合义务修复）：此处曾残留 webui-bak 移植的
         # main.py 拉起代码——fastrag.enable=true 时 main.py 双拉起、首个进程成孤儿
@@ -480,8 +580,8 @@ class AutoliveApp:
         try:
             self.running_flag = True
 
-            # 启动协同程序和主程序
-            self.start_programs()
+            # 外围程序先行（D-14 分级：外围失败降级继续，不阻断主系统拉起）
+            outer_failures = self.start_programs()
 
             # 启动主系统进程（启动链假启动修复 2026-10-12）：代码拆分后主系统
             # 独立为 main.py（控制面 API 8082 + 主循环），webui 仅前端——但启动链
@@ -489,7 +589,29 @@ class AutoliveApp:
             # 一直有 "main" 停止项）→「启动系统」实际只拉外围程序，假启动。
             # sys.executable=webui 进程解释器（runtime312），与手动
             # `python main.py` 等价；stop_programs("main") 原样兼容。
-            self._start_main_system()
+            #
+            # D-14 启动失败分支（/autoplan 批准批次切片 2）：主系统=关键模块，
+            # 失败 → 复位 running_flag + negative 通知（附修复指引）+ 异常缓冲
+            # 记录；外围模块失败 → log warning + 异常缓冲 + 降级继续（notify
+            # warning 呈现"部分启动"显式状态）。
+            ok, reason, fix_hint = self._start_main_system()
+            if not ok:
+                self.running_flag = False
+                self.push_exception("main", reason, fix_hint=fix_hint)
+                if type == "webui":
+                    ui.notify(position="top", type="negative",
+                              message=f"主系统启动失败：{reason}。修复指引：{fix_hint}")
+                return {"code": -1, "msg": f"主系统启动失败！{reason}"}
+
+            if outer_failures:
+                labels = "、".join(
+                    self._MODULE_LABELS.get(m, m) for m, _, _ in outer_failures)
+                for m, r, h in outer_failures:
+                    logger.warning(f"外围程序 {m} 启动失败（降级继续）: {r}")
+                    self.push_exception(m, r, fix_hint=h)
+                if type == "webui":
+                    ui.notify(position="top", type="warning",
+                              message=f"部分启动：{labels} 未启动（其余正常），详见侧边栏运行状态条")
 
             # 启动后一次性存活检查（E2）：3 秒后 poll 各子进程。部分失败场景下
             # start_programs 内部只 logger.error（沿用移植自 webui-bak 的行为），
@@ -505,6 +627,7 @@ class AutoliveApp:
                     try:
                         if proc.poll() is not None:
                             logger.error(f"启动后检查: 程序 {name} 已退出 (code={proc.returncode})")
+                            self.push_exception(name, f"程序启动后已退出 (code={proc.returncode})")
                             if use_ui:
                                 ui.notify(position="top", type="negative",
                                           message=f"程序 {name} 启动后已退出，请查看日志")
@@ -738,9 +861,14 @@ class AutoliveApp:
         main 重拉仅拉主系统（coordination/edtalk/fastrag 为独立进程各自存活，
         不经 run_external_program 重拉以免双实例）；重拉前查训练显存互斥
         （与 run_external_program 同判据），训练中跳过并保持告警等人工处理。
+
+        D1（2026-10-19）：退出事件写入异常环形缓冲（状态条呈现）；告警 notify
+        受 abnormal_alarm.notify_enable 通道开关控制（默认开，缺省向后兼容）。
         """
         if not self.running_flag:
             return
+        notify_enable = bool(get_nested_value(
+            self.config._config, "abnormal_alarm", "notify_enable", default=True))
         for name, proc in list(self.my_subprocesses.items()):
             try:
                 code = proc.poll()
@@ -752,8 +880,11 @@ class AutoliveApp:
             self.my_subprocesses.pop(name, None)
             if name == "main":
                 self.running_flag = False
-                ui.notify(position="top", type="negative",
-                          message=f"主系统进程已退出（exit={code}）——请查看日志；启动按钮已恢复")
+                self.push_exception("main", f"主系统进程退出（exit={code}）",
+                                    fix_hint="请查看完整日志定位原因后重新启动")
+                if notify_enable:
+                    ui.notify(position="top", type="negative",
+                              message=f"主系统进程已退出（exit={code}）——请查看日志；启动按钮已恢复")
                 if get_nested_value(self.config._config, "webui", "auto_run"):
                     try:
                         from utils.train_streamer import pipeline as _train_pipeline
@@ -763,12 +894,17 @@ class AutoliveApp:
                     except Exception:
                         pass
                     logger.warning("auto_run 已启用：自动重拉主系统 main")
-                    self._start_main_system()
-                    if "main" in self.my_subprocesses:
+                    ok, reason, fix_hint = self._start_main_system()
+                    if ok and "main" in self.my_subprocesses:
                         self.running_flag = True
+                    else:
+                        self.push_exception("main", f"auto_run 自动重拉失败：{reason}",
+                                            fix_hint=fix_hint)
             else:
-                ui.notify(position="top", type="warning",
-                          message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")
+                self.push_exception(name, f"外围程序退出（exit={code}）")
+                if notify_enable:
+                    ui.notify(position="top", type="warning",
+                              message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")
     
     def _create_control_buttons(self):
         """创建底部控制按钮 - 已移除重启和关灯按钮"""

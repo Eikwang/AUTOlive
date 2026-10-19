@@ -58,6 +58,11 @@ class SynthesisMixin:
                     # 合成音频并插入待播放队列
                     await self.my_play_voice(message)
 
+                # E2 饥饿路径 flush：突发结束（待合成队列空且无在途合成）时，
+                # 若待播放队列积压未达首次播放阈值，立即放行——规则见
+                # QueueMixin.flush_starved_playback_queue 注释
+                self.flush_starved_playback_queue()
+
                 # message = Audio.message_queue.get(block=True)
                 # logger.debug(message)
                 # await self.my_play_voice(message)

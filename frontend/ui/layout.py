@@ -13,6 +13,143 @@ from frontend.ui.components.service_status import ServiceStatusStrip
 from utils.my_log import logger
 
 
+class RuntimeStatusStrip:
+    """D1 运行状态条（侧边栏底部常驻区，2026-10-19 批次切片 2）。
+
+    内容：running_flag 状态灯 + 各子进程健康度 + 最近一条异常（时间戳+模块名）
+    + "最近 10 条"展开列表 + 完整日志路径固定行。
+
+    数据源：AutoliveApp 类级运行态（_shared_running/_shared_subprocesses/
+    _shared_exception_buffer，script mode 重入共享）——经 app 实例读取，本组件
+    不持状态副本；app 引用缺失时降级为"未连接"只读显示。ui.timer(5) 全量刷新
+    （条目少，重建开销可忽略——同 ServiceStatusStrip 模式）；异常列表由写入方
+    （监控/启动编排）事件驱动追加，无需额外通道。
+    """
+
+    def __init__(self, app=None):
+        self._app = app
+        self._body = None
+        self._expansion_open = False  # 展开态跨刷新记忆（重建保位）
+
+    def mount(self, container):
+        """在给定容器内构建骨架并启动 5s 定时刷新（须在 NiceGUI slot 上下文调用）。"""
+        with container:
+            self._body = ui.column().style("width:100%;gap:4px;")
+        self.refresh()
+        ui.timer(5.0, self.refresh)
+
+    # ---------- 渲染 ----------
+
+    def refresh(self):
+        """定时刷新：重建状态条主体（running_flag/健康度 5s 轮询）。"""
+        if self._body is None:
+            return
+        try:
+            self._body.clear()
+            with self._body:
+                self._render_flag()
+                self._render_processes()
+                self._render_exceptions()
+                self._render_log_path()
+        except Exception:
+            logger.error("[runtime-strip] 刷新异常", exc_info=True)
+
+    def _render_flag(self):
+        """running_flag 状态灯：绿=运行中 / 灰=已停止 / 灰=未连接。"""
+        app = self._app
+        if app is None:
+            color, text = "var(--text-hint)", "未连接应用实例"
+        else:
+            running = bool(getattr(app, "running_flag", False))
+            color = "var(--color-success)" if running else "var(--text-hint)"
+            text = "运行中" if running else "已停止"
+        with ui.row().style("width:100%;align-items:center;gap:6px;"):
+            ui.element("span").style(
+                f"width:8px;height:8px;border-radius:50%;background:{color};flex-shrink:0;"
+            )
+            ui.label(f"系统：{text}").style(
+                "font-size:12px;color:var(--text-primary);font-weight:var(--font-weight-emphasis);"
+            )
+
+    def _render_processes(self):
+        """各子进程健康度（my_subprocesses 遍历：存活绿 / 退出红 / 未知灰）。"""
+        app = self._app
+        health = []
+        if app is not None:
+            try:
+                health = app.subprocess_health()
+            except Exception:
+                health = []
+        if not health:
+            ui.label("子进程：无已登记进程").style(
+                "font-size:11px;color:var(--text-secondary);"
+            )
+            return
+        with ui.row().style("width:100%;align-items:center;gap:8px;flex-wrap:wrap;"):
+            for name, alive in health:
+                if alive is None:
+                    color, tag = "var(--border-color)", "未知"
+                elif alive:
+                    color, tag = "var(--color-success)", "运行中"
+                else:
+                    color, tag = "var(--color-danger)", "已退出"
+                with ui.row().style("align-items:center;gap:3px;"):
+                    ui.element("span").style(
+                        f"width:6px;height:6px;border-radius:50%;background:{color};flex-shrink:0;"
+                    )
+                    ui.label(f"{name} {tag}").style(
+                        "font-size:11px;color:var(--text-secondary);"
+                    )
+
+    def _render_exceptions(self):
+        """最近异常：最新一条常显（时间戳+模块名+脱敏消息+修复指引），展开看 10 条。"""
+        app = self._app
+        entries = []
+        if app is not None:
+            try:
+                entries = app.recent_exceptions()
+            except Exception:
+                entries = []
+        if not entries:
+            ui.label("最近异常：无").style(
+                "font-size:11px;color:var(--text-secondary);"
+            )
+            return
+        latest = entries[-1]
+        hint = f"（{latest['fix_hint']}）" if latest.get("fix_hint") else ""
+        with ui.row().style("width:100%;align-items:center;gap:6px;"):
+            ui.icon("warning", size="xs").style("color:var(--color-warning);flex-shrink:0;")
+            ui.label(f"[{latest['ts']}] {latest['module']}：{latest['message']}{hint}").style(
+                "font-size:11px;color:var(--text-secondary);"
+                "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;"
+            )
+        exp = ui.expansion(f"最近异常（{len(entries)} 条）", value=self._expansion_open).style(
+            "width:100%;border:1px solid var(--border-color);border-radius:6px;"
+            "padding:0;font-size:11px;background:var(--bg-card);"
+        )
+        exp.on("value-change", lambda e: setattr(self, "_expansion_open", bool(e.args)))
+        with exp:
+            for entry in reversed(entries):  # 最新在最上
+                hint = f"（{entry['fix_hint']}）" if entry.get("fix_hint") else ""
+                ui.label(f"[{entry['ts']}] {entry['module']}：{entry['message']}{hint}").style(
+                    "font-size:11px;color:var(--text-secondary);word-break:break-all;"
+                )
+
+    def _render_log_path(self):
+        """完整日志路径固定行（webui loguru 未配置文件输出，落盘点=log/ 目录，
+        含 edtalk_realtime.log 等子进程落盘日志）。"""
+        try:
+            from frontend.config.paths import get_log_dir
+            log_dir = str(get_log_dir())
+        except Exception:
+            return
+        ui.label(f"完整日志：{log_dir}").tooltip(
+            "webui 控制台日志输出至终端；EDTalk 推理日志为该目录下 edtalk_realtime.log"
+        ).style(
+            "font-size:10px;color:var(--text-hint);word-break:break-all;"
+        )
+
+
 class UILayout:
     """UI布局管理器"""
 
@@ -768,6 +905,13 @@ class DrawerLayout:
                 self.service_strip_container = ui.column().style('width:100%;gap:4px;')
                 self._service_strip = ServiceStatusStrip()
                 self._service_strip.mount(self.service_strip_container)
+
+                # D1 运行状态条（2026-10-19 批次切片 2）：running_flag 灯 + 子进程
+                # 健康度 + 最近异常环形缓冲视图 + 完整日志路径；数据源 AutoliveApp
+                # 类级运行态（app 引用缺失时降级只读）
+                self._runtime_strip_container = ui.column().style('width:100%;gap:4px;')
+                self._runtime_strip = RuntimeStatusStrip(app=self.app)
+                self._runtime_strip.mount(self._runtime_strip_container)
 
                 # DanmakuListener 扫码登录入口 + system 事件通知（整合计划 G4/G5：
                 # NEEDS_LOGIN 队列呈现/QR 安全渲染/恢复自动关闭；事件环 → ui.notify）
@@ -1535,6 +1679,24 @@ class DrawerLayout:
         Returns:
             ui.row 对象
         """
+        # 0.0.0.0 局域网暴露横幅（D-1 补充，2026-10-19 批次切片 2）：webui.ip
+        # 显式配置为 0.0.0.0 时页面顶部常驻 warning 横幅——控制端（含 /sys_cmd
+        # 启停/恢复出厂）对局域网无鉴权暴露，引导改回 127.0.0.1。
+        webui_ip = str(get_nested_value(self.config, "webui", "ip", default="127.0.0.1"))
+        if webui_ip == "0.0.0.0":
+            with ui.row().style('''
+                width: 100%;
+                padding: 6px 16px;
+                align-items: center;
+                gap: 8px;
+                background: var(--color-warning);
+                color: var(--text-on-primary);
+            '''):
+                ui.icon('warning', size='xs')
+                ui.label("控制端对局域网暴露（webui.ip=0.0.0.0），请在 webui 配置页把 IP 改回 127.0.0.1").style(
+                    'font-size: var(--font-size-small); font-weight: var(--font-weight-emphasis);'
+                )
+
         with ui.row().style('''
             width: 100%;
             height: calc(100vh - 60px);
