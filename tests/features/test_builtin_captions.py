@@ -57,11 +57,11 @@ def test_priority_unrecognized_type_goes_tail():
 
 
 def test_priority_ordering():
-    p = make_player({"priority_mapping": {"comment": 30, "gift": 20, "copywriting": 1}})
-    p.audio_json_list = [{"type": "copywriting"}]
-    p._data_priority_insert({"type": "gift"})       # 排在 copywriting 前
+    p = make_player({"priority_mapping": {"comment": 30, "gift": 20}})
+    p.audio_json_list = [{"type": "comment"}]
+    p._data_priority_insert({"type": "gift"})       # 排在 comment 前（copywriting 优先级随模块退役，改用 comment 验证插队语义）
     p._data_priority_insert({"type": "comment"})    # 排在最前
-    assert [d["type"] for d in p.audio_json_list] == ["comment", "gift", "copywriting"]
+    assert [d["type"] for d in p.audio_json_list] == ["comment", "comment", "gift"]
 
 
 def test_priority_insert_index_explicit():

@@ -44,10 +44,6 @@ class EventHandler:
                 INSERT INTO gift (username, gift_name, gift_num, unit_price, total_price, ts) VALUES (?, ?, ?, ?, ?, ?)
                 '''
                 self.my_handle.db.execute(insert_data_sql, (username, gift_name, gift_num, data.get("unit_price", 0), data.get("total_price", 0), datetime.now()))
-            
-            # 答谢处理
-            if self.my_handle.config.get("thanks", "gift", "enable"):
-                self.my_handle.get_copywriting_and_audio_synthesis("gift", data)
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
             logger.error(f"礼物处理失败：{e}")
@@ -71,10 +67,6 @@ class EventHandler:
                 INSERT INTO entrance (username, ts) VALUES (?, ?)
                 '''
                 self.my_handle.db.execute(insert_data_sql, (username, datetime.now()))
-            
-            # 答谢处理
-            if self.my_handle.config.get("thanks", "entrance", "enable"):
-                self.my_handle.get_copywriting_and_audio_synthesis("entrance", data)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"入场处理失败：{e}")
@@ -90,10 +82,6 @@ class EventHandler:
             username = data["username"]
             
             logger.info(f"[{username}]关注了直播间")
-            
-            # 答谢处理
-            if self.my_handle.config.get("thanks", "follow", "enable"):
-                self.my_handle.get_copywriting_and_audio_synthesis("follow", data)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"关注处理失败：{e}")
@@ -172,92 +160,6 @@ class EventHandler:
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"闲时任务处理失败：{e}")
-    
-    def image_recognition_schedule_handle(self, data):
-        """
-        图像识别定时任务处理
-        
-        Args:
-            data (dict): 数据
-        """
-        try:
-            username = data.get("username", "系统")
-            content = self.my_handle.config.get("image_recognition", "prompt")
-            type = data.get("type", "窗口截图")
-            
-            # 将用户名字符串中的数字转换成中文
-            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
-                username = self.my_handle.common.convert_digits_to_chinese(username)
-            
-            if type == "窗口截图":
-                # 根据窗口名截图
-                screenshot_path = self.my_handle.common.capture_window_by_title(self.my_handle.config.get("image_recognition", "img_save_path"), self.my_handle.config.get("image_recognition", "screenshot_window_title"))
-            elif type == "摄像头截图":
-                # 根据摄像头索引截图
-                screenshot_path = self.my_handle.common.capture_image(self.my_handle.config.get("image_recognition", "img_save_path"), int(self.my_handle.config.get("image_recognition", "cam_index")))
-            
-            # 通用的data_json构造
-            data_json = {
-                "username": username,
-                "content": content,
-                "img_data": screenshot_path,
-                "ori_username": data.get("username", username),
-                "ori_content": content
-            }
-            
-            # 调用LLM统一接口，获取返回内容
-            resp_content = self.my_handle.llm_handle(self.my_handle.config.get("image_recognition", "model"), data_json, type="vision")
-            
-            if resp_content:
-                logger.info(f"[AI回复{username}]：{resp_content}")
-            else:
-                logger.warning(f'警告：{self.my_handle.config.get("image_recognition", "model")}无返回')
-                resp_content = ""
-            
-            """
-            双重过滤，为您保驾护航
-            """
-            resp_content = resp_content.replace('\n', '。')
-            
-            # LLM回复的内容进行违禁判断
-            resp_content = self.my_handle.prohibitions_handle(resp_content)
-            if resp_content is None:
-                return
-            
-            # logger.info("resp_content=" + resp_content)
-            
-            self.my_handle.write_to_comment_log(resp_content, {"username": username, "content": content})
-            
-            # 判断按键映射触发类型
-            if self.my_handle.config.get("key_mapping", "type") == "回复" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
-                # 替换内容
-                data["content"] = resp_content
-                # 按键映射 触发后不执行后面的其他功能
-                if self.my_handle.key_mapping_handle("回复", data):
-                    pass
-            
-            # 判断自定义命令触发类型
-            if self.my_handle.config.get("custom_cmd", "type") == "回复" or self.my_handle.config.get("custom_cmd", "type") == "弹幕+回复":
-                # 替换内容
-                data["content"] = resp_content
-                # 自定义命令 触发后不执行后面的其他功能
-                if self.my_handle.custom_cmd_handle("回复", data):
-                    pass
-            
-            # 音频合成时需要用到的重要数据
-            message = {
-                "type": "image_recognition_schedule",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": resp_content
-            }
-            
-            self.my_handle.audio_synthesis_handle(message)
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"图像识别定时任务处理失败：{e}")
     
     def abnormal_alarm_handle(self, type):
         """

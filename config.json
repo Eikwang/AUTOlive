@@ -23,25 +23,6 @@
   },
   "comment_log_type": "回答",
   "visual_body": "edtalk_realtime",
-  "luoxi_project": {
-    "Live_Comment_Assistant": {
-      "enable": false,
-      "version": "V0.1.x",
-      "api_ip_port": "http://127.0.0.1:8100",
-      "type": [
-        "comment_reply",
-        "idle_time_task",
-        "entrance_reply",
-        "follow_reply",
-        "gift_reply",
-        "reread",
-        "schedule"
-      ],
-      "trigger_position": [
-        "消息产生时"
-      ]
-    }
-  },
   "metahuman_stream": {
     "type": "musetalk",
     "api_ip_port": "http://127.0.0.1:8010"
@@ -262,20 +243,6 @@
     },
     "lowest_price": 0.1
   },
-  "search_online": {
-    "enable": false,
-    "keyword_enable": true,
-    "before_keyword": [
-      "联网",
-      "在线"
-    ],
-    "engine": "baidu",
-    "engine_id": 1,
-    "count": 1,
-    "resp_template": "请根据以下信息回答我的问题：{summary}\n请确保答案准确，如果有多个相关段落，请总结主要观点。\n问题是：{data}",
-    "http_proxy": "",
-    "https_proxy": ""
-  },
   "gemini": {
     "api_key": "",
     "model": "gemini-pro",
@@ -420,67 +387,6 @@
     "song_path": "song",
     "match_fail_copy": "抱歉，我还没学会唱{content}"
   },
-  "sd": {
-    "enable": true,
-    "translate_type": "none",
-    "prompt_llm": {
-      "type": "none",
-      "before_prompt": "JMBot是一位有艺术气质的AI助理，帮助人通过将自然语言转化为prompt。JMBot的行动规则如下:\n1.将输入的自然语言组合想象为一幅完整的画面，你需要根据描述自行随机添加合理的，不少于5处的画面细节;\n2.第一部分:((masterpiece)), ((best quality)), 8k, high detailed, ultra-detailed, ;\n3.第二部分:用简短的英文描述画面的主体，如:A girl sitting in a classroom,输出这段英文;\n4.第三部分:用英文单词或者词组描述画面的所有主体元素,元素之间用\"\"隔开，如果有哪个元素比较重要，请给代表这个元素的英文词组\n增加小括号，最多可以增加三层小括号，如: 1gir,(black hair), smiling, (windows in background), sunshine,输出这段英文;\n5.JMBot会将以上生成的三部分文本用英文逗号连接，中间不包含任何换行符的prompt作为最终结果;\n6.JMBot输出时将直接输出prompt，而不包含任何说明和解释。\n接下来你将扮演JMBot，要处理的自然语言为:",
-      "after_prompt": ""
-    },
-    "visual_camera": {
-      "background_color": "#00ff00ff"
-    },
-    "trigger": "画画：",
-    "ip": "127.0.0.1",
-    "port": 7860,
-    "negative_prompt": "ufsw, longbody, lowres, bad anatomy, bad hands, missing fingers, pubic hair,extra digit, fewer digits, cropped, worst quality, low quality",
-    "seed": -1.0,
-    "styles": [],
-    "cfg_scale": 7,
-    "steps": 30,
-    "enable_hr": false,
-    "hr_scale": 2,
-    "hr_second_pass_steps": 20,
-    "hr_resize_x": 512,
-    "hr_resize_y": 512,
-    "denoising_strength": 0.4,
-    "save_enable": true,
-    "loop_cover": true,
-    "save_path": "./out/sd"
-  },
-  "copywriting": {
-    "text_path": "data/copywriting/test.txt",
-    "audio_save_path": "out/copywriting/",
-    "audio_synthesis_type": "edge-tts",
-    "config": [
-      {
-        "file_path": "data/copywriting/",
-        "audio_path": "out/copywriting/",
-        "continuous_play_num": 2,
-        "max_play_time": 10.0,
-        "play_list": [
-          "test.wav",
-          "伊卡日语介绍.wav",
-          "吐槽.wav"
-        ]
-      },
-      {
-        "file_path": "data/copywriting2/",
-        "audio_path": "out/copywriting2/",
-        "continuous_play_num": 2,
-        "max_play_time": 3.0,
-        "play_list": [
-          "test.wav",
-          "test2.wav"
-        ]
-      }
-    ],
-    "audio_interval": 5.0,
-    "switching_interval": 5.0,
-    "random_play": true,
-    "auto_play": false
-  },
   "header": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.42"
   },
@@ -560,34 +466,6 @@
         "好的，主人，我休息了",
         "微臣告退"
       ]
-    }
-  },
-  "image_recognition": {
-    "enable": true,
-    "model": "blip",
-    "img_save_path": "./out/图像识别",
-    "prompt": "请讲解一下图片里的内容",
-    "screenshot_window_title": "None",
-    "screenshot_delay": 3.0,
-    "loop_screenshot_enable": false,
-    "loop_screenshot_delay": 15,
-    "cam_screenshot_enable": false,
-    "cam_index": 0,
-    "cam_screenshot_delay": 3.0,
-    "loop_cam_screenshot_enable": false,
-    "loop_cam_screenshot_delay": 15,
-    "gemini": {
-      "model": "gemini-pro-vision",
-      "api_key": "",
-      "http_proxy": "http://127.0.0.1:10809",
-      "https_proxy": "http://127.0.0.1:10809"
-    },
-    "zhipu": {
-      "model": "glm-4v",
-      "api_key": "api-key"
-    },
-    "blip": {
-      "model": "Salesforce/blip-image-captioning-large"
     }
   },
   "captions": {
@@ -1099,100 +977,6 @@
       }
     ]
   },
-  "custom_cmd": {
-    "enable": true,
-    "type": "弹幕",
-    "config": [
-      {
-        "keywords": [
-          "天蝎座今日运势",
-          "天蝎座运势",
-          "天蝎运势"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://api.vvhan.com/api/horoscope?type=scorpio&time=today",
-        "api_type": "GET",
-        "resp_data_type": "json",
-        "data_analysis": "resp['data']['fortunetext']['all']",
-        "resp_template": "{keyword}：{data}"
-      },
-      {
-        "keywords": [
-          "随机笑话",
-          "讲个笑话",
-          "来个笑话"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://api.vvhan.com/api/text/joke",
-        "api_type": "GET",
-        "resp_data_type": "content",
-        "data_analysis": "resp",
-        "resp_template": "{data}"
-      },
-      {
-        "keywords": [
-          "随机情话",
-          "讲个情话",
-          "情话"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://api.vvhan.com/api/text/love",
-        "api_type": "GET",
-        "resp_data_type": "content",
-        "data_analysis": "resp",
-        "resp_template": "{data}"
-      },
-      {
-        "keywords": [
-          "疯狂星期四",
-          "星期四",
-          "KFC",
-          "kfc"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://api.shadiao.pro/kfc",
-        "api_type": "GET",
-        "resp_data_type": "json",
-        "data_analysis": "resp['data']['text']",
-        "resp_template": "{data}"
-      },
-      {
-        "keywords": [
-          "狗屁不通",
-          "gpbt"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://oiapi.net/API/Bullshit/?title=oiapi&length=200",
-        "api_type": "GET",
-        "resp_data_type": "json",
-        "data_analysis": "resp['message']",
-        "resp_template": "{data}"
-      },
-      {
-        "keywords": [
-          "网易热评",
-          "网易云热评"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://oiapi.net/API/NeteaseHotReviews",
-        "api_type": "GET",
-        "resp_data_type": "json",
-        "data_analysis": "resp['data']['content']",
-        "resp_template": "{data}"
-      },
-      {
-        "keywords": [
-          "发病"
-        ],
-        "similarity": 1.0,
-        "api_url": "https://oiapi.net/API/SickL/",
-        "api_type": "GET",
-        "resp_data_type": "json",
-        "data_analysis": "resp['message']",
-        "resp_template": "{data}"
-      }
-    ]
-  },
   "translate": {
     "enable": false,
     "type": "baidu",
@@ -1266,7 +1050,6 @@
       }
     ]
   },
-  "coordination_program": [],
   "assistant_anchor": {
     "enable": false,
     "username": "助播",
@@ -1471,17 +1254,6 @@
           }
         }
       },
-      "copywriting": {
-        "label": "文案",
-        "type": "group",
-        "items": {
-          "content": {
-            "label": "文案内容",
-            "type": "textarea",
-            "value": ""
-          }
-        }
-      },
       "bilibili": {
         "label": "哔哩哔哩配置",
         "type": "group",
@@ -1546,17 +1318,6 @@
             "label": "后置提示词",
             "type": "input",
             "value": ""
-          }
-        }
-      },
-      "image_recognition": {
-        "label": "图像识别配置",
-        "type": "group",
-        "items": {
-          "enable": {
-            "label": "启用图像识别",
-            "type": "switch",
-            "value": false
           }
         }
       },
@@ -1639,18 +1400,8 @@
             "enabled": true
           },
           {
-            "name": "图像识别",
-            "tab_key": "image_recognition",
-            "enabled": true
-          },
-          {
             "name": "动态文案",
             "tab_key": "trends_copywriting",
-            "enabled": true
-          },
-          {
-            "name": "Stable Diffusion",
-            "tab_key": "sd_config",
             "enabled": true
           }
         ]
@@ -1703,11 +1454,6 @@
             "name": "闲时任务",
             "tab_key": "idle_time_task",
             "enabled": true
-          },
-          {
-            "name": "自定义命令",
-            "tab_key": "custom_cmd",
-            "enabled": true
           }
         ]
       },
@@ -1737,11 +1483,6 @@
             "enabled": true
           },
           {
-            "name": "文案",
-            "tab_key": "copywriting",
-            "enabled": true
-          },
-          {
             "name": "数据分析",
             "tab_key": "data_analysis",
             "enabled": true
@@ -1757,18 +1498,8 @@
             "enabled": true
           },
           {
-            "name": "联网搜索",
-            "tab_key": "search_online",
-            "enabled": true
-          },
-          {
             "name": "按键映射",
             "tab_key": "key_mapping",
-            "enabled": true
-          },
-          {
-            "name": "洛曦直播弹幕助手",
-            "tab_key": "luoxi",
             "enabled": true
           }
         ]
@@ -1827,11 +1558,6 @@
           {
             "name": "异常报警",
             "tab_key": "abnormal_alarm",
-            "enabled": true
-          },
-          {
-            "name": "联动程序",
-            "tab_key": "coordination_program",
             "enabled": true
           },
           {

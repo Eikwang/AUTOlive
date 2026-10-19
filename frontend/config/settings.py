@@ -245,10 +245,8 @@ _AUDIO_PLAYER_DEFAULTS: Dict[str, Any] = {
         "talk": 15,
         "idle_time_task": 10,
         "schedule": 10,
-        "image_recognition_schedule": 10,
         "trends_copywriting": 10,
         "abnormal_alarm": 5,
-        "copywriting": 1,
     },
     # api_ip_port 仅外部服务模式（audio_player/audio_player_v2）使用，保留兼容
 }
@@ -330,13 +328,6 @@ def _ensure_defaults(config: "Settings") -> None:
         # 整合后内置化：外部服务地址键退役（计划 §5.4）
         if "api_ip_port" in cfg["web_captions_printer"]:
             del cfg["web_captions_printer"]["api_ip_port"]
-            changed = True
-    # coordination_program 过期外部服务条目清理（计划 §4.6）
-    coord = cfg.get("coordination_program")
-    if isinstance(coord, list) and coord:
-        cleaned = [c for c in coord if isinstance(c, dict) and c.get("executable", "").startswith("E://GitHub_pro//") is False]
-        if len(cleaned) != len(coord):
-            cfg["coordination_program"] = cleaned
             changed = True
     if changed:
         try:

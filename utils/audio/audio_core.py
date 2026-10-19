@@ -40,15 +40,9 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
     音频处理主类 - 通过Mixin模式组合各个功能模块
     """
     
-    # 文案播放标志 0手动暂停 1临时暂停  2循环播放
-    copywriting_play_flag = -1
-
     # pygame.mixer实例
     mixer_normal = None
     mixer_copywriting = None
-
-    # 全局变量用于保存恢复文案播放计时器对象
-    unpause_copywriting_play_timer = None
 
     audio_player = None
 
@@ -92,13 +86,13 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
         self.common = Common()
         self.my_tts = MY_TTS(config_path)
 
-        # 文案模式
+        # webui 前端进程轻量初始化（type=2）：仅读取配置后提前返回，
+        # 不启动播放循环/播放器——双进程拓扑关键机制（完整初始化仅发生在
+        # 主系统进程 my_handle），specs/integration 整合计划有载。
+        # （原「文案模式」分支：copywriting 模块删除后仅保留轻量初始化语义）
         if type == 2:
-            logger.info("文案模式的Audio初始化...")
+            logger.info("轻量模式Audio初始化（webui进程）...")
             return
-    
-        # 文案单独一个线程排队播放
-        self.only_play_copywriting_thread = None
 
         if self.config.get("play_audio", "player") in ["pygame"]:
             import pygame
@@ -114,11 +108,6 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
 
         # 音频合成单独一个线程排队播放
         threading.Thread(target=lambda: asyncio.run(self.only_play_audio())).start()
-
-        # 文案单独一个线程排队播放
-        if self.only_play_copywriting_thread == None:
-            self.only_play_copywriting_thread = threading.Thread(target=self.start_only_play_copywriting)
-            self.only_play_copywriting_thread.start()
 
         # 播放后端分流（整合计划 §4.2）：builtin=内置播放器（进程内队列），
         # 其余=既有 AUDIO_PLAYER HTTP 客户端（外部服务模式，兼容保留）。

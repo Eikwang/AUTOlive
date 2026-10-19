@@ -30,8 +30,6 @@ from .base import logger
 from .db import SQLiteDB
 from .my_translate import My_Translate
 
-from .luoxi_project.live_comment_assistant import send_msg_to_live_comment_assistant
-
 # 导入 handler 模块
 from .handlers.audio_handler import AudioHandler
 from .handlers.chat_handler import ChatHandler
@@ -161,8 +159,6 @@ class My_handle(metaclass=SingletonMeta):
 
             self.custom_llm = None
 
-            self.image_recognition_model = None
-
             self.chat_type_list = ["custom_llm"]
 
             # 初始化 handler 模块
@@ -191,16 +187,6 @@ class My_handle(metaclass=SingletonMeta):
 
         # 聊天相关类实例化
         self.handle_chat_type()
-
-        # 判断是否使能了SD
-        if My_handle.config.get("sd")["enable"]:
-            from utils.sd import SD
-            self.sd = SD(My_handle.config.get("sd"))
-        # 特殊：在SD没有使能情况下，判断图片映射是否使能
-        elif My_handle.config.get("key_mapping", "img_path_trigger_type") != "不启用":
-            # 沿用SD的虚拟摄像头来展示图片
-            from utils.sd import SD
-            self.sd = SD({"enable": False, "visual_camera": My_handle.config.get("sd", "visual_camera")})
 
         # 日志文件路径
         self.log_file_path = "./log/log-" + My_handle.common.get_bj_time(1) + ".txt"
@@ -310,15 +296,12 @@ class My_handle(metaclass=SingletonMeta):
     # 聊天相关
     def get_chat_model(self, chat_type, config):
         return self.chat_handler.get_chat_model(chat_type, config)
-    
-    def get_vision_model(self, chat_type, config):
-        return self.chat_handler.get_vision_model(chat_type, config)
-    
+
     def handle_chat_type(self):
         return self.chat_handler.handle_chat_type()
-    
-    def llm_handle(self, chat_type, data_json, type="chat"):
-        return self.chat_handler.llm_handle(chat_type, data_json, type)
+
+    def llm_handle(self, chat_type, data_json):
+        return self.chat_handler.llm_handle(chat_type, data_json)
     
     def llm_stream_handle_and_audio_synthesis(self, chat_type, data_json, type="chat"):
         return self.chat_handler.llm_stream_handle_and_audio_synthesis(chat_type, data_json, type)
@@ -382,24 +365,16 @@ class My_handle(metaclass=SingletonMeta):
     
     def choose_song_handle(self, data):
         return self.feature_handler.choose_song_handle(data)
-    
-    def sd_handle(self, data):
-        return self.feature_handler.sd_handle(data)
-    
+
     def integral_handle(self, type, data):
         return self.feature_handler.integral_handle(type, data)
     
     def key_mapping_handle(self, type, data):
         return self.feature_handler.key_mapping_handle(type, data)
-    
-    def custom_cmd_handle(self, type, data):
-        return self.feature_handler.custom_cmd_handle(type, data)
-    
+
     def blacklist_handle(self, data):
         return self.feature_handler.blacklist_handle(data)
     
-    def search_online_handle(self, data):
-        return self.feature_handler.search_online_handle(data)
     
     # 事件相关
     def gift_handle(self, data):
@@ -416,10 +391,7 @@ class My_handle(metaclass=SingletonMeta):
     
     def idle_time_task_handle(self, data):
         return self.event_handler.idle_time_task_handle(data)
-    
-    def image_recognition_schedule_handle(self, data):
-        return self.event_handler.image_recognition_schedule_handle(data)
-    
+
     def abnormal_alarm_handle(self, type):
         return self.event_handler.abnormal_alarm_handle(type)
     
@@ -429,13 +401,7 @@ class My_handle(metaclass=SingletonMeta):
     
     def get_room_id(self):
         return self.utils_handler.get_room_id()
-    
-    def get_copywriting_and_audio_synthesis(self, type, data):
-        return self.utils_handler.get_copywriting_and_audio_synthesis(type, data)
-    
-    def get_a_copywriting_and_audio_synthesis(self, type, data):
-        return self.utils_handler.get_a_copywriting_and_audio_synthesis(type, data)
-    
+
     def get_a_local_audio_and_audio_play(self, type, data):
         return self.utils_handler.get_a_local_audio_and_audio_play(type, data)
     

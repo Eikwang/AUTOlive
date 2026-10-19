@@ -139,13 +139,3 @@ class Audio:
         # TODO: 实现文案音频合成
         logger.warning("文案音频合成功能待实现")
         return None
-    
-    def pause_copywriting_play(self):
-        """暂停文案播放"""
-        # TODO: 实现暂停文案播放
-        logger.warning("暂停文案播放功能待实现")
-    
-    def unpause_copywriting_play(self):
-        """继续文案播放"""
-        # TODO: 实现继续文案播放
-        logger.warning("继续文案播放功能待实现")

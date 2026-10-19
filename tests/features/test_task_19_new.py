@@ -95,7 +95,6 @@ def test_ai_dialog_group(function_groups):
     tab_keys = [f['tab_key'] for f in ai_group['functions']]
     assert 'llm' in tab_keys
     assert 'talk' in tab_keys
-    assert 'image_recognition' in tab_keys
 
 
 def test_advanced_features_group(function_groups):
@@ -107,7 +106,6 @@ def test_advanced_features_group(function_groups):
     # visual_body 已移至"数字人"组；integral/translate 现归属本组
     assert 'integral' in tab_keys
     assert 'translate' in tab_keys
-    assert 'copywriting' in tab_keys
 
 
 def test_anchor_group(function_groups):

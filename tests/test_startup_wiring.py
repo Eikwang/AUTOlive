@@ -65,6 +65,7 @@ def _fake_autolive(tmp_path):
     return app
 
 
+@pytest.mark.skip(reason="退役：coordination_program 配置驱动拉起已随联动程序模块退役移除（start/stop_programs 重构保留 EDTalk/fastrag/main 分支）（门禁A/删除批 2026-10-19）")
 def test_coordination_program_passthrough_regression(tmp_path, monkeypatch):
     """R5 回归：既有 coordination_program 条目（parameters 仅 app_path）
     在透传修复后 cmd = [executable, app_path]——行为不变。"""
@@ -98,6 +99,7 @@ def test_coordination_program_passthrough_regression(tmp_path, monkeypatch):
     assert "legacy_app" in app.my_subprocesses
 
 
+@pytest.mark.skip(reason="退役：coordination_program 配置驱动拉起已随联动程序模块退役移除（start/stop_programs 重构保留 EDTalk/fastrag/main 分支）（门禁A/删除批 2026-10-19）")
 def test_coordination_program_multi_params_passthrough(tmp_path, monkeypatch):
     """透传修复：parameters[1:] 不再被丢弃（对接纪要 A2 主诉求）。"""
     captured = {}

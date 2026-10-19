@@ -293,10 +293,6 @@ class TimerHandler:
                     for data in timer.last_data:
                         self.my_handle.idle_time_task_handle(data)
                     #self.my_handle.idle_time_task_handle(timer.last_data)
-                elif timer_flag == "image_recognition_schedule":
-                    # 定时任务处理
-                    for data in timer.last_data:
-                        self.my_handle.image_recognition_schedule_handle(data)
 
                 self.my_handle.is_handleing = 0
 

@@ -266,8 +266,7 @@ class TestFunctionMigration:
                         "icon": "chat",
                         "functions": [
                             {"name": "大语言模型", "enabled": True, "tab_key": "llm"},
-                            {"name": "聊天", "enabled": True, "tab_key": "talk"},
-                            {"name": "图像识别", "enabled": True, "tab_key": "image_recognition"}
+                            {"name": "聊天", "enabled": True, "tab_key": "talk"}
                         ]
                     },
                     {
@@ -283,7 +282,6 @@ class TestFunctionMigration:
                         "icon": "build",
                         "functions": [
                             {"name": "虚拟身体", "enabled": True, "tab_key": "visual_body"},
-                            {"name": "文案", "enabled": True, "tab_key": "copywriting"},
                             {"name": "数据分析", "enabled": True, "tab_key": "data_analysis"}
                         ]
                     }
@@ -296,4 +294,4 @@ class TestFunctionMigration:
         layout = DrawerLayout(config)
         layout.migrate_tabs()
         # Then: function_items 包含所有功能
-        assert len(layout.function_items) == 14
+        assert len(layout.function_items) == 12

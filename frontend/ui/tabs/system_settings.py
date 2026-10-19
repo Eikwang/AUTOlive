@@ -223,34 +223,6 @@ def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
 
 
 # ============================================================
-# 联动程序
-# ============================================================
-def create_coordination_program_tab(config, theme_config, set_config_callback):
-    """创建联动程序页面"""
-    card_css = theme_config.get("card", "")
-    switch_internal_css = theme_config.get("switch_internal", "")
-    button_internal_color = theme_config.get("button_internal_color", "primary")
-    button_internal_css = theme_config.get("button_internal_css", "")
-
-    with ui.card().style(card_css):
-        ui.label('联动程序')
-        with ui.row():
-            ui.input(label='配置索引', value="", placeholder='配置组的排序号')
-            ui.button('增加配置组', color=button_internal_color).style(button_internal_css)
-            ui.button('删除配置组', color=button_internal_color).style(button_internal_css)
-
-        coordination_program_var = {}
-        coordination_program_config_card = ui.card()
-        for index, coordination_program in enumerate(config.get("coordination_program", [])):
-            with coordination_program_config_card.style(card_css):
-                with ui.grid(columns=3):
-                    coordination_program_var[str(4 * index)] = ui.switch(f'启用#{index + 1}', value=coordination_program.get("enable", True)).style(switch_internal_css)
-                    coordination_program_var[str(4 * index + 1)] = ui.input(label=f"程序名#{index + 1}", value=coordination_program.get("name", ""), placeholder='程序名').style("width:100%;")
-                    coordination_program_var[str(4 * index + 2)] = ui.input(label=f"可执行程序#{index + 1}", value=coordination_program.get("executable", ""), placeholder='可执行程序路径').style("width:100%;")
-                    coordination_program_var[str(4 * index + 3)] = ui.textarea(label=f'参数#{index + 1}', value="\n".join(coordination_program.get("parameters", [])), placeholder='参数，换行分隔').style("width:100%;")
-
-
-# ============================================================
 # 兼容旧接口 - 默认显示webui配置
 # ============================================================
 def create_system_settings_tab(config, theme_config, set_config_callback):

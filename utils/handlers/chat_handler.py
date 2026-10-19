@@ -34,32 +34,20 @@ class ChatHandler:
         """
         GPT_MODEL.set_model_config(chat_type, config.get(chat_type))
         self.my_handle.__dict__[chat_type] = GPT_MODEL.get(chat_type)
-    
-    def get_vision_model(self, chat_type, config):
-        """
-        获取视觉模型
-        
-        Args:
-            chat_type (str): 聊天类型
-            config (dict): 配置
-        """
-        GPT_MODEL.set_vision_model_config(chat_type, config)
-        self.my_handle.image_recognition_model = GPT_MODEL.get(chat_type)
-    
+
     def handle_chat_type(self):
         """处理聊天类型"""
         chat_type = self.my_handle.config.get("chat_type")
         self.get_chat_model(chat_type, self.my_handle.config)
     
-    def llm_handle(self, chat_type, data_json, type="chat"):
+    def llm_handle(self, chat_type, data_json):
         """
         LLM处理
-        
+
         Args:
             chat_type (str): 聊天类型
             data_json (dict): 数据JSON
-            type (str): 类型
-            
+
         Returns:
             str: LLM回复内容
         """
@@ -69,17 +57,14 @@ class ChatHandler:
             if model is None:
                 logger.error(f"模型 {chat_type} 未初始化")
                 return None
-            
+
             # 调用模型（使用 get_resp_sync 保持向后兼容）
-            if type == "vision":
-                resp_content = model.vision_chat(data_json)
+            # 优先使用 get_resp_sync 方法（异步化改造后的方法）
+            if hasattr(model, 'get_resp_sync'):
+                resp_content = model.get_resp_sync(data_json)
             else:
-                # 优先使用 get_resp_sync 方法（异步化改造后的方法）
-                if hasattr(model, 'get_resp_sync'):
-                    resp_content = model.get_resp_sync(data_json)
-                else:
-                    resp_content = model.chat(data_json)
-            
+                resp_content = model.chat(data_json)
+
             return resp_content
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
@@ -222,29 +207,15 @@ class ChatHandler:
                 # 按键映射 触发后不执行后面的其他功能
                 if self.my_handle.key_mapping_handle("弹幕", data):
                     return
-            
-            # 判断自定义命令触发类型
-            if self.my_handle.config.get("custom_cmd", "type") == "弹幕" or self.my_handle.config.get("custom_cmd", "type") == "弹幕+回复":
-                # 自定义命令 触发后不执行后面的其他功能
-                if self.my_handle.custom_cmd_handle("弹幕", data):
-                    return
-            
+
             # 1、本地问答库匹配
             if self.my_handle.local_qa_handle(data):
                 return
-            
+
             # 2、点歌模式
             if self.my_handle.choose_song_handle(data):
                 return
-            
-            # 3、SD模式
-            if self.my_handle.sd_handle(data):
-                return
-            
-            # 4、在线搜索
-            if self.my_handle.search_online_handle(data):
-                return
-            
+
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
@@ -309,15 +280,6 @@ class ChatHandler:
                 # 按键映射 触发后不执行后面的其他功能
                 if self.my_handle.key_mapping_handle("回复", data):
                     pass
-
-            # 判断自定义命令触发类型
-            if self.my_handle.config.get("custom_cmd", "type") == "回复" or self.my_handle.config.get("custom_cmd", "type") == "弹幕+回复":
-                # 替换内容
-                data["content"] = resp_content
-                # 自定义命令 触发后不执行后面的其他功能
-                if self.my_handle.custom_cmd_handle("回复", data):
-                    pass
-                
 
             # 音频合成时需要用到的重要数据
             message = {

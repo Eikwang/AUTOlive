@@ -76,7 +76,7 @@ class TestEnableSwitchMigration:
 
     def test_enable_paths_importable(self):
         from frontend.config.enable_paths import ENABLE_PATHS
-        assert len(ENABLE_PATHS) == 21
+        assert len(ENABLE_PATHS) == 16  # 删除批：5 个弃用模块开关随 tab 移除（image_recognition/sd_config/custom_cmd/search_online/luoxi）
 
     def test_enable_paths_resolve(self):
         """E-B2 前置：21 条路径全部可在出货 config.json 解析"""

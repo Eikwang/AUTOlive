@@ -138,7 +138,6 @@ class TestFunctionGroupMapping:
 
         assert "大语言模型" in func_names
         assert "聊天" in func_names
-        assert "图像识别" in func_names
 
     def test_advanced_features_group(self):
         """测试高级功能分组"""
@@ -155,7 +154,6 @@ class TestFunctionGroupMapping:
 
         assert "积分" in func_names
         assert "翻译" in func_names
-        assert "文案" in func_names
         assert "数据分析" in func_names
 
     def test_anchor_group(self):

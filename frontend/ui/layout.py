@@ -59,9 +59,7 @@ class UILayout:
                 'tts': ui.tab('文本转语音'),
                 'svc': ui.tab('变声'),
                 'visual_body': ui.tab('虚拟身体'),
-                'copywriting': ui.tab('文案'),
                 'talk': ui.tab('聊天'),
-                'image_recognition': ui.tab('图像识别'),
                 'integral': ui.tab('积分'),
                 'assistant_anchor': ui.tab('助播'),
                 'translate': ui.tab('翻译'),
@@ -1407,14 +1405,14 @@ class DrawerLayout:
         """根据 tab_key 渲染对应的 tab 内容"""
         # 导入 tab 模块
         from frontend.ui.tabs import (
-            common_config, llm, tts, svc, visual_body, copywriting,
-            talk, image_recognition, integral, assistant_anchor,
+            common_config, llm, tts, svc, visual_body,
+            talk, integral, assistant_anchor,
             translate, serial, data_analysis,
             audio_play, web_captions_printer, log_config,
             filter_config, filter_forget, filter_dedup, filter_queue,
             blacklist, read_comment, thanks, schedule, idle_time_task,
-            custom_cmd, trends_copywriting, sd_config, local_qa,
-            choose_song, search_online, key_mapping, luoxi, database_config,
+            trends_copywriting, local_qa,
+            choose_song, key_mapping, database_config,
             system_settings, platform_config, train_streamer,
             train_voice
         )
@@ -1439,9 +1437,7 @@ class DrawerLayout:
             'tts': lambda: tts.create_tts_tab(self.config, theme_config, set_cb),
             'svc': lambda: svc.create_svc_tab(self.config, theme_config, set_cb),
             'talk': lambda: talk.create_talk_tab(self.config, theme_config, set_cb),
-            'image_recognition': lambda: image_recognition.create_image_recognition_tab(self.config, theme_config, set_cb),
             'trends_copywriting': lambda: trends_copywriting.create_trends_copywriting_tab(self.config, theme_config, set_cb),
-            'sd_config': lambda: sd_config.create_sd_config_tab(self.config, theme_config, set_cb),
             # 互动设置
             'integral': lambda: integral.create_integral_tab(self.config, theme_config, set_cb),
             'assistant_anchor': lambda: assistant_anchor.create_assistant_anchor_tab(self.config, theme_config, set_cb),
@@ -1456,18 +1452,14 @@ class DrawerLayout:
             'thanks': lambda: thanks.create_thanks_tab(self.config, theme_config, set_cb),
             'schedule': lambda: schedule.create_schedule_tab(self.config, theme_config, set_cb),
             'idle_time_task': lambda: idle_time_task.create_idle_time_task_tab(self.config, theme_config, set_cb),
-            'custom_cmd': lambda: custom_cmd.create_custom_cmd_tab(self.config, theme_config, set_cb),
             # 高级功能
             'visual_body': lambda: visual_body.create_visual_body_tab(self.config, theme_config, set_cb),
             'train_streamer': lambda: train_streamer.create_train_streamer_tab(self.config, theme_config, set_cb),
             'train_voice': lambda: train_voice.create_train_voice_tab(self.config, theme_config, set_cb),
-            'copywriting': lambda: copywriting.create_copywriting_tab(self.config, theme_config, set_cb),
             'data_analysis': lambda: data_analysis.create_data_analysis_tab(self.config, theme_config, set_cb),
             'local_qa': lambda: local_qa.create_local_qa_tab(self.config, theme_config, set_cb),
             'choose_song': lambda: choose_song.create_choose_song_tab(self.config, theme_config, set_cb),
-            'search_online': lambda: search_online.create_search_online_tab(self.config, theme_config, set_cb),
             'key_mapping': lambda: key_mapping.create_key_mapping_tab(self.config, theme_config, set_cb),
-            'luoxi': lambda: luoxi.create_luoxi_tab(self.config, theme_config, set_cb),
             'database_config': lambda: database_config.create_database_tab(self.config, theme_config, set_cb),
             # 系统设置
             'webui_config': lambda: system_settings.create_webui_config_tab(self.config, theme_config, set_cb),
@@ -1476,7 +1468,6 @@ class DrawerLayout:
             'account_manage': lambda: system_settings.create_account_manage_tab(self.config, theme_config, set_cb),
             'trends_config': lambda: system_settings.create_trends_config_tab(self.config, theme_config, set_cb),
             'abnormal_alarm': lambda: system_settings.create_abnormal_alarm_tab(self.config, theme_config, set_cb),
-            'coordination_program': lambda: system_settings.create_coordination_program_tab(self.config, theme_config, set_cb),
         }
 
         # 渲染对应的 tab 内容

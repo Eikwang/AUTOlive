@@ -59,110 +59,12 @@ class UtilsHandler:
     def get_room_id(self):
         """
         获取房间号
-        
+
         Returns:
             str: 房间号
         """
         return self.my_handle.config.get("room_display_id")
-    
-    def get_copywriting_and_audio_synthesis(self, type, data):
-        """
-        获取文案和音频合成
-        
-        Args:
-            type (str): 类型
-            data (dict): 数据
-        """
-        try:
-            username = data["username"]
-            
-            # 获取文案
-            copywriting_list = self.my_handle.config.get("copywriting", type, "list")
-            if not copywriting_list:
-                return
-            
-            # 随机选择一个文案
-            import random
-            copywriting = random.choice(copywriting_list)
-            
-            # 替换变量
-            variables = {
-                'username': username,
-                'gift_name': data.get("gift_name", ""),
-                'gift_num': str(data.get("gift_num", "")),
-                'cur_time': self.my_handle.common.get_bj_time(5)
-            }
-            
-            for var, value in variables.items():
-                copywriting = copywriting.replace(f'{{{var}}}', value)
-            
-            # 构建消息
-            message = {
-                "type": type,
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": copywriting
-            }
-            
-            # 音频合成
-            self.my_handle.audio_synthesis_handle(message)
-            
-            # WebUI显示
-            self.webui_show_chat_log_callback(type, data, copywriting)
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"获取文案和音频合成失败：{e}")
-    
-    def get_a_copywriting_and_audio_synthesis(self, type, data):
-        """
-        获取一个文案和音频合成
-        
-        Args:
-            type (str): 类型
-            data (dict): 数据
-        """
-        try:
-            username = data["username"]
-            
-            # 获取文案
-            copywriting_list = self.my_handle.config.get("copywriting", type, "list")
-            if not copywriting_list:
-                return
-            
-            # 随机选择一个文案
-            import random
-            copywriting = random.choice(copywriting_list)
-            
-            # 替换变量
-            variables = {
-                'username': username,
-                'cur_time': self.my_handle.common.get_bj_time(5)
-            }
-            
-            for var, value in variables.items():
-                copywriting = copywriting.replace(f'{{{var}}}', value)
-            
-            # 构建消息
-            message = {
-                "type": type,
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": copywriting
-            }
-            
-            # 音频合成
-            self.my_handle.audio_synthesis_handle(message)
-            
-            # WebUI显示
-            self.webui_show_chat_log_callback(type, data, copywriting)
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"获取一个文案和音频合成失败：{e}")
-    
+
     def get_a_local_audio_and_audio_play(self, type, data):
         """
         获取本地音频和播放

@@ -121,7 +121,6 @@ class QueueMixin:
             schedule 定时任务
             idle_time_task 闲时任务
             abnormal_alarm 异常报警
-            image_recognition_schedule 图像识别定时任务
             trends_copywriting 动态文案
             assistant_anchor_text 助播-文本
             assistant_anchor_audio 助播-音频

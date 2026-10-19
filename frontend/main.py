@@ -47,9 +47,7 @@ from frontend.ui.tabs import (
     tts,
     svc,
     visual_body,
-    copywriting,
     talk,
-    image_recognition,
     integral,
     assistant_anchor,
     translate,
@@ -67,14 +65,10 @@ from frontend.ui.tabs import (
     thanks,
     schedule,
     idle_time_task,
-    custom_cmd,
     trends_copywriting,
-    sd_config,
     local_qa,
     choose_song,
-    search_online,
     key_mapping,
-    luoxi,
     database_config,
     system_settings,
     platform_config
@@ -237,39 +231,13 @@ class AutoliveApp:
             logger.error(f"配置保存失败: {e}")
     
     def start_programs(self):
-        """根据配置启动所有程序（与原文件 webui-bak.py L211-243 一致）
+        """启动外围服务（EDTalk 实时推理 + fastrag 知识库）。
 
-        EDTalk 功能集成（§4.2）：本函数也是实时推理服务器与 fastrag server 的
-        启动挂接点——拉起均显式 shell=False + list 传参（native H1：存量
-        coordination_program 路径的 shell=True 不得沿用到新分支）。
+        coordination_program 配置驱动拉起已随模块退役移除（/autoplan 批准批次
+        删除批，任务书"联动程序此功能已弃用，直接移除"）；EDTalk/fastrag 的
+        拉起均显式 shell=False + list 传参（native H1）。
         """
         config_data = self.config._config
-
-        # 启动协同程序
-        for program in config_data.get("coordination_program", []):
-            if not program.get("enable", False):
-                continue
-
-            name = program.get("name", "")
-            executable = program.get("executable", "")
-            parameters = program.get("parameters", [])
-            app_path = parameters[0] if parameters else ""
-
-            # 从 app.py 的路径中提取目录
-            app_dir = os.path.dirname(app_path) if app_path else "."
-
-            # 使用 Python 解释器路径和 app.py 路径构建命令
-            # （对接纪要 A2：parameters 全量透传，向后兼容——既有条目仅 app_path）
-            cmd = [executable] + parameters
-
-            logger.info(f"运行程序: {name} 位于: {app_dir}")
-
-            try:
-                # 在 app.py 文件所在的目录中启动程序
-                process = subprocess.Popen(cmd, cwd=app_dir, shell=True)
-                self.my_subprocesses[name] = process
-            except Exception as e:
-                logger.error(f"启动程序 {name} 失败: {e}")
 
         # EDTalk 实时推理服务器（计划 §4.2：开关双检 + 端口幂等 + 身份验证）
         self._start_edtalk_realtime(config_data)
@@ -474,15 +442,7 @@ class AutoliveApp:
             logger.warning(f"程序 {name} 没有在运行.")
 
     def stop_programs(self):
-        """根据配置停止所有程序（与原文件 webui-bak.py L271-282 一致）"""
-        config_data = self.config._config
-
-        # 停止协同程序
-        for program in config_data.get("coordination_program", []):
-            if not program.get("enable", False):
-                continue
-            self.stop_program(program.get("name", ""))
-
+        """停止所有已启动程序（coordination 循环随模块退役移除）。"""
         # 停止主程序
         self.stop_program("main")
 
@@ -770,149 +730,6 @@ class AutoliveApp:
 
         # 创建回到顶部按钮
         self._create_scroll_top_button()
-
-    def create_main_ui_old(self):
-        """创建主界面 - 旧版本（使用 tabs 布局）"""
-        # 主题配置 - 使用简化的浅色/深色模式
-        current_theme = self.theme_manager.get_theme_config()
-        tab_panel_css = current_theme.get("tab_panel", "")
-        card_css = current_theme.get("card", "")
-        button_bottom_css = current_theme.get("button_bottom", "")
-        button_bottom_color = current_theme.get("button_bottom_color", "primary")
-        button_internal_css = current_theme.get("button_internal", "")
-        button_internal_color = current_theme.get("button_internal_color", "")
-        switch_internal_css = current_theme.get("switch_internal", "")
-        echart_css = current_theme.get("echart", "")
-
-        # 创建标签页导航
-        tabs = self.navigation_tabs.create_tabs()
-
-        # 创建标签页面板
-        with ui.tab_panels(tabs, value=self.navigation_tabs.tabs['common_config']).classes('w-full'):
-            # 通用配置标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['common_config']).style(self.navigation_tabs.tab_panel_css):
-                common_config.create_common_config_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 大语言模型标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['llm']).style(self.navigation_tabs.tab_panel_css):
-                llm.create_llm_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 文本转语音标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['tts']).style(self.navigation_tabs.tab_panel_css):
-                tts.create_tts_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 变声标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['svc']).style(self.navigation_tabs.tab_panel_css):
-                svc.create_svc_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 虚拟身体标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['visual_body']).style(self.navigation_tabs.tab_panel_css):
-                visual_body.create_visual_body_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 文案标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['copywriting']).style(self.navigation_tabs.tab_panel_css):
-                copywriting.create_copywriting_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 聊天标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['talk']).style(self.navigation_tabs.tab_panel_css):
-                talk.create_talk_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 图像识别标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['image_recognition']).style(self.navigation_tabs.tab_panel_css):
-                image_recognition.create_image_recognition_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 积分标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['integral']).style(self.navigation_tabs.tab_panel_css):
-                integral.create_integral_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 助播标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['assistant_anchor']).style(self.navigation_tabs.tab_panel_css):
-                assistant_anchor.create_assistant_anchor_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 翻译标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['translate']).style(self.navigation_tabs.tab_panel_css):
-                translate.create_translate_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 串口标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['serial']).style(self.navigation_tabs.tab_panel_css):
-                serial.create_serial_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config
-                )
-
-            # 数据分析标签页
-            with ui.tab_panel(self.navigation_tabs.tabs['data_analysis']).style(self.navigation_tabs.tab_panel_css):
-                data_analysis.create_data_analysis_tab(
-                    self.config._config,
-                    self.theme_manager.get_theme_config(),
-                    self.set_config,
-                    data_analysis=self.data_analysis
-                )
-
-            # 页面配置标签页
-            # 页面配置标签页（web.py 已删除——batch2 C-B1）
-
-        # 创建底部控制按钮
-        self._create_control_buttons()
-
-        # 创建回到顶部按钮
-        self._create_scroll_top_button()
-
-        # 是否启用自动运行功能
-        if get_nested_value(self.config._config, "webui", "auto_run"):
-            logger.info("自动运行 已启用")
-            self.run_external_program(type="api")
-
-        # 子进程存活监控（/autoplan 批准批次 C6 项；TODOS 2026-09-23 P1 候选落地：
-        # 深夜长播中 main 子进程静默崩溃 = 直播间黑场数小时且启动按钮持续禁用）。
-        # poll() 非阻塞探活——Windows 禁用 os.kill 探测（学习条目
-        # windows-os-kill-probe-terminates：TerminateProcess 语义会真杀目标进程）。
-        ui.timer(10, self._monitor_subprocesses)
 
     def _monitor_subprocesses(self):
         """子进程存活监控：main 死亡→running_flag 复位+告警（auto_run 时自动重拉）。

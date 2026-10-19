@@ -292,29 +292,15 @@ class CommentHandler:
                 # 按键映射 触发后不执行后面的其他功能
                 if self.my_handle.key_mapping_handle("弹幕", data):
                     return
-            
-            # 判断自定义命令触发类型
-            if self.my_handle.config.get("custom_cmd", "type") == "弹幕" or self.my_handle.config.get("custom_cmd", "type") == "弹幕+回复":
-                # 自定义命令 触发后不执行后面的其他功能
-                if self.my_handle.custom_cmd_handle("弹幕", data):
-                    return
-            
+
             # 1、本地问答库匹配
             if self.my_handle.local_qa_handle(data):
                 return
-            
+
             # 2、点歌模式
             if self.my_handle.choose_song_handle(data):
                 return
-            
-            # 3、SD模式
-            if self.my_handle.sd_handle(data):
-                return
-            
-            # 4、在线搜索
-            if self.my_handle.search_online_handle(data):
-                return
-            
+
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
@@ -379,15 +365,6 @@ class CommentHandler:
                 # 按键映射 触发后不执行后面的其他功能
                 if self.my_handle.key_mapping_handle("回复", data):
                     pass
-
-            # 判断自定义命令触发类型
-            if self.my_handle.config.get("custom_cmd", "type") == "回复" or self.my_handle.config.get("custom_cmd", "type") == "弹幕+回复":
-                # 替换内容
-                data["content"] = resp_content
-                # 自定义命令 触发后不执行后面的其他功能
-                if self.my_handle.custom_cmd_handle("回复", data):
-                    pass
-                
 
             # 音频合成时需要用到的重要数据
             message = {
