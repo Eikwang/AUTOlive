@@ -15,7 +15,7 @@ class TestConnectionPool(unittest.TestCase):
     
     def setUp(self):
         """测试前准备"""
-        self.test_db = 'data/test_unit.db'
+        self.test_db = 'data/test_db_pool_unit.db'
         # 确保测试数据库存在
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
@@ -213,7 +213,7 @@ class TestSQLiteDBLegacy(unittest.TestCase):
     """测试旧版本SQLiteDB类（向后兼容）"""
     
     def setUp(self):
-        self.test_db = 'data/test_legacy.db'
+        self.test_db = 'data/test_db_pool_legacy.db'
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
     

@@ -116,7 +116,7 @@ def test_push_full_success(monkeypatch):
     monkeypatch.setattr(EDTalkClient, "_get_status", lambda self, s: asyncio.sleep(0, result={}))
 
     src = _make_wav(16000, 0.5)
-    ok = asyncio.get_event_loop().run_until_complete(client.push_full(src, "测试"))
+    ok = asyncio.run(client.push_full(src, "测试"))
     assert ok is True
     assert client.failure_count == 0
     assert "/audio/push_full" in sent["url"]
@@ -174,7 +174,7 @@ def test_push_full_rate_limit_blocks(monkeypatch):
     monkeypatch.setattr(EDTalkClient, "_get_status", lambda self, s: asyncio.sleep(0, result={}))
 
     src = _make_wav(16000, 0.5)
-    asyncio.get_event_loop().run_until_complete(client.push_full(src))
+    asyncio.run(client.push_full(src))
     # 应有一个 ≥ (5×1.2 - 0.5) 的阻塞 sleep（完成判定启发式生效）
     assert any(t >= 5.0 for t in sleep_calls), f"期望背压 sleep，实际 {sleep_calls}"
     os.remove(src)
@@ -201,7 +201,7 @@ def test_push_full_failure_degrades(monkeypatch):
     monkeypatch.setattr(mod.aiohttp, "ClientSession", BoomSession)
 
     src = _make_wav(16000, 0.5)
-    ok = asyncio.get_event_loop().run_until_complete(client.push_full(src))
+    ok = asyncio.run(client.push_full(src))
     assert ok is False
     assert client.failure_count == 1
     assert "ConnectionError" in client.last_error
@@ -252,7 +252,7 @@ def test_push_full_error_passthrough(monkeypatch):
     monkeypatch.setattr(EDTalkClient, "_get_status", lambda self, s: asyncio.sleep(0, result={}))
 
     src = _make_wav(16000, 0.5)
-    ok = asyncio.get_event_loop().run_until_complete(client.push_full(src))
+    ok = asyncio.run(client.push_full(src))
     assert ok is False
     assert "载荷超限" in client.last_error
     os.remove(src)
