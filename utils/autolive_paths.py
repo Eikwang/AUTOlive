@@ -140,3 +140,25 @@ class AutolivePaths:
     def default_tts_infer_yaml(self) -> str:
         """AUTOlive 管理的 tts_infer yaml 缺省位置（Step 0 探活已验证可用）。"""
         return os.path.join(self.autolive_home, "config", "tts_infer_probe.yaml")
+
+
+def ensure_config_backup(config_path: str = "config.json", backup_path: str = "config.json.bak") -> bool:
+    """保证恢复出厂基线存在（/autoplan 批准批次 C6 项，TODOS #8）。
+
+    factory（frontend/main.py）依赖 config.json.bak，仓库历史上无该文件时恢复出厂必失败。
+    幂等：仅在备份不存在时从当前 config.json 固化一份"出厂基线"；已存在则保留
+    （出厂语义=首次运行时的已知好配置，不随日常改动漂移）。双进程入口各自幂等调用，
+    谁先启动谁固化。返回是否新建了备份。
+    """
+    import logging
+    import shutil
+
+    logger = logging.getLogger(__name__)
+    if os.path.exists(backup_path):
+        return False
+    if not os.path.exists(config_path):
+        logger.warning("config.json 不存在，跳过出厂基线固化")
+        return False
+    shutil.copy2(config_path, backup_path)
+    logger.info(f"已固化恢复出厂基线：{backup_path}（首次运行快照）")
+    return True

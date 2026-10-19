@@ -159,8 +159,8 @@ def create_talk_tab(
     with ui.expansion('百度', icon="settings", value=False).classes('w-2/3'):
         with ui.grid(columns=3):
             ui.input(label='AppID', value=get_nested_value(config, "talk", "baidu", "app_id"), placeholder='百度云 语音识别应用的 AppID').style("width:100%;")
-            ui.input(label='API Key', value=get_nested_value(config, "talk", "baidu", "api_key"), placeholder='百度云 语音识别应用的 API Key').style("width:100%;")
-            ui.input(label='Secret Key', value=get_nested_value(config, "talk", "baidu", "secret_key"), placeholder='百度云 语音识别应用的 Secret Key').style("width:100%;")
+            ui.input(label='API Key', value=get_nested_value(config, "talk", "baidu", "api_key"), placeholder='百度云 语音识别应用的 API Key', password=True, password_icon_visibility=False).style("width:100%;")
+            ui.input(label='Secret Key', value=get_nested_value(config, "talk", "baidu", "secret_key"), placeholder='百度云 语音识别应用的 Secret Key', password=True, password_icon_visibility=False).style("width:100%;")
 
     # faster_whisper
     with ui.expansion('faster_whisper', icon="settings", value=False).classes('w-2/3'):

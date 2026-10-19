@@ -85,6 +85,7 @@ from frontend.styles.themes import init_theme_manager, get_theme_manager
 
 # 导入日志模块
 from utils.my_log import logger
+from utils.autolive_paths import ensure_config_backup
 
 
 class AutoliveApp:
@@ -132,6 +133,11 @@ class AutoliveApp:
         # NiceGUI 3.x 重入判定：server 已启动 = 本次为 root page 重跑（非首次启动）
         from nicegui import core as _nicegui_core
         self._reentry = bool(getattr(_nicegui_core.app, "is_started", False))
+        if not self._reentry:
+            # 恢复出厂基线自维护（/autoplan 批准批次 C6 项，TODOS #8）：bak 缺失时
+            # 从当前 config.json 固化一份，factory（:614）不再必炸。幂等，仅首次固化。
+            _bak = os.path.join(str(self.base_path), "config.json.bak")
+            ensure_config_backup(str(get_config_path()), _bak)
         if self._reentry:
             logger.debug("AutoliveApp 重入（script mode root page）——跳过重活初始化")
 
@@ -1138,7 +1144,16 @@ class AutoliveApp:
         self._register_api_endpoints()
 
         # 获取WebUI配置
-        webui_ip = get_nested_value(self.config._config, "webui", "ip", default="0.0.0.0")
+        # 暴露面收敛（TODOS #6 / autoplan C6 批）：默认绑定改 127.0.0.1——旧默认 0.0.0.0
+        # 会把无鉴权控制端（含 /sys_cmd run/stop/restart/factory）暴露给局域网。
+        # 用户显式配置 0.0.0.0 时启动日志告警（页面常驻横幅由状态条任务 D-1 承载）。
+        webui_ip = get_nested_value(self.config._config, "webui", "ip", default="127.0.0.1")
+        if str(webui_ip) == "0.0.0.0":
+            logger.warning(
+                "webui 绑定为 0.0.0.0：控制端（含 /sys_cmd 启停/恢复出厂）将对局域网无鉴权暴露。"
+                "确认需要局域网访问请保留；否则请在 webui 配置页把 IP 改回 127.0.0.1。"
+                "（token 鉴权已登记 TODOS）"
+            )
         webui_port = get_nested_value(self.config._config, "webui", "port", default=8086)
         webui_title = get_nested_value(self.config._config, "webui", "title", default="AUTOlive")
 
