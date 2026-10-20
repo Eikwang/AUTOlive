@@ -60,8 +60,13 @@ class ConversationManager:
             return {"success": False, "reason": "处理器未初始化"}
         
         try:
-            # 处理聊天内容
-            self.my_handle.process_data(content, "comment")
+            # 处理聊天内容：走 talk 通道（chat_handler.talk_handle 聊天处理链），
+            # 传与弹幕路径同构的 dict——此前传 (content, "comment") 会让 str 进入
+            # comment_handle 的 data["username"] 索引（T4/ENG H-2）
+            self.my_handle.process_data(
+                {"username": self.config.get("talk", "username"), "content": content},
+                "talk",
+            )
             return {"success": True, "awake_result": awake_result}
         except Exception as e:
             logger.error(f"处理聊天内容失败: {e}")

@@ -7,6 +7,7 @@
 
 import os
 import traceback
+from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
 from ..gpt_model.gpt import GPT_MODEL
@@ -167,12 +168,16 @@ class ChatHandler:
                 tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=10)
             
 
-            # 记录数据库
+            # 记录数据库（窄 try 隔离：DB 异常仅丢日志，不中断回复链——T4/ENG H-1，
+            # 此前 datetime NameError 被外层 try 吞掉导致其后整条回复链静默跳过）
             if self.my_handle.config.get("database", "comment_enable"):
-                insert_data_sql = '''
-                INSERT INTO danmu (username, content, ts) VALUES (?, ?, ?)
-                '''
-                self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
+                try:
+                    insert_data_sql = '''
+                    INSERT INTO danmu (username, content, ts) VALUES (?, ?, ?)
+                    '''
+                    self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
+                except Exception as db_e:
+                    logger.error(f"弹幕日志写库失败（不影响回复链）：{db_e}")
 
             # 0、积分机制运转
             if self.my_handle.integral_handle("comment", data):
@@ -236,8 +241,10 @@ class ChatHandler:
                     resp_content = ""
                     logger.warning(f"警告：{chat_type}无返回")
             elif chat_type == "game":
+                # 游戏控制实现已随拆分移除（GameControl 不在现行代码）——明示不可用而非
+                # None.parse_keys AttributeError（T4）
                 if self.my_handle.config.get("game", "enable"):
-                    self.my_handle.game.parse_keys_and_simulate_keys_press(content.split(), 2)
+                    logger.warning("chat_type=game 已启用但游戏控制实现不存在（GameControl 已移除），忽略本次按键模拟请求")
                 return
             elif chat_type == "none":
                 return

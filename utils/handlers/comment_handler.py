@@ -321,8 +321,10 @@ class CommentHandler:
                     resp_content = ""
                     logger.warning(f"警告：{chat_type}无返回")
             elif chat_type == "game":
+                # 游戏控制实现已随拆分移除（GameControl 不在现行代码）——明示不可用而非
+                # None.parse_keys AttributeError（T4）
                 if self.my_handle.config.get("game", "enable"):
-                    self.my_handle.game.parse_keys_and_simulate_keys_press(content.split(), 2)
+                    logger.warning("chat_type=game 已启用但游戏控制实现不存在（GameControl 已移除），忽略本次按键模拟请求")
                 return
             elif chat_type == "none":
                 return
