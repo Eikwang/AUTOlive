@@ -234,37 +234,111 @@ class TaskScheduler:
         return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
     
     def start_trends_copywriting(self):
-        """启动动态文案任务"""
+        """启动动态文案任务（T9 实装：本地文案→可选 LLM 改写→TTS 播放）"""
         if not self.config.get("trends_copywriting", "enable"):
             return
-        
+
+        def _read_copy_file(path):
+            """读文案文件：UTF-8 优先，失败回退 GBK，双双失败返回 None 不静默（E4 教训）。"""
+            for encoding in ("utf-8", "gbk"):
+                try:
+                    content = open(path, "r", encoding=encoding).read().strip()
+                    if content:
+                        return content
+                    return None
+                except (UnicodeDecodeError, OSError):
+                    continue
+            logger.warning(f"动态文案文件解码失败，跳过：{path}")
+            return None
+
         def run_trends_copywriting():
             logger.info("动态文案任务线程运行中...")
-            
+            file_cursor = 0
+
             try:
                 while self.is_running:
-                    # 文案文件路径列表
-                    copywriting_file_path_list = []
-                    
-                    # 获取动态文案列表
-                    for copywriting in self.config.get("trends_copywriting", "copywriting"):
-                        # 获取文件夹内所有文件的文件绝对路径，包括文件扩展名
-                        for tmp in self.common.get_all_file_paths(copywriting["folder_path"]):
-                            copywriting_file_path_list.append(tmp)
-                        
-                        # 是否开启随机播放
-                        if self.config.get("trends_copywriting", "random_play"):
-                            random.shuffle(copywriting_file_path_list)
-                        
-                        # 这里可以添加播放逻辑
-                        # 暂时只是记录日志
-                        logger.debug(f"动态文案文件: {copywriting_file_path_list}")
-                    
-                    time.sleep(60)  # 每分钟检查一次
-                    
+                    # 收集全部文案文件（copywriting[].folder_path 列表）
+                    file_path_list = []
+                    for copywriting in self.config.get("trends_copywriting", "copywriting") or []:
+                        file_path_list.extend(self.common.get_all_file_paths(copywriting.get("folder_path", "")))
+
+                    if not file_path_list:
+                        logger.warning("动态文案：文案目录为空或无文件，本轮跳过（D-8 空列表静默语义）")
+                        time.sleep(60)
+                        continue
+
+                    if self.config.get("trends_copywriting", "random_play"):
+                        source_path = random.choice(file_path_list)
+                    else:
+                        source_path = file_path_list[file_cursor % len(file_path_list)]
+                        file_cursor += 1
+
+                    source_content = _read_copy_file(source_path)
+                    if not source_content:
+                        time.sleep(60)
+                        continue
+
+                    # S-3 注入防护：改写输入仅限本地文案原文+配置内固定提示词，
+                    # 不接入任何弹幕/事件变量；原文截断 500 字符防爆 LLM/TTS
+                    resp_content = source_content[:500]
+                    prompt_change_enable = False
+                    for copywriting in self.config.get("trends_copywriting", "copywriting") or []:
+                        if copywriting.get("folder_path", "") in source_path:
+                            prompt_change_enable = bool(copywriting.get("prompt_change_enable"))
+                            prompt_change_content = copywriting.get("prompt_change_content", "")
+                            break
+
+                    if prompt_change_enable:
+                        # llm_type 枚举迁移（A5 精神）：chatgpt→custom_llm，其余未知值降级 custom_llm
+                        llm_type = self.config.get("trends_copywriting", "llm_type") or "custom_llm"
+                        if llm_type != "custom_llm":
+                            llm_type = "custom_llm"
+                        rewrite_prompt = f"{prompt_change_content}\n原文案：{resp_content}"
+                        try:
+                            if self.my_handle is not None and llm_type in (self.my_handle.chat_type_list or []):
+                                rewritten = self.my_handle.chat_handler.llm_handle(
+                                    llm_type, {"username": "系统", "content": rewrite_prompt}
+                                )
+                                if rewritten:
+                                    resp_content = str(rewritten)[:500]
+                                else:
+                                    logger.warning("动态文案 LLM 改写无返回，降级播放原文案")
+                            else:
+                                logger.warning(f"动态文案 LLM {llm_type} 不可用，降级播放原文案")
+                        except Exception as llm_e:
+                            logger.warning(f"动态文案 LLM 改写失败，降级播放原文案：{llm_e}")
+
+                    # S-3 注入安全声明：此处 resp_content 的唯一来源是本地文案文件
+                    # （+ 可选 LLM 对该文件的改写），不存在弹幕/观众输入注入点
+                    message = {
+                        "type": "copywriting",
+                        "tts_type": self.config.get("audio_synthesis_type"),
+                        "data": self.config.get(self.config.get("audio_synthesis_type")),
+                        "config": self.config.get("filter"),
+                        "username": "动态文案",
+                        "content": resp_content,
+                    }
+                    if self.my_handle is not None:
+                        self.my_handle.audio_synthesis_handle(message)
+                        logger.info(f"动态文案已入播放链：{source_path}")
+                    else:
+                        logger.warning("动态文案：my_handle 未就绪，本轮跳过播放")
+
+                    # 文案播放间隔（单位：秒，任务书口径）
+                    try:
+                        interval = int(self.config.get("trends_copywriting", "play_interval") or 60)
+                    except (TypeError, ValueError):
+                        interval = 60
+                    sleep_total = max(interval, 10)
+                    # 分片睡眠保证 is_running 停止信号响应
+                    for _ in range(sleep_total):
+                        if not self.is_running:
+                            break
+                        time.sleep(1)
+
             except Exception as e:
                 logger.error(f"动态文案任务失败: {traceback.format_exc()}")
-        
+
         self.trends_copywriting_thread = threading.Thread(target=run_trends_copywriting, daemon=True)
         self.trends_copywriting_thread.start()
         logger.info("动态文案任务线程已启动")
