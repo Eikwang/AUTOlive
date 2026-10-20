@@ -125,7 +125,7 @@
       "gift": 10,
       "entrance": 60
     },
-    "message_queue_max_len": 50,
+    "message_queue_max_len": "20",
     "voice_tmp_path_queue_max_len": 100,
     "voice_tmp_path_queue_min_start_play": 0,
     "priority_mapping": {

@@ -124,14 +124,14 @@ def create_tts_tab(
                 label='合成引擎（backend）',
                 options={'inproc': '进程内（推荐，无需外部服务）', 'api': '外部 API（自备服务兜底）'},
                 value=get_nested_value(config, "gpt_sovits", "backend") or "inproc",
-                on_change=lambda e: set_config_callback("gpt_sovits", "backend", e.value),
+                on_change=lambda e: set_config_callback("gpt_sovits", "backend", value=e.value),
                 style="width:100%;"
             )
             FormField.create_input(
                 label='外部 API 地址（仅 backend=api 时生效）',
                 value=get_nested_value(config, "gpt_sovits", "api_ip_port"),
                 placeholder='http://127.0.0.1:9880（自备 api_v2 服务）',
-                on_change=lambda e: set_config_callback("gpt_sovits", "api_ip_port", e.value),
+                on_change=lambda e: set_config_callback("gpt_sovits", "api_ip_port", value=e.value),
                 style="width:100%;"
             )
 
@@ -158,30 +158,30 @@ def create_tts_tab(
                     placeholder='每行一个参考音频绝对路径；第一行为主参考，其余为辅助参考（实测 3 个以上音色质量最佳）',
                     on_change=lambda e: set_config_callback(
                         "gpt_sovits", "params", "ref_audio_paths",
-                        normalize_ref_paths(e.value)),
+                        value=normalize_ref_paths(e.value)),
                 ).style("width:100%;")
                 ui.switch(
                     '无参考文本模式（ref_free）',
                     value=bool(get_nested_value(config, "gpt_sovits", "params", "ref_free", default=True)),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_free", e.value),
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_free", value=e.value),
                 ).style(switch_internal_css)
             with ui.grid(columns=3):
                 FormField.create_select(label='参考语种', options={'zh':'中文', 'ja':'日文', 'en':'英文', 'ko':'韩文', 'yue':'粤语', 'auto':'自动'},
                     value=get_nested_value(config, "gpt_sovits", "params", "prompt_lang") or "zh",
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_lang", e.value), style="width:100%;")
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_lang", value=e.value), style="width:100%;")
                 FormField.create_select(label='合成语种', options={
                         "all_zh": "中文", "all_yue": "粤语", "en": "英文", "all_ja": "日文",
                         "all_ko": "韩文", "zh": "中英混合", "yue": "粤英混合", "ja": "日英混合",
                         "ko": "韩英混合", "auto": "多语种混合", "auto_yue": "多语种混合(粤语)",
                     },
                     value=get_nested_value(config, "gpt_sovits", "params", "text_lang") or "zh",
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_lang", e.value), style="width:100%;")
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_lang", value=e.value), style="width:100%;")
                 FormField.create_select(label='切分方式', options={
                         'cut0':'不切', 'cut1':'凑四句一切', 'cut2':'凑50字一切',
                         'cut3':'按中文句号。切', 'cut4':'按英文句号.切', 'cut5':'按标点符号切'
                     },
                     value=get_nested_value(config, "gpt_sovits", "params", "text_split_method") or "cut5",
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_split_method", e.value), style="width:100%;")
+                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_split_method", value=e.value), style="width:100%;")
             ui.button('重新加载模型（按当前参数）', on_click=lambda: _load_gpt_sovits_model(config),
                       color=button_internal_color).style(button_internal_css)
 
@@ -198,19 +198,19 @@ def create_tts_tab(
                     value=get_nested_value(config, "edge_tts", "voice") or EDGE_TTS_DEFAULT_VOICE,
                     with_input=True,
                     new_value_mode='add',
-                    on_change=lambda e: set_config_callback("edge_tts", "voice", e.value),
+                    on_change=lambda e: set_config_callback("edge_tts", "voice", value=e.value),
                 ).style("width:100%;").tooltip('输入关键字过滤（如 xiaoxiao / zh）；支持键入清单外音色名')
                 FormField.create_input(
                     label='语速 rate（默认 100%）',
                     value=get_nested_value(config, "edge_tts", "rate") or EDGE_TTS_DEFAULT_RATE,
                     placeholder='加快 1.2 倍填 +20%，减慢 0.9 倍填 -10%',
-                    on_change=lambda e: set_config_callback("edge_tts", "rate", e.value),
+                    on_change=lambda e: set_config_callback("edge_tts", "rate", value=e.value),
                     style="width:100%;")
                 ui.textarea(
                     label='高级参数 JSON 透传（默认空=全默认）',
                     value=get_nested_value(config, "edge_tts", "extra_args_json") or "",
                     placeholder='{"pitch": "+0Hz", "volume": "+0%"}',
-                    on_change=lambda e: set_config_callback("edge_tts", "extra_args_json", e.value),
+                    on_change=lambda e: set_config_callback("edge_tts", "extra_args_json", value=e.value),
                 ).style("width:100%;")
 
             
@@ -243,8 +243,12 @@ def _load_gpt_sovits_model(config: Dict[str, Any]):
                         _ui.notify(position="top", type="negative",
                                    message=f"重载失败（已保持旧模型）：{body.get('detail') or body.get('message')}")
         except Exception as e:
-            _ui.notify(position="top", type="negative",
-                       message=f"无法连接主系统控制面（main 进程未启动？）：{e}")
+            try:
+                _ui.notify(position="top", type="negative",
+                           message=f"无法连接主系统控制面（main 进程未启动？）：{e}")
+            except RuntimeError:
+                # 后台 task 无 UI 上下文（slot empty）——降级日志
+                logger.error(f"无法连接主系统控制面（main 进程未启动？）：{e}")
 
     import asyncio as _aio
     try:
@@ -319,7 +323,7 @@ def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
     from utils.config import Config
     import json, tempfile, os as _os
     cfg_path = _os.path.join(_os.path.dirname(_os.path.dirname(
-        _os.path.dirname(_os.path.abspath(__file__)))), "config.json")
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))), "config.json")
     with open(cfg_path, encoding="utf-8") as f:
         data = json.load(f)
     data["gpt_sovits"].update(fields)

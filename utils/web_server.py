@@ -253,6 +253,30 @@ class WebServer:
                 logger.error(f"回调请求失败！{e}")
                 return CommonResult(code=-1, message=f"回调请求失败！{e}")
 
+        @self.app.post("/tts/synthesize")
+        async def tts_synthesize(msg: dict = None):
+            """合成测试端点（切片3：webui 轻量进程无合成能力，经此跨进程调用
+            main 进程的 audio_processor 完成合成，返回音频路径）。
+
+            body: {"content": "...", "audio_synthesis_type": "gpt_sovits|edge_tts"}
+            """
+            try:
+                body = msg or {}
+                content = body.get("content", "")
+                stype = body.get("audio_synthesis_type", "gpt_sovits")
+                if not content:
+                    return {"code": -1, "message": "content 为空"}
+                audio = getattr(self.my_handle, "audio_processor", None) or getattr(self.my_handle, "audio", None)
+                if audio is None:
+                    return {"code": -1, "message": "音频处理实例未初始化"}
+                file_path = await audio.audio_synthesis_use_local_config(content, stype)
+                if not file_path:
+                    return {"code": -1, "message": "合成失败，请查看 main 日志"}
+                return {"code": 200, "file_path": file_path}
+            except Exception as e:
+                logger.error(f"/tts/synthesize 失败: {e}")
+                return {"code": -1, "message": f"合成失败！{e}"}
+
         @self.app.get("/edtalk_status")
         async def edtalk_status():
             """EDTalk 推送健康度快照（EDTalk功能集成计划 §4.3.1）。

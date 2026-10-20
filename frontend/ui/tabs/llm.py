@@ -48,7 +48,7 @@ def create_llm_tab(
                 label="服务地址（base_url）",
                 value=get_nested_value(config, "custom_llm", "base_url"),
                 placeholder="如 http://127.0.0.1:11434/v1 或 https://api.deepseek.com/v1",
-                on_change=lambda e: set_config_callback("custom_llm", "base_url", e.value),
+                on_change=lambda e: set_config_callback("custom_llm", "base_url", value=e.value),
                 tooltip='OpenAI-compatible 服务前缀，系统自动拼接 /chat/completions',
                 style="width:100%;"
             )
@@ -58,7 +58,7 @@ def create_llm_tab(
                 label="模型（model）",
                 value=get_nested_value(config, "custom_llm", "model"),
                 placeholder="如 qwen:latest / deepseek-chat",
-                on_change=lambda e: set_config_callback("custom_llm", "model", e.value),
+                on_change=lambda e: set_config_callback("custom_llm", "model", value=e.value),
                 tooltip='模型名（Ollama 用 ollama list 查看）',
                 style="width:100%;"
             )
@@ -68,7 +68,7 @@ def create_llm_tab(
                 label="API Key",
                 value=get_nested_value(config, "custom_llm", "api_key"),
                 placeholder="云端平台必填；本地 Ollama 留空",
-                on_change=lambda e: set_config_callback("custom_llm", "api_key", e.value),
+                on_change=lambda e: set_config_callback("custom_llm", "api_key", value=e.value),
                 tooltip='以 Authorization: Bearer <key> 发送；Ollama 等本地服务无需填写',
                 style="width:100%;"
             ).props("type=password")
@@ -79,7 +79,7 @@ def create_llm_tab(
                 label="max_tokens（可选，留空不限制）",
                 value=str(get_nested_value(config, "custom_llm", "max_tokens") or ""),
                 placeholder="如 1024",
-                on_change=lambda e: set_config_callback("custom_llm", "max_tokens", e.value),
+                on_change=lambda e: set_config_callback("custom_llm", "max_tokens", value=e.value),
                 tooltip='回复最大 token 数；留空则不发送该参数',
                 style="width:100%;"
             )
@@ -88,7 +88,7 @@ def create_llm_tab(
                 label="temperature（可选，留空用服务默认）",
                 value=str(get_nested_value(config, "custom_llm", "temperature") or ""),
                 placeholder="如 0.7",
-                on_change=lambda e: set_config_callback("custom_llm", "temperature", e.value),
+                on_change=lambda e: set_config_callback("custom_llm", "temperature", value=e.value),
                 tooltip='采样温度 0-2；留空则不发送该参数',
                 style="width:100%;"
             )
