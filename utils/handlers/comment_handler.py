@@ -247,7 +247,11 @@ class CommentHandler:
         try:
             username = data["username"]
             content = data["content"]
-            
+
+            # 黑名单拦截（T7 接线：丢弃黑名单用户的一切信息，置于写库前防污染数据分析）
+            if self.my_handle.blacklist_handle(data):
+                return
+
             # 输出当前用户发送的弹幕消息
             logger.info(f"[{username}]: {content}")
             

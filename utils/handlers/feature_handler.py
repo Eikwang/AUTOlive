@@ -878,30 +878,54 @@ class FeatureHandler:
 
     def blacklist_handle(self, data):
         """
-        黑名单处理
-        
+        黑名单处理（T7 接线恢复：键面对齐 UI 写入键 filter.blacklist.username）
+
+        S-2 匹配语义：平台 UID 优先，其次 NFKC+去全部空白+casefold 规范化匹配
+        （防全角/零宽字符/首尾空格/大小写绕过）。
+
         Args:
-            data (dict): 数据
-            
+            data (dict): 数据（含 username，可能含 uid）
+
         Returns:
             bool: 是否在黑名单中
         """
         try:
-            username = data["username"]
-            
-            # 检查是否启用黑名单
-            if not self.my_handle.config.get("blacklist", "enable"):
+            # 键面对齐：前端 blacklist tab 写 filter.blacklist.username（换行分隔 textarea）
+            raw_list = self.my_handle.config.get("filter", "blacklist", "username")
+            if isinstance(raw_list, str):
+                entries = [item.strip() for item in raw_list.splitlines() if item.strip()]
+            elif isinstance(raw_list, list):
+                entries = [str(item).strip() for item in raw_list if str(item).strip()]
+            else:
                 return False
-            
-            # 检查是否在黑名单中
-            blacklist = self.my_handle.config.get("blacklist", "list", [])
-            if username in blacklist:
-                logger.debug(f"用户 {username} 在黑名单中")
+            if not entries:
+                return False  # 空名单=功能关闭（UI 无独立开关）
+
+            normalized_entries = {self._normalize_blacklist_entry(e) for e in entries}
+
+            # UID 优先匹配（弹幕链路载荷含 uid 时）
+            uid = data.get("uid")
+            if uid and str(uid).strip() and self._normalize_blacklist_entry(str(uid)) in normalized_entries:
+                logger.info(f"用户 uid={uid} 在黑名单中（UID 匹配），拦截")
                 return True
-            
+
+            # 用户名规范化匹配（S-2：防全角/零宽/空白/大小写绕过）
+            username = str(data.get("username", ""))
+            if self._normalize_blacklist_entry(username) in normalized_entries:
+                logger.info(f"用户 {username} 在黑名单中（规范化匹配），拦截")
+                return True
+
             return False
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"黑名单处理失败：{e}")
             return False
+
+    @staticmethod
+    def _normalize_blacklist_entry(s: str) -> str:
+        """S-2 规范化：NFKC（全角→半角等）→ 去全部空白（含零宽字符）→ casefold。"""
+        import unicodedata
+        normalized = unicodedata.normalize("NFKC", str(s))
+        normalized = "".join(ch for ch in normalized if not ch.isspace() and not unicodedata.category(ch) == "Cf")
+        return normalized.casefold()
     
