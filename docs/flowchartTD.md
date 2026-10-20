@@ -28,14 +28,14 @@ flowchart TD
     DB --> Result("数据统计展示〔真实〕<br>前端数据分析页")
 
     Stats --> Filter["关键词过滤〔真实〕<br>违禁词/长度/符号 comment_handler.py:26-102<br>⚠badwords.txt 缺失期间过滤实际空转（TODOS A4）"]
-    Filter --> Blacklist["黑名单过滤〔断链〕<br>feature_handler.py:879 无调用者→T7"]
+    Filter --> Blacklist["黑名单过滤〔真实〕<br>feature_handler.py T7 已接线<br>comment/talk 入口前置拦截（写库前）<br>S-2 规范化：UID优先+NFKC+casefold<br>键面: filter.blacklist.username（UI 对齐）"]
 
-    Filter --> Interact("答谢&互动〔断链〕<br>消费端在 timer_handler.py:102-202<br>生产端丢失 event_handler 无 thanks 写入→T6")
+    Filter --> Interact("答谢&互动〔真实〕<br>生产端 event_handler._thanks_generate 已恢复（T6 完成）<br>消费端 timer_handler.py:102-202<br>即时通道限流 thanks.rate_limit_per_min=10（E-2）<br>开关: thanks.gift/entrance/follow_enable=true")
     Filter --> Reread["复读/调音〔真实〕<br>comment_handler.py:104-208<br>现存互动通道"]
     HasDM --> Points["积分系统〔真实〕<br>feature_handler.py:508<br>开关: integral.enable=false"]
     Points --> Calc("计算积分→档位播报〔真实〕<br>feature_handler.py:599<br>静态优先级 integral:20<br>播报输出→播放链（F5 补边）")
-    HasDM --> Keymap{"按键映射触发〔断链〕<br>feature_handler.py:855 TODO 空壳<br>完整实现遗留 my_handle.py.backup:2225<br>开关: key_mapping.enable=false→T5"}
-    Keymap -->|是| SendPort("发送串口〔断链〕<br>serial_manager.py:9 实现在运行链零调用→T5")
+    HasDM --> Keymap{"按键映射触发〔真实〕<br>feature_handler.py T5 已迁移恢复<br>相似度匹配+五触发器（key/文案/音频/串口/图片）<br>S-1 限速：全局 6 次/分+每用户 2 次/分+同句去重<br>开关: key_mapping.enable=false（启用需 pip install pyautogui/pyserial）"}
+    Keymap -->|是| SendPort("发送串口〔真实〕<br>serial_manager.py 接线恢复（T5）<br>⚠依赖 pyserial 未安装时降级警告")
     HasDM --> SongMode["点歌模式〔真实〕<br>feature_handler.py:307<br>开关: choose_song.enable=false<br>相似度匹配+RVC翻唱异步 cover_worker.py"]
 
     SongMode -->|匹配成功 type=song 音频直通| Match("歌曲文件路径入队〔真实〕<br>synthesis_manager.py:153<br>⚠本地音频绕过 TTS（F7）")
@@ -47,9 +47,9 @@ flowchart TD
     Interact --> Queue
     SendPort -.->|修复后 T5| Queue
 
-    SystemTasks --> Idle["闲时任务〔断链〕<br>出口 event_handler.py:129 在<br>task_scheduler.py:177 do_task 无调用者→T8"]
+    SystemTasks --> Idle["闲时任务〔真实〕<br>task_scheduler.py T8 已接线<br>三机制判定（无消息计数/队列阈值，E5 单选）<br>三模式每周期随机执行其一<br>开关: idle_time_task.enable=true（type=无消息机制）"]
     SystemTasks --> Timed["定时任务〔真实〕<br>task_scheduler.py:53 随机间隔"]
-    SystemTasks --> DynamicCopy["动态文案〔断链〕<br>task_scheduler.py:236<br>循环体只记日志不播放 :259→T9"]
+    SystemTasks --> DynamicCopy["动态文案〔真实〕<br>task_scheduler.py T9 已实装<br>本地文案→可选 LLM 改写→TTS 播放<br>S-3 注入防护：输入仅限本地文件+固定提示词<br>开关: trends_copywriting.enable=true"]
     Idle --> Queue
     Timed --> Queue
     DynamicCopy --> Queue

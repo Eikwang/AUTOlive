@@ -6,8 +6,10 @@
 """
 
 import os
+import random
 import time
 import traceback
+from collections import deque
 from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
@@ -852,28 +854,258 @@ class FeatureHandler:
         self._integral_format_and_reply(copy_list, data, variables)
         return True
     
+    # ---------------- 按键映射（T5 迁移恢复：源=my_handle.py.backup:2225-2520，T-c 四类对照后适配） ----------------
+
+    # S-1 串口安全：全局+每用户滑动窗口限速 + 同句去重
+    _serial_rate_window = None  # 类级 deque：全局窗口
+    _serial_user_windows = None  # 类级 dict：每用户窗口
+    _serial_last_content = None  # 同句去重：最近一次串口触发内容
+
+
+    def _serial_rate_allow(self, username: str) -> bool:
+        """S-1 限速：全局 key_mapping.serial_rate_limit_per_min（默认 6）+
+        每用户 serial_per_user_limit_per_min（默认 2），超限拒绝串口触发。"""
+        import time as _time
+        now = _time.time()
+        if FeatureHandler._serial_rate_window is None:
+            FeatureHandler._serial_rate_window = deque()
+            FeatureHandler._serial_user_windows = {}
+        window = FeatureHandler._serial_rate_window
+        window.append(now)
+        while window and now - window[0] > 60:
+            window.popleft()
+        user_windows = FeatureHandler._serial_user_windows.setdefault(username, deque())
+        user_windows.append(now)
+        while user_windows and now - user_windows[0] > 60:
+            user_windows.popleft()
+        try:
+            global_limit = int(self.my_handle.config.get("key_mapping", "serial_rate_limit_per_min") or 6)
+            user_limit = int(self.my_handle.config.get("key_mapping", "serial_per_user_limit_per_min") or 2)
+        except (TypeError, ValueError):
+            global_limit, user_limit = 6, 2
+        if len(window) > global_limit:
+            logger.warning(f"S-1 串口限速：全局每分钟超 {global_limit} 次，拒绝触发（user={username}）")
+            return False
+        if len(user_windows) > user_limit:
+            logger.warning(f"S-1 串口限速：用户 {username} 每分钟超 {user_limit} 次，拒绝触发")
+            return False
+        return True
+
+    def _serial_send(self, key_mapping_config: dict, data: dict):
+        """串口触发（S-1 限速+同句去重；asyncio 安全执行——T-c 适配点④）。"""
+        username = str(data.get("username", ""))
+        tmp = random.choice(key_mapping_config.get("serial_send_data") or [])
+        if not tmp:
+            return None
+        tmp = self.my_handle.common.brackets_text_randomize(tmp)
+        data_json = {
+            "username": username,
+            "gift_name": data.get("gift_name", ""),
+            "gift_num": data.get("num", ""),
+            "unit_price": data.get("unit_price", ""),
+            "total_price": data.get("total_price", ""),
+            "cur_time": self.my_handle.common.get_bj_time(5),
+        }
+        tmp = self.my_handle.common.dynamic_variable_replacement(tmp, data_json)
+
+        # S-1 同句去重：同一弹幕内容不重复触发串口（复用 *_single_sentence_trigger_once 语义）
+        if FeatureHandler._serial_last_content == tmp and data.get("content") == getattr(self, "_serial_last_source", None):
+            logger.debug(f"S-1 同句去重：{tmp} 已触发过，跳过")
+            return None
+
+        if not self._serial_rate_allow(username):
+            return None
+
+        serial_name = key_mapping_config.get("serial_name", "")
+        serial_config = None
+        for cfg_item in self.my_handle.config.get("serial", "config") or []:
+            if cfg_item.get("serial_name") == serial_name:
+                serial_config = cfg_item
+                break
+        if not serial_config:
+            logger.error(f"获取串口名：{serial_name} 的配置信息失败，请到 串口 页面检查配置是否正确！")
+            return None
+
+        async def _connect_and_send():
+            from utils.serial_manager_instance import get_serial_manager
+            manager = get_serial_manager()
+            await manager.connect(serial_name, int(serial_config["baudrate"]))
+            return await manager.send_data(serial_name, tmp, serial_config.get("serial_data_type", "ascii"))
+
+        # T-c 适配点④：asyncio.run 在事件循环线程内会 RuntimeError——同步线程链（Timer）安全，
+        # 仍以 try/except 防御性处理
+        try:
+            import asyncio
+            resp_json = asyncio.run(_connect_and_send())
+            logger.info(f"【触发按键映射】触发串口：{tmp}，{resp_json.get('msg', resp_json)}")
+            FeatureHandler._serial_last_content = tmp
+            self._serial_last_source = data.get("content")
+            return tmp
+        except RuntimeError as e:
+            logger.error(f"串口发送失败（事件循环冲突）：{e}")
+            return None
+        except Exception as e:
+            logger.error(f"串口发送失败（pyserial 缺失或设备不可达——启用串口触发需 pip install pyserial）：{e}")
+            return None
+
+    def _trigger_copywriting(self, key_mapping_config: dict, data: dict):
+        """文案触发：随机文案+变量替换→播放链。"""
+        copy_list = key_mapping_config.get("copywriting") or []
+        if not copy_list:
+            return
+        tmp = random.choice(copy_list)
+        tmp = self.my_handle.common.brackets_text_randomize(tmp)
+        data_json = {
+            "username": data.get("username", ""),
+            "gift_name": data.get("gift_name", ""),
+            "gift_num": data.get("num", ""),
+            "unit_price": data.get("unit_price", ""),
+            "total_price": data.get("total_price", ""),
+            "cur_time": self.my_handle.common.get_bj_time(5),
+        }
+        tmp = self.my_handle.common.dynamic_variable_replacement(tmp, data_json)
+        message = {
+            "type": "key_mapping",
+            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+            "config": self.my_handle.config.get("filter"),
+            "username": data.get("username", ""),
+            "content": tmp,
+        }
+        logger.info(f"【触发按键映射】触发文案：{tmp}")
+        self.my_handle.audio_synthesis_handle(message)
+        return True
+
+    def _trigger_local_audio(self, key_mapping_config: dict, data: dict):
+        """本地音频触发（T-c 适配点②：config[].local_audio 键可能缺失，.get 防御）。"""
+        audio_list = key_mapping_config.get("local_audio") or []
+        if not audio_list:
+            return
+        tmp = random.choice(audio_list)
+        message = {
+            "type": "key_mapping",
+            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+            "config": self.my_handle.config.get("filter"),
+            "username": data.get("username", ""),
+            "content": tmp,
+            "file_path": tmp,
+        }
+        logger.info(f"【触发映射】播放本地音频：{tmp}")
+        self.my_handle.audio_synthesis_handle(message)
+        return True
+
+    def _trigger_key_press(self, key_mapping_config: dict, data: dict):
+        """按键触发（pyautogui 延迟导入——未安装时降级警告，T-c 适配点②）。"""
+        try:
+            import pyautogui
+        except ImportError:
+            logger.warning("按键触发需要 pyautogui（pip install pyautogui），当前未安装，跳过本次按键模拟")
+            return
+        for key in key_mapping_config.get("keys") or []:
+            pyautogui.keyDown(key)
+        for key in key_mapping_config.get("keys") or []:
+            pyautogui.keyUp(key)
+        logger.info(f"【触发按键映射】按键：{key_mapping_config.get('keys')}")
+        return True
+
+    def _trigger_img(self, key_mapping_config: dict, data: dict):
+        """图片触发（T-c 适配点③：现行 my_handle 无 sd 属性，降级警告）。"""
+        img_list = key_mapping_config.get("img_path") or []
+        sd = getattr(self.my_handle, "sd", None)
+        if sd is None:
+            logger.warning("图片触发依赖虚拟摄像头对象（my_handle.sd 不存在），跳过本次图片推送")
+            return
+        tmp = random.choice(img_list)
+        sd.set_new_img(tmp)
+        logger.info(f"【触发按键映射】推送图片：{tmp}")
+        return True
+
     def key_mapping_handle(self, type, data):
         """
-        按键映射处理
-        
+        按键映射处理（T5 迁移恢复）
+
         Args:
-            type (str): 类型
-            data (dict): 数据
-            
+            type (str): 数据来源类型（弹幕/回复）
+            data (dict): 平台侧传入的 data 数据
+
         Returns:
-            bool: 是否触发并处理
+            bool: 是否正常触发了按键映射事件
         """
+        flag = False
         try:
-            # 检查是否启用按键映射
             if not self.my_handle.config.get("key_mapping", "enable"):
                 return False
-            
-            # TODO: 实现按键映射处理逻辑
-            
-            return False
+
+            def trigger_dispatch(trigger_type: str, key_mapping_config: dict, matched_text: str) -> bool:
+                """按 trigger_type 分派（T-c 适配点①：键面 f"{prefix}_single_sentence_trigger_once"，无 _enable 后缀）。"""
+                handlers_map = {
+                    "key_trigger_type": lambda: self._trigger_key_press(key_mapping_config, data),
+                    "copywriting_trigger_type": lambda: self._trigger_copywriting(key_mapping_config, data),
+                    "local_audio_trigger_type": lambda: self._trigger_local_audio(key_mapping_config, data),
+                    "serial_trigger_type": lambda: self._serial_send(key_mapping_config, data),
+                    "img_path_trigger_type": lambda: self._trigger_img(key_mapping_config, data),
+                }
+                mode_values = ["关键词", "关键词+礼物"] if trigger_type.startswith("key") or trigger_type.startswith("copy") or trigger_type.startswith("local") or trigger_type.startswith("img") else ["礼物", "关键词+礼物"]
+                _ = mode_values  # 触发模式判定在 backup 中由 config key_mapping.<trigger_type> 值决定
+                trigger_mode = self.my_handle.config.get("key_mapping", trigger_type)
+                if trigger_mode not in ["关键词", "礼物", "关键词+礼物"]:
+                    return False
+                logger.info(f"【触发按键映射】匹配：{matched_text}，类型：{trigger_type}，模式：{trigger_mode}")
+                executed = handlers_map[trigger_type]()  # 降级（依赖缺失）返回 False
+                if not executed:
+                    return False  # 未实际执行 → 继续尝试下一触发器
+                flag = True
+                # once 语义：实际命中才终止后续匹配（键面适配：config 无 _enable 后缀，双键面兼容）
+                prefix = trigger_type.split("_")[0]
+                once = self.my_handle.config.get("key_mapping", f"{prefix}_single_sentence_trigger_once")
+                if once is None:
+                    once = self.my_handle.config.get("key_mapping", f"{prefix}_single_sentence_trigger_once_enable")
+                return bool(once)
+
+            key_mapping_configs = self.my_handle.config.get("key_mapping", "config") or []
+
+            if "gift_name" in data:
+                # 礼物触发：礼物名精确匹配（once=false 时继续遍历，flag 聚合）
+                for key_mapping_config in key_mapping_configs:
+                    for gift in key_mapping_config.get("gift") or []:
+                        if gift == data["gift_name"]:
+                            for trigger in ["key_trigger_type", "copywriting_trigger_type",
+                                            "local_audio_trigger_type", "serial_trigger_type"]:
+                                if trigger_dispatch(trigger, key_mapping_config, gift):
+                                    return True
+                                flag = True  # 实际执行过（executed），once=false 继续
+                return flag
+
+            content = str(data.get("content", ""))
+            start_cmd = self.my_handle.config.get("key_mapping", "start_cmd")
+            if start_cmd and content.startswith(start_cmd):
+                content = content[len(start_cmd):]
+
+            for key_mapping_config in key_mapping_configs:
+                try:
+                    similarity = float(key_mapping_config.get("similarity", 1))
+                except (TypeError, ValueError):
+                    similarity = 1.0
+                for keyword in key_mapping_config.get("keywords") or []:
+                    matched = False
+                    if type == "弹幕":
+                        import difflib
+                        ratio = difflib.SequenceMatcher(None, content, keyword).ratio()
+                        matched = ratio >= similarity
+                    elif type == "回复":
+                        matched = keyword in content
+
+                    if matched:
+                        for trigger in ["key_trigger_type", "copywriting_trigger_type",
+                                        "local_audio_trigger_type", "serial_trigger_type",
+                                        "img_path_trigger_type"]:
+                            if trigger_dispatch(trigger, key_mapping_config, keyword):
+                                return True
+            return flag
         except Exception as e:
             logger.error(traceback.format_exc())
-            logger.error(f"按键映射处理失败：{e}")
+            logger.error(f"【触发按键映射】错误：{e}")
             return False
 
     def blacklist_handle(self, data):

@@ -22,6 +22,7 @@ def _make_my_handle():
     mh.config.get = MagicMock(side_effect=lambda *keys: _config_get(mh.config, keys))
     mh.common.get_bj_time.return_value = "2026-10-20 12:00:00"
     mh.integral_handle.return_value = False
+    mh.blacklist_handle.return_value = False  # T7 接线后 talk/comment 入口有黑名单拦截
     mh.prohibitions_handle.side_effect = lambda x: x
     mh.comment_check_and_replace.side_effect = lambda x: x
     mh.common.is_punctuation_string.return_value = False
