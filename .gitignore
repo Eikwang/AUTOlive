@@ -373,3 +373,4 @@ frontend/config/.tts_inproc_hinted
 
 # C4 LLM 收敛：请求模板文档（OpenAI-compatible 标准协议，UI 指引引用）
 !docs/llm-request-template.md
+config.json

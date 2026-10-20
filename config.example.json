@@ -251,9 +251,9 @@
     "history_max_len": 4096
   },
   "custom_llm": {
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
-    "api_key": "sk",
+    "base_url": "https://api.deepseek.com/chat/completions",
+    "model": "deepseek-flash",
+    "api_key": "",
     "max_tokens": "",
     "temperature": ""
   },
@@ -313,10 +313,14 @@
       "text_lang": "zh",
       "ref_audio_path": "D:\\AI\\GPT-SoVITS\\参考音频\\1.古灵精怪Haa.wav",
       "prompt_text": "マスター、どうりょくろか、いいえ、なんでもありません",
-      "prompt_lang": "ja",
-      "text_split_method": "cut0",
+      "prompt_lang": "zh",
+      "text_split_method": "cut3",
       "speed_factor": 1.0,
-      "ref_audio_paths": [],
+      "ref_audio_paths": [
+        "D:\\AI\\GPT-SoVITS\\output\\slicer_opt\\14.wav_0005846080_0006002560.wav",
+        "D:\\AI\\GPT-SoVITS\\output\\slicer_opt\\16.wav_0000818560_0000954880.wav",
+        "D:\\AI\\GPT-SoVITS\\output\\slicer_opt\\12.wav_0013736960_0013864000.wav"
+      ],
       "ref_free": true,
       "top_k": 5,
       "top_p": 1.0,
@@ -326,7 +330,13 @@
       "repetition_penalty": 1.35,
       "seed": -1,
       "parallel_infer": true
-    }
+    },
+    "gpt_model_path": "D:\\AI\\AUTOlive\\apps\\gpt-sovits\\GPT_weights_v2ProPlus\\WY-e20.ckpt",
+    "sovits_model_path": "D:\\AI\\AUTOlive\\apps\\gpt-sovits\\SoVITS_weights_v2ProPlus\\WY_e10_s2870.pth",
+    "ref_audio_path": "D:\\sound\\WY\\read\\sliced\\12.wav_0000109440_0000240960.wav",
+    "prompt_text": "",
+    "prompt_language": "zh",
+    "voice_profile_id": "WY_2"
   },
   "choose_song": {
     "enable": false,
@@ -1711,7 +1721,7 @@
     "epoch": 2
   },
   "edge_tts": {
-    "voice": "zh-CN-XiaoxiaoNeural",
+    "voice": "zh-HK-HiuMaanNeural",
     "rate": "100%",
     "extra_args_json": ""
   },

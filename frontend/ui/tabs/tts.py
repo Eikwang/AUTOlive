@@ -54,12 +54,29 @@ def create_tts_tab(
         audio_synthesis_type = select_tts_common_audio_synthesis_type.value
 
         # 使用本地配置进行音频合成，返回音频路径
-        if audio:
+        # webui 轻量进程（type=2 Audio）无合成能力——经 main 进程 /tts/synthesize 跨进程调用
+        file_path = None
+        if audio is not None and getattr(audio, "_synthesis_ready", False):
             file_path = await audio.audio_synthesis_use_local_config(content, audio_synthesis_type)
         else:
-            logger.error("音频处理实例未初始化")
-            ui.notify(position="top", type="negative", message="音频处理实例未初始化")
-            return
+            import aiohttp
+            base = "http://127.0.0.1:8082"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(f"{base}/tts/synthesize",
+                                            json={"content": content, "audio_synthesis_type": audio_synthesis_type},
+                                            timeout=aiohttp.ClientTimeout(total=180)) as resp:
+                        body = await resp.json()
+                if body.get("code") == 200:
+                    file_path = body.get("file_path")
+                else:
+                    logger.error(f"跨进程合成失败：{body.get('message')}")
+                    ui.notify(position="top", type="negative", message=f"合成失败：{body.get('message')}")
+                    return
+            except Exception as e:
+                logger.error(f"跨进程合成请求失败（main 未启动或不可达）：{e}")
+                ui.notify(position="top", type="negative", message=f"合成请求失败：main 未启动或不可达——请先在首页点启动系统")
+                return
 
         if file_path:
             logger.info(f"音频合成成功，存储于：{file_path}")
@@ -197,9 +214,8 @@ def create_tts_tab(
                     options={v: v for v in EDGE_TTS_VOICES},
                     value=get_nested_value(config, "edge_tts", "voice") or EDGE_TTS_DEFAULT_VOICE,
                     with_input=True,
-                    new_value_mode='add',
                     on_change=lambda e: set_config_callback("edge_tts", "voice", value=e.value),
-                ).style("width:100%;").tooltip('输入关键字过滤（如 xiaoxiao / zh）；支持键入清单外音色名')
+                ).style("width:100%;").tooltip('输入关键字过滤（如 xiaoxiao / zh）；支持键入清单外音色名（键入后需按回车确认，手动点保存栏位旁空白触发落盘）')
                 FormField.create_input(
                     label='语速 rate（默认 100%）',
                     value=get_nested_value(config, "edge_tts", "rate") or EDGE_TTS_DEFAULT_RATE,
@@ -338,16 +354,15 @@ def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
     import threading as _th
 
     def _do_switch():
+        # 后台线程无 UI 上下文（页面可能已关）——notify 统一降级日志（slot 异常防御）
         from utils.gpt_sovits_inproc import get_engine
         eng = get_engine()
         if eng is None:
-            _ui.notify(position="top", type="warning",
-                       message="进程内引擎不可用（backend=api 模式下请自行重载外部服务）")
+            logger.warning("进程内引擎不可用（backend=api 模式下请自行重载外部服务）")
             return
         ok, msg = eng.switch_model(prof.get("gpt_model", ""), prof.get("sovits_model", ""))
-        _ui.notify(position="top", type="positive" if ok else "negative",
-                   message=(f"声音档案「{prof.get('name', pid)}」切换成功" if ok
-                            else f"切换失败，已保持旧模型：{msg}"))
+        (logger.info if ok else logger.error)(
+            f"声音档案「{prof.get('name', pid)}」切换{'成功' if ok else f'失败，已保持旧模型：{msg}'}")
 
     _th.Thread(target=_do_switch, daemon=True).start()
     _ui.notify(position="top", type="positive",
