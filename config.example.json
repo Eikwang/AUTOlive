@@ -236,7 +236,8 @@
         "trigger_num_max": 2
       }
     },
-    "lowest_price": 0.1
+    "lowest_price": 0.1,
+    "rate_limit_per_min": 10
   },
   "gemini": {
     "api_key": "",
