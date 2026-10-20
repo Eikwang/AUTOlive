@@ -313,54 +313,44 @@ class SynthesisMixin:
 
         try:
             if message["tts_type"] == "gpt_sovits":
-                if message["data"]["language"] == "自动识别":
-                    # 自动检测语言
+                # P25 键面重构（实测修复）：旧 data.language/api_0322/api_0706/v2_api_0821/webtts
+                # 键随参数精简退役——inproc 装配走 params 白名单（my_tts._gpt_sovits_inproc），
+                # api 兜底路径用 .get({}) 保旧结构不炸。语言：params.text_lang 缺省"自动识别"
+                # （动态检测后回写代码值，inproc 装配透传）。
+                _gdata = message["data"]
+                _params = _gdata.get("params") or {}
+                _lang_raw = _params.get("text_lang") or _gdata.get("language") or "自动识别"
+                if _lang_raw == "自动识别":
+                    # 自动检测语言（ref_free 模式无参考文本语种前提，动态检测为配套）
                     language = self.common.lang_check(message["content"])
-
                     logger.debug(f'language={language}')
-
-                    # 自定义语言名称（需要匹配请求解析）
-                    language_name_dict = {"en": "英文", "zh": "中文", "ja": "日文"}  
-
-                    if language in language_name_dict:
-                        language = language_name_dict[language]
-                    else:
-                        language = "中文"  # 无法识别出语言代码时的默认值
+                    language_name_dict = {"en": "英文", "zh": "中文", "ja": "日文"}
+                    _lang_code = language if language in ("en", "zh", "ja") else "zh"
+                    language = language_name_dict.get(_lang_code, "中文")
+                    _params.setdefault("text_lang", _lang_code)
                 else:
-                    language = message["data"]["language"]
-
-                if message["data"]["api_0322"]["text_lang"] == "自动识别":
-                    # 自动检测语言
-                    language = self.common.lang_check(message["content"])
-
-                    logger.debug(f'language={language}')
-
-                    # 自定义语言名称（需要匹配请求解析）
-                    language_name_dict = {"en": "英文", "zh": "中文", "ja": "日文"}  
-
-                    if language in language_name_dict:
-                        message["data"]["api_0322"]["text_lang"] = language_name_dict[language]
-                    else:
-                        message["data"]["api_0322"]["text_lang"] = "中文"  # 无法识别出语言代码时的默认值
-
-                if message["data"]["api_0706"]["text_language"] == "自动识别":
-                    message["data"]["api_0706"]["text_language"] = "auto"
+                    language = _lang_raw
+                    # 显示名→代码值（inproc 装配 text_lang 需代码值；params.text_lang 优先已回写）
+                    _name_to_code = {"英文": "en", "中文": "zh", "日文": "ja"}
+                    _lang_code = _name_to_code.get(language, _params.get("text_lang", "zh"))
 
                 data = {
-                    "type": message["data"]["type"],
-                    "gradio_ip_port": message["data"]["gradio_ip_port"],
-                    "api_ip_port": message["data"]["api_ip_port"],
-                    "ref_audio_path": message["data"]["ref_audio_path"],
-                    "prompt_text": message["data"]["prompt_text"],
-                    "prompt_language": message["data"]["prompt_language"],
-                    "language": language,
-                    "cut": message["data"]["cut"],
-                    "api_0322": message["data"]["api_0322"],
-                    "api_0706": message["data"]["api_0706"],
-                    "v2_api_0821": message["data"]["v2_api_0821"],
-                    "webtts": message["data"]["webtts"],
+                    "type": _gdata.get("type", "gpt_sovits"),
+                    "gradio_ip_port": _gdata.get("gradio_ip_port", ""),
+                    "api_ip_port": _gdata.get("api_ip_port", ""),
+                    "backend": _gdata.get("backend", "inproc"),
+                    "params": _params,
+                    "ref_audio_path": _gdata.get("ref_audio_path", _params.get("ref_audio_path", "")),
+                    "prompt_text": _gdata.get("prompt_text", _params.get("prompt_text", "")),
+                    "prompt_language": _gdata.get("prompt_language", _params.get("prompt_lang", "zh")),
+                    "language": _lang_code,
+                    "cut": _gdata.get("cut", _params.get("text_split_method", "cut3")),
+                    "api_0322": _gdata.get("api_0322", {}),
+                    "api_0706": _gdata.get("api_0706", {}),
+                    "v2_api_0821": _gdata.get("v2_api_0821", {}),
+                    "webtts": _gdata.get("webtts", {}),
                     # P26 变速迁移：运行时语速透传（合成参数变速；无值=系统默认）
-                    "speed": message["data"].get("speed"),
+                    "speed": _gdata.get("speed"),
                     "content": message["content"]
                 }
 

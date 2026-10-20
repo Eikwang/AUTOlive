@@ -5,6 +5,8 @@
 import os
 import traceback
 from ..my_log import logger
+from utils.config import Config  # reload_config 依赖（NameError 修复 2026-10-20）
+from utils.audio_handle.my_tts import MY_TTS  # 同上：reload_config 的 MY_TTS 实例化（NameError 修复 2026-10-20）
 
 
 class UtilsMixin:
