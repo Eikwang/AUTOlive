@@ -298,6 +298,7 @@ docs/*
 !docs/danmaku_module.md
 !docs/danmaku_upgrade_checklist.md
 !docs/architecture/
+!docs/flowchartTD.md
 !docs/开发记录/
 docs/开发记录/*
 !docs/开发记录/2026-10-12_整合阶段改动盘点.md
