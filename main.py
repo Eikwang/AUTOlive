@@ -68,6 +68,11 @@ class MainApplication:
             
             # 初始化处理器（My_handle.__init__(config_path) 单参——内部自建 Config/Common 单例；2026-10-12 修复签名漂移）
             self.my_handle = My_handle(self.config_path)
+            # uc1 根因修复（/autoplan 批准批次切片 2）：danmaku_consumer._dispatch 经
+            # utils.my_global.my_handle 取处理器引用——该模块属性从未被赋值，导致
+            # 每条弹幕/礼物/入场消息"my_handle 未就绪，信息丢弃"（弹幕不进对话链）。
+            from utils import my_global
+            my_global.my_handle = self.my_handle
             logger.info("处理器初始化完成")
             
             # 初始化各个模块

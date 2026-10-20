@@ -66,6 +66,32 @@ def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_conf
                 print(f"保存配置失败: {ex}")
 
     component.on_value_change(on_change)
+
+    # blur 兜底（"填完没自动保存"修复 2026-10-20）：NiceGUI input 的值上报默认
+    # 在失焦时触发——填完直接关页/断连（直播场景常见）时 blur 未发、值丢失。
+    # 失焦时把组件当前值再存一次（幂等：值未变时 set_config 快速返回）。
+    def _on_blur(_e):
+        try:
+            current = component.value
+        except Exception:
+            return
+        if current is None:
+            return
+        cfg = config
+        try:
+            for key in keys[:-1]:
+                if key not in cfg:
+                    cfg[key] = {}
+                cfg = cfg[key]
+            if cfg.get(keys[-1]) != current:
+                on_change(type("V", (), {"value": current})())
+        except Exception:
+            pass
+
+    # mock 组件（测试替身）可能无 on 方法——防御性注册
+    on_registrar = getattr(component, "on", None)
+    if callable(on_registrar):
+        on_registrar("blur", _on_blur)
     return component
 
 

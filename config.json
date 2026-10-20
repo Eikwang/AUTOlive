@@ -251,8 +251,8 @@
     "history_max_len": 4096
   },
   "custom_llm": {
-    "base_url": "http://127.0.0.1:11434/v1",
-    "model": "qwen:latest",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
     "api_key": "sk",
     "max_tokens": "",
     "temperature": ""
@@ -317,7 +317,15 @@
       "text_split_method": "cut0",
       "speed_factor": 1.0,
       "ref_audio_paths": [],
-      "ref_free": true
+      "ref_free": true,
+      "top_k": 5,
+      "top_p": 1.0,
+      "temperature": 1.0,
+      "batch_size": 1,
+      "fragment_interval": 0.3,
+      "repetition_penalty": 1.35,
+      "seed": -1,
+      "parallel_infer": true
     }
   },
   "choose_song": {
@@ -936,7 +944,7 @@
   },
   "translate": {
     "enable": false,
-    "type": "baidu",
+    "type": "argos",
     "trans_type": "弹幕",
     "baidu": {
       "appid": "",
@@ -1554,7 +1562,7 @@
     "reaction_segment": true
   },
   "fastrag": {
-    "enable": false,
+    "enable": true,
     "port": 11420
   },
   "paths": {

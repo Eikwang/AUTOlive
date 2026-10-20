@@ -26,6 +26,37 @@ class FormField:
     WIDTH_LG = "400px"
 
     @staticmethod
+    def _attach_blur_save(component, on_change: Optional[Callable]) -> None:
+        """失焦兜底保存（"填完没自动保存"修复 2026-10-20）。
+
+        NiceGUI input/textarea/select 的值上报默认在 blur 时触发——填完直接关页/
+        断连（直播场景常见）时 blur 未发、值丢失。失焦时把组件当前值重放一次
+        on_change（幂等：值未变时 set_config 的旧值比较/内存写代价可忽略）。
+        与 config_auto_save.auto_bind 的 blur 兜底同批引入，覆盖全部 FormField 系输入。
+        """
+        if on_change is None:
+            return
+
+        def _on_blur(_e):
+            try:
+                current = component.value
+            except Exception:
+                return
+            if current is None:
+                return
+            try:
+                on_change(type("V", (), {"value": current})())
+            except Exception:
+                pass
+
+        on_registrar = getattr(component, "on", None)
+        if callable(on_registrar):
+            try:
+                on_registrar("blur", _on_blur)
+            except Exception:
+                pass
+
+    @staticmethod
     def _extract_width(style: Optional[str], default: str = "250px") -> str:
         """
         从 style 字符串中提取宽度值。
@@ -81,6 +112,8 @@ class FormField:
         if tooltip:
             input_field.tooltip(tooltip)
 
+        FormField._attach_blur_save(input_field, on_change)
+
         return input_field
 
     @staticmethod
@@ -124,6 +157,8 @@ class FormField:
 
         if tooltip:
             select_field.tooltip(tooltip)
+
+        FormField._attach_blur_save(select_field, on_change)
 
         return select_field
     
@@ -172,12 +207,14 @@ class FormField:
             on_change: 值变化事件处理函数
             rows: 行数
         """
-        return ui.textarea(
+        textarea_field = ui.textarea(
             label=label,
             value=value,
             placeholder=placeholder,
             on_change=on_change
         ).props(f'rows={rows}')
+        FormField._attach_blur_save(textarea_field, on_change)
+        return textarea_field
     
     @staticmethod
     def create_number(
