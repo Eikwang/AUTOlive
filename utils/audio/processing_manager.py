@@ -97,55 +97,36 @@ class ProcessingMixin:
     async def audio_synthesis_use_local_config(self, content, audio_synthesis_type="gpt_sovits"):
         """使用本地配置进行音频合成，返回音频路径
 
+        切片 3 键面重写（2026-10-20 实测修复）：旧实现硬取退役键
+        （gpt_sovits.language/type/gradio_ip_port/api_0322...）且仅有 gpt_sovits
+        分支——选 edge_tts 时 voice_tmp_path 无赋值路径，return 处抛
+        UnboundLocalError（用户实测"语音生成测试失败"根因，弹幕链正常而
+        测试链失败的分叉点）。新实现与弹幕链（synthesis_manager.tts_handle）
+        同键面：gpt_sovits 参数装配收口在 _gpt_sovits_inproc（config.params
+        为事实来源，C-1），edge_tts 走 edge_tts_api（voice/rate 自 edge_tts 节）。
+
         Args:
             content (str): 待合成的文本内容
             audio_synthesis_type (str, optional): 使用的tts类型. Defaults to "gpt_sovits".
 
         Returns:
-            str: 合成的音频的路径
+            str: 合成的音频的路径（失败返回 None）
         """
         # 重载配置
         self.reload_config(self.config_path)
 
+        voice_tmp_path = None
         if audio_synthesis_type == "gpt_sovits":
-            if self.config.get("gpt_sovits", "language") == "自动识别":
-                # 自动检测语言
-                language = self.common.lang_check(content)
-
-                logger.debug(f'language={language}')
-
-                # 自定义语言名称（需要匹配请求解析）
-                language_name_dict = {"en": "英文", "zh": "中文", "ja": "日文"}  
-
-                if language in language_name_dict:
-                    language = language_name_dict[language]
-                else:
-                    language = "中文"  # 无法识别出语言代码时的默认值
-            else:
-                language = self.config.get("gpt_sovits", "language")
-
-            # 传太多有点冗余了
             data = {
-                "type": self.config.get("gpt_sovits", "type"),
-                "gradio_ip_port": self.config.get("gpt_sovits", "gradio_ip_port"),
-                "ws_ip_port": self.config.get("gpt_sovits", "ws_ip_port"),
-                "api_ip_port": self.config.get("gpt_sovits", "api_ip_port"),
-                "ref_audio_path": self.config.get("gpt_sovits", "ref_audio_path"),
-                "prompt_text": self.config.get("gpt_sovits", "prompt_text"),
-                "prompt_language": self.config.get("gpt_sovits", "prompt_language"),
-                "language": language,
-                "cut": self.config.get("gpt_sovits", "cut"),
-                "api_0322": self.config.get("gpt_sovits", "api_0322"),
-                "api_0706": self.config.get("gpt_sovits", "api_0706"),
-                "v2_api_0821": self.config.get("gpt_sovits", "v2_api_0821"),
-                "webtts": self.config.get("gpt_sovits", "webtts"),
-                # P26 变速迁移：合成请求构造处接 speed（合成参数变速，优先于 pydub 回退）
+                # P26：测试链默认语速取 params.speed_factor（与弹幕链 speed 透传同语义）
                 "speed": self.config.get("gpt_sovits", "params", "speed_factor"),
                 "content": content
             }
-                    
-            # 调用接口合成语音
             voice_tmp_path = await self.my_tts.gpt_sovits_api(data)
+        elif audio_synthesis_type == "edge_tts":
+            voice_tmp_path = await self.my_tts.edge_tts_api({"content": content})
+        else:
+            logger.error(f"不支持的合成类型：{audio_synthesis_type}（可选 gpt_sovits / edge_tts）")
 
         return voice_tmp_path
 

@@ -46,7 +46,7 @@ EDGE_TTS_VOICES: List[str] = [
 EDGE_TTS_DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
 # 默认语速（任务书：rate 默认 100%）
-EDGE_TTS_DEFAULT_RATE = "100%"
+EDGE_TTS_DEFAULT_RATE = "+0%"
 
 _RATE_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)\s*%")
 
@@ -98,6 +98,29 @@ def speed_to_edge_rate(speed: float) -> str:
     percent = (s - 1.0) * 100.0
     sign = "+" if percent >= 0 else "-"
     return f"{sign}{round(abs(percent), 2):g}%"
+
+
+def normalize_edge_rate(rate) -> Optional[str]:
+    """用户 rate 配置规范化（P26，2026-10-20 实测修复）。
+
+    edge-tts 7.x 要求带符号增量（"+0%"/"+20%"/"-10%"），裸 "100%" 会抛
+    Invalid rate。UI 语义是"语速百分比"（100%=基准），与 edge-tts 的
+    "相对增量"语义差 100：裸值 X% 先换算 speed=X/100 再映射增量
+    （"120%"→"+20%"，"90%"→"-10%"）；带符号值原样返回（已是原生语义）。
+    无效输入返回 None（调用方落默认值）。
+    """
+    if rate is None:
+        return None
+    r = str(rate).strip()
+    if not r:
+        return None
+    if r[0] in "+-":
+        return r
+    try:
+        s = float(r.rstrip("%")) / 100.0
+    except ValueError:
+        return None
+    return speed_to_edge_rate(s)
 
 
 def normalize_ref_paths(paths_input) -> List[str]:

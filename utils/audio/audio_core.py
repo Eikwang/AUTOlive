@@ -131,6 +131,15 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
         self.captions_manager.set_paused_getter(self._builtin_player_paused)
         self.captions_manager.set_error_notifier(self._captions_error_to_player)
 
+        # EDTalk 实时推理客户端（EDTalk功能集成计划 §4.3.1）：
+        # 无论是否激活都创建（构造廉价），is_edtalk_active() 在使用点判定；
+        # 注册到模块级 holder，供 main.py 运行时 /edtalk_status 健康度端点读取。
+        # （2026-10-20 实测修复：原两行被缩进进 _captions_error_to_player 尾部，
+        # 仅字幕错误回调触发时才创建——正常启动 self.edtalk_client 恒缺失，
+        # playback_manager.only_play_audio 每条音频 AttributeError）
+        self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"))
+        register_client(self.edtalk_client)
+
     def _builtin_player_paused(self):
         """字幕节流用：builtin 播放器是否暂停中（eng E-4；非 builtin 返回 False）"""
         player = Audio.audio_player
@@ -151,9 +160,3 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
                 player.last_error = {"seq": player._error_seq, "message": str(message), "ts": time.time()}
         except Exception:
             pass
-
-        # EDTalk 实时推理客户端（EDTalk功能集成计划 §4.3.1）：
-        # 无论是否激活都创建（构造廉价），is_edtalk_active() 在使用点判定；
-        # 注册到模块级 holder，供 main.py 运行时 /edtalk_status 健康度端点读取。
-        self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"))
-        register_client(self.edtalk_client)

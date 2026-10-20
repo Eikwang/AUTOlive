@@ -218,7 +218,7 @@ class MY_TTS:
             return None
         from utils.audio_handle.tts_params import (
             EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
-            speed_to_edge_rate, parse_edge_extra_args)
+            speed_to_edge_rate, parse_edge_extra_args, normalize_edge_rate)
 
         text = data.get("content") or ""
         if not text:
@@ -231,7 +231,8 @@ class MY_TTS:
         if speed is not None:
             rate = speed_to_edge_rate(speed)  # P26：运行时 speed → rate 百分比映射
         else:
-            rate = edge_cfg.get("rate") or EDGE_TTS_DEFAULT_RATE
+            # 配置路径 rate 规范化：存量裸 "100%" 换算 "+0%"（edge-tts 7.x 拒收裸值）
+            rate = normalize_edge_rate(edge_cfg.get("rate")) or EDGE_TTS_DEFAULT_RATE
 
         extra_args, extra_err = parse_edge_extra_args(edge_cfg.get("extra_args_json"))
         if extra_err:
