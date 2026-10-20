@@ -174,65 +174,145 @@ class TaskScheduler:
         logger.debug(f"type={data_type}, tmp={tmp}")
         return copy.copy(tmp) if tmp else []
     
-    def do_task(self, last_mode: int, copywriting_copy_list: List, 
+    def do_task(self, last_mode: int, copywriting_copy_list: List,
                 comment_copy_list: List, local_audio_path_list: List) -> tuple:
         """
-        执行闲时任务
-        
+        执行闲时任务（T8 接线：三模式每周期随机执行其一——任务书 E5 语义）
+
         Args:
             last_mode: 上一个模式
             copywriting_copy_list: 文案列表
             comment_copy_list: 评论列表
             local_audio_path_list: 本地音频路径列表
-            
+
         Returns:
             tuple: (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
         """
         # 闲时计数清零
         my_global.global_idle_time = 0
-        
-        # 闲时任务处理
+
+        # 收集已启用的闲时模式，每周期随机执行其一（任务书"只随机执行其中一个"）
+        active_modes = []
         if self.config.get("idle_time_task", "copywriting", "enable"):
-            if last_mode == 0:
-                # 是否开启了随机触发
-                if self.config.get("idle_time_task", "copywriting", "random"):
-                    logger.debug("切换到文案触发模式")
-                    if copywriting_copy_list:
-                        # 随机打乱列表中的元素
-                        random.shuffle(copywriting_copy_list)
-                        copywriting_copy = copywriting_copy_list.pop(0)
-                    else:
-                        # 刷新list数据
-                        copywriting_copy_list = self.load_data_list("copywriting")
-                        # 随机打乱列表中的元素
-                        random.shuffle(copywriting_copy_list)
-                        if copywriting_copy_list:
-                            copywriting_copy = copywriting_copy_list.pop(0)
-                        else:
-                            return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
-                else:
-                    logger.debug(copywriting_copy_list)
-                    if copywriting_copy_list:
-                        copywriting_copy = copywriting_copy_list.pop(0)
-                    else:
-                        # 刷新list数据
-                        copywriting_copy_list = self.load_data_list("copywriting")
-                        if copywriting_copy_list:
-                            copywriting_copy = copywriting_copy_list.pop(0)
-                        else:
-                            return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
-                
-                # 处理文案
-                if self.my_handle:
-                    data = {"platform": self.platform, "username": "闲时任务", "content": copywriting_copy}
-                    self.my_handle.process_data(data, "idle_time_task")
-                
-                last_mode = 1
-        
-        # 这里可以添加更多的闲时任务逻辑
-        
+            active_modes.append("copywriting")
+        if self.config.get("idle_time_task", "comment", "enable"):
+            active_modes.append("comment")
+        if self.config.get("idle_time_task", "local_audio", "enable"):
+            active_modes.append("local_audio")
+
+        if not active_modes or not self.my_handle:
+            return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
+
+        mode = random.choice(active_modes)
+
+        if mode == "copywriting":
+            # 闲时文案：随机/顺序取文案 → 闲时出口合成
+            copy_content = self._pop_from_list(copywriting_copy_list, "copywriting")
+            if copy_content is None:
+                return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
+            data = {"platform": self.platform, "username": "闲时任务", "content": copy_content}
+            self.my_handle.process_data(data, "idle_time_task")
+
+        elif mode == "comment":
+            # 弹幕触发 LLM 模式：随机弹幕激活系统对话
+            comment_content = self._pop_from_list(comment_copy_list, "comment")
+            if comment_content is None:
+                return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
+            data = {"platform": self.platform, "username": "闲时任务", "content": comment_content}
+            self.my_handle.process_data(data, "comment")
+
+        elif mode == "local_audio":
+            # 本地音频模式：随机音频文件走 song 直通（不经 TTS，与点歌同路径）
+            audio_path = self._pop_from_list(local_audio_path_list, "local_audio")
+            if audio_path is None:
+                return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
+            message = {
+                "type": "song",
+                "content": audio_path,
+                "username": "闲时任务",
+            }
+            self.my_handle.audio.audio_synthesis(message)
+
+        last_mode = 1
         return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
-    
+
+    def _pop_from_list(self, data_list: List, data_type: str):
+        """从列表取一项（随机/顺序），空则刷新列表；双空返回 None。"""
+        random_mode = self.config.get("idle_time_task", data_type, "random")
+        if random_mode and data_list:
+            random.shuffle(data_list)
+        if not data_list:
+            refreshed = self.load_data_list(data_type)
+            if random_mode:
+                random.shuffle(refreshed)
+            data_list.clear()
+            data_list.extend(refreshed)
+        if not data_list:
+            logger.warning(f"闲时任务 {data_type} 数据为空，跳过本模式（D-8 静默语义）")
+            return None
+        return data_list.pop(0)
+
+    def start_idle_time_task_thread(self):
+        """闲时任务驱动线程（T8 接线：三机制判定 + 闲时窗口触发 do_task）"""
+        if not self.config.get("idle_time_task", "enable"):
+            return
+
+        def run_idle_time_task():
+            logger.info("闲时任务线程运行中...")
+            last_mode = 0
+            while self.is_running:
+                time.sleep(5)
+                if self.my_handle is None:
+                    continue
+
+                # 消息处理中 → 非闲时，重置计数
+                if getattr(self.my_handle, "is_handleing", 0) == 1:
+                    my_global.global_idle_time = 0
+                    continue
+
+                mechanism = str(self.config.get("idle_time_task", "type") or "")
+                idle_now = False
+
+                if "无消息" in mechanism:
+                    # 直播间无消息更新闲时：计数器递增（有消息处理时已被重置）
+                    my_global.global_idle_time += 5
+                    try:
+                        idle_min = int(self.config.get("idle_time_task", "idle_time_min") or 30)
+                        idle_max = int(self.config.get("idle_time_task", "idle_time_max") or 60)
+                        idle_min, idle_max = min(idle_min, idle_max), max(idle_min, idle_max)
+                    except (TypeError, ValueError):
+                        idle_min, idle_max = 30, 60
+                    idle_now = my_global.global_idle_time >= random.randint(idle_min, idle_max)
+                elif "合成" in mechanism or "消息队列" in mechanism:
+                    # 待合成消息队列闲时：队列长度 ≤ 阈值触发
+                    try:
+                        threshold = int(self.config.get("idle_time_task", "min_msg_queue_len_to_trigger") or 1)
+                    except (TypeError, ValueError):
+                        threshold = 1
+                    queue_len = len(getattr(self.my_handle.audio, "message_queue", []) or [])
+                    idle_now = queue_len <= threshold
+                elif "播放" in mechanism or "音频队列" in mechanism:
+                    # 待播放音频队列闲时
+                    try:
+                        threshold = int(self.config.get("idle_time_task", "min_audio_queue_len_to_trigger") or 1)
+                    except (TypeError, ValueError):
+                        threshold = 1
+                    queue_len = len(getattr(self.my_handle.audio, "voice_tmp_path_queue", []) or [])
+                    idle_now = queue_len <= threshold
+                else:
+                    logger.warning(f"未知闲时机制类型：{mechanism}，本轮跳过（E5 单选）")
+                    continue
+
+                if idle_now:
+                    logger.info(f"闲时触发（机制={mechanism}，idle={my_global.global_idle_time}s）")
+                    last_mode, self.copywriting_copy_list, self.comment_copy_list, self.local_audio_path_list = \
+                        self.do_task(last_mode, self.copywriting_copy_list,
+                                     self.comment_copy_list, self.local_audio_path_list)
+
+        self.idle_time_task_thread = threading.Thread(target=run_idle_time_task, daemon=True)
+        self.idle_time_task_thread.start()
+        logger.info("闲时任务线程已启动")
+
     def start_trends_copywriting(self):
         """启动动态文案任务（T9 实装：本地文案→可选 LLM 改写→TTS 播放）"""
         if not self.config.get("trends_copywriting", "enable"):
@@ -347,6 +427,7 @@ class TaskScheduler:
         """启动所有任务"""
         self.start_schedule_thread()
         self.start_trends_copywriting()
+        self.start_idle_time_task_thread()
         logger.info("所有任务已启动")
     
     def stop_all(self):
