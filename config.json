@@ -510,9 +510,9 @@
   },
   "database": {
     "path": "data/data.db",
-    "comment_enable": false,
-    "entrance_enable": false,
-    "gift_enable": false
+    "comment_enable": true,
+    "entrance_enable": true,
+    "gift_enable": true
   },
   "game": {
     "enable": true,
