@@ -1,5 +1,26 @@
 # TODOS.md
 
+## Deferred Items from 环境实测 (2026-10-20) — 系统审查批次实测修复轮（用户指示：先记录，架构调整后统一修复）
+
+### A 组：弹幕链刷屏错误（每条弹幕触发，真实直播间实测发现）
+
+1. **so_vits_svc 变声链每弹幕 ConnectionRefused**（P2, S）— 实测：每条弹幕音频合成后触发 `synthesis_manager.voice_change → so_vits_svc_api`，连接失败报错刷屏（`so_vits_svc合成失败，请检查配置`）；疑似 config 残留变声开启但服务不存在，或触发条件缺陷（不应无条件走变声链）。修复=查明触发条件（config 开关/调用点判定）+关闭残留开关或修条件。注意与 RVC 翻唱链的关系辨析（变声 vs 翻唱两链）。
+2. **多音字.txt 相对路径 Errno 2**（P2, S）— TTS 前处理多音字词典以相对路径打开（`[Errno 2] No such file or directory: '多音字.txt'`），工作目录依赖：非仓库根启动即失效。修复=路径改为相对仓库根锚定（utils.autolive_paths 语义）或确认词典文件入库位置。
+3. **luna_ai 写弹幕日志 'NoneType' .get 失败**（P2, S）— 数据库写入路径某 dict 为 None（`写入弹幕日志失败：'NoneType' object has no attribute 'get'` 每弹幕报），弹幕日志功能实际失效。修复=定位 None 来源（大概率 config 节缺失未兜底）。
+4. **data/badwords.txt 违禁词文件缺失**（P2, S）— config `badwords.path=data/badwords.txt` 指向文件不存在，每次弹幕 Errno 2，违禁词过滤实际未生效。修复=补文件（含违禁拼音表 data/违禁拼音.txt 同查）或 config 判空跳过。
+
+### B 组：批次收尾验证项
+
+5. **P25 多参考音频音色人耳判定**（P2, S）— 合成已出音频（`out/gpt_sovits_inproc_*.wav`），用户试听确认多参考音色质量即裁决（spike 收尾）。
+6. **P26 双语速时长对比**（P3, S）— synth_speed 透传链路已通；跑 synth(1.0) vs synth(2.0) 时长对比验证生效性（spike 收尾，pydub 回退已保底）。
+7. **gptsovits S1/S2 两断言存量失败**（P3, S）— test_gptsovits_deep_integration.py 两项失败；config 键恢复实验已否定键假设，待查（引擎 mock 态/单测环境 GPU 依赖方向）。
+
+### C 组：批次遗留小项
+
+8. **utils/*.backup 文件处置**（P3, S）— 删除批后遗留的备份文件清点与删除。
+9. **D-15 首启"更新移除项"告知 UI**（P3, S）— 首次启动告知用户本批移除的模块/键面，避免旧配置静默失效无感知。
+10. **v2 backend=api 兜底数据链退役评估**（P3, S）— inproc 为主后，api 兜底路径的数据链是否随键迁移一并退役评估。
+
 ## Deferred Items from /autoplan (2026-10-15) — EDTalk 全面整合（正式接入批次）
 
 1. **片段编排能力**（P2, L）— 用户指示保留待办：realtime_serve 段播放调度增强（含 reaction_segment 弹幕→切段联动——配置键/UI/switch_segment 方法在但无回复分发点调用方，前端调查发现缺口）。依赖：本期推理模块托管+热切落地后评估。
@@ -132,6 +153,6 @@
 
 ## Deferred Items from E2E 出画排障 (2026-10-16) — EDTalk 推理整合收官
 
-1. **全量测试套件 149 项存量失败（features 历史验收测试漂移）**（P2, M）— tests/features/test_task_01~27（约 145 项，如 function_groups 断言 8 组实际 7 组）+ 全量跑时 test_edtalk_client 4 项（单独跑全绿=测试间状态污染）。均为存量：在已推送 HEAD（2847a138）上即失败，与 EDTalk 整合批次改动无关；docs-refresh（2026-10-12）已标注"全面测试待用户执行"。整理任务=按现行功能现实重写/退役过期断言+排查污染源（模块单例/共享端口）。
+1. **~~全量测试套件 149 项存量失败（features 历史验收测试漂移）~~（已完成 2026-10-20）**— 门禁 A 批次（74b932d1）150 失败→0：asyncio.run 根因修复×4+独立路径防竞争+按现行功能现实重写/退役过期断言，最终套件 619 passed + 72 retired skip。
 2. **虚拟摄像头"已安装"态无重装/改名入口**（P3, S）— visual_body 摄像头卡仅在未安装态渲染安装按钮；改名/重装需手动 regsvr32。旧安装 dll 指向 D:\AI\EDTalk\UNITYC~1（仍有效），清理该目录前须先重装（安装件在 edtalk/UnityCapture-master/Install/）。
 3. **test_cover_queue GPU 环境依赖**（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
