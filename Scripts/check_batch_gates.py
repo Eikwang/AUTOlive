@@ -22,6 +22,7 @@ import sys
 PYAUTOGUI_WHITELIST = {
     "utils/handlers/feature_handler.py",   # T5 按键触发惰性导入（活功能）
     "tests/test_t5_key_mapping.py",        # 缺依赖降级测试探测（门禁 A 管辖）
+    "Scripts/check_batch_gates.py",        # 本门禁脚本自身（白名单定义元引用）
 }
 
 
