@@ -227,6 +227,25 @@ class EDTalkClient:
             logger.error(f"EDTalk 切段失败（降级跳过）：{e}")
             return {"ok": False, "error": str(e)}
 
+    def schedule(self, sequence: list, align: bool = True) -> dict:
+        """下发段播放序列（/segment/schedule）。
+
+        align=True 立即对齐 sequence[0]（编排回默认用）；False 仅装表下一边界生效。
+        失败降级返回 {"ok": False}，不抛异常（调用方负责重试）。
+        """
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/segment/schedule",
+                json={"sequence": list(sequence), "align": bool(align)},
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            return resp.json() if resp.status_code == 200 else {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.error(f"EDTalk 序列下发失败（降级跳过）：{e}")
+            return {"ok": False, "error": str(e)}
+
     def get_status(self) -> dict:
         """GET /status 同步版（供 webui 控制区轮询直连）。"""
         try:
