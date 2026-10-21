@@ -2,7 +2,7 @@
 
 ## Deferred Items from 门1验证 (2026-10-21) — 清理批次 pytest 既有失败
 
-1. **test_t5_key_mapping 5 项既有失败**（P2, S）— TestMatching×4（test_danmu_similarity_trigger_copywriting/test_reply_contains_trigger/test_gift_exact_match/test_start_cmd_stripped）+ TestSerialSafety::test_serial_send_requires_pyserial。现象：key 模式走真实 pyautogui 按键分支（pyautogui 已装），audio_synthesis_handle mock 未被调用；serial 测试期望 pyserial 缺失降级但 pyserial 已装。根因方向：测试设计依赖"pyautogui/pyserial 缺失"环境或 mock 边界未覆盖真按键分支，与清理无关（git stash HEAD 对比同败，留痕 .gstack/tmp/autoplan/batch1-verify.md）。修复=测试 mock 打桩按键分支或补缺依赖降级桩。依赖：无。
+1. **test_t5_key_mapping 5 项既有失败**（P2, S）— 【2026-10-21 已修复，提交 9d6eedf4：TestMatching 4 项 key_trigger_type 置"无"隔离 key 分支环境依赖；serial 测试 monkeypatch get_serial_manager 模拟缺依赖；纯测试侧修复产品零改动，全套 735/73/0】TestMatching×4（test_danmu_similarity_trigger_copywriting/test_reply_contains_trigger/test_gift_exact_match/test_start_cmd_stripped）+ TestSerialSafety::test_serial_send_requires_pyserial。现象：key 模式走真实 pyautogui 按键分支（pyautogui 已装），audio_synthesis_handle mock 未被调用；serial 测试期望 pyserial 缺失降级但 pyserial 已装。根因方向：测试设计依赖"pyautogui/pyserial 缺失"环境或 mock 边界未覆盖真按键分支，与清理无关（git stash HEAD 对比同败，留痕 .gstack/tmp/autoplan/batch1-verify.md）。依赖：无。
 
 ## Deferred Items from /autoplan (2026-10-21) — 死代码清理批次（批准实施，rec）
 
