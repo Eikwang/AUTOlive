@@ -8,10 +8,10 @@
 
 1. **批次 1b：utils/*.backup 退役**（P2, S）— 【2026-10-21 已执行完成：diff 验证 PASS（留痕 .gstack/tmp/autoplan/batch1-verify.md）+ 用户执行确认后删除 utils/audio.py.backup、utils/db.py.backup、utils/my_handle.py.backup 三件；删除后门4 import 探测 PASS，git 零影响（未跟踪文件）。至此 2026-10-20 第 4 条与 C 组第 8 条彻底闭环】backup diff 验证曾确认 T5 按键映射已迁 feature_handler.py、T6 答谢三通道已迁 timer_handler.py，46 个独有函数逐一核对无迁移缺失。依赖：无（已完成）。
 2. **仓库卫生门禁**（P2, M）— 【2026-10-21 已交付：tests/test_repo_hygiene.py（backup 后缀拦截进 pytest 门）+ Scripts/check_batch_gates.py（批次验证门模板：门1 pytest/门2 pyautogui 两态白名单/门4 import 探测+反向断言，--skip-pytest 快查），提交随本批】将本批 grep 门推广为批次验证模板（pyautogui 式两态白名单+git grep 全跟踪扫描+活模块 import 探测）；backup/*.bak 类后缀进 lint 拦截（CI/本地 pre-commit 均可）。来源：CEO 审查 F1"一次性清理无防再脏机制"。依赖：无。
-3. **.github/ 上游 issue 模板退役评估**（P3, S）— 硬 fork 后上游 issue 模板无意义但无害；评估是否随仓库品牌化删除/改写。依赖：无。
-4. **log/ vs logs/ 双日志目录合并评估**（P3, M）— 两目录并存（log/=运行时日志含 README 跟踪、logs/=服务日志未跟踪），合并需迁移路径引用，超清理批次 30min 界。依赖：无。
-5. **Scripts 诊断工具归档注释统一**（P3, S）— bench_fastrag_latency/diagnose_danmaku_chain/smoke_builtin_captions 三工具加统一头部注释（用途/前置/调用方式）；注意改动会破坏文档路径引用需同步。依赖：无。
-6. **specs/ 历史计划档案归档标注**（P3, S）— specs/integration/ 11 份历史计划档案加"已归档"头部标注，与活文档区分。依赖：无。
+3. **.github/ 上游 issue 模板退役评估**（P3, S）— 【2026-10-21 已执行：config.yml 指向上游 Ikaros 仓库品牌错位，solo 仓库无协作者 issue 场景，.github/ISSUE_TEMPLATE 四件已退役删除。依赖：无。
+4. **log/ vs logs/ 双日志目录合并评估**（P3, M）— 【2026-10-21 评估完成，裁决不合并：两目录语义不同非重复——log/=弹幕/聊天运行日志（my_handle.py:238 comment 日志写入点），logs/=训练/服务日志体系（RVC spike filelist 硬编码 logs/mute、test_train_pipeline.py:400 断言 logs/Audio2Lip 布局契约、train_rvc_pipeline 预建目录），合并将破坏训练管线布局契约+测试断言+上游兼容。依赖：无（已闭环）。
+5. **Scripts 诊断工具归档注释统一**（P3, S）— 【2026-10-21 已执行：三工具头部核对——diagnose/smoke 已含用途+用法+前置语义达标，bench_fastrag_latency 补前置+用法行；文档路径引用零改动。依赖：无。
+6. **specs/ 历史计划档案归档标注**（P3, S）— 【2026-10-21 已执行：specs/integration/ 10 份 md 加"已归档历史档案"头部（2026-10-21 批次标注+现行事实以 docs/ 与代码为准）；install/ 为 bat/txt 可执行工件不加头（破坏执行性）。依赖：无。
 7. **DX-R3 注记**（P3, S）— Scripts/半自动/ 已于 2026-10-21 清理批次删除，conda 环境名分裂问题（specs/技术栈.md autolive vs 脚本 ai_vtb）仅剩文档侧；统一方案收敛为"文档示例改 ai_vtb"或在下次动 conda 环境时一并处理。
 
 ## Deferred Items from /autoplan (2026-10-20) — 主线流程图审查（图-码对齐+断链登记）

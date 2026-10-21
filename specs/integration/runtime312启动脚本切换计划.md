@@ -1,3 +1,5 @@
+> **📦 已归档历史档案**（2026-10-21 批次标注）：本文件为整合期计划/纪要快照，记录当时决策与实施过程，不随现行代码演进；现行事实以 docs/ 与代码为准。
+
 <!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Ikaros-521-AUTOlive\\main-autoplan-restore-20260922-165941.md" -->
 ## Implementation plan
 # AUTOlive 启动脚本切换 runtime312（Python 3.12）+ 依赖缺口清单

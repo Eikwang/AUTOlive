@@ -1,3 +1,5 @@
+> **📦 已归档历史档案**（2026-10-21 批次标注）：本文件为整合期计划/纪要快照，记录当时决策与实施过程，不随现行代码演进；现行事实以 docs/ 与代码为准。
+
 <!-- /autoplan restore point: "C:\\Users\\admin\\.gstack\\projects\\Eikwang-AUTOlive\\main-autoplan-restore-20260924-050105.md" -->
 ## Implementation plan
 <!-- /autoplan: ACTIVE_PLAN — EDTalk 功能集成计划（2026-09-24） -->

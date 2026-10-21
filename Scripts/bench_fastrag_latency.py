@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """fastrag python 路线 10 问延迟实测（Eng F-E11/F-4 终门判据，2026-10-15）
 判据：python p95 ≤ rust p95×2 则选 python（终门 uc1a 已选 python，本实测为判据确认）。
+前置：fastrag 服务已启动（本地 HTTP 端点）；结果写入 logs/fastrag_latency_python.json。
+用法：python Scripts/bench_fastrag_latency.py
 """
 import json
 import statistics

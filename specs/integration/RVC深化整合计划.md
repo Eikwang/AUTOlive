@@ -1,3 +1,5 @@
+> **📦 已归档历史档案**（2026-10-21 批次标注）：本文件为整合期计划/纪要快照，记录当时决策与实施过程，不随现行代码演进；现行事实以 docs/ 与代码为准。
+
 <!-- /autoplan restore point: "D:\\AI\\AUTOlive\\.gstack\\tmp\\autoplan\\main-autoplan-restore-20261014-155823.md" -->
 ## Implementation plan
 # RVC 与歌曲翻唱深化整合计划
