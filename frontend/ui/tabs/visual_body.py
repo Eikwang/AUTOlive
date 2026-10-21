@@ -235,11 +235,11 @@ def create_visual_body_tab(
                 style="width:100%;",
             )
             FormField.create_select(
-                label='弹幕触发切段',
+                label='弹幕触发切段（deprecated）',
                 options={'true': '开', 'false': '关'},
                 value=str(get_nested_value(config, "edtalk_realtime", "reaction_segment", default=True)).lower(),
                 on_change=lambda e: set_config_callback("edtalk_realtime", "reaction_segment", value=e.value == "true"),
-                tooltip="布尔开关：直播回复后自动切换表情段（segment_end 无缝）",
+                tooltip="已由下方『动作编排』规则取代（deprecated，保留兼容）：弹幕触发切段请改用编排规则的关键词触发",
                 style="width:100%;",
             )
             FormField.create_input(
@@ -313,6 +313,263 @@ def create_visual_body_tab(
                     on_click=lambda: _switch_segment(segment_switch_input.value),
                 ).props("outline")
                 ui.button("刷新状态", on_click=lambda: _poll_status_once()).props("flat")
+
+    # ================= 卡片 3.5：动作编排管理（/autoplan 20261021 批次 P2） =================
+    import copy as _copy
+    import json as _json
+
+    _choreo_status_cache = {}
+
+    def _main_api_url() -> str:
+        api_port = get_nested_value(config, "api_port", default=8082)
+        api_ip = get_nested_value(config, "api_ip", default="127.0.0.1")
+        if str(api_ip) == "0.0.0.0":
+            api_ip = "127.0.0.1"
+        return f"http://{api_ip}:{api_port}"
+
+    def _default_rule():
+        return {"rule_id": "new_rule", "trigger_type": "gift", "match": "", "min_price": 0,
+                "sequence": {
+                    "enter": {"segment": "", "switch_at": "segment_end", "duration_s": 4},
+                    "main": {"segment": "", "switch_at": "segment_end", "duration_s": 30},
+                    "exit": {"segment": "", "switch_at": "segment_end", "duration_s": 4},
+                },
+                "emotion_tiers": [], "interrupt": "standard"}
+
+    choreo_node = _copy.deepcopy(get_nested_value(config, "choreography", default={}) or {})
+    if not isinstance(choreo_node, dict) or "enable" not in choreo_node:
+        choreo_node = {"enable": False, "default_mode": "rotate", "default_segments": [],
+                       "min_retrigger_s": 2, "min_sequence_hold_s": 5, "step_timeout_s": 60,
+                       "rules": []}
+    choreo_node.setdefault("rules", [])
+    choreo_node.setdefault("default_segments", [])
+    choreo_avail = {"segments": []}
+
+    async def _fetch_avail_segments():
+        """从 EDTalk /status 拉可用段（供步骤下拉；与卡 2『从服务获取』同源）。"""
+        try:
+            import requests
+            resp = await asyncio.to_thread(
+                requests.get, f"{_edtalk_api()}/status",
+                headers=_auth_headers(), timeout=3,
+            )
+            segs = (resp.json() or {}).get("available_segments") or []
+            choreo_avail["segments"] = [str(s) for s in segs]
+            if segs:
+                ui.notify(position="top", type="positive", message=f"可用段 {len(segs)} 个已刷新")
+            else:
+                ui.notify(position="top", type="warning", message="EDTalk 未运行或无可用段")
+        except Exception as e:
+            ui.notify(position="top", type="negative", message=f"获取失败：{e}")
+        _render_rules()
+
+    def _seg_options(current: str) -> dict:
+        """步骤段下拉选项：服务可用段 ∪ 规则已引用段（未拉取时至少能显示现值）。"""
+        opts = list(dict.fromkeys((choreo_avail["segments"] or []) + [current or ""]))
+        return {s: s for s in opts if s}
+
+    def _render_rules():
+        rules_container.clear()
+        with rules_container:
+            for idx, rule in enumerate(choreo_node["rules"]):
+                with ui.expansion(
+                    f"规则 {rule.get('rule_id') or ('#' + str(idx + 1))}"
+                    f"（{rule.get('trigger_type', '?')} · {rule.get('match') or '任意'}）"
+                ).style("width:100%"):
+                    with ui.grid(columns=4):
+                        FormField.create_input(
+                            label='规则 ID（唯一）', value=str(rule.get("rule_id", "")),
+                            on_change=lambda e, r=rule: r.__setitem__("rule_id", (e.value or "").strip()),
+                            style="width:100%;")
+                        FormField.create_select(
+                            label='触发类型',
+                            options={'gift': '礼物打赏', 'keyword': '弹幕关键词', 'song': '点歌命中'},
+                            value=str(rule.get("trigger_type", "gift")),
+                            on_change=lambda e, r=rule: r.__setitem__("trigger_type", e.value),
+                            tooltip="entrance/follow 为预留枚举位（P1 不订阅，需先给节流方案）",
+                            style="width:100%;")
+                        FormField.create_input(
+                            label='匹配值（gift=礼物名全等 / keyword=子串 / song 可空=任意）',
+                            value=str(rule.get("match", "")),
+                            on_change=lambda e, r=rule: r.__setitem__("match", e.value or ""),
+                            style="width:100%;")
+                        FormField.create_input(
+                            label='最低价值门槛（仅 gift，与答谢链同口径）',
+                            value=str(rule.get("min_price", 0)),
+                            on_change=lambda e, r=rule: r.__setitem__(
+                                "min_price", float(e.value or 0) if str(e.value or "").replace(".", "", 1).isdigit() else 0),
+                            style="width:100%;")
+                    for step_name in ("enter", "main", "exit"):
+                        step = rule.setdefault("sequence", {}).setdefault(step_name, {})
+                        step.setdefault("switch_at", "segment_end")
+                        with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
+                            ui.label({"enter": "上场", "main": "主线", "exit": "离场"}[step_name]).style(
+                                "min-width:44px;color: var(--text-hint);font-size: var(--font-size-body)")
+                            ui.select(
+                                options=_seg_options(str(step.get("segment", ""))),
+                                value=str(step.get("segment", "")),
+                                label="段名",
+                                on_change=lambda e, s=step: s.__setitem__("segment", e.value or ""),
+                            ).style("min-width:150px").tooltip("段名=orifra/ 目录名；下拉=『刷新可用段』结果 ∪ 已引用段")
+                            ui.select(
+                                options={"segment_end": "segment_end（边界无缝）", "immediate": "immediate（立即硬切）"},
+                                value=str(step.get("switch_at", "segment_end")),
+                                label="切换方式",
+                                on_change=lambda e, s=step: s.__setitem__("switch_at", e.value),
+                            ).style("min-width:170px").tooltip("衔接短素材建议 segment_end；immediate 硬切≤一次边界")
+                            FormField.create_input(
+                                label='时长(s)', value=str(step.get("duration_s", "")),
+                                on_change=lambda e, s=step: s.__setitem__(
+                                    "duration_s", float(e.value) if str(e.value or "").replace(".", "", 1).isdigit() and e.value else None),
+                                tooltip="无音轨步骤必填 >0；有音轨时语义=完成上限（F1 看门狗）",
+                                style="width:90px;")
+                            FormField.create_select(
+                                label='音轨', options={'none': '无（TTS 照常）', 'tts': '答谢语音', 'file': '本地文件'},
+                                value=str((step.get("audio") or {}).get("mode", "none")),
+                                on_change=lambda e, s=step: s.__setitem__(
+                                    "audio", {"mode": e.value, "path": (s.get("audio") or {}).get("path", "")}
+                                    if e.value != "none" else None),
+                                style="width:130px;")
+                            if (step.get("audio") or {}).get("mode") == "file":
+                                FormField.create_input(
+                                    label='音频路径', value=str((step.get("audio") or {}).get("path", "")),
+                                    on_change=lambda e, s=step: s.__setitem__(
+                                        "audio", {"mode": "file", "path": e.value or ""}),
+                                    tooltip="本地音频走点歌直通通道（type=song）",
+                                    style="width:220px;")
+                    tiers_raw = _json.dumps(rule.get("emotion_tiers", []), ensure_ascii=False)
+                    tiers_area = ui.textarea(
+                        label='情绪分级（JSON 数组；可空=单档恒用基础素材）', value=tiers_raw,
+                    ).style("width:100%").tooltip('[{"max_count":3,"mood":"happy"},'
+                                                  '{"max_count":6,"mood":"angry",'
+                                                  '"segment_overrides":{"enter":"段名"}}] '
+                                                  'max_count 严格递增；超出末档用最高档')
+                    with ui.row():
+                        ui.button("删除规则", on_click=lambda i=idx: _delete_rule(i)).props(
+                            "outline color=negative")
+
+    def _delete_rule(idx: int):
+        try:
+            choreo_node["rules"].pop(idx)
+        except Exception:
+            return
+        _render_rules()
+
+    async def _apply_choreography():
+        """组装整节 → main /choreography/rules（校验+热生效+持久化，单写者）。"""
+        try:
+            import requests
+            resp = await asyncio.to_thread(
+                requests.post, f"{_main_api_url()}/choreography/rules",
+                json=choreo_node, timeout=8,
+            )
+            data = (resp.json() or {}) if resp.status_code == 200 else {}
+            if resp.status_code == 200 and data.get("applied"):
+                bad = data.get("rejected") or []
+                missing = data.get("missing_all") or []
+                msg = f"已应用：{len(data.get('enabled_rules') or [])} 条生效"
+                if bad:
+                    msg += f"，{len(bad)} 条结构拒绝"
+                if missing:
+                    msg += f"，缺失段 {missing}"
+                if not data.get("persisted"):
+                    msg += "（⚠ 持久化失败：重启后丢失）"
+                ui.notify(position="top", type="positive", message=msg)
+            else:
+                detail = data.get("message") or (resp.json() or {}).get("detail", {})
+                ui.notify(position="top", type="warning",
+                          message=f"未应用（HTTP {resp.status_code}）：{detail}")
+        except Exception as e:
+            ui.notify(position="top", type="negative",
+                      message=f"应用失败（运行系统未启动？）：{e}")
+
+    async def _poll_choreo_status():
+        """编排状态条 5s 轮询（main API；未装配/未启动=提示态，不报错刷屏）。"""
+        try:
+            import requests
+            resp = await asyncio.to_thread(
+                requests.get, f"{_main_api_url()}/choreography/status", timeout=2)
+            st = (resp.json() or {}) if resp.status_code == 200 else {}
+        except Exception:
+            st = {}
+        _choreo_status_cache["active"] = bool(
+            st.get("enable") and st.get("ready") and st.get("state") is not None)
+        if not st:
+            choreo_status_label.set_text("状态：运行系统未启动或编排器未装配").style(
+                "color: var(--text-hint)")
+            return
+        if not st.get("enable"):
+            choreo_status_label.set_text("状态：已停用（开关关闭，订阅点短路直通）").style(
+                "color: var(--text-hint)")
+            return
+        if st.get("state") == "sequence":
+            mood = f" · {st.get('mood')}" if st.get("mood") else ""
+            text = (f"执行中：{st.get('active_rule')} · {st.get('step')}{mood} · "
+                    f"计数 {st.get('counters', {})} · 降级 {st.get('degrade_total', 0)}")
+            choreo_status_label.set_text(text).style("color: var(--color-warning)")
+        else:
+            text = (f"待机（默认轮播）· 生效规则 {st.get('enabled_rules', [])} · "
+                    f"计数 {st.get('counters', {})} · 降级 {st.get('degrade_total', 0)}")
+            choreo_status_label.set_text(text).style("color: var(--color-positive)")
+        if not st.get("ready"):
+            choreo_status_label.set_text(
+                choreo_status_label.text + " · ⚠ EDTalk 未就绪（规则未校验生效）").style(
+                "color: var(--color-warning)")
+
+    with ui.card().style(card_css):
+        with ui.row().style("width:100%;align-items:center;gap:12px"):
+            ui.label("动作编排（事件驱动画面序列）").style("font-size: var(--font-size-title)")
+            choreo_status_label = ui.label("状态：未轮询").style("color: var(--text-hint)")
+        ui.label("打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 情绪分级。"
+                 "改动后点『应用』= 校验 + 热生效 + 写回 config（重启后按 config 装载）。"
+                 "前置：EDTalk 驱动启用且服务运行（段名校验依赖 available_segments）").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
+        with ui.grid(columns=5):
+            ui.switch("总开关", value=bool(choreo_node.get("enable")),
+                      on_change=lambda e: choreo_node.__setitem__("enable", e.value))
+            FormField.create_select(
+                label='默认画面模式',
+                options={'rotate': '轮播（顺序）', 'random': '随机', 'single': '单段'},
+                value=str(choreo_node.get("default_mode", "rotate")),
+                on_change=lambda e: choreo_node.__setitem__("default_mode", e.value),
+                tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）",
+                style="width:100%;")
+            FormField.create_input(
+                label='最短再触发间隔(s)', value=str(choreo_node.get("min_retrigger_s", 2)),
+                on_change=lambda e: choreo_node.__setitem__(
+                    "min_retrigger_s", float(e.value or 2) if str(e.value or "").replace(".", "", 1).isdigit() else 2),
+                tooltip="每规则防连点风暴；被节流触发不计数",
+                style="width:100%;")
+            FormField.create_input(
+                label='序列最小展示(s)', value=str(choreo_node.get("min_sequence_hold_s", 5)),
+                on_change=lambda e: choreo_node.__setitem__(
+                    "min_sequence_hold_s", float(e.value or 5) if str(e.value or "").replace(".", "", 1).isdigit() else 5),
+                tooltip="hold 窗口内他键触发忽略（防画面乒乓，F5）",
+                style="width:100%;")
+            FormField.create_input(
+                label='步骤超时上限(s)', value=str(choreo_node.get("step_timeout_s", 60)),
+                on_change=lambda e: choreo_node.__setitem__(
+                    "step_timeout_s", float(e.value or 60) if str(e.value or "").replace(".", "", 1).isdigit() else 60),
+                tooltip="音轨步骤完成回调丢失时的强制推进上限（F1 看门狗）",
+                style="width:100%;")
+        default_seg_area = ui.textarea(
+            label='默认画面段名池（一行一个；序列段结束后恢复轮播的池）',
+            value="\n".join(str(s) for s in (choreo_node.get("default_segments") or [])),
+            on_change=lambda e: choreo_node.__setitem__(
+                "default_segments", [s.strip() for s in (e.value or "").splitlines() if s.strip()]),
+        ).style("width:40%").tooltip("空池=不接管默认轮播（EDTalk 自身 segments 配置生效）")
+        ui.label("规则列表").style("font-size: var(--font-size-body)")
+        rules_container = ui.column().style("width:100%")
+        with ui.row():
+            ui.button("新增规则", on_click=lambda: (choreo_node["rules"].append(_default_rule()),
+                                                    _render_rules())).props("outline")
+            ui.button("刷新可用段", on_click=_fetch_avail_segments).props("outline")
+            ui.button("应用（校验+热生效+写回）", on_click=_apply_choreography)
+        ui.label("改链提示：新增规则引用的段名必须存在于 EDTalk available_segments，"
+                 "否则该规则被禁用并计入资产缺口报告（启动日志三段式）").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
+
+    _render_rules()
 
     # ================= 卡片 4：metahuman_stream 参数（保留，edtalk 时收起） =================
     edtalk_selected = is_edtalk_selected(config)
@@ -404,6 +661,19 @@ def create_visual_body_tab(
         if not segment:
             ui.notify(position="top", type="warning", message="请输入段名")
             return
+        # F7 机械互锁（/autoplan 20261021 批次 P2）：编排启用中手动切段会覆盖/
+        # 清除编排 pending（单槽 last-write-wins）导致序列丢步——确认弹窗保留逃生口
+        if _choreo_status_cache.get("active"):
+            with ui.dialog() as confirm_dlg, ui.card().style(card_css):
+                ui.label("动作编排已启用且服务就绪：手动切段会覆盖编排队列的待执行切换"
+                         "（单槽 last-write-wins），可能导致编排序列丢步。仍要继续？").style(
+                    "white-space: pre-wrap; max-width: 420px")
+                with ui.row():
+                    ui.button("仍要切换", on_click=lambda: confirm_dlg.submit(True))
+                    ui.button("取消", on_click=lambda: confirm_dlg.submit(False)).props("flat")
+            confirmed = await confirm_dlg
+            if not confirmed:
+                return
         try:
             import requests
             resp = await asyncio.to_thread(
@@ -483,3 +753,5 @@ def create_visual_body_tab(
 
     # 5 秒轮询（仅当 edtalk 被选中时活动；native F14：失败不转全局离线，仅本页显示）
     ui.timer(5.0, _poll_status_once)
+    # 编排状态条轮询（P2：main API /choreography/status；兼作 F7 互锁状态源）
+    ui.timer(5.0, _poll_choreo_status)

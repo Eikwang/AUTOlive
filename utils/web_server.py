@@ -182,6 +182,14 @@ class WebServer:
         except Exception:
             logger.error("TTS 控制面路由挂载失败（不影响其他 API）", exc_info=True)
 
+        # 动作编排控制面（/autoplan 20261021 批次 P2：管理页后端；
+        # /choreography/status 状态条轮询 + /choreography/rules 热应用+持久化）
+        try:
+            from utils.orchestration.api import register_choreography_routes
+            register_choreography_routes(self.app, self.config)
+        except Exception:
+            logger.error("choreography 控制面路由挂载失败（管理页显示未装配）", exc_info=True)
+
         # 翻唱队列控制面（/autoplan 2026-10-14 C-3：点歌页队列状态卡数据源；
         # 写者矩阵=cover_worker（main 进程）唯一写者，webui 只读窄端点）
         @self.app.get("/cover/status")

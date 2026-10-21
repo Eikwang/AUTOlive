@@ -7,13 +7,17 @@
 
 事件驱动的数字人画面编排：打赏/关键词/点歌 → 片段序列（enter→main→exit）+ 情绪分级。
 
-**启用步骤**：
+**启用步骤（方式一：管理页，推荐）**：webui → 数字人-画面设置 → 「动作编排」卡片 →
+刷新可用段 → 配规则 → 点「应用」（=校验+热生效+写回 config，序列执行中会拒绝 409）。
+状态条实时显示执行中规则/步骤/情绪档/计数/降级。
+
+**启用步骤（方式二：手编 config）**：
 1. EDTalk realtime_serve 运行中（编排前置 = `is_edtalk_active`，本地播放模式不适用——§3 边界）
 2. `config.json` 新增 `choreography` 节（结构见 config.example.json 示例规则）
 3. `enable: true` + 重启主进程（**开关生效时机 = 配置装载，与全系统一致，无热更**）
 4. 观察启动日志：`[编排] EDTalk 就绪` + `DEFAULT 初始化` + 规则生效/禁用清单
 
-**段名发现**：段名 = EDTalk 角色素材目录名（character_dir 子目录），或 `GET /status` 的 `available_segments`。规则引用不存在的段名 → 该规则 disabled + 资产缺口报告（三段式日志列出缺失清单，义务 F2）。
+**段名发现**：段名 = EDTalk 角色素材目录名（character_dir 子目录），或 `GET /status` 的 `available_segments`（管理页「刷新可用段」同源）。规则引用不存在的段名 → 该规则 disabled + 资产缺口报告（三段式日志列出缺失清单，义务 F2）。
 
 ## 2. 配置速查
 

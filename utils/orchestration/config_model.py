@@ -129,7 +129,9 @@ def load_choreography_config(config) -> ChoreographyConfig:
     """
     node = config.get("choreography")
     if not isinstance(node, dict):
-        return ChoreographyConfig(enable=False)
+        cfg = ChoreographyConfig(enable=False)
+        cfg._rejections = []
+        return cfg
 
     rejections: list = []
     enable = bool(node.get("enable", False))
@@ -241,11 +243,13 @@ def load_choreography_config(config) -> ChoreographyConfig:
             f"choreography 装载完成：{len(rules)} 条规则生效，{len(rejections)} 条被拒"
             f"（problem=部分规则未启用；cause=结构校验未过；fix=按上方三段式日志逐条修正）"
         )
-    return ChoreographyConfig(enable=enable, default_mode=default_mode,
-                              default_segments=default_segments,
-                              min_retrigger_s=min_retrigger_s,
-                              min_sequence_hold_s=min_sequence_hold_s,
-                              step_timeout_s=step_timeout_s, rules=rules)
+    cfg = ChoreographyConfig(enable=enable, default_mode=default_mode,
+                             default_segments=default_segments,
+                             min_retrigger_s=min_retrigger_s,
+                             min_sequence_hold_s=min_sequence_hold_s,
+                             step_timeout_s=step_timeout_s, rules=rules)
+    cfg._rejections = rejections
+    return cfg
 
 
 def validate_rule_segments(rules: list, available_segments: set) -> dict:

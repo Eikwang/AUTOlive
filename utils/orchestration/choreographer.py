@@ -29,6 +29,21 @@ from utils.orchestration.config_model import (ChoreographyConfig, RuleCfg, StepC
                                               load_choreography_config,
                                               validate_rule_segments)
 
+
+class _DottedNode:
+    """raw dict 的点式 get 包装（apply_config 直收 choreography 节用）。"""
+
+    def __init__(self, node: dict):
+        self._node = node if isinstance(node, dict) else {}
+
+    def get(self, *keys):
+        cur = self._node
+        for k in keys:
+            if not isinstance(cur, dict) or k not in cur:
+                return None
+            cur = cur[k]
+        return cur
+
 # 事件队列轮询间隔上限（秒）——无近期 deadline 时的最大等待粒度
 TICK_CAP_S = 1.0
 # 恢复默认轮播重试参数（义务：恢复是回默认唯一路径，失败重试）
@@ -456,6 +471,7 @@ class ChoreoEngine:
             "state": self.state,
             "active_rule": seq["rule_id"] if seq else None,
             "step": (seq["steps"][seq["idx"]]["name"] if seq else None),
+            "mood": (seq.get("tier_mood") or "") if seq else "",
             "counters": dict(self.counters),
             "hold_remaining": max(0.0, (seq["hold_until"] - self.clock())) if seq else 0.0,
             "degrade_total": self.degrade_total,
@@ -535,6 +551,62 @@ class ActionChoreographer:
     def get_state(self) -> dict:
         with self._lock:
             return self.engine.get_state()
+
+    def apply_config(self, cfg_node: dict) -> dict:
+        """运行时热换装（P2 管理页「应用」按钮；写者=orchestration.api 持久化）。
+
+        流程：结构校验（fail-fast 逐规则）→ EDTalk 可达时段名第二段校验 →
+        安全换装（序列执行中拒绝 409；DEFAULT 态换 cfg+enabled_rules，计数保留
+        同名键、剔除失效键）→ 重新下发 DEFAULT 轮播。
+
+        Returns: {"applied": bool, "status": 200|409|503, "enabled_rules": [...],
+                  "rejected": [{rule_id, reason}], "missing_all": [...], "message": str}
+        """
+        new_cfg = load_choreography_config(_DottedNode({"choreography": cfg_node}))
+        rejected = getattr(new_cfg, "_rejections", [])
+        with self._lock:
+            if self.engine.state == "sequence":
+                return {"applied": False, "status": 409, "enabled_rules": [],
+                        "rejected": rejected, "missing_all": [],
+                        "message": "编排序列执行中，暂不能应用（exit 完成回默认后重试）"}
+            # 段名第二段校验（EDTalk 可达时；不可达=保存但不生效，C5-1 语义）
+            status = {}
+            try:
+                status = self.edtalk_client.get_status() or {}
+            except Exception:
+                status = {}
+            segments = set(status.get("available_segments") or [])
+            if not segments:
+                return {"applied": False, "status": 503, "enabled_rules": [],
+                        "rejected": rejected, "missing_all": [],
+                        "message": "EDTalk 未连接（/status 无可用段）：规则已校验但未生效，"
+                                   "服务就绪后重试应用"}
+            result = validate_rule_segments(new_cfg.rules, segments)
+            enabled_ids = set(result["enabled_rules"])
+            # 换装：cfg/enabled_rules 替换；计数保留同名键（规则语义可能已变）
+            new_engine = ChoreoEngine(new_cfg, clock=self._clock)
+            new_engine.ready = self.engine.ready
+            new_engine.enabled_rules = [r for r in new_cfg.rules if r.rule_id in enabled_ids]
+            new_engine.counters = {k: v for k, v in self.engine.counters.items()
+                                   if k in enabled_ids}
+            new_engine.key_last = {k: v for k, v in self.engine.key_last.items()
+                                   if k in enabled_ids}
+            new_engine.degrade_total = self.engine.degrade_total
+            old_engine = self.engine
+            self.engine = new_engine
+            self.cfg = new_cfg
+            # 重新下发 DEFAULT 轮播（default_segments 可能已变；权属线 CP-5）
+            commands = new_engine.default_init_commands()
+            self._dispatch(commands)
+            logger.info(
+                f"[编排] 运行时换装：{len(new_engine.enabled_rules)} 条规则生效，"
+                f"{len(rejected)} 条结构拒绝，{len(result['disabled_rules'])} 条段名禁用"
+            )
+            return {"applied": True, "status": 200,
+                    "enabled_rules": [r.rule_id for r in new_engine.enabled_rules],
+                    "rejected": rejected,
+                    "missing_all": result["missing_all"],
+                    "message": "已应用并恢复默认轮播"}
 
     # ---------- 内部 ----------
 
