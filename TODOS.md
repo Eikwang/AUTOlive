@@ -6,7 +6,7 @@
 
 ## Deferred Items from /autoplan (2026-10-21) — 死代码清理批次（批准实施，rec）
 
-1. **批次 1b：utils/*.backup 退役**（P2, S）— 【挂起，uc2b 裁决】backup diff 验证已通过（2026-10-21，留痕 .gstack/tmp/autoplan/diff-*-backup.txt + batch1-verify.md：T5 按键映射已迁 feature_handler.py、T6 答谢三通道已迁 timer_handler.py，46 个独有函数逐一核对无迁移缺失）；删除须待 T5-T9 恢复产物经用户实测确认后执行（终门 uc2b：尚未实测）。对象：utils/audio.py.backup、utils/db.py.backup、utils/my_handle.py.backup。依赖：用户实测确认。
+1. **批次 1b：utils/*.backup 退役**（P2, S）— 【2026-10-21 已执行完成：diff 验证 PASS（留痕 .gstack/tmp/autoplan/batch1-verify.md）+ 用户执行确认后删除 utils/audio.py.backup、utils/db.py.backup、utils/my_handle.py.backup 三件；删除后门4 import 探测 PASS，git 零影响（未跟踪文件）。至此 2026-10-20 第 4 条与 C 组第 8 条彻底闭环】backup diff 验证曾确认 T5 按键映射已迁 feature_handler.py、T6 答谢三通道已迁 timer_handler.py，46 个独有函数逐一核对无迁移缺失。依赖：无（已完成）。
 2. **仓库卫生门禁**（P2, M）— 【2026-10-21 已交付：tests/test_repo_hygiene.py（backup 后缀拦截进 pytest 门）+ Scripts/check_batch_gates.py（批次验证门模板：门1 pytest/门2 pyautogui 两态白名单/门4 import 探测+反向断言，--skip-pytest 快查），提交随本批】将本批 grep 门推广为批次验证模板（pyautogui 式两态白名单+git grep 全跟踪扫描+活模块 import 探测）；backup/*.bak 类后缀进 lint 拦截（CI/本地 pre-commit 均可）。来源：CEO 审查 F1"一次性清理无防再脏机制"。依赖：无。
 3. **.github/ 上游 issue 模板退役评估**（P3, S）— 硬 fork 后上游 issue 模板无意义但无害；评估是否随仓库品牌化删除/改写。依赖：无。
 4. **log/ vs logs/ 双日志目录合并评估**（P3, M）— 两目录并存（log/=运行时日志含 README 跟踪、logs/=服务日志未跟踪），合并需迁移路径引用，超清理批次 30min 界。依赖：无。
