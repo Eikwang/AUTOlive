@@ -87,8 +87,14 @@ def feature():
 
 class TestMatching:
     def test_danmu_similarity_trigger_copywriting(self, feature):
-        """弹幕相似度匹配 → 文案触发（once=False 继续遍历但触发已发生）。"""
+        """弹幕相似度匹配 → 文案触发（once=False 继续遍历但触发已发生）。
+
+        key_trigger_type 置"无"隔离 pyautogui 环境依赖（已装时 key 模式真按键，
+        2026-10-21 门1 既有失败修复：被测对象是匹配+文案链，key 分支由
+        TestDegradation 专测）。
+        """
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
         triggered = fh.key_mapping_handle("弹幕", {"username": "小明", "content": "放烟花呀"})
         assert triggered in (True, False)  # once=False 时继续遍历返回 False，但播放已发生
         mh.audio_synthesis_handle.assert_called()
@@ -97,22 +103,25 @@ class TestMatching:
         assert any("小明" in c for c in contents), contents
 
     def test_reply_contains_trigger(self, feature):
-        """回复模式：关键词包含匹配。"""
+        """回复模式：关键词包含匹配（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
         fh.key_mapping_handle("回复", {"username": "小明", "content": "来一个放烟花"})
         mh.audio_synthesis_handle.assert_called()
 
     def test_gift_exact_match(self, feature):
-        """礼物名精确匹配：key 降级（pyautogui 缺失）→ 链继续，copywriting 实际执行。"""
+        """礼物名精确匹配 → copywriting 实际执行（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
         result = fh.key_mapping_handle("礼物", {"username": "小明", "gift_name": "小花火",
                                                  "num": 1, "unit_price": 1, "total_price": 1})
         assert result is True  # copywriting 实际执行（executed）→ flag 聚合 True
         mh.audio_synthesis_handle.assert_called()  # 文案播报发生
 
     def test_start_cmd_stripped(self, feature):
-        """命令头剥离：#烟花 → 烟花。"""
+        """命令头剥离：#烟花 → 烟花（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
         mh.config._cfg["key_mapping"]["start_cmd"] = "#"
         fh.key_mapping_handle("回复", {"username": "小明", "content": "#放烟花"})
         mh.audio_synthesis_handle.assert_called()
@@ -141,12 +150,28 @@ class TestSerialSafety:
         assert fh._serial_rate_allow("爆发用户") is False  # 每用户第 3 次拒绝
         assert fh._serial_rate_allow("正常用户") is True  # 别人不受影响
 
-    def test_serial_send_requires_pyserial(self, feature):
-        """pyserial 缺失：串口触发失败但不崩（日志降级）。"""
+    def test_serial_send_requires_pyserial(self, feature, monkeypatch):
+        """串口连接不可用（pyserial 缺失/设备不可达）：失败但不崩（日志降级）。
+
+        2026-10-21 门1 既有失败修复：原测试依赖"pyserial 未安装"环境前提；
+        现环境 pyserial 已装且 serial_manager 对未连接端口走 WARNING 返回路径
+        （send_data 返回 msg dict，_serial_send 正常返回 tmp）——与断言 None 冲突。
+        改为 mock get_serial_manager 抛 ImportError，精确模拟缺依赖路径。
+        """
         fh, mh = feature
+        import utils.serial_manager_instance as smi
+
+        class _BrokenManager:
+            async def connect(self, *a, **k):
+                raise ImportError("pyserial missing（测试模拟）")
+
+            async def send_data(self, *a, **k):
+                raise ImportError("pyserial missing（测试模拟）")
+
+        monkeypatch.setattr(smi, "get_serial_manager", lambda: _BrokenManager())
         result = fh._serial_send(fh.my_handle.config._cfg["key_mapping"]["config"][0],
                                  {"username": "u", "content": "放烟花"})
-        assert result is None  # 未安装 pyserial → 失败返回 None，不抛异常
+        assert result is None  # 连接异常 → 失败返回 None，不抛异常
 
     def test_serial_no_matching_config(self, feature):
         """serial_name 无对应配置 → 明确报错返回 None。"""
