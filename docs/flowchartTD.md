@@ -65,7 +65,22 @@ flowchart TD
     Queue{"待处理消息队列〔真实〕<br>双队列 audio_core.py:54<br>满载丢低优先级 queue_manager.py:200<br>饥饿 flush :71"}
     Queue --> Sort("静态优先级插入〔真实〕<br>queue_manager.py:139 priority_mapping<br>⚠非动态排序（F12 修正）")
 
-    Sort --> Compile{"动作编排〔规划〕<br>无骨架无代码（F13）<br>audio_handler.py:62 直调无编排层<br>未来功能占位"}
+    %% 动作编排（2026-10-21 批次填实 F13 占位）：分类分发层订阅点→编排器→切段/音轨
+    Sort --> Compile("动作编排〔真实〕<br>utils/orchestration/choreographer.py<br>ActionChoreographer 单工作线程+RLock<br>开关: choreography.enable=false<br>前置: is_edtalk_active（helpers 判定）<br>（2026-10-21 批次填实 F13 占位）")
+
+    subgraph CHOREO[编排器子图〔真实〕]
+        direction TB
+        C1["订阅点×3〔真实〕<br>event_handler.gift_handle 答谢门槛前 on_gift（接管短路 _thanks_generate）<br>comment_handler 格式检查后 on_keyword（独立词表 S-2 规范化）<br>feature_handler.choose_song_handle 命中点 on_song（音频走原路）"]
+        C2["状态机〔真实〕<br>DEFAULT(single/rotate/random) ⇄ SEQUENCE(enter→main→exit)<br>条件1 exit完成→/segment/schedule 恢复轮播<br>条件2 同键：main未完忽略不计数/已完重排三步<br>条件3 他键：[旧exit?,新enter,新main,新exit]+旧键计数清零<br>hold=min_sequence_hold_s 防乒乓｜计数档位 emotion_tiers<br>F1 看门狗：audio 步 duration_s 上限超时强制推进+降级计数"]
+        C3["场景指令〔真实〕<br>edtalk_client.switch_segment:215（激活）/ schedule（批次新增）<br>→ EDTalk /segment/switch (immediate|segment_end)"]
+        C4["音轨指令〔真实〕<br>none=不动音频链｜tts=注入引用复用 _thanks_generate（E-2 限流共享）<br>file=type=song 直通（synthesis_manager.py:153 同构）<br>完成回调: playback_manager EDTalk push 路径 (type,content) 关联"]
+        C1 --> C2
+        C2 --> C3
+        C2 --> C4
+    end
+    Compile --> C2
+    C3 -.->|切段| AvatarQ
+    C4 -.->|音频入队| Queue
 
     Queue --> KBQ{"助播通道〔断链〕<br>未实现：仅队列类型名<br>queue_manager.py:160 + 配置残留<br>config.example.json:1032<br>处置=标注不删除（终门 d2a 产品决策）"}
     KBQ -->|否| SysKB["本地问答匹配〔真实〕<br>feature_handler.py:144<br>fastrag 前端拉起但 utils 零调用<br>chat_with_file.py 死代码"]
