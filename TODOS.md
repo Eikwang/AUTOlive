@@ -1,11 +1,25 @@
 # TODOS.md
 
+## Deferred Items from 门1验证 (2026-10-21) — 清理批次 pytest 既有失败
+
+1. **test_t5_key_mapping 5 项既有失败**（P2, S）— TestMatching×4（test_danmu_similarity_trigger_copywriting/test_reply_contains_trigger/test_gift_exact_match/test_start_cmd_stripped）+ TestSerialSafety::test_serial_send_requires_pyserial。现象：key 模式走真实 pyautogui 按键分支（pyautogui 已装），audio_synthesis_handle mock 未被调用；serial 测试期望 pyserial 缺失降级但 pyserial 已装。根因方向：测试设计依赖"pyautogui/pyserial 缺失"环境或 mock 边界未覆盖真按键分支，与清理无关（git stash HEAD 对比同败，留痕 .gstack/tmp/autoplan/batch1-verify.md）。修复=测试 mock 打桩按键分支或补缺依赖降级桩。依赖：无。
+
+## Deferred Items from /autoplan (2026-10-21) — 死代码清理批次（批准实施，rec）
+
+1. **批次 1b：utils/*.backup 退役**（P2, S）— 【挂起，uc2b 裁决】backup diff 验证已通过（2026-10-21，留痕 .gstack/tmp/autoplan/diff-*-backup.txt + batch1-verify.md：T5 按键映射已迁 feature_handler.py、T6 答谢三通道已迁 timer_handler.py，46 个独有函数逐一核对无迁移缺失）；删除须待 T5-T9 恢复产物经用户实测确认后执行（终门 uc2b：尚未实测）。对象：utils/audio.py.backup、utils/db.py.backup、utils/my_handle.py.backup。依赖：用户实测确认。
+2. **仓库卫生门禁**（P2, M）— 将本批 grep 门推广为批次验证模板（pyautogui 式两态白名单+git grep 全跟踪扫描+活模块 import 探测）；backup/*.bak 类后缀进 lint 拦截（CI/本地 pre-commit 均可）。来源：CEO 审查 F1"一次性清理无防再脏机制"。依赖：无。
+3. **.github/ 上游 issue 模板退役评估**（P3, S）— 硬 fork 后上游 issue 模板无意义但无害；评估是否随仓库品牌化删除/改写。依赖：无。
+4. **log/ vs logs/ 双日志目录合并评估**（P3, M）— 两目录并存（log/=运行时日志含 README 跟踪、logs/=服务日志未跟踪），合并需迁移路径引用，超清理批次 30min 界。依赖：无。
+5. **Scripts 诊断工具归档注释统一**（P3, S）— bench_fastrag_latency/diagnose_danmaku_chain/smoke_builtin_captions 三工具加统一头部注释（用途/前置/调用方式）；注意改动会破坏文档路径引用需同步。依赖：无。
+6. **specs/ 历史计划档案归档标注**（P3, S）— specs/integration/ 11 份历史计划档案加"已归档"头部标注，与活文档区分。依赖：无。
+7. **DX-R3 注记**（P3, S）— Scripts/半自动/ 已于 2026-10-21 清理批次删除，conda 环境名分裂问题（specs/技术栈.md autolive vs 脚本 ai_vtb）仅剩文档侧；统一方案收敛为"文档示例改 ai_vtb"或在下次动 conda 环境时一并处理。
+
 ## Deferred Items from /autoplan (2026-10-20) — 主线流程图审查（图-码对齐+断链登记）
 
 1. **T10 语音对话链接通**（P2, L）— conversation_manager.py:221-240 do_listen_and_comment 为空框架（循环体仅 sleep），audio_listen 无调用者，ASR（funasr/whisper）未接入对话链。触发条件锚定：T5-T9 断链批次落地后下一批（不无限期）。入口：conversation_manager 框架填充+ASR 接入+全链手动实测。
 2. **写库/过滤顺序语义决策**（P3, S）— 现状弹幕原文先写 danmu 表（comment_handler.py:255-260）后过违禁词过滤（:272-288），数据分析读到含违禁词原文。变更影响数据分析口径，需用户裁决：保持现状（入库原文）vs 写库前过滤 vs 入库+标记列。**与下方 A4 交叉**：badwords 文件缺失期间违禁词过滤全链失效，写库内容=未过滤原文。依赖：无。
 3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchartTD.md Review record 0A 节）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：T1/T2 修图完成后。
-4. **my_handle.py.backup 退役清理**（P3, S）— T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。
+4. **my_handle.py.backup 退役清理**（P3, S）— 【2026-10-21 已由清理批次 1b 接管，diff 验证通过，见上方 2026-10-21 节第 1 条；删除仍待用户实测确认】T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。
 5. **"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。
 6. **流程图与实测发现的交叉注记**（P3, S）— 下方 A 组实测错误对流程图四态标注的影响：F8 过滤链在 badwords 缺失期间应标"实际失效"（代码在位但文件缺失）；变声通道 so_vits_svc（synthesis_manager.py:278-301）每弹幕触发 ConnectionRefused 说明播放链存在图中未画的变声分支且其配置处于残留开启态。T2 修图时一并消化。
 
@@ -26,7 +40,7 @@
 
 ### C 组：批次遗留小项
 
-8. **utils/*.backup 文件处置**（P3, S）— 删除批后遗留的备份文件清点与删除。
+8. **utils/*.backup 文件处置**（P3, S）— 【2026-10-21 已由清理批次 1b 接管（diff 验证通过，删除待用户实测确认，见 2026-10-21 节第 1 条）】删除批后遗留的备份文件清点与删除。
 9. **D-15 首启"更新移除项"告知 UI**（P3, S）— 首次启动告知用户本批移除的模块/键面，避免旧配置静默失效无感知。
 10. **v2 backend=api 兜底数据链退役评估**（P3, S）— inproc 为主后，api 兜底路径的数据链是否随键迁移一并退役评估。
 

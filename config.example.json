@@ -533,10 +533,6 @@
     "entrance_enable": true,
     "gift_enable": true
   },
-  "game": {
-    "enable": true,
-    "module_name": "game1"
-  },
   "trends_copywriting": {
     "enable": true,
     "llm_type": "chatgpt",

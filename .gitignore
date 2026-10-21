@@ -376,3 +376,6 @@ frontend/config/.tts_inproc_hinted
 # C4 LLM 收敛：请求模板文档（OpenAI-compatible 标准协议，UI 指引引用）
 !docs/llm-request-template.md
 config.json
+
+# 测试视频素材存档（2026-10-21 批次裁决 uc1a：已移出仓库至 D:/AI/AUTOlive-assets-archive/tests-vodeo/，防同名目录误入库）
+tests/vodeo/
