@@ -393,6 +393,16 @@ class FeatureHandler:
                                 if _ext.lower() in (".wav", ".mp3") and _cq.normalize_song(_base.split("__")[0]) == _norm:
                                     _cover_full = os.path.abspath(os.path.join(_covers_dir, _fn))
                                     logger.info(f"[点歌] covers 命中: {_cover_full}")
+                                    # 动作编排订阅点（/autoplan 2026-10-21 批次）：on_song 命中=
+                                    # 画面序列接管（唱歌画面切换）；点歌音频走 SongMode 原路
+                                    # （义务 WP-10：编排不复制不拦截音频）
+                                    try:
+                                        from utils.orchestration import get_choreographer
+                                        _choreo = get_choreographer()
+                                        if _choreo is not None:
+                                            _choreo.on_song(_base.split("__")[0])
+                                    except Exception:
+                                        pass
                                     _msg = {"type": "song",
                                             "tts_type": self.my_handle.config.get("audio_synthesis_type"),
                                             "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
@@ -437,6 +447,15 @@ class FeatureHandler:
                     resp_content = f"{self.my_handle.config.get('choose_song', 'song_path')}/{resp_content[0]}"
                     resp_content = os.path.abspath(resp_content)
                     logger.info(f"点歌成功！匹配到的音频路径：{resp_content}")
+                    # 动作编排订阅点（/autoplan 2026-10-21 批次）：本地匹配成功——
+                    # on_song 命中=画面序列接管，音频走 SongMode 原路（义务 WP-10）
+                    try:
+                        from utils.orchestration import get_choreographer
+                        _choreo = get_choreographer()
+                        if _choreo is not None:
+                            _choreo.on_song(song_filename)
+                    except Exception:
+                        pass
                     # P3-2/DX-5: 异步入队翻唱（成品下次点歌零延迟）
                     try:
                         from utils.cover_worker import CoverQueue

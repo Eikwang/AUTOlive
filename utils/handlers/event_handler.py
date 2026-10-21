@@ -137,11 +137,25 @@ class EventHandler:
                 self.my_handle.db.execute(insert_data_sql, (username, gift_name, gift_num, data.get("unit_price", 0), total_price, datetime.now()))
 
             # 1、礼物答谢（T6 恢复：最低价格门槛 + 变量替换，即时/周期双通道 + E-2 限流）
+            # 动作编排订阅点（/autoplan 2026-10-21 批次）：在答谢门槛之前——接管判定
+            # 先于答谢生成；接管=true 跳过 _thanks_generate（短路在通道分流前，周期+
+            # 即时双通道一并覆盖）。编排 tts 音轨经注入引用复用原生 _thanks_generate，
+            # E-2 限流窗口共享不绕过（义务 CS-1/WP-3/WP-4）。
+            _choreo_takeover = False
+            try:
+                from utils.orchestration import get_choreographer
+                _choreo = get_choreographer()
+                if _choreo is not None:
+                    _choreo_takeover = _choreo.on_gift(data)
+            except Exception as _choreo_err:
+                logger.warning(f"动作编排 on_gift 异常（降级直通）：{_choreo_err}")
+            if _choreo_takeover:
+                logger.info(f"[{username}] 礼物 {gift_name} 由动作编排接管（画面序列含 tts 答谢）")
             try:
                 lowest_price = float(self.my_handle.config.get("thanks", "lowest_price") or 0)
             except (TypeError, ValueError):
                 lowest_price = 0
-            if float(total_price or 0) >= lowest_price:
+            if not _choreo_takeover and float(total_price or 0) >= lowest_price:
                 self._thanks_generate("gift", data, {
                     "gift_name": gift_name,
                     "gift_num": gift_num,

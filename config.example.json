@@ -1570,7 +1570,36 @@
     "api_token": "",
     "port": 8000,
     "interpreter_path": "D:\\AI\\EDTalk\\runtime312\\python.exe",
-    "reaction_segment": true
+    "reaction_segment": true,
+    "_deprecated_note": "reaction_segment 已由 choreography 编排规则取代（deprecated 标注保留，配置面不删除）"
+  },
+  "choreography": {
+    "enable": false,
+    "default_mode": "rotate",
+    "default_segments": [],
+    "min_retrigger_s": 2,
+    "min_sequence_hold_s": 5,
+    "step_timeout_s": 60,
+    "rules": [
+      {
+        "rule_id": "girl_A_dance",
+        "trigger_type": "gift",
+        "match": "小心心",
+        "min_price": 0,
+        "sequence": {
+          "enter": { "segment": "A_放下手机", "switch_at": "segment_end", "duration_s": 4 },
+          "main": { "segment": "A_跳舞", "switch_at": "segment_end", "duration_s": 30,
+                    "audio": { "mode": "file", "path": "music/dance_A.mp3" } },
+          "exit": { "segment": "A_走出场外", "switch_at": "segment_end", "duration_s": 4 }
+        },
+        "emotion_tiers": [
+          { "max_count": 3, "mood": "happy" },
+          { "max_count": 6, "mood": "angry", "segment_overrides": { "enter": "A_生气入场" } },
+          { "max_count": 9, "mood": "breakdown", "segment_overrides": { "main": "A_崩溃跳舞" } }
+        ],
+        "interrupt": "standard"
+      }
+    ]
   },
   "fastrag": {
     "enable": true,

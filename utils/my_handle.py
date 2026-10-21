@@ -173,6 +173,25 @@ class My_handle(metaclass=SingletonMeta):
             # 配置加载
             self.config_load()
 
+            # 动作编排器（/autoplan 2026-10-21 批次 T1）：全部依赖就绪后装配
+            # （config/event_handler/audio.edtalk_client 均已在位）。enable=false
+            # 或 EDTalk 客户端缺失时 worker 不启动，订阅点短路直通——
+            # 关闭=全链零行为变化（义务"总开关"）。
+            try:
+                from utils.orchestration import ActionChoreographer, register_choreographer
+                self.choreographer = ActionChoreographer(
+                    config=My_handle.config,
+                    edtalk_client=getattr(My_handle.audio, "edtalk_client", None),
+                    audio_enqueue=self.audio_synthesis_handle,
+                    thanks_generate=self.event_handler._thanks_generate,
+                )
+                register_choreographer(self.choreographer)
+            except Exception as e:
+                logger.error(
+                    f"动作编排器装配失败（功能关闭，主链不受影响）：problem=编排器未启用；"
+                    f"cause={type(e).__name__}: {e}；fix=检查 config choreography 节与依赖后重启"
+                )
+
             logger.info(f"配置数据加载成功。")
 
             # 启动定时器

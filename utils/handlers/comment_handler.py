@@ -290,7 +290,19 @@ class CommentHandler:
             if self.my_handle.common.is_punctuation_string(content):
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
-            
+
+            # 动作编排关键词订阅（/autoplan 2026-10-21 批次）：违禁/黑名单/格式检查
+            # 之后（:283-294 后）、按键映射之前；独立词表子串匹配（S-2 规范化），
+            # 规范化输入=comment_check_and_replace 处理后 content（义务 WP-11/CL-3）。
+            # 命中触发画面序列，弹幕本身照常走后续流程（无答谢/拦截语义）。
+            try:
+                from utils.orchestration import get_choreographer
+                _choreo = get_choreographer()
+                if _choreo is not None:
+                    _choreo.on_keyword(content)
+            except Exception as _choreo_err:
+                logger.debug(f"动作编排 on_keyword 异常（忽略）：{_choreo_err}")
+
             # 判断按键映射触发类型
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
                 # 按键映射 触发后不执行后面的其他功能

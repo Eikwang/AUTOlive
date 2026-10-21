@@ -110,6 +110,18 @@ class PlaybackMixin:
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
+                        # 动作编排完成回调（/autoplan 2026-10-21 批次，义务 CL-2/D-2）：
+                        # EDTalk push 路径每条目完成处（push_full 返回=单飞行句完成判定）。
+                        # builtin 的 play() 为入队背压非播放结束——编排完成观测仅声明
+                        # 支持 EDTalk 激活场景（前置条件 is_edtalk_active，RUNBOOK 边界）。
+                        try:
+                            from utils.orchestration import get_choreographer
+                            _choreo = get_choreographer()
+                            if _choreo is not None:
+                                _choreo.on_audio_complete(
+                                    data_json.get("type", ""), data_json.get("content", ""))
+                        except Exception as _choreo_err:
+                            logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{_choreo_err}")
                     elif self.config.get("play_audio", "player") in ["audio_player", "audio_player_v2", "builtin"]:
                         if "insert_index" in data_json:
                             data_json = {
