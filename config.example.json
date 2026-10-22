@@ -23,10 +23,6 @@
   },
   "comment_log_type": "回答",
   "visual_body": "edtalk_realtime",
-  "metahuman_stream": {
-    "type": "musetalk",
-    "api_ip_port": "http://127.0.0.1:8010"
-  },
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
@@ -1583,15 +1579,45 @@
         "match": "小心心",
         "min_price": 0,
         "sequence": {
-          "enter": { "segment": "A_放下手机", "switch_at": "segment_end", "duration_s": 4 },
-          "main": { "segment": "A_跳舞", "switch_at": "segment_end", "duration_s": 30,
-                    "audio": { "mode": "file", "path": "music/dance_A.mp3" } },
-          "exit": { "segment": "A_走出场外", "switch_at": "segment_end", "duration_s": 4 }
+          "enter": {
+            "segment": "A_放下手机",
+            "switch_at": "segment_end",
+            "duration_s": 4
+          },
+          "main": {
+            "segment": "A_跳舞",
+            "switch_at": "segment_end",
+            "duration_s": 30,
+            "audio": {
+              "mode": "file",
+              "path": "music/dance_A.mp3"
+            }
+          },
+          "exit": {
+            "segment": "A_走出场外",
+            "switch_at": "segment_end",
+            "duration_s": 4
+          }
         },
         "emotion_tiers": [
-          { "max_count": 3, "mood": "happy" },
-          { "max_count": 6, "mood": "angry", "segment_overrides": { "enter": "A_生气入场" } },
-          { "max_count": 9, "mood": "breakdown", "segment_overrides": { "main": "A_崩溃跳舞" } }
+          {
+            "max_count": 3,
+            "mood": "happy"
+          },
+          {
+            "max_count": 6,
+            "mood": "angry",
+            "segment_overrides": {
+              "enter": "A_生气入场"
+            }
+          },
+          {
+            "max_count": 9,
+            "mood": "breakdown",
+            "segment_overrides": {
+              "main": "A_崩溃跳舞"
+            }
+          }
         ],
         "interrupt": "standard"
       }
@@ -1599,7 +1625,8 @@
   },
   "fastrag": {
     "enable": true,
-    "port": 11420
+    "port": 11420,
+    "host": "localhost"
   },
   "paths": {
     "autolive_home": "",

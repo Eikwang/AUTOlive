@@ -1147,9 +1147,7 @@
       "svc": {
         "so_vits_svc": true
       },
-      "visual_body": {
-        "metahuman_stream": true
-      }
+      "visual_body": {}
     }
   },
   "login": {
@@ -1172,7 +1170,7 @@
     "username_max_le": 10
   },
   "comment_log_type": "回答",
-  "visual_body": "metahuman_stream",
+  "visual_body": "edtalk_realtime",
   "luoxi_project": {
     "Live_Comment_Assistant": {
       "enable": false,
@@ -1191,10 +1189,6 @@
         "消息产生时"
       ]
     }
-  },
-  "metahuman_stream": {
-    "type": "musetalk",
-    "api_ip_port": "http://127.0.0.1:8010"
   },
   "ordinaryroad_barrage_fly": {
     "ws_ip_port": "ws://127.0.0.1:9898",
