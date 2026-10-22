@@ -1,7 +1,7 @@
 # 动作编排 RUNBOOK（Action Choreography）
 
 > /autoplan 2026-10-21 批次 P1 交付（义务 F3/F4/WP-5/WP-7/C1-1/C5-1/F2 对应章节）
-> 完整设计：`docs/flowchartTD.md` 编排器子图 + `.gstack/tmp/autoplan/action-orchestration-plan.md`
+> 完整设计：编排器子图见 `docs/flowchart-detail.md`（只读历史归档，含编排器子图与锚点）+ 主干图 `docs/flowchartTD.md`（动作编排=事件订阅边，2026-10-22 uc4a 裁决）+ `.gstack/tmp/autoplan/action-orchestration-plan.md`
 
 ## 1. 功能与启用
 

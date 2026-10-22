@@ -1,5 +1,10 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-22) — 系统流程审查批次（新版 flowchartTD 对齐，main-20261022-161815，终门 rec 全推荐批准）
+
+1. **UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。
+2. **UC-1/3/4/5 图侧修正已并入本批 T2 主干图修正任务**（无独立待办）— 终门 uc1a/uc3a/uc4a/uc5a 全部为图修正（图改回独立语义/入队前翻译/订阅边/互斥两路+字幕从属），随 T2 实施闭环；主干图头部加版本行+四态图例+"改图必开批次"约定。依赖：无（本批实施）。
+
 ## Deferred Items from /autoplan (2026-10-22) — 基础功能版块审查与修复批次
 
 1. **WebUI LLM 通道"测试连接"按钮**（P3, S）— 配置 fastrag 后故障首见于真实弹幕且只能翻日志（DX native medium）；一次性手动试连（POST /query 或 local_qa_match 试匹配）与 R2-2 方案 a（不轮询）裁决不冲突。依赖：无。
@@ -35,7 +40,7 @@
 
 1. **T10 语音对话链接通**（P2, L）— conversation_manager.py:221-240 do_listen_and_comment 为空框架（循环体仅 sleep），audio_listen 无调用者，ASR（funasr/whisper）未接入对话链。触发条件锚定：T5-T9 断链批次落地后下一批（不无限期）。入口：conversation_manager 框架填充+ASR 接入+全链手动实测。
 2. **写库/过滤顺序语义决策**（P3, S）— 现状弹幕原文先写 danmu 表（comment_handler.py:255-260）后过违禁词过滤（:272-288），数据分析读到含违禁词原文。变更影响数据分析口径，需用户裁决：保持现状（入库原文）vs 写库前过滤 vs 入库+标记列。**与下方 A4 交叉**：badwords 文件缺失期间违禁词过滤全链失效，写库内容=未过滤原文。依赖：无。
-3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchartTD.md Review record 0A 节）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：T1/T2 修图完成后。
+3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchart-detail.md Review record 0A 节〔2026-10-22 起随详图归档迁移〕）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：T1/T2 修图完成后。
 4. **my_handle.py.backup 退役清理**（P3, S）— 【2026-10-21 已由清理批次 1b 接管，diff 验证通过，见上方 2026-10-21 节第 1 条；删除仍待用户实测确认】T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。
 5. **"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。
 6. **流程图与实测发现的交叉注记**（P3, S）— 下方 A 组实测错误对流程图四态标注的影响：F8 过滤链在 badwords 缺失期间应标"实际失效"（代码在位但文件缺失）；变声通道 so_vits_svc（synthesis_manager.py:278-301）每弹幕触发 ConnectionRefused 说明播放链存在图中未画的变声分支且其配置处于残留开启态。T2 修图时一并消化。
