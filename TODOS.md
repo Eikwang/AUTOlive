@@ -1,5 +1,17 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-22) — 字幕打印功能审查批次（main-20261022-162614，终门 rec 批准实施）
+
+1. **copywriting 变速死配置清理**（P3, S）— CEO defer：`audio_random_speed.copywriting` 节仅前端 UI 有配置（audio_play.py:148-150），代码无读取点（全仓仅 playback_manager 读 normal 节，A2 批次后连 normal 也退役）——UI 开关误导用户。建议：设置页移除该节配置或后端补语义。依赖：音频播放页下次触碰。
+2. **TODOS #9 失准台账修正**（P3, S）— spec 第 2 轮 N2：#9 原文「.gitignore:286 使 42+ 测试文件不入库」已过时——实测 .gitignore:290 根锚定 `/test_*.py` 不匹配 tests/（:291 `!tests/` 反选），tests/features 86 文件在库。修正本条目措辞，防误导。依赖：无。
+3. **字幕差异化方向登记**（P3, M）— native 1.2+4.3+5.1 合并：字幕的 10x 价值=与弹幕/数字人/计费链路联动（弹幕问答上字幕、礼物计价信息上屏、数字人状态联动样式），而非继续追求孤立时序精度；平台自带 AI 字幕（抖音/B站直播伴侣）成熟后自建字幕差异化只剩联动能力。下次字幕相关规划先读此条。依赖：无。
+4. **builtin「无 speed 语义」假设失效条件 + :413 退役顺带项**（P3, S）— native 2.3+Eng A1：CaptionsManager keep_time 取文件时长依赖「builtin 条目 speed 恒 1」——失效条件=playback_manager 条目重建处（:152/:165 一带）speed 硬编码 1 被改为透传 synth_speed（届时 builtin_play_center.py:413 残留的采样率折算会生效，真实播放时长偏离文件时长 speed 倍）。下次触碰播放链路时：①确认该假设仍成立 ②顺带退役 :413 折算残留。依赖：播放链路触碰。
+5. **EDTalk「公共段后移=同步改善」推断收口**（P3, S）— native 2.4：对 pygame/外部模式公共段后移贴近开播成立；EDTalk 走数字人生成链路（音频→驱动→虚拟摄像头），改善幅度未证。随 R10-② 实测一并收口（见第 9 条）。依赖：第 9 条。
+6. **「实际播放者统一推送」替代方案评估**（P3, M）— native 4.1：本批 F3 已为 builtin 采用播放器回调推送（正确架构方向）；更内聚方案=谁实际开播谁推送+公共段仅兜底无回调能力的播放器（该方案下 F2 门控的 EDTalk 短路补丁不需要存在）。升级触发条件：下次触碰播放链路时重估（含 EDTalk 原生回调可用性）。依赖：播放链路触碰。
+7. **外部模式移除触发条件**（P3, S）— native 4.2：audio_player/audio_player_v2 外部模式保留（沿 2026-09-25 §7 兼容承诺），但与「不得回退外接 API」红线并存的混淆成本随时间累积。触发条件：下次触碰 captions_manager 时顺带评估移除（配合 sunset 判据，见 2026-09-25 节 #1）。依赖：captions_manager 触碰。
+8. **999 让位窗口绕过 E-4 暂停同步**（P3, S）— Eng E1：builtin_play_center 让位分支（:258-266 一带）只 stop_stream 不置 pause_event——`get_status().paused=False`，CaptionsManager 的字幕挂起判定（E-4）在让位窗口失效，字幕继续走 keep_time 而音频已停，续播回退 1 秒后偏移=挂起时长。A7×E-4 批次交界缝隙。修复方向：让位分支同置 pause_event，或 get_status 增加 suspended 态并把字幕挂起判定纳入。依赖：A7 机制下次触碰。
+9. **R10-② EDTalk 字幕偏移实测【阻塞待测】**（P1, S）— 义务 R10-②（本批次完成定义项，M1 离线替代路径）：**阻塞原因**=实测需 EDTalk 实时推理服务在线（启动 EDTalk serve+虚拟摄像头链路），实施窗口内未满足。**复测条件**=EDTalk 模式开播任意一次直播/手动拉起推理服务后，运行 `python Scripts/smoke_builtin_captions.py --captions`（check_edtalk_offset 段）人工比对字幕 message 到达与 EDTalk 开口偏移，判据 <0.5s（冒烟脚本已锚定；自动化断言为既有 TODO 桩）。实测完成后据实更新 2026-09-25 节 #2「EDTalk 回调驱动字幕」条件触发状态，并收口第 5 条推断。依赖：EDTalk 实时推理服务可用。
+
 ## Deferred Items from /autoplan (2026-10-22) — 系统流程审查批次（新版 flowchartTD 对齐，main-20261022-161815，终门 rec 全推荐批准）
 
 1. **UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。
@@ -201,3 +213,8 @@
 1. **~~全量测试套件 149 项存量失败（features 历史验收测试漂移）~~（已完成 2026-10-20）**— 门禁 A 批次（74b932d1）150 失败→0：asyncio.run 根因修复×4+独立路径防竞争+按现行功能现实重写/退役过期断言，最终套件 619 passed + 72 retired skip。
 2. **虚拟摄像头"已安装"态无重装/改名入口**（P3, S）— visual_body 摄像头卡仅在未安装态渲染安装按钮；改名/重装需手动 regsvr32。旧安装 dll 指向 D:\AI\EDTalk\UNITYC~1（仍有效），清理该目录前须先重装（安装件在 edtalk/UnityCapture-master/Install/）。
 3. **test_cover_queue GPU 环境依赖**（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
+
+## Deferred Items from /autoplan (2026-10-22) — 音频播放功能审查批次（CEO/Eng 两阶段收官，待 Phase 4 终门）
+
+1. **reread_top_priority 生产端接线**（P2, M）— 本审查证实 999 权重唯一生产入口 /send 当前 TypeError 500（A6 修复后签名通但 type 语义仍按普通复读处理）；完整接线=弹幕高优词表→reread_top_priority 消息生产→999 暂停-续播链路真实触发（A7 的 E2E 浸泡依赖此）。属复读模块非播放模块，故 Deferred。依赖：A6（T2）+A7（T4）落地后。
+2. **闲时任务清零功能重建评估**（P3, S）— info_to_callback 参数移除（A3）后其声称用途"闲时清零"核实为已死链（/callback 端点仅日志、wait_play_audio_num 恒 0 从未写入），移除零功能损失；若未来需要闲时清零语义，应走进程内直查（get_audio_info）而非 HTTP 回调。依赖：无。

@@ -8,7 +8,8 @@
   push(data_json) 进程内直调（原 send_to_web_captions_printer 方法不存在）；
 - E-1：keep_time_align_audio=true 时 start_delay 强制 0（音频开始即显示，
   防内置拓扑下每句字幕系统性晚 2 秒）；防叠逻辑保留给积压场景；
-- E-2：变速场景 keep_time 按 speed 折算（读的是变速前文件时长）；
+- E-2/F2：keep_time 直接取 voice_path 文件实际时长（2026-10-22 审查批次
+  删除 speed 折算——data_json 从不携带 speed 键，折算为死代码）；
 - E-4：push 前检查播放器 paused 状态并阻塞等待（暂停期间字幕同步挂起）；
 - E-5：sio emit 经带有效性检查的 loop 提交器，失败计数走错误可见性；
 - D1/E-6：sio connect 时向新连接 emit 全量配置+enable 状态（OBS 刷新即恢复）；
@@ -177,22 +178,22 @@ class CaptionsManager:
             logger.error("字幕 push 异常（已隔离，不影响播放）\n" + traceback.format_exc())
 
     def _compute_timing(self, data_json, content):
-        """keep_time 与 start_delay 计算（E-1/E-2 修订）"""
+        """keep_time 与 start_delay 计算（E-1 修订；F2/X1：删除 speed 折算）"""
         align = bool(self._cfg("keep_time_align_audio", True))
         single_char_ms = float(self._cfg("single_char_show_time", CHARACTER_DELAY_DEFAULT) or CHARACTER_DELAY_DEFAULT)
         auto_ms = len(content) * single_char_ms + DEFAULT_START_DELAY
 
-        # E-2：音频时长按变速折算（push 点在变速前，voice_path 为变速前文件）
+        # F2/X1（义务）：voice_path 即实际播放文件（合成侧变速已应用后落盘；
+        # playback_manager 条目 speed 无生产语义——data_json 从不携带该键，
+        # 读取恒为默认 1=死代码，2026-10-22 审查批次删除）。keep_time 直接取
+        # 文件实际时长；sf=None 或读失败降级字符延时估算（M5 存续）。
         keep_time_ms = auto_ms
         voice_path = data_json.get("voice_path")
         if align and sf is not None and voice_path and os.path.isfile(voice_path):
             try:
                 info = sf.info(voice_path)
                 audio_ms = float(info.duration) * 1000.0
-                speed = float(data_json.get("speed", 1) or 1)
-                if speed <= 0:
-                    speed = 1.0
-                keep_time_ms = max(audio_ms / speed, auto_ms)  # 保底显示时长
+                keep_time_ms = max(audio_ms, auto_ms)  # 保底显示时长
             except Exception:
                 logger.error(f"音频时长读取失败，keep_time 降级自动计算：{voice_path}")
                 keep_time_ms = auto_ms

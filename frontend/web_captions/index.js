@@ -61,7 +61,7 @@ function applyConfig(cfg) {
     // E-6：enable=false 明示（页面已连接但不会有字幕推送）
     const status = document.getElementById('conn_status');
     if (!config.enable && socket && socket.connected) {
-        status.innerText = '字幕功能未开启（请在 AUTOlive 基础功能-web字幕打印机 中启用）';
+        status.innerText = '字幕功能未开启（请在 AUTOlive 基础功能-字幕打印 中启用）';
         status.style.display = 'block';
     } else if (socket && socket.connected) {
         status.style.display = 'none';
@@ -173,7 +173,7 @@ socket.on('connect', () => {
     document.getElementById('conn_status').style.display = 'none';
     if (!config.enable) {
         const status = document.getElementById('conn_status');
-        status.innerText = '字幕功能未开启（请在 AUTOlive 基础功能-web字幕打印机 中启用）';
+        status.innerText = '字幕功能未开启（请在 AUTOlive 基础功能-字幕打印 中启用）';
         status.style.display = 'block';
     }
 });

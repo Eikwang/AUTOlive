@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 """
-web字幕打印机标签页模块（整合计划 §6.2：内置化改造）
+字幕打印标签页模块（整合计划 §6.2：内置化改造；2026-10-22 审查批次 F1 改名）
 
 义务：
 - 补 enable 开关（现状 UI 缺失——断链三重奏之一）+ 三步微指引（D12）
@@ -23,7 +23,7 @@ def create_web_captions_printer_tab(
     theme_config: Dict[str, str],
     set_config_callback: Callable
 ):
-    """创建web字幕打印机标签页"""
+    """创建字幕打印标签页"""
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
 
@@ -46,7 +46,7 @@ def create_web_captions_printer_tab(
     captions_url = f"{_webui_base()}/captions"
 
     with ui.card().style(card_css):
-        ui.label('web字幕打印机')
+        ui.label('字幕打印')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('启用', value=get_nested_value(config, "web_captions_printer", "enable", default=False)).style(switch_internal_css).tooltip(

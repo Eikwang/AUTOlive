@@ -14,7 +14,7 @@
 - **对话链**：LLM 通道统一 **OpenAI-compatible** 三字段接入（base_url/model/api_key，兼容 DeepSeek/Qwen/GLM/Moonshot/Ollama 等主流平台），弹幕/礼物/进场/关注事件驱动回复，fastrag 本地知识库问答，积分体系（签到/礼物/入场/关注计分与查询）。
 - **语音链路**：TTS 与实时变声的托管服务——[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)（文本转语音）、RVC（实时变声热切换）、AICoverGen（一键翻唱）作为一等公民随系统拉起，含声音训练流水线（训练声音页）。
 - **数字人**：[EDTalk](https://github.com/References-of-Talk/EDTalk) 实时推理驱动（音频推送、口型同步），配套"训练主播"一键全链路训练（audio2lip ckpt）。
-- **字幕与播放**：内置字幕前端（web_captions），音频播放器/字幕打印机内置化，断线自检。
+- **字幕与播放**：内置字幕前端（web_captions），音频播放器/字幕打印内置化，断线自检。
 
 ## 🚀 快速开始
 

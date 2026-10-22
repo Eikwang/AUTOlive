@@ -97,6 +97,41 @@ def check_audio():
     report("audio.playback+callback", 1.8 <= elapsed_all <= 9 and first_latency < 2.0,
            f"两条 1s 音频总耗时 {elapsed_all:.2f}s，首条完成 {first_latency:.2f}s")
 
+    # R10-①（义务 native C3 升格，2026-10-22 审查批次）：字幕开播时点自动化断言——
+    # 时间戳基，不依赖音频设备（F3 开播回调 vs playing 边沿）。E2 场景限定：
+    # 长句（3s > auto_ms=len×80ms+2000ms），短句连播积压场景显式排除（E2）；
+    # 连播一一对应断言（Eng T1：防 per-entry 绑定错绑的静默错误）。
+    started_events = []
+
+    async def started_cb(data):
+        started_events.append((time.time(), data))
+
+    player.set_started_callback(started_cb)
+    long1 = make_test_wav(os.path.join(tmp, "sync1.wav"), 3.0)
+    long2 = make_test_wav(os.path.join(tmp, "sync2.wav"), 3.0)
+    player.play({"type": "comment", "voice_path": long1, "content": "同步断言一"})
+    player.play({"type": "copywriting", "voice_path": long2, "content": "同步断言二"})
+    played_marks = []
+    prev_playing = False
+    t_end = time.time() + 15
+    while time.time() < t_end:
+        st = player.get_status()
+        if st["playing"] and not prev_playing:
+            played_marks.append(time.time())
+        prev_playing = st["playing"]
+        if len(played_marks) >= 2 and len(started_events) >= 2 \
+                and not st["playing"] and st["queue_len"] == 0:
+            break
+        time.sleep(0.02)
+    ok_count = len(started_events) == 2 and len(played_marks) == 2
+    ok_order = ok_count and [e[1]["content"] for e in started_events] == ["同步断言一", "同步断言二"]
+    offsets = [f"{abs(e[0] - m):.3f}s" for e, m in zip(started_events, played_marks)] if ok_count else []
+    ok_sync = ok_count and all(abs(e[0] - m) < 0.5 for e, m in zip(started_events, played_marks))
+    report("audio.started_cb.sync(R10-1)", ok_count and ok_order and ok_sync,
+           f"回调 {len(started_events)} 次/播放沿 {len(played_marks)} 次，"
+           f"顺序={'一致' if ok_order else '错乱'}，开播偏移={offsets}（判据 <0.5s，长句场景）")
+    player.set_started_callback(None)
+
     # 跳过语义：入队一条 2s 音频后立即跳过，应在远小于 2s 内回到空闲
     wav2 = make_test_wav(os.path.join(tmp, "long.wav"), 2.0)
     player.play({"type": "comment", "voice_path": wav2, "content": "将被跳过", "speed": 1})
