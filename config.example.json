@@ -26,13 +26,12 @@
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
-    "interval_num_min": 1,
-    "interval_num_max": 2,
     "normal_interval_min": 0.3,
     "normal_interval_max": 0.5,
     "out_path": "out",
     "player": "pygame",
-    "info_to_callback": true
+    "play_interval_min": 0.3,
+    "play_interval_max": 0.5
   },
   "audio_player": {
     "device_index": -1,
@@ -42,23 +41,6 @@
       "enable": false,
       "min": 0.1,
       "max": 3
-    },
-    "priority_mapping": {
-      "reread_top_priority": 999,
-      "comment": 30,
-      "local_qa_audio": 30,
-      "reread": 25,
-      "gift": 20,
-      "entrance": 20,
-      "follow": 20,
-      "thanks": 20,
-      "song": 20,
-      "read_comment": 20,
-      "talk": 15,
-      "idle_time_task": 10,
-      "schedule": 10,
-      "trends_copywriting": 10,
-      "abnormal_alarm": 5
     },
     "api_ip_port": "http://127.0.0.1:5602"
   },
@@ -279,11 +261,6 @@
   "audio_random_speed": {
     "normal": {
       "enable": false,
-      "speed_min": 0.8,
-      "speed_max": 1.2
-    },
-    "copywriting": {
-      "enable": true,
       "speed_min": 0.8,
       "speed_max": 1.2
     }
@@ -1336,7 +1313,7 @@
             "enabled": true
           },
           {
-            "name": "web字幕打印机",
+            "name": "字幕打印",
             "tab_key": "web_captions_printer",
             "enabled": true
           },

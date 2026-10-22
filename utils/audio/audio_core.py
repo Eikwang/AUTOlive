@@ -30,19 +30,17 @@ from utils.edtalk_realtime.edtalk_client import register_client
 from .queue_manager import QueueMixin
 from .playback_manager import PlaybackMixin
 from .synthesis_manager import SynthesisMixin
-from .processing_manager import ProcessingMixin
 from .utils_manager import UtilsMixin
 from .alarm_manager import AlarmMixin
 
 
-class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMixin, AlarmMixin):
+class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin, AlarmMixin):
     """
     音频处理主类 - 通过Mixin模式组合各个功能模块
     """
     
     # pygame.mixer实例
     mixer_normal = None
-    mixer_copywriting = None
 
     audio_player = None
 
@@ -57,6 +55,9 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
 
     # 第一次触发voice_tmp_path_queue_not_empty标志
     voice_tmp_path_queue_not_empty_flag = False
+
+    # A7/T1（2026-10-22 审查批次）：999 权重音频"在系统中"标记（播放器持有或播放中）
+    active_reread_top_999 = False
 
     # 异常报警数据
     abnormal_alarm_data = {
@@ -99,7 +100,13 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
 
             # 初始化多个pygame.mixer实例
             Audio.mixer_normal = pygame.mixer
-            Audio.mixer_copywriting = pygame.mixer
+
+        # A5/F-4/F-6（2026-10-22 审查批次）：双优先级映射一次性合并迁移（禁纯静默）——
+        # audio_player.priority_mapping（退役节）中的独有键（如 thanks）与冲突键
+        # 迁入 filter.priority_mapping，冲突时 audio_player 值胜（R6(b)）。迁移内存
+        # 即时生效（经 priority provider 供播放器消费），持久化随「互动设置-优先级
+        # 配置」页下次保存落盘；启动告警列出全部迁移键。
+        self._merge_legacy_priority_mapping()
 
         # 旧版同步写法
         # threading.Thread(target=self.message_queue_thread).start()
@@ -115,10 +122,15 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
         if self.config.get("play_audio", "player") == "builtin":
             Audio.audio_player = BUILTIN_PLAY_CENTER(
                 self.config.get("audio_player") or {}, config_path=self.config_path)
-            # 完成回调（play_audio.info_to_callback 语义保持；方法内部自检开关，
-            # 经播放器专用 loop 线程提交——builtin 播放在独立线程）
-            Audio.audio_player.set_completion_callback(
-                lambda data: self.send_audio_play_info_to_callback(data))
+            # A3（2026-10-22 审查批次）：完成回调注册随 play_audio.info_to_callback
+            # 参数退役移除（回路死链；_fire_completion 对 None 回调自检跳过）。
+            # A7/T1：999 离开播放系统时清除 active 标记（完成/跳过/清空/停止均触发，
+            # 保证 999 单实例约束在条目释放后恢复放行）
+            Audio.audio_player.set_999_release_hook(
+                lambda: setattr(self, "active_reread_top_999", False))
+            # A5：权威优先级表读取器（Config 内存视图——合并迁移即时可见，不等落盘）
+            Audio.audio_player.set_priority_provider(
+                lambda: self.config.get("filter", "priority_mapping") or {})
             builtin_play_center_mod.register_builtin_player(Audio.audio_player)
         else:
             Audio.audio_player = AUDIO_PLAYER(self.config.get("audio_player"))
@@ -130,6 +142,13 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
         register_captions_manager(self.captions_manager)
         self.captions_manager.set_paused_getter(self._builtin_player_paused)
         self.captions_manager.set_error_notifier(self._captions_error_to_player)
+        # F3（义务 Eng T1：独立注册点，不复用 set_completion_callback——其载荷固定
+        # 且被 A7 999 续播复用）：builtin 开播时推送字幕，时点=实际播放时点，
+        # 载荷 content/type/voice_path 三键。仅 builtin 播放器有此回调；EDTalk/
+        # pygame/外部模式字幕走 playback_manager 公共段推送（F2 门控）。
+        if self.config.get("play_audio", "player") == "builtin" and Audio.audio_player is not None and hasattr(Audio.audio_player, "set_started_callback"):
+            Audio.audio_player.set_started_callback(
+                lambda data: self.captions_manager.push(data))
 
         # EDTalk 实时推理客户端（EDTalk功能集成计划 §4.3.1）：
         # 无论是否激活都创建（构造廉价），is_edtalk_active() 在使用点判定；
@@ -139,6 +158,37 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, ProcessingMixin, UtilsMix
         # playback_manager.only_play_audio 每条音频 AttributeError）
         self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"))
         register_client(self.edtalk_client)
+
+    def _merge_legacy_priority_mapping(self):
+        """A5/F-4/F-6：audio_player.priority_mapping → filter.priority_mapping 一次性
+        合并（独有键迁入、冲突 audio_player 值胜），启动告警禁纯静默。"""
+        try:
+            filter_map = self.config.get("filter", "priority_mapping")
+            legacy_map = self.config.get("audio_player", "priority_mapping")
+            if not isinstance(legacy_map, dict) or not legacy_map:
+                return
+            if not isinstance(filter_map, dict):
+                filter_map = {}
+            merged = {}
+            for key, value in legacy_map.items():
+                if key not in filter_map:
+                    filter_map[key] = value
+                    merged[key] = f"独有键迁入（={value}）"
+                elif filter_map[key] != value:
+                    merged[key] = f"冲突 {filter_map[key]} → {value}（audio_player 值胜）"
+                    filter_map[key] = value
+            if merged:
+                base = self.config.config.get("filter")
+                if not isinstance(base, dict):
+                    base = {}
+                    self.config.config["filter"] = base
+                base["priority_mapping"] = filter_map
+                detail = "；".join(f"{k}: {v}" for k, v in merged.items())
+                logger.warning(
+                    f"[优先级单源迁移] audio_player.priority_mapping → filter.priority_mapping "
+                    f"共 {len(merged)} 键：{detail}（内存即时生效；持久化随「互动设置-优先级配置」页下次保存）")
+        except Exception:
+            logger.error("优先级单源迁移失败（沿用 filter 表）\n" + traceback.format_exc())
 
     def _builtin_player_paused(self):
         """字幕节流用：builtin 播放器是否暂停中（eng E-4；非 builtin 返回 False）"""

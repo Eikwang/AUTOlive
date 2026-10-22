@@ -226,28 +226,14 @@ _DANMAKU_LISTENER_DEFAULTS: Dict[str, Any] = {
 }
 
 # audio_player/captions_printer 整合（2026-09-25 计划 §4.5/§5.4/R7）
+# A5/F-4（2026-10-22 审查批次）：priority_mapping 收敛单源至 filter.priority_mapping——
+# 本默认表不再携带优先级映射（audio_player.priority_mapping 配置节退役，运行时
+# 合并迁移见 utils/audio/audio_core.Audio.__init__ 的 _merge_legacy_priority_mapping）。
 _AUDIO_PLAYER_DEFAULTS: Dict[str, Any] = {
     "device_index": -1,
     "queue_max": 50,
     "audio_interval": 0,
     "random_audio_interval": {"enable": False, "min": 0.1, "max": 3},
-    "priority_mapping": {
-        "reread_top_priority": 999,
-        "comment": 30,
-        "local_qa_audio": 30,
-        "reread": 25,
-        "gift": 20,
-        "entrance": 20,
-        "follow": 20,
-        "thanks": 20,
-        "song": 20,
-        "read_comment": 20,
-        "talk": 15,
-        "idle_time_task": 10,
-        "schedule": 10,
-        "trends_copywriting": 10,
-        "abnormal_alarm": 5,
-    },
     # api_ip_port 仅外部服务模式（audio_player/audio_player_v2）使用，保留兼容
 }
 

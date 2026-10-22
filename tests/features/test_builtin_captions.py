@@ -25,7 +25,7 @@ def make_player(config_data, config_file=None):
     from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER
     p = AUDIO_PLAY_CENTER.__new__(AUDIO_PLAY_CENTER)
     p.config_data = config_data
-    p.config_path = config_file or "config.json"
+    p.config_path = config_file or os.path.join(tempfile.gettempdir(), "__no_such_config__.json")  # 隔离：防读仓库真实 config.json
     p.stream = None
     p.pause_event = threading.Event()
     p.audio_data_event = threading.Event()
@@ -38,6 +38,14 @@ def make_player(config_data, config_file=None):
     p.last_error = None
     p._error_seq = 0
     return p
+
+
+def _sf_available():
+    try:
+        import soundfile  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def write_config(tmpdir, cfg):
@@ -139,7 +147,9 @@ def test_captions_start_delay_zero_when_align(tmp_path=None):
 # ---------- E-2：变速 keep_time 折算 ----------
 
 def test_captions_keep_time_speed_adjust(tmp_path=None):
-    """变速 2x 时 keep_time 折算减半（用真实 wav 验证）"""
+    """E-2 现行契约（F2/X1 义务，2026-10-22）：data_json.speed 从不携带（合成侧
+    变速已落盘），keep_time=文件实际时长、speed 键不折算——本用例锁定该语义
+    （旧断言"speed 折算"随死代码删除过期；sf 缺失时降级字符延时，M5 存续）"""
     import wave as wavemod
     import struct
     from utils.web_captions.captions_manager import CaptionsManager
@@ -158,8 +168,10 @@ def test_captions_keep_time_speed_adjust(tmp_path=None):
         m.last_message_time = None
         keep_fast, _ = m._compute_timing({"voice_path": wav_path, "speed": 2.0}, "字")
         keep_slow, _ = m._compute_timing({"voice_path": wav_path, "speed": 0.5}, "字")
-        assert keep_fast < 1000 * 2.2, f"2x 变速应折算到 ~1s，实测 {keep_fast}ms"
-        assert keep_slow > 1000 * 3.0, f"0.5x 变速应折算到 ~4s，实测 {keep_slow}ms"
+        assert keep_fast == keep_slow, "speed 键已无折算语义（F2/X1），不同 speed 值 keep_time 一致"
+        if CaptionsManager.__module__ and _sf_available():
+            # soundfile 可用：keep_time = 文件实际时长（2s）
+            assert 1000 * 1.8 < keep_fast < 1000 * 2.2, f"keep_time 应≈文件时长 2s，实测 {keep_fast}ms"
 
 
 # ---------- E-10-5：keep_time 降级不阻塞 ----------
@@ -248,6 +260,134 @@ def test_ensure_defaults_migration():
     # settings.py 依赖较多，这里仅验证默认值表内容与键覆盖
     from frontend.config import settings as settings_mod
     assert "device_index" in settings_mod._AUDIO_PLAYER_DEFAULTS
-    assert settings_mod._AUDIO_PLAYER_DEFAULTS["priority_mapping"].get("comment") == 30
+    # A5/F-4（2026-10-22 审查批次）：优先级映射收敛单源至 filter.priority_mapping——
+    # _AUDIO_PLAYER_DEFAULTS 不再携带 priority_mapping（audio_player 节退役）。
+    assert "priority_mapping" not in settings_mod._AUDIO_PLAYER_DEFAULTS
     assert "keep_time_align_audio" in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
     assert "api_ip_port" not in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
+
+
+# ---------- C2：门控组合矩阵（义务 native C2/DX H1/Eng A2，2026-10-22） ----------
+
+def _make_gate_mixin(config_get):
+    m = types.SimpleNamespace()
+    m.config = types.SimpleNamespace(get=config_get)
+    return m
+
+
+def _gate_stub(edtalk, player):
+    """is_edtalk_active 兼容 stub：visual_body + edtalk_realtime.enable 双键
+    （helpers.py 判定键）+ play_audio.player。"""
+    class Cfg:
+        def get(self, *keys):
+            if keys == ("visual_body",):
+                return "edtalk_realtime"
+            if keys == ("edtalk_realtime", "enable"):
+                return edtalk
+            if keys == ("play_audio", "player"):
+                return player
+            return None
+    m = types.SimpleNamespace()
+    m.config = Cfg()
+    return m
+
+
+def test_captions_gate_keys_cover_dispatch():
+    """Eng A2/H1：矩阵枚举集合==分派分支集合（PLAYER_KEYS 单一事实源）——
+    未来新增播放器未入常量时本测试先红，防枚举门控失配静默丢字幕。"""
+    from utils.audio.playback_manager import PLAYER_KEYS
+    assert set(PLAYER_KEYS) == {"audio_player", "audio_player_v2", "builtin"}, \
+        "PLAYER_KEYS 必须覆盖全部在役播放器分派值（audio_player_v2 为活值）"
+    # pygame 走 else 分支（分派结果全集=PLAYER_KEYS+pygame，T2 注记）
+    assert set(PLAYER_KEYS) | {"pygame"} == \
+        {"audio_player", "audio_player_v2", "builtin", "pygame"}
+
+
+def test_captions_gate_matrix_all_combinations():
+    """C2 门控矩阵（义务 native C2/DX H1）：is_edtalk_active × player 全组合——
+    仅（非 EDTalk 且 builtin）跳过公共段（F3 开播回调推送）；其余全部推送。
+    EDTalk+builtin 必须推送（N1 回归门：否则字幕零输出）。"""
+    from utils.audio.playback_manager import PlaybackMixin, PLAYER_KEYS
+
+    for player in PLAYER_KEYS:
+        assert PlaybackMixin._captions_builtin_skip(_gate_stub(True, player)) is False, \
+            f"EDTalk 激活 × {player}：公共段必须推送（N1）"
+        if player == "builtin":
+            assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, player)) is True, \
+                "非 EDTalk × builtin：公共段跳过（F3 开播回调推送）"
+        else:
+            assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, player)) is False, \
+                f"非 EDTalk × {player}：公共段推送（同步播放/外部模式）"
+    assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, "pygame")) is False, \
+        "非 EDTalk × pygame（else 分支）：公共段推送"
+
+
+# ---------- F3：开播回调（义务 Eng T1 通道隔离+载荷三键，2026-10-22） ----------
+
+def _make_player_with_cb_loop():
+    from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER, _CallbackLoop
+    p = make_player({})
+    p._cb_loop = _CallbackLoop()
+    return p
+
+
+def test_started_callback_payload_three_keys():
+    """F3 载荷契约：content/type/voice_path 三键（Eng T1——keep_time 取实际播放文件）。"""
+    import asyncio
+    p = _make_player_with_cb_loop()
+    received = []
+
+    async def cb(data):
+        received.append(data)
+
+    p.set_started_callback(cb)
+    p._fire_started({"type": "comment", "content": "你好世界", "voice_path": "x.wav"})
+    deadline = time.time() + 2
+    while not received and time.time() < deadline:
+        time.sleep(0.02)
+    assert received == [{"type": "comment", "content": "你好世界", "voice_path": "x.wav"}], \
+        "开播回调载荷必须为 content/type/voice_path 三键"
+
+
+def test_started_callback_channel_isolation():
+    """Eng T1 通道隔离：开播回调独立注册点，与 _completion_cb 互不串扰——
+    防完成判定误消费开播消息、破坏播放背压语义。"""
+    import asyncio
+    p = _make_player_with_cb_loop()
+    started, completed = [], []
+
+    async def s_cb(data):
+        started.append(data)
+
+    async def c_cb(data):
+        completed.append(data)
+
+    p.set_completion_callback(c_cb)
+    p._fire_started({"type": "t", "content": "c", "voice_path": "v"})
+    time.sleep(0.3)
+    assert started == [] and completed == [], "未注册开播回调不应触发任何通道"
+
+    p.set_started_callback(s_cb)
+    p._completion_cb = None  # 完成回调未注册场景（A3 后常态）
+    p._fire_started({"type": "t", "content": "c", "voice_path": "v"})
+    deadline = time.time() + 2
+    while not started and time.time() < deadline:
+        time.sleep(0.02)
+    assert len(started) == 1 and completed == [], "开播与完成回调互不串扰"
+
+
+def test_started_callback_exception_isolated():
+    """F3 异常隔离沿 _fire_completion 模式：回调异常走 _record_error 不炸播放线程。"""
+    import asyncio
+    p = _make_player_with_cb_loop()
+
+    async def bad_cb(data):
+        raise RuntimeError("boom")
+
+    p.set_started_callback(bad_cb)
+    p._fire_started({"type": "t", "content": "c", "voice_path": "v"})
+    deadline = time.time() + 2
+    while p.last_error is None and time.time() < deadline:
+        time.sleep(0.02)
+    assert p.last_error is not None and "字幕开播回调异常" in str(p.last_error.get("message", "")), \
+        "回调异常必须被隔离并记录（错误条可见）"

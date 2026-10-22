@@ -98,33 +98,41 @@ class CommentHandler:
             logger.error(f"违禁处理失败：{e}")
             return content
     
-    def reread_handle(self, data):
+    def reread_handle(self, data, type=None):
         """
         复读处理
-        
+
         Args:
             data (dict): 数据
-            
+            type (str, optional): 复读类型（reread | reread_top_priority）。
+                A6 修复（2026-10-22 批次）：原签名无此参数，web_server /send 带
+                type= 调用即 TypeError。type 原样透传进消息——reread_top_priority
+                经 priority_mapping 取 999 权重（999 映射保持不变，见审查记录
+                R6(a)）；业务层复读去重逻辑不区分类型。
+
         Returns:
             bool: 是否触发并处理
         """
         try:
             username = data["username"]
             content = data["content"]
-            
+
             # 检查是否启用复读
             if not self.my_handle.config.get("reread", "enable"):
                 return False
-            
+
             # 检查是否匹配复读关键词
-            keywords = self.my_handle.config.get("reread", "keywords", [])
+            # A6（2026-10-22 审查批次）：原 3 参 get("reread","keywords",[]) 在 Config
+            # 遍历语义下对 list 再 .get 会 AttributeError（/send reread 二次断点），
+            # 改安全形式。
+            keywords = self.my_handle.config.get("reread", "keywords") or []
             for keyword in keywords:
                 if keyword in content:
                     logger.info(f"[{username}]触发复读：{content}")
-                    
-                    # 构建消息
+
+                    # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
                     message = {
-                        "type": "reread",
+                        "type": type if type in ("reread", "reread_top_priority") else "reread",
                         "tts_type": self.my_handle.config.get("audio_synthesis_type"),
                         "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
                         "config": self.my_handle.config.get("filter"),

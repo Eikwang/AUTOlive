@@ -53,15 +53,20 @@ def create_audio_play_tab(
     with ui.card().style(card_css):
         ui.label('音频播放')
         with ui.grid(columns=3):
-            _auto_save(ui.switch('启用文本切分', value=get_nested_value(config, "play_audio", "text_split_enable")).style(switch_internal_css).tooltip('启用后会将LLM等待合成音频的消息根据内部切分算法切分成多个短句，以便TTS快速合成'), ("play_audio", "text_split_enable"))
-            _auto_save(ui.switch('音频信息回传给内部接口', value=get_nested_value(config, "play_audio", "info_to_callback")).style(switch_internal_css).tooltip('启用后，会在当前音频播放完毕后，将程序中等待播放的音频信息传递给内部接口，用于闲时任务的闲时清零功能。\n不过这个功能会一定程度的拖慢程序运行，如果你不需要闲时清零，可以关闭此功能来提高响应速度'), ("play_audio", "info_to_callback"))
+            _auto_save(ui.switch('启用文本切分', value=get_nested_value(config, "play_audio", "text_split_enable")).style(switch_internal_css).tooltip('启用后会将LLM等待合成音频的消息按四句一切的方式分段（每段最多四句），以便TTS快速合成'), ("play_audio", "text_split_enable"))
+            # A3（2026-10-22 审查批次）：「音频信息回传给内部接口」参数退役移除——
+            # 外接 audio_player 已弃用，且回路接收端（/callback）本就仅打日志（死链）。
+            # 闲时清零如需数据走进程内 get_audio_info 直查，不经 HTTP 回调。
 
         with ui.grid(columns=3):
-            _auto_save(ui.input(label='间隔时间重复次数最小值', value=get_nested_value(config, "play_audio", "interval_num_min"), placeholder='普通音频播放间隔时间，重复睡眠次数最小值。会在最大最小值之间随机生成一个重复次数，就是 次数 x 时间 = 最终间隔时间').style("width:100%;").tooltip('普通音频播放间隔时间重复睡眠次数最小值。会在最大最小值之间随机生成一个重复次数，就是 次数 x 时间 = 最终间隔时间'), ("play_audio", "interval_num_min"))
-            _auto_save(ui.input(label='间隔时间重复次数最大值', value=get_nested_value(config, "play_audio", "interval_num_max"), placeholder='普通音频播放间隔时间，重复睡眠次数最大值。会在最大最小值之间随机生成一个重复次数，就是 次数 x 时间 = 最终间隔时间').style("width:100%;").tooltip('普通音频播放间隔时间重复睡眠次数最大值。会在最大最小值之间随机生成一个重复次数，就是 次数 x 时间 = 最终间隔时间'), ("play_audio", "interval_num_max"))
-            _auto_save(ui.input(label='最小播放间隔', value=get_nested_value(config, "play_audio", "normal_interval_min"), placeholder='就是弹幕回复、唱歌等音频播放结束后到播放下一个音频之间的一个间隔时间，单位：秒').style("width:100%;").tooltip('就是弹幕回复、唱歌等音频播放结束后到播放下一个音频之间的一个间隔时间，单位：秒。次数 x 时间 = 最终间隔时间'), ("play_audio", "normal_interval_min"))
-            _auto_save(ui.input(label='最大播放间隔', value=get_nested_value(config, "play_audio", "normal_interval_max"), placeholder='就是弹幕回复、唱歌等音频播放结束后到播放下一个音频之间的一个间隔时间，单位：秒').style("width:100%;").tooltip('就是弹幕回复、唱歌等音频播放结束后到播放下一个音频之间的一个间隔时间，单位：秒。次数 x 时间 = 最终间隔时间'), ("play_audio", "normal_interval_max"))
-            _auto_save(ui.input(label='音频输出路径', placeholder='音频文件合成后存储的路径，支持相对路径或绝对路径', value=get_nested_value(config, "play_audio", "out_path")).style("width:100%;").tooltip('音频文件合成后存储的路径，支持相对路径或绝对路径'), ("play_audio", "out_path"))
+            # A3：「间隔时间重复次数最小值/最大值」退役移除（设计项3）——播放间隔改为
+            # 单次随机取值；节奏变化（默认值域 0.3~1.0s → 0.3~0.5s）已入发布说明。
+            # A4（设计项4）：参数名改为「播放间隔min/max」，新键 play_interval_min/max，
+            # 旧键 normal_interval_min/max 读侧一次性兼容（值不丢，旧键保留）。
+            _auto_save(ui.input(label='播放间隔min', value=get_nested_value(config, "play_audio", "play_interval_min", default=get_nested_value(config, "play_audio", "normal_interval_min")), placeholder='每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒').style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_min"))
+            _auto_save(ui.input(label='播放间隔max', value=get_nested_value(config, "play_audio", "play_interval_max", default=get_nested_value(config, "play_audio", "normal_interval_max")), placeholder='每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒').style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_max"))
+            # UC2a（2026-10-22 终门裁决）：「音频输出路径」用户可配置性移除——out_path
+            # 保留为系统内部透明临时目录（TTS 产物落盘必需），不再暴露给用户配置。
             player_select = _auto_save(ui.select(
                 label='音频播放器',
                 options={
@@ -96,8 +101,10 @@ def create_audio_play_tab(
                 _auto_save(ui.input(label='随机间隔上限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "max", default=3)).style("width:100%;"), ("audio_player", "random_audio_interval", "max"))
 
         # D4：优先级映射只读折叠区（默认收起；dx7 逃生门注明）
+        # A5/F-4（2026-10-22 审查批次）：数据源切换 filter.priority_mapping（权威单源），
+        # audio_player.priority_mapping 配置节随 A3 清理退役。
         with ui.expansion('优先级映射（只读）', icon='low_priority').style("width:100%;"):
-            priority_map = get_nested_value(config, "audio_player", "priority_mapping", default={}) or {}
+            priority_map = get_nested_value(config, "filter", "priority_mapping", default={}) or {}
             try:
                 ranked = sorted(priority_map.items(), key=lambda kv: -float(kv[1]))
                 rows = ["  ".join(f"{k} = {v}" for k, v in ranked[i:i+3]) for i in range(0, len(ranked), 3)]
@@ -105,7 +112,7 @@ def create_audio_play_tab(
                     'white-space: pre-wrap; font-size: var(--font-size-assist, 12px);')
             except Exception:
                 ui.label("（映射表格式异常）")
-            ui.label('数值越大越先播；未识别类型排队尾。如需调整可在 config.json 的 audio_player.priority_mapping 中修改。').style(
+            ui.label('数值越大越先播；未识别类型排队尾。在「互动设置-优先级配置」页调整（单源：filter.priority_mapping）。').style(
                 'font-size: var(--font-size-assist, 12px);')
 
     # ---------- 外部服务 API 地址卡（仅外部模式显示；0G cherry-pick #4 动态显隐） ----------
@@ -136,18 +143,15 @@ def create_audio_play_tab(
         for b in (btn_pause, btn_resume, btn_skip, btn_clear):
             b.props('dense outline')
 
-    # ---------- 音频随机变速卡（既有） ----------
+    # ---------- 音频随机变速卡（A2 后语义：合成侧 TTS 语速；A3 移除文案变速列） ----------
     with ui.card().style(card_css):
         ui.label('音频随机变速')
         with ui.grid(columns=3):
-            with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('普通音频变速', value=get_nested_value(config, "audio_random_speed", "normal", "enable")).style(switch_internal_css).tooltip('是否启用 针对 普通音频的音频变速功能。此功能需要安装配置ffmpeg才能使用'), ("audio_random_speed", "normal", "enable"))
-                _auto_save(ui.input(label='速度下限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_min")).style("width:100%;").tooltip('音频变速的下限，最终速度会在上下限之间随机一个值进行变速'), ("audio_random_speed", "normal", "speed_min"))
-                _auto_save(ui.input(label='速度上限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_max")).style("width:100%;").tooltip('音频变速的上限，最终速度会在上下限之间随机一个值进行变速'), ("audio_random_speed", "normal", "speed_max"))
-            with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('文案音频变速', value=get_nested_value(config, "audio_random_speed", "copywriting", "enable")).style(switch_internal_css).tooltip('是否启用 针对 文案页音频的音频变速功能。此功能需要安装配置ffmpeg才能使用'), ("audio_random_speed", "copywriting", "enable"))
-                _auto_save(ui.input(label='速度下限', value=get_nested_value(config, "audio_random_speed", "copywriting", "speed_min")).style("width:100%;").tooltip('音频变速的下限，最终速度会在上下限之间随机一个值进行变速'), ("audio_random_speed", "copywriting", "speed_min"))
-                _auto_save(ui.input(label='速度上限', value=get_nested_value(config, "audio_random_speed", "copywriting", "speed_max")).style("width:100%;").tooltip('音频变速的上限，最终速度会在上下限之间随机一个值进行变速'), ("audio_random_speed", "copywriting", "speed_max"))
+            _auto_save(ui.switch('普通音频变速', value=get_nested_value(config, "audio_random_speed", "normal", "enable")).style(switch_internal_css).tooltip('启用后针对弹幕回复、助播等 TTS 合成音频，在语速上下限之间随机取值，于 TTS 合成时调整语速参数（gpt-sovits speed_factor / edge-tts rate+pitch 联动），无失真。本地音频与点歌歌曲不变速'), ("audio_random_speed", "normal", "enable"))
+            _auto_save(ui.input(label='速度下限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_min")).style("width:100%;").tooltip('语速倍率下限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_min"))
+            _auto_save(ui.input(label='速度上限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_max")).style("width:100%;").tooltip('语速倍率上限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_max"))
+            # A3（2026-10-22 审查批次）：「文案音频变速」参数列退役移除——文案模块已
+            # 弃用，变速功能仅需普通音频一条逻辑（设计项7）。
 
     # ---------- 行为逻辑 ----------
     def _refresh_visibility():

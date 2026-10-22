@@ -205,43 +205,90 @@ class TextMixin:
         return result2
 
 
-    # 文本切分算法
+    # 文本切分算法（A10 四句一切，2026-10-22 审查批次，义务 R2-A10）
+    # 语义：「句」=以句末标点（。！？!?）结尾的单元；先按句末标点分句，
+    # 无标点长句（>60 字）按逗号优先切点硬切兜底，每 4 句合并为一片段
+    # （设计上限硬约束：每个文本片段最多包含四句）；段内短句自然并段
+    # （下限保护），末段过短时从相邻段回拉一句平衡（不破坏四句上限）。
+    _SENTENCE_SPLIT_RE = r'(?<=[。！？!?])'
+    _LONG_RUNON_LEN = 60
+    _SENTENCES_PER_SEGMENT = 4
+    _MIN_SEGMENT_LEN = 10
+
+    def _split_long_runon(self, s):
+        """无标点长句兜底（>60 字）：逗号/分号/顿号优先切点，无切点按 60 字硬切。"""
+        pieces = []
+        remaining = s
+        while len(remaining) > self._LONG_RUNON_LEN:
+            window = remaining[:self._LONG_RUNON_LEN]
+            cut = -1
+            for sep in ("，", ",", "；", ";", "、"):
+                idx = window.rfind(sep)
+                if idx > 0:
+                    cut = max(cut, idx)
+            if cut <= 0:
+                cut = self._LONG_RUNON_LEN - 1
+            pieces.append(remaining[:cut + 1])
+            remaining = remaining[cut + 1:]
+        if remaining:
+            pieces.append(remaining)
+        return [p for p in pieces if p]
+
     def split_sentences(self, text):
-        # 使用正则表达式切分句子
-        sentences = re.split(r'(?<=[。！？!?])', text)
-        result = []
-        current_sentence = ""
-        
-        for sentence in sentences:
-            # 去除换行和空格
-            sentence = sentence.replace('\n', '')
-            
-            # 如果句子为空则跳过
-            if not sentence:
-                continue
-            
-            # 如果句子长度小于10个字，则与下一句合并
-            if len(current_sentence) < 10:
-                current_sentence += sentence
+        """四句一切切分（A10，替代旧"短句合并+标点切分"算法）。
+
+        Args:
+            text (str): 待切分文本
+
+        Returns:
+            list[str]: 文本片段列表，每片段最多含 4 个句末标点单元
+        """
+        if not text:
+            return []
+
+        # 1) 按句末标点分句
+        raw = [s for s in re.split(self._SENTENCE_SPLIT_RE, text) if s]
+
+        # 2) 构建有序单元：(文本, 是否句末标点句)；兜底片段独立成段标记
+        #    （实施轮修正：兜底切出的 ≤60 字片段若参与 4 句合并会被拼回长段，兜底失效）
+        units = []
+        for s in raw:
+            s = s.replace('\n', '')
+            if len(s) > self._LONG_RUNON_LEN:
+                for p in self._split_long_runon(s):
+                    units.append((p, False))
             else:
-                # 判断当前句子是否以标点符号结尾
-                if current_sentence[-1] in ["。", "！", "？", ".", "!", "?"]:
-                    result.append(current_sentence)
-                    current_sentence = sentence
-                else:
-                    # 如果当前句子不以标点符号结尾，则进行二次切分
-                    split_sentences = re.split(r'(?<=[,，;；])', current_sentence)
-                    if len(split_sentences) > 1:
-                        result.extend(split_sentences[:-1])
-                        current_sentence = split_sentences[-1] + sentence
-                    else:
-                        current_sentence += sentence
-        
-        # 添加最后一句
-        if current_sentence:
-            result.append(current_sentence)
-        
-        return result
+                units.append((s, True))
+
+        # 3) 流式组装：句按 4 句一组封段；兜底片段即到即封（保持原文顺序）
+        result = []
+        buf = []
+        for seg_text, is_sentence in units:
+            if not is_sentence:
+                if buf:
+                    result.append("".join(buf))
+                    buf = []
+                result.append(seg_text)
+            else:
+                buf.append(seg_text)
+                if len(buf) >= self._SENTENCES_PER_SEGMENT:
+                    result.append("".join(buf))
+                    buf = []
+        if buf:
+
+            # 4) 末段过短（<10 字）从上一句组回拉一句（下限保护，不破坏四句上限）
+            if len(buf) < self._MIN_SEGMENT_LEN and result:
+                last = result[-1]
+                sent_count = sum(last.count(c) for c in "。！？!?")
+                if sent_count >= 2:
+                    parts = [p for p in re.split(self._SENTENCE_SPLIT_RE, last) if p]
+                    if len(parts) >= 2:
+                        moved = parts.pop()
+                        result[-1] = "".join(parts)
+                        buf.insert(0, moved)
+            result.append("".join(buf))
+
+        return [s for s in result if s.strip()]
 
 
     # 字符串匹配算法来计算字符串之间的相似度，并选择匹配度最高的字符串作为结果

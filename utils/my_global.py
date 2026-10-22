@@ -4,8 +4,6 @@ last_username_list = None
 last_liveroom_data = None
 
 # 待播放音频数量（在使用 音频播放器 等不通过AUTOlive播放音频的对接项目时，使用此变量记录是是否还有音频没有播放完；metahuman-stream 对接已随 2026-10-22 批次退役）
-wait_play_audio_num = 0
-wait_synthesis_msg_num = 0
 
 # 闲时任务计时自动清零
 def idle_time_auto_clear(config, type: str):

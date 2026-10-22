@@ -2,13 +2,12 @@
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
-    "interval_num_min": 1,
-    "interval_num_max": 2,
     "normal_interval_min": 0.3,
     "normal_interval_max": 0.5,
     "out_path": "out",
     "player": "pygame",
-    "info_to_callback": true
+    "play_interval_min": 0.3,
+    "play_interval_max": 0.5
   },
   "audio_player": {
     "api_ip_port": "http://127.0.0.1:5600"
@@ -16,11 +15,6 @@
   "audio_synthesis_type": "gpt_sovits",
   "audio_random_speed": {
     "normal": {
-      "enable": false,
-      "speed_min": 0.8,
-      "speed_max": 1.2
-    },
-    "copywriting": {
       "enable": false,
       "speed_min": 0.8,
       "speed_max": 1.2

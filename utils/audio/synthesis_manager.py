@@ -5,10 +5,12 @@
 import asyncio
 import aiohttp
 import os
+import random
 import traceback
 from copy import deepcopy
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
+from ..audio_handle.tts_params import clamp_speed_factor
 
 
 class SynthesisMixin:
@@ -121,9 +123,6 @@ class SynthesisMixin:
                     "content": message["content"]
                 }
 
-                if "insert_index" in data_json:
-                    data_json["insert_index"] = message["insert_index"]
-
                 # 是否开启了音频播放 
                 if self.config.get("play_audio", "enable"):
                     self.data_priority_insert("等待合成消息", data_json)
@@ -137,9 +136,6 @@ class SynthesisMixin:
                     "voice_path": message['content'],
                     "content": message["content"]
                 }
-
-                if "insert_index" in data_json:
-                    data_json["insert_index"] = message["insert_index"]
 
                 # 是否开启了音频播放 
                 if self.config.get("play_audio", "enable"):
@@ -155,9 +151,6 @@ class SynthesisMixin:
                     "content": message["content"]
                 }
 
-                if "insert_index" in data_json:
-                    data_json["insert_index"] = message["insert_index"]
-
                 # 是否开启了音频播放
                 if self.config.get("play_audio", "enable"):
                     self.data_priority_insert("等待合成消息", data_json)
@@ -172,9 +165,6 @@ class SynthesisMixin:
                     "content": message["content"]
                 }
 
-                if "insert_index" in data_json:
-                    data_json["insert_index"] = message["insert_index"]
-
                 # 是否开启了音频播放
                 if self.config.get("play_audio", "enable"):
                     self.data_priority_insert("等待合成消息", data_json)
@@ -185,6 +175,11 @@ class SynthesisMixin:
                 if message['content_type'] in ["comment", "reread"]:
                     pass
                 elif message['content_type'] == "local_audio":
+                    # A11（2026-10-22 审查批次，义务 R2-A11/E4）：本地音频类维持 enable
+                    # 门控（原分支漏检直接入队，关闭态仍会播出——审查发现 R1(7)）；
+                    # 本地音频不走 EDTalk 豁免（F-7：闲时音效不应推给数字人端）。
+                    if not self.config.get("play_audio", "enable"):
+                        return
                     # 拼接json数据，存入队列
                     data_json = {
                         "type": message['type'],
@@ -192,9 +187,6 @@ class SynthesisMixin:
                         "voice_path": message['file_path'],
                         "content": message["content"]
                     }
-
-                    if "insert_index" in data_json:
-                        data_json["insert_index"] = message["insert_index"]
                     
                     self.data_priority_insert("等待合成消息", data_json)
 
@@ -208,9 +200,6 @@ class SynthesisMixin:
                     "voice_path": message['file_path'],
                     "content": message["content"]
                 }
-
-                if "insert_index" in data_json:
-                    data_json["insert_index"] = message["insert_index"]
 
                 # 是否开启了音频播放
                 if self.config.get("play_audio", "enable"):
@@ -263,6 +252,30 @@ class SynthesisMixin:
         return voice_tmp_path
     
 
+    def _resolve_random_synth_speed(self):
+        """A2（2026-10-22 审查批次）：随机语速源迁移合成侧（义务 R2-A2/spec C-1）。
+
+        读 audio_random_speed.normal.{enable,speed_min,speed_max}——键位保留、
+        语义变更为合成侧随机语速源（旧 pydub 读侧随路径退役）；enable=false 或
+        取值非法时返回 None（不变速=系统默认）。
+        边界：tts_type=none 的本地音频/点歌在 audio_synthesis 短路直插播放队列、
+        不经本函数，天然满足"本地音频与点歌不变速"边界声明（song 条目
+        tts_type=none 已带标记，Feasibility 条件核实关闭）。
+        """
+        try:
+            if not self.config.get("audio_random_speed", "normal", "enable"):
+                return None
+            _warn = lambda m: logger.warning(f"[变速] {m}")
+            lo = clamp_speed_factor(self.config.get("audio_random_speed", "normal", "speed_min"), log_bad=_warn)
+            hi = clamp_speed_factor(self.config.get("audio_random_speed", "normal", "speed_max"), log_bad=_warn)
+            lo, hi = min(lo, hi), max(lo, hi)
+            factor = random.uniform(lo, hi)
+            logger.info(f"[变速] 随机语速 factor={factor:.3f}（域 [{lo}, {hi}]）")
+            return factor
+        except Exception:
+            logger.error(traceback.format_exc())
+            return None
+
     async def tts_handle(self, message):
         """根据本地配置，使用TTS进行音频合成，返回相关数据
 
@@ -274,6 +287,9 @@ class SynthesisMixin:
         """
 
         try:
+            # A2：随机语速源合成侧解析（enable=false → None=系统默认；本地音频不经此路径）
+            _random_speed = self._resolve_random_synth_speed()
+
             if message["tts_type"] == "gpt_sovits":
                 # P25 键面重构（实测修复）：旧 data.language/api_0322/api_0706/v2_api_0821/webtts
                 # 键随参数精简退役——inproc 装配走 params 白名单（my_tts._gpt_sovits_inproc），
@@ -322,18 +338,17 @@ class SynthesisMixin:
                     "api_0706": _gdata.get("api_0706", {}),
                     "v2_api_0821": _gdata.get("v2_api_0821", {}),
                     "webtts": _gdata.get("webtts", {}),
-                    # P26 变速迁移：运行时语速透传（合成参数变速；无值=系统默认）
-                    "speed": _gdata.get("speed"),
+                    # P26/A2：运行时语速透传（合成参数变速；None=系统默认）
+                    "speed": _random_speed,
                     "content": message["content"]
                 }
 
                 voice_tmp_path = await self.my_tts.gpt_sovits_api(data)
             elif message["tts_type"] == "edge_tts":
-                # edge-tts 合成（切片 3：WebTTS 退役改用 EDGE-TTS；P26 语速经 rate 映射）
-                _edge_data = message.get("data") or {}
+                # edge-tts 合成（切片 3：WebTTS 退役改用 EDGE-TTS；P26/A2 语速经 rate 映射+pitch 联动）
                 voice_tmp_path = await self.my_tts.edge_tts_api({
                     "content": message["content"],
-                    "speed": _edge_data.get("speed"),
+                    "speed": _random_speed,
                 })
             elif message["tts_type"] == "none":
                 # Audio.voice_tmp_path_queue.put(message)
@@ -344,11 +359,10 @@ class SynthesisMixin:
                 "msg": "合成成功",
                 "audio_path": voice_tmp_path
             }
-            # P26：合成侧已应用语速时随结果透传（播放侧据此跳过 pydub 变速，双路径并存）
-            _speed = message.get("data", {}).get("speed")
-            if voice_tmp_path and _speed is not None:
+            # P26/A2：合成侧已应用语速时随结果透传（播放侧据此识别；pydub 回退路径已退役）
+            if voice_tmp_path and _random_speed is not None:
                 try:
-                    message["result"]["synth_speed"] = float(_speed)
+                    message["result"]["synth_speed"] = float(_random_speed)
                 except (TypeError, ValueError):
                     pass
         except Exception as e:
@@ -361,36 +375,49 @@ class SynthesisMixin:
 
         return message
 
-    async def send_audio_play_info_to_callback(self, data: dict=None):
-        """发送音频播放信息给main内部的http服务端
+    # A3（2026-10-22 审查批次）：send_audio_play_info_to_callback 方法随
+    # play_audio.info_to_callback 参数退役删除——回路接收端（/callback 端点）本就
+    # 仅打日志（死链，wait_play_audio_num 恒 0 从未写入），移除零功能损失；
+    # builtin 完成回调注册一并移除（audio_core）。
+
+    async def audio_synthesis_use_local_config(self, content, audio_synthesis_type="gpt_sovits"):
+        """使用本地配置进行音频合成，返回音频路径（页面合成测试链 /tts/synthesize）
+
+        【2026-10-22 审查批次自 processing_manager.py 迁入】——原文件随 pydub 变速
+        路径（audio_speed_change）与文案合并（merge_audio_files）退役删除，本测试链
+        方法为在飞消费点（web_server /tts/synthesize），迁移至 SynthesisMixin 保链。
+        D-20 双代码路径纪律：本方法=页面测试链，与弹幕链（tts_handle）同键面但独立
+        存在，改键面时两链同改。
+
+        切片 3 键面重写（2026-10-20 实测修复）：与弹幕链同键面——gpt_sovits 参数装配
+        收口在 _gpt_sovits_inproc（config.params 为事实来源，C-1），edge_tts 走
+        edge_tts_api（voice/rate 自 edge_tts 节）。
 
         Args:
-            data (dict): 音频播放信息
+            content (str): 待合成的文本内容
+            audio_synthesis_type (str, optional): 使用的tts类型. Defaults to "gpt_sovits".
+
+        Returns:
+            str: 合成的音频的路径（失败返回 None）
         """
-        try:
-            if False == self.config.get("play_audio", "info_to_callback"):
-                return None
+        # 重载配置
+        self.reload_config(self.config_path)
 
-            if data is None:
-                data = {
-                    "type": "audio_playback_completed",
-                    "data": {
-                        # 待播放音频数量
-                        "wait_play_audio_num": len(self.voice_tmp_path_queue),
-                        # 待合成音频的消息数量
-                        "wait_synthesis_msg_num": len(self.message_queue),
-                    }
-                }
+        voice_tmp_path = None
+        if audio_synthesis_type == "gpt_sovits":
+            data = {
+                # P26：测试链默认语速取 params.speed_factor（与弹幕链 speed 透传同语义；
+                # 测试链为静态配置语速，不走弹幕链随机语速源——语义差异登记 D-20）
+                "speed": self.config.get("gpt_sovits", "params", "speed_factor"),
+                "content": content
+            }
+            voice_tmp_path = await self.my_tts.gpt_sovits_api(data)
+        elif audio_synthesis_type == "edge_tts":
+            voice_tmp_path = await self.my_tts.edge_tts_api({"content": content})
+        else:
+            logger.error(f"不支持的合成类型：{audio_synthesis_type}（可选 gpt_sovits / edge_tts）")
 
-            logger.debug(f"data={data}")
-
-            main_api_ip = "127.0.0.1" if self.config.get("api_ip") == "0.0.0.0" else self.config.get("api_ip")
-            resp = await self.common.send_async_request(f'http://{main_api_ip}:{self.config.get("api_port")}/callback', "POST", data)
-
-            return resp
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            return None
+        return voice_tmp_path
 
 
     async def my_play_voice(self, message):
@@ -444,26 +471,38 @@ class SynthesisMixin:
             if "insert_index" in message:
                 data_json["insert_index"] = message["insert_index"]
 
+            # A11（2026-10-22 审查批次，义务 R2-A11/E4）：EDTalk 推送链豁免 enable——
+            # 数字人服务的音频不受 play_audio.enable 影响（设计开关行为条款）；
+            # 豁免仅限经 TTS→push_full 的类型（本函数即 TTS 链收口）。
+            _playback_gate = (self.config.get("play_audio", "enable")
+                              or is_edtalk_active(self.config))
             # 区分消息类型是否是 回复xxx 并且 关闭了变声
             if message["type"] == "reply":
                 # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
-                if self.config.get("play_audio", "enable"):
+                if _playback_gate:
                     self.data_priority_insert("待播放音频列表", data_json)
                     return True
             # 区分消息类型是否是 念弹幕 并且 关闭了变声
             elif message["type"] == "read_comment" and not self.config.get("read_comment", "voice_change"):
                 # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
-                if self.config.get("play_audio", "enable"):
+                if _playback_gate:
                     self.data_priority_insert("待播放音频列表", data_json)
                     return True
 
             voice_tmp_path = await self.voice_change(voice_tmp_path)
-            
+
+            # A12（2026-10-22 审查批次，义务 R7/E1）：变声失败（svc 返回 None）不再入队——
+            # 报警已在 voice_change 内触发（abnormal_alarm_handle("svc")），旧路径 None
+            # 照常入队导致播放侧二次报"无法加载音频文件"刷屏（审查发现 E1）。
+            if not voice_tmp_path:
+                logger.error("变声失败（svc 返回空路径），本次音频不入播放队列（报警已触发）")
+                return False
+
             # 更新音频路径
             data_json["voice_path"] = voice_tmp_path
 
             # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
-            if self.config.get("play_audio", "enable"):
+            if _playback_gate:
                 self.data_priority_insert("待播放音频列表", data_json)
 
             return True

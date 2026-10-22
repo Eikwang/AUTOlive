@@ -100,6 +100,40 @@ def speed_to_edge_rate(speed: float) -> str:
     return f"{sign}{round(abs(percent), 2):g}%"
 
 
+def clamp_speed_factor(speed, log_bad=None) -> float:
+    """随机语速倍率 clamp（A2/S1，2026-10-22 审查批次）。
+
+    合法域 [0.25, 4.0]（与 GPT-SoVITS speed_factor 滑条范围对齐）。
+    非法（None/非数值/越界/0/负值）→ 回落 1.0（不变速）；提供 log_bad 回调时
+    输出告警（义务 E6：非法回落 1.0+告警，防打爆 TTS API）。
+    """
+    try:
+        s = float(speed)
+    except (TypeError, ValueError):
+        if log_bad:
+            log_bad(f"语速倍率非法（{speed!r}），回落 1.0")
+        return 1.0
+    if not (0.25 <= s <= 4.0):
+        if log_bad:
+            log_bad(f"语速倍率越界（{s}，合法域 [0.25, 4.0]），回落 1.0")
+        return 1.0
+    return s
+
+
+def speed_to_edge_pitch(speed: float) -> str:
+    """speed_factor 倍率 → edge-tts pitch 字符串（A2 pitch 联动，2026-10-22 批次）。
+
+    设计公式：pitch_hz = (factor - 1) * 50，即 +1.2 倍语速 → "+10Hz"、
+    0.9 倍 → "-5Hz"；可调范围 ±50Hz，越界截断（义务 R2-A2）。
+    1.0（不变速）→ "+0Hz"（edge-tts 合法形式，等效不调）。
+    """
+    s = clamp_speed_factor(speed)
+    hz = (s - 1.0) * 50.0
+    hz = max(-50.0, min(50.0, hz))
+    sign = "+" if hz >= 0 else "-"
+    return f"{sign}{round(abs(hz), 2):g}Hz"
+
+
 def normalize_edge_rate(rate) -> Optional[str]:
     """用户 rate 配置规范化（P26，2026-10-20 实测修复）。
 

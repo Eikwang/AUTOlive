@@ -99,6 +99,17 @@ class AUDIO_PLAY_CENTER:
 
         self._cb_loop = _CallbackLoop()
         self._completion_cb = None    # audio_core 注册的 async 完成回调
+        self._started_cb = None       # 字幕打印开播回调（F3，独立注册点——Eng T1 通道隔离）
+        self._release_999_hook = None  # audio_core 注入：999 离开系统时清除 Audio.active 标记（A7/T1）
+        self._priority_provider = None  # A5：权威优先级表读取器（filter 单源内存视图）
+
+        # A7（2026-10-22 审查批次）：999 暂停-续播状态（单一暂停机制，F-2/F-3/F-5）
+        self._suspended_999 = None     # 挂起的 999 条目（播放器持有，不重新入队——R2-A7a）
+        self._suspended_play = None    # 挂起现场 {"wf","tmp_audio_path"}（流=self.stream）
+        self._playing_is_999 = False   # 当前播放条目是否 999（让位触发判定）
+        self._current_output_rate = 0  # 输出采样率（F-5：回退 1 秒帧数折算基准）
+        self._interrupt_999_event = threading.Event()  # 让位触发（design 情况1）
+        self._interruptor_pending = False  # 挂起后待插播的打断者标记（播毕即续播）
 
         # 输出目录：沿用系统 play_audio.out_path（合成产物同级）
         try:
@@ -143,6 +154,38 @@ class AUDIO_PLAY_CENTER:
         """注册播放完成回调（async(data_dict)）；在播放器线程经专用 loop 提交"""
         self._completion_cb = async_cb
 
+    def set_started_callback(self, async_cb):
+        """注册开播回调（F3：字幕推送时点=实际播放时点；义务 Eng T1——独立注册点，
+        不复用 set_completion_callback/_completion_cb：其载荷固定且被 A7 999 续播
+        复用，复用将使 audio_core 完成判定误消费开播消息、破坏播放背压语义）"""
+        self._started_cb = async_cb
+
+    def _fire_started(self, data_json):
+        """开播回调（F3）。异常隔离沿 _fire_completion；载荷=播放条目
+        content/type/voice_path 三键（Eng T1 义务：keep_time 取实际播放文件时长）。
+        999 续播恢复不重推（挂起前已在开播时推送）。"""
+        try:
+            if self._started_cb is None:
+                return
+            payload = {
+                "type": data_json.get("type", ""),
+                "content": data_json.get("content", ""),
+                "voice_path": data_json.get("voice_path", ""),
+            }
+
+            async def _safe_started():
+                # 回调协程内异常在 _cb_loop 执行时才发生（submit 只提交不等待）——
+                # 此处包裹捕获并计入错误可见性（_record_error→错误条 D9）
+                try:
+                    await self._started_cb(payload)
+                except Exception:
+                    self._record_error(f"字幕开播回调异常\n{traceback.format_exc()}")
+
+            if not self._cb_loop.submit(_safe_started()):
+                self._record_error("字幕开播回调提交失败（_cb_loop）")
+        except Exception:
+            self._record_error(f"字幕开播回调异常\n{traceback.format_exc()}")
+
     def _fire_completion(self):
         try:
             if self._completion_cb is None:
@@ -166,6 +209,10 @@ class AUDIO_PLAY_CENTER:
         while not self._stop_flag.is_set():
             try:
                 if len(self.audio_json_list) <= 0:
+                    if self._suspended_999 is not None:
+                        # 队列空且仍有挂起 999（插播者已被消费/清空）→ 恢复
+                        self._resume_suspended_999()
+                        continue
                     self.audio_data_event.clear()
                     self.audio_data_event.wait(1.0)
                     continue
@@ -173,33 +220,216 @@ class AUDIO_PLAY_CENTER:
                 with self.list_lock:
                     data_json = self.audio_json_list.pop(0)
 
-                self._play_item(data_json)
+                status = self._play_item(data_json)
+                if status == "suspended":
+                    # 999 让位挂起：下一步从队列播插播条目（不得立即续播）
+                    continue
+                # 插播条目播毕 → 立即续播挂起的 999（R2-A7b：不等队列排空）
+                if self._suspended_999 is not None and self._interruptor_pending:
+                    self._interruptor_pending = False
+                    self._resume_suspended_999()
             except Exception:
                 # 单条失败跳过（缺陷3 修复：不清空整个队列）
                 logger.error("builtin播放器播放循环异常，跳过当前条\n" + traceback.format_exc())
                 self._cleanup_stream()
                 time.sleep(0.2)
 
+    def _priority_mapping(self):
+        """A5 单源：priority provider（Config 内存视图）→ filter 表（config.json）
+        → 存量 audio_player 表兜底（未迁移配置）。"""
+        try:
+            if self._priority_provider is not None:
+                m = self._priority_provider()
+                if m:
+                    return m
+        except Exception:
+            pass
+        try:
+            cfg_all = _load_config_file(self.config_path) or {}
+            m = (cfg_all.get("filter") or {}).get("priority_mapping")
+            if m:
+                return m
+        except Exception:
+            pass
+        return (self.config_data or {}).get("priority_mapping") or {}
+
+    def _item_priority(self, data_json):
+        """条目权重（A7/T1/A5 单源）：见 _priority_mapping；未识别 → None。"""
+        try:
+            p = self._priority_mapping().get(data_json.get("type"))
+            return int(p) if p is not None else None
+        except Exception:
+            return None
+
+    def set_priority_provider(self, provider):
+        """A5：注入权威优先级表读取器（audio_core 传入 Config 内存视图——合并迁移
+        即时可见，不依赖 config.json 落盘）。"""
+        self._priority_provider = provider
+
+    def set_999_release_hook(self, hook):
+        """注册 999 离开系统回调（audio_core 注入，清除 Audio.active_reread_top_999）。"""
+        self._release_999_hook = hook
+
+    def _release_999(self):
+        try:
+            if self._release_999_hook is not None:
+                self._release_999_hook()
+        except Exception:
+            logger.error("999 释放回调异常\n" + traceback.format_exc())
+
+    def request_999_interrupt(self):
+        """队列插入侧调用（queue_manager._maybe_interrupt_999_for）：正在播 999 时
+        请求让位（design 情况1）。已挂起则忽略（情况 c 排队不打断，R2-A7c）。"""
+        if self._playing_is_999 and self._suspended_999 is None:
+            self._interrupt_999_event.set()
+
+    def _wait_loop(self, is_999=False):
+        """播放等待循环（A7 重构，F-2 修复）。
+
+        旧循环缺陷：pause_stream 调 stop_stream 后 is_active 翻 False → 循环即出
+        → 误报完成 + finally 关流删 tmp → resume_stream 对已关流失效（=变相跳过）。
+        新循环：pause_event 置位期间保持等待（流停、wf 读位冻结），恢复后续播；
+        999 让位中断（design 情况1）；跳过/停止；EOF 自然完成。
+
+        Returns:
+            str: "completed" | "skipped" | "suspended"
+        """
+        while True:
+            if is_999 and self._suspended_999 is None and self._interrupt_999_event.is_set():
+                # 999 让位：暂停挂起（流停、wf 读位冻结；现场由调用方登记保留）
+                self._interrupt_999_event.clear()
+                try:
+                    self.stream.stop_stream()
+                except Exception:
+                    pass
+                logger.info("999 权重音频让位挂起（新音频插播，design 情况1）")
+                return "suspended"
+            if self.pause_event.is_set():
+                # F-2：手动暂停保持等待（不退出循环、不误报完成），恢复后从暂停点继续
+                time.sleep(0.1)
+                continue
+            if self._skip_event.is_set() or self._stop_flag.is_set():
+                return "skipped"
+            if self.stream is None or not self.stream.is_active():
+                return "completed"
+            time.sleep(0.1)
+
+    def _finish_cleanup(self, wf=None, tmp_audio_path=None):
+        """条目终态清理（eng E-8 次序：先 wf 后 stream 再删文件，防 Windows PermissionError）"""
+        if wf is not None:
+            try:
+                wf.close()
+            except Exception:
+                pass
+        self._cleanup_stream()
+        if tmp_audio_path:
+            try:
+                os.remove(tmp_audio_path)
+            except OSError:
+                pass
+        self._current = None
+        self._playing_is_999 = False
+
+    def _resume_suspended_999(self):
+        """A7 续播：回退 1 秒后从暂停点继续（打断者播毕即续播，不等队列排空——R2-A7b）。
+
+        回退口径（E2/F-5）：1 秒 = 输出采样率帧数（speed≠1 时按输出流速率折算，
+        即听众时间轴回退 1 秒）。
+        """
+        item = self._suspended_999
+        held = self._suspended_play
+        self._suspended_999 = None
+        self._suspended_play = None
+        self._interruptor_pending = False
+        try:
+            wf = held["wf"]
+            rewind = int(self._current_output_rate * 1.0) if self._current_output_rate else 0
+            if rewind > 0:
+                try:
+                    pos = wf.tell()
+                    wf.setpos(max(0, pos - rewind))
+                    logger.info(f"999 续播回退 1 秒（{rewind} 帧，暂停点 {pos}）")
+                except Exception:
+                    logger.warning("999 续播回退设置失败（继续暂停点位置）")
+            if self.stream is not None:
+                try:
+                    self.stream.start_stream()
+                except Exception:
+                    pass
+            logger.info(f"999 权重音频续播：{item.get('voice_path')}")
+
+            self._skip_event.clear()
+            status = self._wait_loop(is_999=True)
+            if status == "completed":
+                self._fire_completion()
+            self._release_999()
+            self._finish_cleanup(wf, held.get("tmp_audio_path"))
+            self._post_play_interval()
+        except Exception:
+            logger.error("999 续播异常\n" + traceback.format_exc())
+            self._release_999()
+            self._finish_cleanup(held.get("wf") if held else None,
+                                 held.get("tmp_audio_path") if held else None)
+
+    def _discard_suspended(self, reason):
+        """F-3：清理路径（skip/clear/stop_all）放弃挂起的 999 条目，日志留痕不静默。"""
+        if self._suspended_999 is None:
+            return
+        held = self._suspended_play
+        path = self._suspended_999.get("voice_path")
+        self._suspended_999 = None
+        self._suspended_play = None
+        self._interruptor_pending = False
+        self._release_999()
+        if held:
+            try:
+                held["wf"].close()
+            except Exception:
+                pass
+            try:
+                os.remove(held["tmp_audio_path"])
+            except OSError:
+                pass
+        self._cleanup_stream()
+        logger.info(f"{reason}：放弃挂起的 999 条目（F-3）：{path}")
+
+    def _post_play_interval(self):
+        """播完后间隔（默认 0：间隔由 playback_manager 层负责，避免双重间隔）"""
+        interval = float(self._hot_value("audio_interval", 0) or 0)
+        random_interval = self._hot_value("random_audio_interval", None) or {}
+        if random_interval.get("enable"):
+            time.sleep(random.uniform(float(random_interval.get("min", 0)), float(random_interval.get("max", 0))))
+        elif interval > 0:
+            time.sleep(interval)
+
     def _play_item(self, data_json):
         voice_path = data_json.get("voice_path")
         if not voice_path or not os.path.isfile(voice_path):
             self._record_error(f"音频文件不存在，跳过：{voice_path}")
-            return
+            return "completed"
         if data_json.get("mode") == "url":
             # 内置模式仅消费本地产物（URL 场景属外部服务模式）
             self._record_error(f"builtin 不支持 url 模式，跳过：{voice_path}")
-            return
+            return "completed"
+
+        is_999 = (self._item_priority(data_json) == 999)
+        self._playing_is_999 = is_999
+        self._interrupt_999_event.clear()  # 丢弃上个条目周期的陈旧让位事件
 
         # 解码统一转 wav（mp3 等格式依赖 ffmpeg，既有系统依赖）
-        audio = AudioSegment.from_file(voice_path)
-        tmp_audio_path = os.path.join(
-            self.audio_out_path, "tmp_" + str(int(time.time() * 1000)) + ".wav")
-        os.makedirs(self.audio_out_path, exist_ok=True)
-        audio.export(tmp_audio_path, format="wav")
+        try:
+            audio = AudioSegment.from_file(voice_path)
+            tmp_audio_path = os.path.join(
+                self.audio_out_path, "tmp_" + str(int(time.time() * 1000)) + ".wav")
+            os.makedirs(self.audio_out_path, exist_ok=True)
+            audio.export(tmp_audio_path, format="wav")
+        except Exception:
+            self._record_error(f"解码失败：{voice_path}\n" + traceback.format_exc())
+            self._playing_is_999 = False
+            return "completed"
 
         wf = wave.open(tmp_audio_path, "rb")
         self._skip_event.clear()
-        completed_flag = {"fired": False}
         self._current = {
             "type": data_json.get("type", ""),
             "content": str(data_json.get("content", ""))[:20],
@@ -213,6 +443,7 @@ class AUDIO_PLAY_CENTER:
                 return (b"", pyaudio.paComplete)
             return (data, pyaudio.paContinue)
 
+        suspended = False
         try:
             # device_index 播放时现读（缺陷4 修复）；-1 = 系统默认（pyaudio 需 None）
             device_index = self._hot_value("device_index", -1)
@@ -222,6 +453,7 @@ class AUDIO_PLAY_CENTER:
                 device_index = -1
 
             rate = int(wf.getframerate() * float(data_json.get("speed", 1) or 1))
+            self._current_output_rate = rate  # F-5：999 续播回退 1 秒的折算基准
 
             self.stream = self.audio.open(
                 format=self.audio.get_format_from_width(wf.getsampwidth()),
@@ -233,41 +465,34 @@ class AUDIO_PLAY_CENTER:
             )
             self.stream.start_stream()
             logger.info(f"builtin播放开始：type={data_json.get('type')} path={voice_path}")
+            self._fire_started(data_json)  # F3：字幕推送时点=实际开播时
 
-            # 完成判定 = 流转 inactive（pyaudio 实证：EOF 无独立回调信号）。
-            # 0.1s 有界轮询——已修复的原缺陷是"零休眠 pass 自旋烧 CPU"，非轮询本身。
-            while self.stream is not None and self.stream.is_active():
-                if self._skip_event.is_set() or self._stop_flag.is_set():
-                    break
-                time.sleep(0.1)
+            status = self._wait_loop(is_999=is_999)
 
-            skipped = self._skip_event.is_set() or self._stop_flag.is_set()
+            if status == "suspended":
+                # A7：现场登记后返回（流/wf/tmp 由挂起状态持有，续播或弃置时处理）
+                suspended = True
+                self._suspended_play = {"wf": wf, "tmp_audio_path": tmp_audio_path}
+                self._suspended_999 = data_json
+                self._interruptor_pending = True
+                return "suspended"
+
+            skipped = (status == "skipped")
             logger.info(f"builtin播放结束：{'跳过' if skipped else '完成'} type={data_json.get('type')}")
 
             if not skipped:
                 self._fire_completion()
-
-            # 播完后间隔（默认 0：间隔由 playback_manager 层负责，避免双重间隔）
-            interval = float(self._hot_value("audio_interval", 0) or 0)
-            random_interval = self._hot_value("random_audio_interval", None) or {}
-            if random_interval.get("enable"):
-                time.sleep(random.uniform(float(random_interval.get("min", 0)), float(random_interval.get("max", 0))))
-            elif interval > 0:
-                time.sleep(interval)
+            if is_999:
+                self._release_999()
+            self._finish_cleanup(wf, tmp_audio_path)
+            self._post_play_interval()
+            return status
         except Exception:
             self._record_error(f"播放失败（设备/解码）：{voice_path}\n" + traceback.format_exc())
-        finally:
-            # 句柄关闭次序（eng E-8）：先 wf 后 stream 再删文件，防 Windows PermissionError
-            try:
-                wf.close()
-            except Exception:
-                pass
-            self._cleanup_stream()
-            try:
-                os.remove(tmp_audio_path)
-            except OSError:
-                pass
-            self._current = None
+            if is_999:
+                self._release_999()
+            self._finish_cleanup(wf, tmp_audio_path)
+            return "completed"
 
     def _cleanup_stream(self):
         if self.stream is not None:
@@ -301,8 +526,9 @@ class AUDIO_PLAY_CENTER:
         return True
 
     def _data_priority_insert(self, audio_json):
-        """按 priority_mapping 插队（源 data_priority_insert 语义保真：未识别 type 落队尾）"""
-        priority_mapping = (self.config_data or {}).get("priority_mapping") or {}
+        """按优先级插队（源 data_priority_insert 语义保真：未识别 type 落队尾）。
+        A5 单源：消费 filter.priority_mapping（经 _priority_mapping 三级回退）。"""
+        priority_mapping = self._priority_mapping()
 
         def get_priority(item):
             return priority_mapping.get(item.get("type"))
@@ -340,7 +566,9 @@ class AUDIO_PLAY_CENTER:
             logger.info("builtin播放已恢复")
 
     def skip_current_stream(self):
-        """跳过当前条（builtin 停止语义调用目标，native F6）"""
+        """跳过当前条（builtin 停止语义调用目标，native F6）；
+        F-3：挂起中的 999 一并放弃（进下一条，日志留痕）"""
+        self._discard_suspended("跳过")
         with self.list_lock:
             if self.stream is not None:
                 try:
@@ -359,6 +587,7 @@ class AUDIO_PLAY_CENTER:
     def clear(self):
         with self.list_lock:
             self.audio_json_list.clear()
+        self._discard_suspended("清空队列")
         logger.info("builtin清空播放队列")
 
     def get_list(self):
@@ -392,10 +621,11 @@ class AUDIO_PLAY_CENTER:
         return device_infos
 
     def stop_all(self):
-        """系统停止链路调用（eng E-11）：清队列+停流+唤醒线程退出"""
+        """系统停止链路调用（eng E-11）：清队列+停流+唤醒线程退出；F-3 弃置挂起条目"""
         self._stop_flag.set()
         with self.list_lock:
             self.audio_json_list.clear()
+        self._discard_suspended("系统停止")
         self.pause_event.clear()
         self._skip_event.set()
         self._done_event.set()

@@ -498,8 +498,9 @@ class My_handle(metaclass=SingletonMeta):
     def prohibitions_handle(self, content):
         return self.comment_handler.prohibitions_handle(content)
     
-    def reread_handle(self, data):
-        return self.comment_handler.reread_handle(data)
+    def reread_handle(self, data, type=None):
+        # A6 修复（2026-10-22 批次）：透传 type（reread_top_priority→999 权重映射保持）
+        return self.comment_handler.reread_handle(data, type=type)
     
     def tuning_handle(self, data):
         return self.comment_handler.tuning_handle(data)

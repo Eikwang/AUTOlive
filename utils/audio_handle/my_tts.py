@@ -218,7 +218,7 @@ class MY_TTS:
             return None
         from utils.audio_handle.tts_params import (
             EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
-            speed_to_edge_rate, parse_edge_extra_args, normalize_edge_rate)
+            speed_to_edge_rate, speed_to_edge_pitch, parse_edge_extra_args, normalize_edge_rate)
 
         text = data.get("content") or ""
         if not text:
@@ -238,12 +238,21 @@ class MY_TTS:
         if extra_err:
             logger.warning(f"[TTS-edge] 高级参数 JSON 无效（已忽略，走全默认）——{extra_err}")
 
+        # A2 pitch 联动（2026-10-22 批次，义务 R2-A2）：运行时语速同步调 pitch 保持音高
+        # 一致——pitch_hz=(factor-1)*50 即 +1.2 倍→"+10Hz"，±50Hz 截断（speed_to_edge_pitch）。
+        # 仅语速驱动时联动（speed=None 走配置 rate 不调 pitch）；用户 extra_args 显式
+        # pitch 优先（escape hatch 覆盖自动联动）。d1a 裁决：试听不过则此联动一行禁用。
+        synth_kwargs = {"rate": rate}
+        if speed is not None:
+            synth_kwargs["pitch"] = speed_to_edge_pitch(speed)
+
         file_name = 'edge_tts_' + self.common.get_bj_time(4) + '.mp3'
         voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate, **extra_args)
+            communicate = edge_tts.Communicate(text, voice, **synth_kwargs, **extra_args)
             await communicate.save(voice_tmp_path)
-            logger.info(f"[TTS-edge] 合成成功 voice={voice} rate={rate} → {voice_tmp_path}")
+            logger.info(f"[TTS-edge] 合成成功 voice={voice} rate={rate}"
+                        f"{' pitch=' + synth_kwargs['pitch'] if 'pitch' in synth_kwargs else ''} → {voice_tmp_path}")
             return voice_tmp_path
         except Exception as e:
             logger.error(f"[TTS-edge] 合成失败——problem: {e}; "

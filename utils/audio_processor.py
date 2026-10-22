@@ -134,9 +134,8 @@ class AudioProcessor:
             if self.config.get("talk", "no_recording_during_playback"):
                 # 存在待合成音频 或 已合成音频还未播放 或 播放中 或 在数据处理中
                 if (
-                    self.my_handle.is_audio_queue_empty() != 15
+                    self.my_handle.is_audio_queue_empty() != 7
                     or self.my_handle.is_handle_empty() == 1
-                    or my_global.wait_play_audio_num > 0
                 ):
                     time.sleep(
                         float(
