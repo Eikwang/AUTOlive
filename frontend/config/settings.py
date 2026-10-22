@@ -275,6 +275,21 @@ def _ensure_defaults(config: "Settings") -> None:
     """补写新增配置节的缺失键（只补缺失，不覆盖既有值）并落盘。"""
     changed = False
     cfg = config._config
+
+    # metahuman_stream 驱动退役归一化（2026-10-22 批次 G2/A3）：
+    # 存量 visual_body=metahuman_stream → edtalk_realtime 并 log 告知
+    if cfg.get("visual_body") == "metahuman_stream":
+        cfg["visual_body"] = "edtalk_realtime"
+        changed = True
+        try:
+            from utils.base import logger
+            logger.warning(
+                "visual_body=metahuman_stream 已弃用（2026-10-22 批次退役）——已自动迁移为 "
+                "edtalk_realtime；如需回看请查发布说明。metahuman_stream 配置节不再读取")
+        except Exception:
+            pass
+    # metahuman_stream 配置节退役（不再读取；保留于存量文件不影响运行）
+
     if "edtalk_realtime" not in cfg:
         cfg["edtalk_realtime"] = dict(_EDTALK_REALTIME_DEFAULTS)
         changed = True

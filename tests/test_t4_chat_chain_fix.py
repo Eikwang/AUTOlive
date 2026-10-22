@@ -60,6 +60,10 @@ def my_handle():
     mh.config._cfg = cfg
     # 绑定必须在 config 对象就位之后（side_effect 闭包读取 mh.config._cfg）
     mh.config.get = MagicMock(side_effect=lambda *keys: _config_get(mh.config, keys))
+    # 2026-10-22 批次：回复模板接线后 talk_handle 多一步 apply_reply_template——
+    # MagicMock 属性会污染 result["content"]，此处透传原文（模板行为由
+    # test_common_config_wiring.py::TestApplyReplyTemplate 专项覆盖）
+    mh.apply_reply_template = MagicMock(side_effect=lambda resp, username: resp)
     return mh
 
 

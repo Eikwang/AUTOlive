@@ -30,8 +30,8 @@ class SynthesisMixin:
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处
                 #
-                # 音频分流（EDTalk功能集成计划 §4.3.2，与启动条件对齐杜绝静音组合）：
-                # - metahuman_stream：文本 echo，TTS 由对端托管（既有逻辑）
+                # 音频分流（EDTalk功能集成计划 §4.3.2，与启动条件对齐杜绝静音组合；
+                # 2026-10-22 批次：metahuman_stream 驱动退役（G2）——本地 TTS 单路径）：
                 # - edtalk_realtime 且 enable：走本地 TTS 合成 → 播放环节跳过本地播放、
                 #   推送 /audio/push_full 给 EDTalk 帧锁定播放（playback_manager 分流）
                 # - edtalk_realtime 但 enable=false：走本地 TTS + 本地正常播放
@@ -42,21 +42,8 @@ class SynthesisMixin:
                         "本次音频将走本地声音播放，无数字人画面与口型"
                     )
 
-                if self.config.get("visual_body") == "metahuman_stream":
-                    logger.debug(f"合成音频前的原始数据：{message['content']}")
-                    # 针对配置传参遗漏情况，主动补上，避免异常
-                    if "config" not in message:
-                        message["config"] = self.config.get("filter")
-                    message["content"] = self.common.remove_extra_words(message["content"], message["config"]["max_len"], message["config"]["max_char_len"])
-                    # logger.info("裁剪后的合成文本:" + text)
-
-                    message["content"] = message["content"].replace('\n', '。')
-
-                    if message["content"] != "":
-                        await self.metahuman_stream_api(message['content'])
-                else:
-                    # 合成音频并插入待播放队列
-                    await self.my_play_voice(message)
+                # 合成音频并插入待播放队列
+                await self.my_play_voice(message)
 
                 # E2 饥饿路径 flush：突发结束（待合成队列空且无在途合成）时，
                 # 若待播放队列积压未达首次播放阈值，立即放行——规则见
@@ -109,31 +96,6 @@ class SynthesisMixin:
             logger.error(traceback.format_exc())
             return None
 
-
-    async def metahuman_stream_api(self, message=""):
-        """调用metahuman_stream的api"""
-        try:
-            from urllib.parse import urljoin
-
-            url = urljoin(self.config.get('metahuman_stream', 'api_ip_port'), "/human")
-
-            data = {
-                "type": 'echo',
-                "text": message
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=data) as response:
-                    # 检查响应状态
-                    if response.status == 200:
-                        logger.info("metahuman发送成功")
-                        return True
-                    else:
-                        logger.error(f"metahuman发送失败，状态码：{response.status}")
-                        return False
-
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            return False
 
     def audio_synthesis(self, message):
         """音频合成（edge-tts / vits_fast等）并播放"""
@@ -321,18 +283,29 @@ class SynthesisMixin:
                 _params = _gdata.get("params") or {}
                 _lang_raw = _params.get("text_lang") or _gdata.get("language") or "自动识别"
                 if _lang_raw == "自动识别":
-                    # 自动检测语言（ref_free 模式无参考文本语种前提，动态检测为配套）
+                    # 动态检测语言（ref_free 模式配套）——2026-10-22 批次（P13 潜伏缺陷修复）：
+                    # 原调用的 common.lang_check 已弃用不存在（AttributeError 雷），
+                    # 改走新建轻量 lang_check（TextMixin，粤/谚/假/拉/汉字符区段判定）
                     language = self.common.lang_check(message["content"])
                     logger.debug(f'language={language}')
-                    language_name_dict = {"en": "英文", "zh": "中文", "ja": "日文"}
-                    _lang_code = language if language in ("en", "zh", "ja") else "zh"
-                    language = language_name_dict.get(_lang_code, "中文")
+                    _lang_code = language if language in ("en", "zh", "ja", "ko") else "zh"
                     _params.setdefault("text_lang", _lang_code)
                 else:
-                    language = _lang_raw
                     # 显示名→代码值（inproc 装配 text_lang 需代码值；params.text_lang 优先已回写）
-                    _name_to_code = {"英文": "en", "中文": "zh", "日文": "ja"}
-                    _lang_code = _name_to_code.get(language, _params.get("text_lang", "zh"))
+                    _name_to_code = {"英文": "en", "中文": "zh", "日文": "ja", "韩文": "ko",
+                                     "所有": "auto", "粤语": "auto_yue"}
+                    _lang_code = _name_to_code.get(_lang_raw, _params.get("text_lang", "zh"))
+                    language = _lang_code
+
+                # need_lang（回复语言）映射覆盖 params 静态值（G3/spec L1 落地路径，2026-10-22）——
+                # 代码值直通 data.language→my_tts._gpt_sovits_inproc merged.text_lang→引擎
+                # （{none→auto, zh→zh, en→en, jp→ja, ko→ko, yue→auto_yue}）
+                _need_lang = self.config.get("need_lang") or "none"
+                _need_to_text_lang = {"none": "auto", "zh": "zh", "en": "en",
+                                      "jp": "ja", "ko": "ko", "yue": "auto_yue"}
+                if _need_lang in _need_to_text_lang:
+                    _lang_code = _need_to_text_lang[_need_lang]
+                    language = _lang_code
 
                 data = {
                     "type": _gdata.get("type", "gpt_sovits"),

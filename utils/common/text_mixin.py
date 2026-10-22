@@ -524,3 +524,66 @@ class TextMixin:
             i += 1
 
         return result
+
+    # ==================== 语言检测（基础功能版块 2026-10-22 批次） ====================
+    # 历史背景：原 lang_check 以 langid 实现，因内存泄漏风险被注释弃用
+    # （utils/common_original.py:407-418，translate_argos.py:53 记"已失联"）。
+    # synthesis_manager.py:325 曾调用不存在的 lang_check（潜伏 AttributeError，
+    # params.text_lang 为空即触发）。本实现为无第三方依赖的轻量字符区段判定。
+
+    # 粤语特征字封闭常量：命中任一即判粤语。判定次序中粤语先于中文——
+    # 粤语弹幕被 zh 放行后会以 text_lang=zh 合成导致发音失真（spec C5）。
+    # 扩充原则：常见粤语独有汉字（普通话书面语不用的粤字）。
+    YUE_FEATURE_CHARS = frozenset("唔嘅咗咁喺啲冇乜佢哋嚟咩冧掂嘢係喇啱嗰哂")
+
+    _lang_detect_counts = {"yue": 0, "ko": 0, "ja": 0, "en": 0, "zh": 0}
+
+    def lang_check(self, text: str) -> str:
+        """轻量语言检测（基础功能 2026-10-22 批次新建，替代弃用的 langid 方案）。
+
+        判定次序：粤字特征集 → 谚文(Hangul) → 假名(Kana) → 拉丁字母 → 汉字 → 默认 zh。
+        粤语先于中文：粤字弹幕被 zh 放行后将以 text_lang=zh 合成发音失真（spec C5）。
+
+        Args:
+            text (str): 待检测文本（弹幕内容）
+
+        Returns:
+            str: 'yue' | 'ko' | 'ja' | 'en' | 'zh'
+        """
+        try:
+            if not text:
+                return "zh"
+            # 第一遍：粤字特征全文扫描（任一粤字出现即 yue——先于其他判定，spec C5；
+            # 不用"首字符即返"：如"呢个嘢"的"呢"是普通话也用的字，须扫到"嘢"才判粤）
+            for ch in text:
+                if ch in self.YUE_FEATURE_CHARS:
+                    self._lang_detect_counts["yue"] = self._lang_detect_counts.get("yue", 0) + 1
+                    return "yue"
+            # 第二遍：字符区段判定（首个可判定字符）
+            for ch in text:
+                if "\u1100" <= ch <= "\u11FF" or "\uAC00" <= ch <= "\uD7AF":
+                    lang = "ko"
+                elif "\u3040" <= ch <= "\u30FF":
+                    lang = "ja"
+                elif ch.isascii() and ch.isalpha():
+                    lang = "en"
+                elif "\u4E00" <= ch <= "\u9FFF":
+                    lang = "zh"
+                else:
+                    continue
+                self._lang_detect_counts[lang] = self._lang_detect_counts.get(lang, 0) + 1
+                return lang
+            return "zh"
+        except Exception as e:
+            logger.error(f"lang_check 检测失败（降级 zh）：problem=语言检测异常；cause={e}；fix=查看日志定位")
+            return "zh"
+
+    def lang_detect_stats_summary(self) -> str:
+        """各语言分类计数汇总（日志可观测误判盲区——DX medium）。
+
+        Returns:
+            str: 如 "语言检测统计: zh=123, en=45, yue=6, ja=3, ko=0"
+        """
+        c = self._lang_detect_counts
+        return ("语言检测统计: zh={}, en={}, yue={}, ja={}, ko={}"
+                .format(c.get("zh", 0), c.get("en", 0), c.get("yue", 0), c.get("ja", 0), c.get("ko", 0)))

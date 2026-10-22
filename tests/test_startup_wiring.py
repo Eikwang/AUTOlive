@@ -88,8 +88,9 @@ def test_coordination_program_passthrough_regression(tmp_path, monkeypatch):
             "executable": "E:/srv/python.exe",
             "parameters": ["E:/srv/app.py"],
         }],
-        # 关闭新服务开关（隔离被测分支）
-        "visual_body": "metahuman_stream",
+        # 关闭新服务开关（隔离被测分支；2026-10-22 批次 G2：metahuman 值退役改 edtalk+enable=false）
+        "visual_body": "edtalk_realtime",
+        "edtalk_realtime": {"enable": False},
         "fastrag": {"enable": False},
     }
     monkeypatch.setattr("frontend.main.subprocess.Popen", FakeProc)
@@ -119,7 +120,8 @@ def test_coordination_program_multi_params_passthrough(tmp_path, monkeypatch):
             "executable": "py.exe",
             "parameters": ["app.py", "--port", "9999"],
         }],
-        "visual_body": "metahuman_stream",
+        "visual_body": "edtalk_realtime",
+        "edtalk_realtime": {"enable": False},
         "fastrag": {"enable": False},
     }
     monkeypatch.setattr("frontend.main.subprocess.Popen", FakeProc)
@@ -165,7 +167,7 @@ def test_edtalk_not_started_when_disabled(tmp_path, monkeypatch):
     assert launched == {}
 
     cfg2 = _ed_config()
-    cfg2["visual_body"] = "metahuman_stream"
+    cfg2["edtalk_realtime"]["enable"] = False  # 2026-10-22 批次 G2：visual_body 单值，改 enable=false 组合
     app.config._config = cfg2
     app._start_edtalk_realtime(app.config._config)
     assert launched == {}

@@ -38,11 +38,13 @@ def create_common_config_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="common_config")
 
-    chat_type_options = {'custom_llm': '自定义LLM'}
+    chat_type_options = {'custom_llm': '自定义LLM', 'fastrag': 'fastrag知识库', 'local_qa': '本地问答'}
+    # 2026-10-22 批次（G1）：chat_type 三通道——custom_llm（OpenAI-compatible 自定义）/
+    # fastrag（本地知识库 RAG）/local_qa（本地词库直答）。失败→本地问答托底（llm_handle 共享层）。
     # edtalk_realtime 为合法运行态值（EDTalk 整合，frontend/main.py 开关双检）——
-    # 漏列曾致通用配置页 "Invalid value: edtalk_realtime"（2026-10-06 基线既有问题，2026-10-12 修复）
-    visual_body_options = {'metahuman_stream': 'metahuman_stream',
-                           'edtalk_realtime': 'EDTalk 实时驱动'}
+    # 漏列曾致通用配置页 "Invalid value: edtalk_realtime"（2026-10-06 基线既有问题，2026-10-12 修复）。
+    # 2026-10-22 批次（G2）：metahuman_stream 选项退役移除。
+    visual_body_options = {'edtalk_realtime': 'EDTalk 实时驱动'}
     audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS', 'edge_tts': 'edge-tts'}  # D-19：与合成测试处下拉保持一致
 
     # 基础配置（3列网格）
@@ -72,7 +74,9 @@ def create_common_config_tab(
     with ui.grid(columns=3):
         _auto_save(ui.select(
             label='回复语言',
-            options={'none': '所有', 'zh': '中文', 'en': '英文', 'jp': '日文'},
+            # 2026-10-22 批次（G3）：补韩文/粤语。内部值 'jp'→引擎 'ja' 映射见
+            # synthesis_manager.tts_handle（存量配置兼容，不改键值）
+            options={'none': '所有', 'zh': '中文', 'en': '英文', 'jp': '日文', 'ko': '韩文', 'yue': '粤语'},
             value=get_nested_value(config, "need_lang")
         ).style("width:100%;").tooltip('限制回复的语言，如：选中中文，则只会回复中文提问，其他语言将被跳过'), ("need_lang",))
 

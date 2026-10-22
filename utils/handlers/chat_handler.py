@@ -19,16 +19,18 @@ class ChatHandler:
     def __init__(self, my_handle):
         """
         初始化聊天处理器
-        
+
         Args:
             my_handle: My_handle 实例
         """
         self.my_handle = my_handle
-    
+        # LLM 熔断器（per-channel，ENG E-3：通道间不互扰）
+        self._llm_breakers = {}
+
     def get_chat_model(self, chat_type, config):
         """
         获取聊天模型
-        
+
         Args:
             chat_type (str): 聊天类型
             config (dict): 配置
@@ -40,24 +42,87 @@ class ChatHandler:
         """处理聊天类型"""
         chat_type = self.my_handle.config.get("chat_type")
         self.get_chat_model(chat_type, self.my_handle.config)
-    
-    def llm_handle(self, chat_type, data_json):
-        """
-        LLM处理
+
+    def _get_breaker(self, channel):
+        """取通道熔断器（惰性创建，per-channel 隔离）。"""
+        if channel not in self._llm_breakers:
+            from utils.llm_breaker import LLMBreaker
+            self._llm_breakers[channel] = LLMBreaker(channel)
+        return self._llm_breakers[channel]
+
+    def _try_local_qa_fallback(self, chat_type, data_json, fail_reason):
+        """本地问答托底（基础功能 2026-10-22，spec A2）。
+
+        custom_llm/fastrag 失败（异常/None/空）后调用；local_qa.enable=false 时
+        托底禁用→统一"无回复原因"出口（ENG E-6：终结全静默）。
 
         Args:
-            chat_type (str): 聊天类型
+            chat_type (str): 失败的 LLM 通道名
+            data_json (dict): 弹幕数据（含 username/content）
+            fail_reason (str): LLM 失败原因链（入 log）
+
+        Returns:
+            str | None: 托底命中返回渲染后回答；未命中/禁用返回 None（log 已记原因）
+        """
+        username = (data_json or {}).get("username", "")
+        content = (data_json or {}).get("content", "")
+        if not self.my_handle.config.get("local_qa", "enable"):
+            logger.info(
+                f"无回复原因：LLM 通道 {chat_type} 失败（{fail_reason}）→ "
+                f"本地问答托底禁用（local_qa.enable=false）→ 无回复；"
+                f"fix=启用 WebUI 本地问答开关或修复 LLM 服务")
+            return None
+        answer = self.my_handle.feature_handler.local_qa_match(content, username=username)
+        if answer:
+            logger.info(f"本地问答托底命中：LLM 通道 {chat_type} 失败（{fail_reason}）→ 词库回答")
+            return answer
+        logger.info(
+            f"无回复原因：LLM 通道 {chat_type} 失败（{fail_reason}）→ "
+            f"本地问答托底未命中 → 无回复")
+        return None
+
+    def llm_handle(self, chat_type, data_json):
+        """
+        LLM处理（共享层：弹幕路径 comment_handle 与语音路径 talk_handle 共用，
+        ENG E-1——失败→托底→熔断在此单点实现，双路径行为天然一致）
+
+        Args:
+            chat_type (str): 聊天类型（custom_llm/fastrag/local_qa）
             data_json (dict): 数据JSON
 
         Returns:
             str: LLM回复内容
         """
+        # chat_type=local_qa：纯词库直答（不经 prompt/HTTP）
+        if chat_type == "local_qa":
+            username = (data_json or {}).get("username", "")
+            content = (data_json or {}).get("content", "")
+            if not self.my_handle.config.get("local_qa", "enable"):
+                logger.info(
+                    "无回复原因：chat_type=local_qa 但 local_qa.enable=false → 无回复；"
+                    "fix=启用 WebUI 本地问答开关或改 chat_type")
+                return None
+            answer = self.my_handle.feature_handler.local_qa_match(content, username=username)
+            if answer:
+                return answer
+            logger.info("无回复原因：本地问答词库未命中 → 无回复")
+            return None
+
         try:
+            # 熔断检查：开路期直接走托底（native F3，防故障期每条 60s 级联停顿）
+            breaker = self._get_breaker(chat_type)
+            if not breaker.allow_request():
+                return self._try_local_qa_fallback(
+                    chat_type, data_json, f"熔断开路中（连续失败）")
+
             # 获取模型
             model = self.my_handle.__dict__.get(chat_type)
             if model is None:
-                logger.error(f"模型 {chat_type} 未初始化")
-                return None
+                logger.error(
+                    f"模型 {chat_type} 未初始化；fix=检查 config chat_type 与对应配置节"
+                    f"（custom_llm/fastrag），重启系统")
+                breaker.record_failure()
+                return self._try_local_qa_fallback(chat_type, data_json, "模型未初始化")
 
             # 调用模型（使用 get_resp_sync 保持向后兼容）
             # 优先使用 get_resp_sync 方法（异步化改造后的方法）
@@ -66,11 +131,25 @@ class ChatHandler:
             else:
                 resp_content = model.chat(data_json)
 
-            return resp_content
+            if resp_content:
+                breaker.record_success()
+                return resp_content
+
+            # 返回 None/空：通道失败→托底（DX CAP6-4/5：失败原因+通道名入 log）
+            breaker.record_failure()
+            return self._try_local_qa_fallback(chat_type, data_json, "通道返回空（None/空串）")
         except Exception as e:
-            handle_error(e, {'module': 'handler', 'function': 'unknown'})
-            logger.error(f"LLM处理失败：{e}")
-            return None
+            handle_error(e, {'module': 'handler', 'function': 'llm_handle'})
+            logger.error(
+                f"LLM_FALLBACK LLM 处理异常：通道 {chat_type}，"
+                f"{type(e).__name__}: {e}；fix=查看下方 traceback 定位"
+                f"（非预期异常附紧凑栈）")
+            logger.error(traceback.format_exc(limit=8))
+            try:
+                self._get_breaker(chat_type).record_failure()
+            except Exception:
+                pass
+            return self._try_local_qa_fallback(chat_type, data_json, f"异常 {type(e).__name__}: {e}")
     
     def llm_stream_handle_and_audio_synthesis(self, chat_type, data_json, type="chat"):
         """
@@ -205,21 +284,27 @@ class ChatHandler:
             content = self.my_handle.comment_check_and_replace(content)
             if content is None:
                 return
-            
+
+            # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
+            if not self.my_handle.lang_filter_pass(content):
+                return
+
             # 判断字符串是否全为标点符号，是的话就过滤
             if self.my_handle.common.is_punctuation_string(content):
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
-            
+
             # 判断按键映射触发类型
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
                 # 按键映射 触发后不执行后面的其他功能
                 if self.my_handle.key_mapping_handle("弹幕", data):
                     return
 
-            # 1、本地问答库匹配
-            if self.my_handle.local_qa_handle(data):
-                return
+            # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
+            # custom_llm/fastrag 模式跳过，词库改由 llm_handle 内托底调用）
+            if self.my_handle.config.get("chat_type") == "local_qa":
+                if self.my_handle.local_qa_handle(data):
+                    return
 
             # 2、点歌模式
             if self.my_handle.choose_song_handle(data):
@@ -228,22 +313,22 @@ class ChatHandler:
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 构建数据
+                # 构建数据（prompt 走共享构建器：弹幕模板→前后缀→语言指令，ENG E-1）
                 data_json = {
                     "username": username,
                     "content": content,
+                    "prompt": self.my_handle.build_llm_input(username, content),
                     "ori_username": data.get("ori_username", username),
                     "ori_content": data.get("ori_content", content)
                 }
-                
-                # LLM处理
+
+                # LLM处理（失败→托底→熔断在 llm_handle 单点实现）
                 resp_content = self.llm_handle(chat_type, data_json)
-                
+
                 if resp_content:
                     logger.info(f"[AI回复{username}]：{resp_content}")
                 else:
                     resp_content = ""
-                    logger.warning(f"警告：{chat_type}无返回")
             elif chat_type == "game":
                 # 游戏控制实现已随拆分移除（GameControl 不在现行代码）——明示不可用而非
                 # None.parse_keys AttributeError（T4）
@@ -285,6 +370,10 @@ class ChatHandler:
                 tmp = self.my_handle.my_translate.trans(resp_content)
                 if tmp:
                     resp_content = tmp
+
+            # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→写日志→TTS，
+            # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本）
+            resp_content = self.my_handle.apply_reply_template(resp_content, username)
 
             self.my_handle.write_to_comment_log(resp_content, {"username": username, "content": content})
 

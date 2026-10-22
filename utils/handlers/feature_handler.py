@@ -247,46 +247,89 @@ class FeatureHandler:
             logger.error(f"加载数据失败：{e}")
             return None
     
+    def local_qa_match(self, content, username=None):
+        """本地问答词库纯查询（基础功能 2026-10-22 批次抽取，DRY：三消费点共用）。
+
+        仅做匹配与渲染（变量替换+随机括号），不含 enable 检查、不播音频——
+        enable 检查统一在调用点（spec R2-1）；local_qa_handle/LLM 托底/
+        chat_type=local_qa 通道三消费点统一调用（ENG E-2）。
+
+        Args:
+            content (str): 弹幕内容（查询文本）
+            username (str | None): 弹幕用户名（供词库 {username} 变量渲染）
+
+        Returns:
+            str | None: 渲染后的回答文本；未匹配返回 None
+        """
+        try:
+            # 根据类型，执行不同的问答匹配算法
+            if self.my_handle.config.get("local_qa", "format") == "text":
+                tmp = self.find_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
+            else:
+                tmp = self.find_similar_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
+
+            if tmp is None:
+                return None
+            return self.local_qa_render(tmp, content_username=username)
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            logger.error(f"本地问答匹配失败：{e}")
+            return None
+
+    def local_qa_render(self, text, content_username=None):
+        """词库回答共享渲染（ENG E-2：变量替换 + [1|2] 随机括号语法）。
+
+        Args:
+            text (str): 词库原始回答文本
+            content_username (str | None): 弹幕用户名（托底/local_qa 通道传入；
+                local_qa_handle 传实际 username）
+
+        Returns:
+            str: 渲染后的回答文本
+        """
+        try:
+            # 将问答库中设定的参数替换为指定内容，开发者可以自定义替换内容
+            # 假设有多个未知变量，用户可以在此处定义动态变量
+            variables = {
+                'cur_time': self.my_handle.common.get_bj_time(5),
+                'username': content_username or ''
+            }
+
+            # 使用字典进行字符串替换
+            if any(var in text for var in variables):
+                text = text.format(**{var: value for var, value in variables.items() if var in text})
+
+            # [1|2]括号语法随机获取一个值，返回取值完成后的字符串
+            return self.my_handle.common.random_bracket_value(text)
+        except Exception as e:
+            logger.error(f"本地问答渲染失败（降级原文）：{e}")
+            return text
+
     def local_qa_handle(self, data):
         """
-        本地问答处理
-        
+        本地问答处理（前置抢答路径——仅 chat_type=local_qa 时由调用方进入，
+        spec C1：custom_llm/fastrag 模式跳过前置拦截，词库只作托底）
+
         Args:
             data (dict): 数据
-            
+
         Returns:
             bool: 是否触发并处理
         """
         try:
             username = data["username"]
             content = data["content"]
-            
+
             # 检查是否启用本地问答
             if not self.my_handle.config.get("local_qa", "enable"):
                 return False
-            
-            # 根据类型，执行不同的问答匹配算法
-            if self.my_handle.config.get("local_qa", "format") == "text":
-                tmp = self.find_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
-            else:
-                tmp = self.find_similar_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
-            
-            if tmp is not None:
+
+            # 匹配+渲染走共享函数（DRY，ENG E-2）
+            resp_content = self.local_qa_match(content, username=username)
+
+            if resp_content is not None:
                 logger.info(f'触发本地问答库 [{username}]: {content}')
-                # 将问答库中设定的参数替换为指定内容，开发者可以自定义替换内容
-                # 假设有多个未知变量，用户可以在此处定义动态变量
-                variables = {
-                    'cur_time': self.my_handle.common.get_bj_time(5),
-                    'username': username
-                }
-                
-                # 使用字典进行字符串替换
-                if any(var in tmp for var in variables):
-                    tmp = tmp.format(**{var: value for var, value in variables.items() if var in tmp})
-                
-                # [1|2]括号语法随机获取一个值，返回取值完成后的字符串
-                resp_content = self.my_handle.common.random_bracket_value(tmp)
-                
+
                 message = {
                     "type": "local_qa_text",
                     "tts_type": self.my_handle.config.get("audio_synthesis_type"),
@@ -295,11 +338,11 @@ class FeatureHandler:
                     "username": username,
                     "content": resp_content
                 }
-                
+
                 self.my_handle.audio_synthesis_handle(message)
-                
+
                 return True
-            
+
             return False
         except Exception as e:
             logger.error(traceback.format_exc())

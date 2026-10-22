@@ -108,7 +108,7 @@ class TestE2StarvationFlush:
         assert queue_fx.voice_tmp_path_queue_not_empty_flag is False
 
     def test_flush_noop_when_play_queue_empty(self, queue_fx):
-        """待播放队列为空时无操作（metahuman 等不产音频路径安全）"""
+        """待播放队列为空时无操作（不产音频路径安全；metahuman 驱动已 2026-10-22 退役）"""
         assert queue_fx.flush_starved_playback_queue() is False
         assert queue_fx.voice_tmp_path_queue_not_empty_flag is False
 

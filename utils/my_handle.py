@@ -159,7 +159,7 @@ class My_handle(metaclass=SingletonMeta):
 
             self.custom_llm = None
 
-            self.chat_type_list = ["custom_llm"]
+            self.chat_type_list = ["custom_llm", "fastrag", "local_qa"]
 
             # 初始化 handler 模块
             self.audio_handler = AudioHandler(self)
@@ -201,8 +201,20 @@ class My_handle(metaclass=SingletonMeta):
 
     # 配置加载
     def config_load(self):
-        # 设置GPT_Model全局模型列表
+        # 设置GPT_Model全局模型列表（基础功能 2026-10-22：三通道按配置初始化）
         GPT_MODEL.set_model_config("custom_llm", My_handle.config.get("custom_llm"))
+        GPT_MODEL.set_model_config("fastrag", My_handle.config.get("fastrag"))
+
+        # 启动警告（spec R2-1/DX CAP6-8：通道可用性与配置开关错配时明示+fix 指引）
+        _chat_type = My_handle.config.get("chat_type")
+        if _chat_type == "fastrag" and not (My_handle.config.get("fastrag") or {}).get("enable"):
+            logger.warning(
+                "chat_type=fastrag 但 fastrag.enable=false——知识库服务不会随系统启动，"
+                "运行期 /query 将失败并走本地问答托底；fix=启用 WebUI 知识库页开关或改 chat_type")
+        if _chat_type == "local_qa" and not My_handle.config.get("local_qa", "enable"):
+            logger.warning(
+                "chat_type=local_qa 但 local_qa.enable=false——本地问答词库不会匹配，"
+                "每条弹幕将无回复；fix=启用 WebUI 本地问答开关或改 chat_type")
 
         # uc2/LLM 翻译接线（切片 3 收尾）：GPT 通道就绪后注入翻译回调——
         # 译文目标语言跟随翻译模块既有 to_lang 配置（baidu.to_lang 缺省 zh）
@@ -344,7 +356,132 @@ class My_handle(metaclass=SingletonMeta):
 
     def llm_handle(self, chat_type, data_json):
         return self.chat_handler.llm_handle(chat_type, data_json)
-    
+
+    # ==================== 基础功能共享层（2026-10-22 批次，ENG E-1） ====================
+    # 弹幕主路径（comment_handle）与语音路径（talk_handle）共用的 LLM 输入构建、
+    # 语言过滤与回复模板——单点实现防双路径行为分裂（dual-code-path 教训）。
+
+    def build_llm_input(self, username, content):
+        """共享 LLM 输入构建器：弹幕模板→提示词前后缀→语言回复指令统一拼装。
+
+        调用点：comment_handle 与 talk_handle 两处 data_json 构建同调（ENG E-1）。
+        各环节异常均降级原文（DX CAP6-9：warning 含异常+原模板串+占位符对照）。
+
+        Args:
+            username (str): 弹幕用户名
+            content (str): 违禁/格式检查后的弹幕内容
+
+        Returns:
+            str: 发送给 LLM 的最终 prompt
+        """
+        templated = content
+        try:
+            # 1. 弹幕模板（G5）
+            if self.config.get("comment_template", "enable"):
+                template = self.config.get("comment_template", "copywriting")
+                if template:
+                    try:
+                        templated = template.format(username=username, comment=content)
+                    except (KeyError, IndexError, ValueError) as e:
+                        logger.warning(
+                            f"弹幕模板 format 失败（降级原文）：{e}；原模板={template!r}；"
+                            f"占位符对照：合法变量为 {{username}}/{{comment}}")
+                        templated = content
+        except Exception as e:
+            logger.warning(f"弹幕模板处理异常（降级原文）：{e}")
+            templated = content
+
+        # 2. 提示词前后缀（G4，空串不拼）
+        before_prompt = self.config.get("before_prompt") or ""
+        after_prompt = self.config.get("after_prompt") or ""
+        prompt = before_prompt + templated + after_prompt
+
+        # 3. 语言回复指令（native F2：yue/ko 需显式指令，防普通话文本经 auto_yue/ko 合成失真）
+        need_lang = self.config.get("need_lang") or "none"
+        lang_instruction = {"yue": "请用粤语回复。", "ko": "请用韩语回复。"}.get(need_lang)
+        if lang_instruction:
+            prompt = prompt + lang_instruction
+        return prompt
+
+    def apply_reply_template(self, resp_content, username):
+        """回复模板应用（G6/G7）：多条模板随机选一条套用，异常降级原文。
+
+        调用点：两路径在违禁过滤+翻译之后、写评论日志之前（ENG Section 4 顺序裁决）。
+
+        Args:
+            resp_content (str): LLM 回复原文（已过违禁/翻译）
+            username (str): 弹幕用户名（超 username_max_len 截断）
+
+        Returns:
+            str: 套模板后的回复文本
+        """
+        try:
+            if not self.config.get("reply_template", "enable"):
+                return resp_content
+            copywriting = self.config.get("reply_template", "copywriting")
+            if not copywriting:
+                return resp_content
+            # str 与 list 双形态兼容（G7：存量 config 为 str，前端按数组转换）
+            if isinstance(copywriting, str):
+                templates = [t for t in copywriting.split("\n") if t.strip()]
+            elif isinstance(copywriting, list):
+                templates = [str(t) for t in copywriting if str(t).strip()]
+            else:
+                return resp_content
+            if not templates:
+                return resp_content
+
+            import random
+            template = random.choice(templates)
+
+            # username_max_len 截断（超长加省略号）
+            max_len = self.config.get("reply_template", "username_max_len")
+            try:
+                max_len = int(max_len) if max_len not in (None, "") else None
+            except (TypeError, ValueError):
+                max_len = None
+            display_username = username or ""
+            if max_len and max_len > 0 and len(display_username) > max_len:
+                display_username = display_username[:max_len] + "…"
+
+            try:
+                return template.format(username=display_username, data=resp_content)
+            except (KeyError, IndexError, ValueError) as e:
+                logger.warning(
+                    f"回复模板 format 失败（降级原文）：{e}；原模板={template!r}；"
+                    f"占位符对照：合法变量为 {{username}}/{{data}}")
+                return resp_content
+        except Exception as e:
+            logger.warning(f"回复模板处理异常（降级原文）：{e}")
+            return resp_content
+
+    def lang_filter_pass(self, content):
+        """回复语言过滤（G3，双路径共用）：need_lang≠none 时检测弹幕语言。
+
+        粤语以粤字特征集判定（粤先于中文，spec C5）；不匹配丢弃+debug log；
+        每 50 条一次 info 级分类计数汇总（DX medium：默认日志级别下盲区可观测）。
+
+        Args:
+            content (str): 弹幕内容
+
+        Returns:
+            bool: True=放行（need_lang=none 或语言匹配）；False=丢弃
+        """
+        need_lang = self.config.get("need_lang") or "none"
+        if need_lang == "none":
+            return True
+        detected = self.common.lang_check(content)
+        allowed = {"zh": "zh", "en": "en", "jp": "ja", "ko": "ko", "yue": "yue"}.get(need_lang)
+        if allowed is None:
+            return True
+        if detected != allowed:
+            logger.debug(f"语言过滤丢弃：need_lang={need_lang} 检测={detected} 弹幕={content[:50]!r}")
+            return False
+        self._lang_filter_count = getattr(self, "_lang_filter_count", 0) + 1
+        if self._lang_filter_count % 50 == 0:
+            logger.info(f"语言过滤汇总（每50条）：{self.common.lang_detect_stats_summary()}")
+        return True
+
     def llm_stream_handle_and_audio_synthesis(self, chat_type, data_json, type="chat"):
         return self.chat_handler.llm_stream_handle_and_audio_synthesis(chat_type, data_json, type)
     

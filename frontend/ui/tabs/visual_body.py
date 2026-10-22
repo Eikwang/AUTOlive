@@ -3,10 +3,9 @@
 画面设置标签页模块（EDTalk功能集成计划 §4.1，原"虚拟身体"页重做）
 
 三区顺序 = 驱动类型 → EDTalk 配置区 → 运行控制区（默认折叠，服务运行时展开）。
-- 驱动类型：metahuman_stream / edtalk_realtime 二选一（互斥）
+- 驱动类型：edtalk_realtime 单驱动（2026-10-22 批次 G2：metahuman_stream 驱动退役移除）
 - EDTalk 配置区：config.edtalk_realtime 全参数（port/interpreter_path 可覆盖）
 - 运行控制区：直调 HTTP 不落 config（gaze/repair 热切、段调度、/status 回显）
-- metahuman_stream 参数区保留（edtalk 选中时收起为折叠面板）
 
 设计义务：运行控制区独立卡片+"立即生效"标注+5s 轮询+手动刷新+空态；
 按钮状态矩阵（驱动类型×服务状态 2×4）；驱动类型×enable 四组合提示；
@@ -22,7 +21,6 @@ from frontend.ui.components.config_helper import get_nested_value
 from utils.my_log import logger
 from utils.edtalk_realtime.helpers import (
     is_edtalk_active,
-    is_edtalk_selected,
     query_unity_capture,
 )
 
@@ -40,28 +38,24 @@ def create_visual_body_tab(
         ui.label("驱动类型")
         driver_select = FormField.create_select(
             label='数字人驱动',
-            options={'edtalk_realtime': 'EDTalk 实时推理（推荐）', 'metahuman_stream': 'metahuman_stream'},
+            # 2026-10-22 批次（G2）：metahuman_stream 驱动退役移除——单驱动 edtalk_realtime
+            options={'edtalk_realtime': 'EDTalk 实时推理（推荐）'},
             value=get_nested_value(config, "visual_body", default="edtalk_realtime"),
             on_change=lambda e: set_config_callback("visual_body", value=e.value),
             style="width:100%;",
-        ).tooltip("二选一互斥：EDTalk 实时推理 = 本地 TTS + 音频推送 + 虚拟摄像头帧锁定播放；"
-                  "metahuman_stream = 文本 echo 由对端托管")
+        ).tooltip("EDTalk 实时推理 = 本地 TTS + 音频推送 + 虚拟摄像头帧锁定播放"
+                  "（metahuman_stream 驱动已随 2026-10-22 批次退役）")
 
-        # 驱动类型 × enable 四组合提示（常驻区）
+        # 驱动类型 × enable 组合提示（常驻区）
         combo_warning = ui.label("").style("color: var(--color-warning); white-space: pre-wrap")
 
         def _update_combo_warning():
-            body = get_nested_value(config, "visual_body", default="metahuman_stream")
+            body = get_nested_value(config, "visual_body", default="edtalk_realtime")
             ed_enable = bool(get_nested_value(config, "edtalk_realtime", "enable", default=False))
-            fastrag_enable = bool(get_nested_value(config, "fastrag", "enable", default=False))
             msgs = []
             if body == "edtalk_realtime" and not ed_enable:
                 msgs.append("EDTalk 服务未启用（enable 关闭）：运行系统不会拉起数字人，"
                             "声音走本地播放、无数字人画面与口型")
-            if body == "metahuman_stream" and ed_enable:
-                msgs.append("edtalk_realtime.enable 已开但当前驱动为 metahuman_stream——该开关不会生效")
-            if body == "metahuman_stream" and fastrag_enable:
-                msgs.append("fastrag server 会随系统启动，但 metahuman 驱动不使用该服务（仅 custom_llm 指向 /query 时生效）")
             combo_warning.set_text("\n".join(msgs) if msgs else "")
 
         _update_combo_warning()
@@ -571,29 +565,8 @@ def create_visual_body_tab(
 
     _render_rules()
 
-    # ================= 卡片 4：metahuman_stream 参数（保留，edtalk 时收起） =================
-    edtalk_selected = is_edtalk_selected(config)
-    with ui.card().style(card_css):
-        mh_expansion = ui.expansion(
-            "metahuman_stream 参数" + ("（当前使用 EDTalk 实时推理，以下参数不生效）" if edtalk_selected else "")
-        ).style("width:100%")
-        mh_expansion.value = not edtalk_selected
-        with mh_expansion:
-            with ui.grid(columns=3):
-                FormField.create_select(
-                    label='类型',
-                    options={'ernerf': 'ernerf', 'musetalk': 'musetalk', 'wav2lip': 'wav2lip'},
-                    value=get_nested_value(config, "metahuman_stream", "type"),
-                    on_change=lambda e: set_config_callback("metahuman_stream", "type", e.value),
-                    style="width:100%;"
-                )
-                FormField.create_input(
-                    label='API地址',
-                    value=get_nested_value(config, "metahuman_stream", "api_ip_port"),
-                    placeholder='metahuman_stream应用启动API后，监听的ip和端口',
-                    on_change=lambda e: set_config_callback("metahuman_stream", "api_ip_port", e.value),
-                    style="width:100%;"
-                )
+    # （2026-10-22 批次 G2）卡片 4：metahuman_stream 参数卡已随驱动退役移除——
+    # 存量 metahuman_stream 配置节由 frontend/config/settings.py 归一化为 edtalk_realtime
 
     # ================= 交互函数 =================
 

@@ -57,13 +57,10 @@ class CommentHandler:
             replace_chars = filter_config.get("replace_chars", {})
             for old_char, new_char in replace_chars.items():
                 content = content.replace(old_char, new_char)
-            
-            # 语言过滤
-            lang_filter = filter_config.get("lang_filter")
-            if lang_filter and lang_filter != "none":
-                # TODO: 实现语言过滤
-                pass
-            
+
+            # （2026-10-22 批次清理，spec C3）原 filter.lang_filter 死 TODO 分支已移除——
+            # 语言过滤由顶层 need_lang 键驱动（my_handle.lang_filter_pass），与此处 filter 节无关
+
             return content
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
@@ -285,7 +282,11 @@ class CommentHandler:
             content = self.comment_check_and_replace(content)
             if content is None:
                 return
-            
+
+            # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
+            if not self.my_handle.lang_filter_pass(content):
+                return
+
             # 判断字符串是否全为标点符号，是的话就过滤
             if self.my_handle.common.is_punctuation_string(content):
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
@@ -309,9 +310,11 @@ class CommentHandler:
                 if self.my_handle.key_mapping_handle("弹幕", data):
                     return
 
-            # 1、本地问答库匹配
-            if self.my_handle.local_qa_handle(data):
-                return
+            # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
+            # custom_llm/fastrag 模式跳过，词库改由 llm_handle 内托底调用；ENG E-1 双路径同改）
+            if self.my_handle.config.get("chat_type") == "local_qa":
+                if self.my_handle.local_qa_handle(data):
+                    return
 
             # 2、点歌模式
             if self.my_handle.choose_song_handle(data):
@@ -320,22 +323,22 @@ class CommentHandler:
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 构建数据
+                # 构建数据（prompt 走共享构建器：弹幕模板→前后缀→语言指令，ENG E-1）
                 data_json = {
                     "username": username,
                     "content": content,
+                    "prompt": self.my_handle.build_llm_input(username, content),
                     "ori_username": data.get("ori_username", username),
                     "ori_content": data.get("ori_content", content)
                 }
-                
-                # LLM处理
+
+                # LLM处理（失败→托底→熔断在 llm_handle 单点实现）
                 resp_content = self.my_handle.llm_handle(chat_type, data_json)
-                
+
                 if resp_content:
                     logger.info(f"[AI回复{username}]：{resp_content}")
                 else:
                     resp_content = ""
-                    logger.warning(f"警告：{chat_type}无返回")
             elif chat_type == "game":
                 # 游戏控制实现已随拆分移除（GameControl 不在现行代码）——明示不可用而非
                 # None.parse_keys AttributeError（T4）
@@ -377,6 +380,10 @@ class CommentHandler:
                 tmp = self.my_handle.my_translate.trans(resp_content)
                 if tmp:
                     resp_content = tmp
+
+            # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→写日志→TTS，
+            # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本）
+            resp_content = self.my_handle.apply_reply_template(resp_content, username)
 
             self.write_to_comment_log(resp_content, {"username": username, "content": content})
 

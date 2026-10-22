@@ -100,7 +100,7 @@ class PlaybackMixin:
 
                     # print(voice_tmp_path)
 
-                    # 根据接入的虚拟身体类型执行不同逻辑（仅保留metahuman_stream在合成前处理）
+                    # 根据接入的虚拟身体类型执行不同逻辑（2026-10-22：metahuman_stream 驱动退役，EDTalk 分流为唯一特殊路径）
                     # EDTalk 实时推理模式（EDTalk功能集成计划 §4.3.3）：跳过本地播放——
                     # EDTalk 端 sounddevice 帧锁定播放（本地播放会双声），TTS 落盘
                     # （含变速）后仅推送 /audio/push_full。推送协程内阻塞等待完成

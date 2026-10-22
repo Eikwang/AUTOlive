@@ -1,5 +1,22 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-22) — 基础功能版块审查与修复批次
+
+1. **WebUI LLM 通道"测试连接"按钮**（P3, S）— 配置 fastrag 后故障首见于真实弹幕且只能翻日志（DX native medium）；一次性手动试连（POST /query 或 local_qa_match 试匹配）与 R2-2 方案 a（不轮询）裁决不冲突。依赖：无。
+2. **熔断首连败停顿窗口降档**（P3, S）— 首次 3 连败期间每条弹幕最长阻塞 60s 才降级托底（服务挂起场景直播感知差）；候选=首超时计双次或对已判失败通道降档超时。依赖：T1 熔断落地后评估。
+3. **TTHW 正式度量**（P3, M）— 配置改动→生效验证的自动化度量；与 2026-10-11 O2 DX 埋点项（TODOS DanmakuListener v0.7.0 节）合并推进。依赖：O2。
+4. **gpt_sovits 引擎懒启动评估**（P3, M）— 引擎现为共享资源无条件 inproc 启动（G8 拒绝条件启动的裁决：合成测试页/翻唱/字幕依赖）；懒启动=首次调用拉起/空闲回收，评估显存收益与链路风险。依赖：无。
+5. **fastrag /query 集成冒烟**（P3, S）— Fastrag_LLM 契约经 mock HTTP 单测（no_claim=provider acceptance），真实服务契约漂移靠注释锚定人工核对；补 enable=true 且端口可达时跑一例真实 /query 的可选冒烟。依赖：fastrag 服务实跑环境。
+6. **动态文案页存量 chatgpt llm_type 值展示不生效**（P3, S）— trends_copywriting.py:33 存量值 'chatgpt' 入 options 展示，但 task_scheduler.py:374 强制回退 custom_llm（ENG 既有债）；前端选项收敛或后端提示。依赖：无。
+
+
+## Deferred Items from /autoplan (2026-10-22) — 弹幕监听模块审查与优化批次
+
+1. **存量 gift 表口径迁移工具**（P3, M）— gift/integral 表历史行单位混杂（抖音/快手/小红书/视频号低 10 倍、B站连击少计、虎牙在线路径恒 0），本批不迁移；重算能力以因子常量文档化保留（原始币值÷因子=元，因子表在引擎代码+docs/danmaku_contract/mapping.md 双记载）。榜单侧已加口径切换说明行（data_analysis.py subtext）。迁移需用户裁决历史口径语义后启动。依赖：无。
+2. **上游 DanmakuListener 同步（有截止）**（P2, M）— 本批受管副本 7 张价格表元重定基+4 引擎修复+未命中告警（台账见 docs/danmaku_module.md 礼物计价批次节，G1-G6）。**截止条件=下次从 D:\AI\DanmakuListener 同步受管副本前必须完成 replay**，否则同步冲掉元口径成果（本副本=临时事实源至 replay 完成）。依赖：无。
+3. **B站及同类平台连击复发少计 + fixture 采集**（P2, S）— B站 gift_count=num 本条语义与消费者差值去重不匹配（连击/重复少计）；快手 comboCount 跨 burst 复位场景同类（以实测为准）。修复需 combo_total_num 真实样本语义验证——先采集 B站真实连击 SEND_GIFT 原始样本存 fixture（tests/fixtures），再做计数语义对齐。交付说明已显式标注该残留（native CEO F1 终门 uc1a 裁决）。依赖：真实直播间样本采集。
+4. **contract v2 unit-tagged 备选**（P3, S）— gift_value 契约演进方向：载荷带单位标签字段（unit-tagged）替代发射点换算常量，消除 7 处漂移点（native CEO F6）。依赖：上游契约变更窗口。
+
 ## Deferred Items from 门1验证 (2026-10-21) — 清理批次 pytest 既有失败
 
 1. **test_t5_key_mapping 5 项既有失败**（P2, S）— 【2026-10-21 已修复，提交 9d6eedf4：TestMatching 4 项 key_trigger_type 置"无"隔离 key 分支环境依赖；serial 测试 monkeypatch get_serial_manager 模拟缺依赖；纯测试侧修复产品零改动，全套 735/73/0】TestMatching×4（test_danmu_similarity_trigger_copywriting/test_reply_contains_trigger/test_gift_exact_match/test_start_cmd_stripped）+ TestSerialSafety::test_serial_send_requires_pyserial。现象：key 模式走真实 pyautogui 按键分支（pyautogui 已装），audio_synthesis_handle mock 未被调用；serial 测试期望 pyserial 缺失降级但 pyserial 已装。根因方向：测试设计依赖"pyautogui/pyserial 缺失"环境或 mock 边界未覆盖真按键分支，与清理无关（git stash HEAD 对比同败，留痕 .gstack/tmp/autoplan/batch1-verify.md）。依赖：无。

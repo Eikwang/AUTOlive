@@ -10,6 +10,7 @@
 from utils.my_log import logger
 
 from utils.gpt_model.custom_llm import Custom_LLM
+from utils.gpt_model.fastrag_llm import Fastrag_LLM
 
 class GPT_Model:
     openai = None
@@ -17,6 +18,7 @@ class GPT_Model:
     def set_model_config(self, model_name, config):
         model_classes = {
             "custom_llm": Custom_LLM,
+            "fastrag": Fastrag_LLM,
         }
 
         if model_name in model_classes:
