@@ -69,11 +69,11 @@ class TestConfigPageDisplay:
         assert layout.config_status_label is None
 
     def test_render_config_page_displays_textarea(self):
-        """测试 render_config_page 走真实 tab 渲染（以 log_config 为例，仅验证不抛异常）"""
+        """测试 render_config_page 走真实 tab 渲染（以 common_config 为例，仅验证不抛异常）"""
         config = {"webui": {"theme": {"choose": "default"}}}
         layout = _create_layout(config)
         # 现行渲染按 tab_key 调用真实 tab 模块函数；选轻量 tab 验证链路可达
-        layout.render_config_page("log_config")
+        layout.render_config_page("common_config")
         layout.config_page.clear.assert_called()
 
     def test_render_config_page_for_unknown_function(self):

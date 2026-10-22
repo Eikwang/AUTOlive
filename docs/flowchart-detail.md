@@ -102,7 +102,7 @@ flowchart TD
     AvatarAI --> AvatarPlay("数字人独立出画〔真实〕<br>edtalk/realtime_serve → 虚拟摄像头<br>unity_capture.py:50<br>→ OBS 合成出画")
     AudioList --> SystemPlay("系统播放〔真实〕<br>builtin_play_center.py:75<br>mp3→wav 转码 :193")
 
-    GenerateAudio --> Subtitle("字幕打印〔真实〕<br>captions_manager.py:164 出队时推送<br>keep_time=音频时长估算 :179<br>开关: captions.enable=false /<br>web_captions_printer.enable=true")
+    GenerateAudio --> Subtitle("字幕打印〔真实〕<br>captions_manager.py:164 出队时推送<br>keep_time=音频时长估算 :179<br>开关: web_captions_printer.enable=true<br>（captions 文件日志节已随日志功能退役移除，2026-10-22）")
     Subtitle --> Sync["对齐字幕同步显示〔真实〕<br>socket.io web_server.py:92 /captions 页<br>由播放/推送驱动显示<br>⚠字幕不驱动播放与数字人（F20 修正）"]
 
     %% ==================== 监控自愈子图〔真实〕 ====================
@@ -172,7 +172,7 @@ flowchart TD
 
 ### 0B 现有代码映射（What already exists，证据=A 节全链路核实）
 
-弹幕链：DanmakuListener 进程内托管（main.py:159-163）→ 桥 hook（danmaku_consumer.py:208-259）→ 5 秒聚合/背压/R39 去重（:77-145/:426-455/:1159-1202）→ my_handle.process_data（my_handle.py:367-371）→ timer_handler 遗忘窗口+分派 → comment/event/feature/chat/like/follow 六 handler。播放链：双队列（audio_core.py:54-59）→ synthesis_manager（TTS inproc gpt_sovits_inproc.py, main.py:137-148 / edge-tts）→ queue_manager 优先级 → playback_manager 单消费循环 → builtin_play_center（pygame/pyaudio）或 EDTalk push_full → 虚拟摄像头 → OBS。字幕链：captions_manager（出队 push+时长估算）→ socket.io web 页（web_server.py:92-159）+ 文件模式双通道。任务链：task_scheduler.py 定时+文案线程（闲时未接线）。语音链：input_handler/audio_processor 有实现但 conversation_manager 空框架。RVC：独立子进程音频设备回路+训练管线。监控：webui _monitor_subprocesses（frontend/main.py:857-921）+ DanmakuListener 守护重建（danmaku_consumer.py:836-857）+ 异常报警自愈重启（event_handler.py:175-232）。
+弹幕链：DanmakuListener 进程内托管（main.py:159-163）→ 桥 hook（danmaku_consumer.py:208-259）→ 5 秒聚合/背压/R39 去重（:77-145/:426-455/:1159-1202）→ my_handle.process_data（my_handle.py:367-371）→ timer_handler 遗忘窗口+分派 → comment/event/feature/chat/like/follow 六 handler。播放链：双队列（audio_core.py:54-59）→ synthesis_manager（TTS inproc gpt_sovits_inproc.py, main.py:137-148 / edge-tts）→ queue_manager 优先级 → playback_manager 单消费循环 → builtin_play_center（pygame/pyaudio）或 EDTalk push_full → 虚拟摄像头 → OBS。字幕链：captions_manager（出队 push+时长估算）→ socket.io web 页（web_server.py:92-159；文件日志通道已随日志功能退役移除，2026-10-22）。任务链：task_scheduler.py 定时+文案线程（闲时未接线）。语音链：input_handler/audio_processor 有实现但 conversation_manager 空框架。RVC：独立子进程音频设备回路+训练管线。监控：webui _monitor_subprocesses（frontend/main.py:857-921）+ DanmakuListener 守护重建（danmaku_consumer.py:836-857）+ 异常报警自愈重启（event_handler.py:175-232）。
 
 ### 0C Dream State Mapping
 

@@ -57,7 +57,6 @@ from frontend.ui.tabs import (
     data_analysis,
     audio_play,
     web_captions_printer,
-    log_config,
     filter_config,
     filter_forget,
     filter_dedup,

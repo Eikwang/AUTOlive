@@ -45,11 +45,6 @@ class My_Translate:
         if type is None:
             type = self.config_data["type"]
 
-        # 是否启用字幕输出
-        if self.config.get("captions", "enable"):
-            # 输出当前播放的音频文件的文本内容到字幕文件中，就是保存翻译前的原文
-            self.common.write_content_to_file(self.config.get("captions", "raw_file_path"), text, write_log=False)
-
         if type == "baidu":
             return self.baidu_trans(text)
         elif type == "google":

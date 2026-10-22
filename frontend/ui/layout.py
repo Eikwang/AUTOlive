@@ -1552,7 +1552,7 @@ class DrawerLayout:
             common_config, llm, tts, svc, visual_body,
             talk, integral, assistant_anchor,
             translate, serial, data_analysis,
-            audio_play, web_captions_printer, log_config,
+            audio_play, web_captions_printer,
             filter_config, filter_forget, filter_dedup, filter_queue,
             blacklist, read_comment, thanks, schedule, idle_time_task,
             trends_copywriting, local_qa,
@@ -1575,7 +1575,6 @@ class DrawerLayout:
             'platform_config': lambda: platform_config.create_platform_config_tab(self.config, theme_config, set_cb),
             'audio_play': lambda: audio_play.create_audio_play_tab(self.config, theme_config, set_cb),
             'web_captions_printer': lambda: web_captions_printer.create_web_captions_printer_tab(self.config, theme_config, set_cb),
-            'log_config': lambda: log_config.create_log_tab(self.config, theme_config, set_cb),
             # AI对话
             'llm': lambda: llm.create_llm_tab(self.config, theme_config, set_cb),
             'tts': lambda: tts.create_tts_tab(self.config, theme_config, set_cb),

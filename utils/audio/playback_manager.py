@@ -41,8 +41,6 @@ class PlaybackMixin:
     async def only_play_audio(self):
         """只进行普通音频播放"""
         try:
-            captions_config = self.config.get("captions")
-
             try:
                 if self.config.get("play_audio", "player") in ["pygame"]:
                     self.mixer_normal.init()
@@ -74,12 +72,6 @@ class PlaybackMixin:
                         _was_999 = False
                     if _was_999:
                         self.active_reread_top_999 = True
-
-                    # 是否启用字幕输出
-                    if captions_config["enable"]:
-                        # 输出当前播放的音频文件的文本内容到字幕文件中
-                        self.common.write_content_to_file(captions_config["file_path"], data_json["content"], write_log=False)
-
 
                     # 判断是否发送字幕打印（web 字幕，前端名"字幕打印"）
                     # 内置字幕模块进程内直调（修复原断链：send_to_web_captions_printer
@@ -199,11 +191,6 @@ class PlaybackMixin:
                             if _was_999:
                                 # A7/T1：pygame 路径 999 完成释放（builtin 走 release hook）
                                 self.active_reread_top_999 = False
-
-                    # 是否启用字幕输出
-                    #if captions_config["enable"]:
-                        # 清空字幕文件
-                        # self.common.write_content_to_file(captions_config["file_path"], "")
 
                 except Exception as e:
                     logger.error(traceback.format_exc())

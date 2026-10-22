@@ -21,7 +21,6 @@
     "copywriting": "回复{username}，{data}\n{username}你好，{data}",
     "username_max_le": 10
   },
-  "comment_log_type": "回答",
   "visual_body": "edtalk_realtime",
   "play_audio": {
     "enable": true,
@@ -416,11 +415,6 @@
         "微臣告退"
       ]
     }
-  },
-  "captions": {
-    "enable": false,
-    "file_path": "log/字幕.txt",
-    "raw_file_path": "log/原文字幕.txt"
   },
   "schedule": [
     {

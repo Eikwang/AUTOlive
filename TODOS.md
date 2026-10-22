@@ -1,5 +1,12 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-22) — 日志功能全链移除批次（main-20261022-180708，终门 rec 批准实施）
+
+1. **DB 驱动弹幕历史查看面意向**（P3, M-L）— CEO F2b/DX d3a：日志功能全链退役后，内容史（弹幕/回复原文）唯一留存通道=database 入库（实测默认值 comment_enable/entrance_enable/gift_enable 全 true，两配置源一致——内容史默认已在 DB 留存）；但 DB 无用户查看面，"弹幕历史在哪看"目前只能 SQL 回答。被拆除的「日志」导航位是黄金位，未来可改造为 DB 驱动的历史页（弹幕/回复/礼物流水+过滤）。登记为特性意向，触发条件=用户提出内容史查看需求时优先于此设计。依赖：无（database 入库已在运行）。
+2. **local_qa.py:43 标签「弹幕日志类型」命名债**（P3, S）— Eng F3（日志移除批 T9 预登记例外）：该标签绑定 `local_qa.text.type`（本地问答存储格式选择），与已退役的 comment_log_type（弹幕日志）无关，系历史命名撞名；docs/系统审查任务.md:553 已记载"应为'存储格式'"。下次触碰 local_qa 页时改标签为「存储格式」。依赖：local_qa 页触碰。
+3. **validate_enable_paths 文档串失准**（P3, S）— Eng F7：enable_paths.py:35-38 文档串称"启动即响"，实测该函数仅测试面调用（无运行时启动调用点）。修正文档串或补启动接线，二选一。依赖：无。
+4. **features.json show_card 死块**（P3, S）— R2 C2（日志移除批 NOT in scope 登记）：`config/features/features.json:1128` `webui.show_card.log=true` 为零消费者死键（show_card 全块 frontend/utils 零代码引用），随「混合配置文件收官」批次整体清理。依赖：混合配置文件收官批。
+
 ## Deferred Items from /autoplan (2026-10-22) — 字幕打印功能审查批次（main-20261022-162614，终门 rec 批准实施）
 
 1. **copywriting 变速死配置清理**（P3, S）— CEO defer：`audio_random_speed.copywriting` 节仅前端 UI 有配置（audio_play.py:148-150），代码无读取点（全仓仅 playback_manager 读 normal 节，A2 批次后连 normal 也退役）——UI 开关误导用户。建议：设置页移除该节配置或后端补语义。依赖：音频播放页下次触碰。
@@ -63,7 +70,7 @@
 
 1. **so_vits_svc 变声链每弹幕 ConnectionRefused**（P2, S）— 实测：每条弹幕音频合成后触发 `synthesis_manager.voice_change → so_vits_svc_api`，连接失败报错刷屏（`so_vits_svc合成失败，请检查配置`）；疑似 config 残留变声开启但服务不存在，或触发条件缺陷（不应无条件走变声链）。修复=查明触发条件（config 开关/调用点判定）+关闭残留开关或修条件。注意与 RVC 翻唱链的关系辨析（变声 vs 翻唱两链）。
 2. **多音字.txt 相对路径 Errno 2**（P2, S）— TTS 前处理多音字词典以相对路径打开（`[Errno 2] No such file or directory: '多音字.txt'`），工作目录依赖：非仓库根启动即失效。修复=路径改为相对仓库根锚定（utils.autolive_paths 语义）或确认词典文件入库位置。
-3. **luna_ai 写弹幕日志 'NoneType' .get 失败**（P2, S）— 数据库写入路径某 dict 为 None（`写入弹幕日志失败：'NoneType' object has no attribute 'get'` 每弹幕报），弹幕日志功能实际失效。修复=定位 None 来源（大概率 config 节缺失未兜底）。
+3. **luna_ai 写弹幕日志 'NoneType' .get 失败**（P2, S）— 【2026-10-22 已闭环：日志功能全链移除批次（/autoplan main-20261022-180708 终门 rec 批准）根治——根因=comment_log 键在三配置源中不存在，comment_handler.write_to_comment_log :225 `.get("comment_log")` 返回 None → :228 None.get AttributeError，每回复刷 2 行 error；随日志功能整体退役，write_to_comment_log 方法+两调用点+my_handle 包装+启动建文件全链删除，弹幕日志噪音清零】原记录：数据库写入路径某 dict 为 None（`写入弹幕日志失败：'NoneType' object has no attribute 'get'` 每弹幕报），弹幕日志功能实际失效。修复=定位 None 来源（大概率 config 节缺失未兜底）。
 4. **data/badwords.txt 违禁词文件缺失**（P2, S）— config `badwords.path=data/badwords.txt` 指向文件不存在，每次弹幕 Errno 2，违禁词过滤实际未生效。修复=补文件（含违禁拼音表 data/违禁拼音.txt 同查）或 config 判空跳过。
 
 ### B 组：批次收尾验证项

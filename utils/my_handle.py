@@ -246,15 +246,6 @@ class My_handle(metaclass=SingletonMeta):
                 f.write('')
                 logger.info(f'{self.log_file_path} 日志文件已创建')
 
-        # 生成弹幕文件
-        self.comment_file_path = "./log/comment-" + My_handle.common.get_bj_time(1) + ".txt"
-        if os.path.isfile(self.comment_file_path):
-            logger.info(f'{self.comment_file_path} 弹幕文件已存在，跳过')
-        else:
-            with open(self.comment_file_path, 'w') as f:
-                f.write('')
-                logger.info(f'{self.comment_file_path} 弹幕文件已创建')
-
         try:
             # 数据库
             self.db = SQLiteDB(My_handle.config.get("database", "path"))
@@ -504,9 +495,6 @@ class My_handle(metaclass=SingletonMeta):
     
     def tuning_handle(self, data):
         return self.comment_handler.tuning_handle(data)
-    
-    def write_to_comment_log(self, content, data):
-        return self.comment_handler.write_to_comment_log(content, data)
     
     def comment_handle(self, data):
         return self.comment_handler.comment_handle(data)

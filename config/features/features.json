@@ -310,11 +310,6 @@
       "model": "Salesforce/blip-image-captioning-large"
     }
   },
-  "captions": {
-    "enable": false,
-    "file_path": "log/字幕.txt",
-    "raw_file_path": "log/原文字幕.txt"
-  },
   "schedule": [
     {
       "enable": false,
@@ -1169,7 +1164,6 @@
     ],
     "username_max_le": 10
   },
-  "comment_log_type": "回答",
   "visual_body": "edtalk_realtime",
   "luoxi_project": {
     "Live_Comment_Assistant": {

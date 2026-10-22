@@ -211,37 +211,7 @@ class CommentHandler:
             logger.error(traceback.format_exc())
             logger.error(f"调音处理失败：{e}")
             return False
-    
-    def write_to_comment_log(self, content, data):
-        """
-        写入弹幕日志
-        
-        Args:
-            content (str): 内容
-            data (dict): 数据
-        """
-        try:
-            # 获取配置
-            log_config = self.my_handle.config.get("comment_log")
-            
-            # 检查是否启用日志
-            if not log_config.get("enable"):
-                return
-            
-            # 写入日志
-            username = data.get("username", "")
-            ori_content = data.get("content", "")
-            
-            log_content = f"[{username}]: {ori_content}\n[AI回复]: {content}\n"
-            
-            with open(self.my_handle.comment_file_path, 'a', encoding='utf-8') as f:
-                f.write(log_content)
-            
-            logger.debug(f"写入弹幕日志：{username}")
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"写入弹幕日志失败：{e}")
-    
+
     def comment_handle(self, data):
         """
         弹幕处理
@@ -389,11 +359,10 @@ class CommentHandler:
                 if tmp:
                     resp_content = tmp
 
-            # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→写日志→TTS，
-            # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本）
+            # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→TTS，
+            # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本；写日志环节已随
+            # 日志功能全链退役移除，2026-10-22）
             resp_content = self.my_handle.apply_reply_template(resp_content, username)
-
-            self.write_to_comment_log(resp_content, {"username": username, "content": content})
 
             # 判断按键映射触发类型
             if self.my_handle.config.get("key_mapping", "type") == "回复" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
