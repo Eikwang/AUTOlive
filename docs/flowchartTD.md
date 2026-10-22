@@ -117,5 +117,6 @@ flowchart TD
         AvatarPlay -.->|播放驱动显示| Sync
         SystemPlay -.->|播放驱动显示| Sync
         %% 裁决(uc5a/差异D8): 互斥两路（playback_manager.py:109 is_edtalk_active 分流——激活=推送跳过本地播放）+字幕从属（由播放/推送驱动，F20 字幕不驱动播放）；原"三路并存+Sync→播放"为 F18/F20 已证伪结构
+        %% 裁决(2026-10-22 音频审查批次, 1f10f1bc): ①AudioList 入队=四规则（未满权重序插入/满+同权重组首取代组内FIFO/满+更高驱逐最低优组组首/其余丢弃）+999单实例约束（queue_manager data_priority_insert，测试锚 TestQueueFourRules）②SystemPlay=builtin 暂停-续播（999 让位挂起→插播者播毕即续播回退1s；F-2 手动暂停同机制修复；skip/clear/stop_all 弃置挂起条目留痕）③变速在合成侧 SpeedQ（pydub 播放侧路径退役）④enable 门控豁免仅 EDTalk 的 TTS 链类型（A11/F-7，本地音频维持门控）；详见 docs/参数生效语义矩阵.md 勘误摘要
     end
 ```

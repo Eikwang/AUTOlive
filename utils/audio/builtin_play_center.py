@@ -296,13 +296,17 @@ class AUDIO_PLAY_CENTER:
         """
         while True:
             if is_999 and self._suspended_999 is None and self._interrupt_999_event.is_set():
-                # 999 让位：暂停挂起（流停、wf 读位冻结；现场由调用方登记保留）
+                # 999 让位：暂停挂起（流停、wf 读位冻结；现场由调用方登记保留）。
+                # 同置 pause_event：get_status().paused 翻真 → E-4 字幕挂起同步
+                # （字幕批次 Eng E1 交界缝隙：否则让位窗口字幕继续走 keep_time，
+                # 续播回退 1s 后偏移=挂起时长）。
                 self._interrupt_999_event.clear()
+                self.pause_event.set()
                 try:
                     self.stream.stop_stream()
                 except Exception:
                     pass
-                logger.info("999 权重音频让位挂起（新音频插播，design 情况1）")
+                logger.info("999 权重音频让位挂起（新音频插播，design 情况1；字幕 E-4 同步）")
                 return "suspended"
             if self.pause_event.is_set():
                 # F-2：手动暂停保持等待（不退出循环、不误报完成），恢复后从暂停点继续
@@ -351,6 +355,7 @@ class AUDIO_PLAY_CENTER:
                     logger.info(f"999 续播回退 1 秒（{rewind} 帧，暂停点 {pos}）")
                 except Exception:
                     logger.warning("999 续播回退设置失败（继续暂停点位置）")
+            self.pause_event.clear()  # E-4：字幕挂起同步解除
             if self.stream is not None:
                 try:
                     self.stream.start_stream()
@@ -556,6 +561,11 @@ class AUDIO_PLAY_CENTER:
         logger.info("builtin播放已暂停")
 
     def resume_stream(self):
+        if self._suspended_999 is not None:
+            # A7：999 挂起期手动续播不生效——插播条目播毕后自动续播（防挂起流
+            # 被手动拉起与插播者双出声；E-4 同步由挂起状态维持）
+            logger.info("999 挂起中，手动续播不生效（插播完成后自动续播）")
+            return
         if self.pause_event.is_set():
             self.pause_event.clear()
             if self.stream:

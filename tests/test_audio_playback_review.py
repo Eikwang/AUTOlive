@@ -564,6 +564,35 @@ class TestBuiltinPauseResume:
         assert p._suspended_999 is None
         assert wf.setpos_calls == []  # 未续播
 
+    def test_suspension_syncs_pause_event_for_captions(self):
+        """E-4 交界缝隙（字幕批次 Eng E1）：让位挂起同置 pause_event（字幕挂起同步），
+        续播解除；挂起期手动续播守卫（防双出声）"""
+        p = _bare_player()
+        stream = _FakeStream()
+        p.stream = stream
+        p._interrupt_999_event.set()
+        assert p._wait_loop(is_999=True) == "suspended"
+        assert p.pause_event.is_set() is True, "挂起必须同置 pause_event（get_status().paused → E-4 字幕挂起）"
+
+        # 续播：回退→清 pause_event→start_stream
+        wf = _FakeWf(pos=50000)
+        p._suspended_999 = {"type": "reread_top_priority", "voice_path": "x.wav"}
+        p._suspended_play = {"wf": wf, "tmp_audio_path": ""}
+        p._current_output_rate = 16000
+        p.stream.start_stream = lambda: None  # 保持 inactive 供 wait_loop 立即完成
+        p.stream._active = False
+        released = []
+        p._release_999_hook = lambda: released.append(1)
+        p._resume_suspended_999()
+        assert p.pause_event.is_set() is False, "续播必须解除 pause_event（字幕恢复）"
+
+        # 挂起期手动续播守卫
+        p2 = _bare_player()
+        p2.pause_event.set()
+        p2._suspended_999 = {"type": "reread_top_priority"}
+        p2.resume_stream()
+        assert p2.pause_event.is_set() is True, "挂起期手动续播不得解除 pause_event"
+
     def test_request_interrupt_gated_on_playing_999(self):
         """让位请求仅在 999 播放中且未挂起时生效"""
         p = _bare_player()
