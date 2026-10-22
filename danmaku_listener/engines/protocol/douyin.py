@@ -515,10 +515,12 @@ class DouyinWebProtocolEngine(BaseEngine):
         if method == "WebcastGiftMessage":
             g = dy_pb2.GiftMessage()
             g.ParseFromString(msg.payload)
-            # 礼物名/价格：协议 gift.name 优先，空则查静态对照表
-            # （2026-10-02 用户实测 102 项，钻石计价）
+            # 礼物名/价格：协议 gift.name 优先，空则查静态元表
+            # （2026-10-22 用户重整 102 项转录）。gift_value=单价(元)×totalCount
+            # （gift_count 别名=totalCount 累计——mapping.md 契约，消费者差值去重）
             gift_name = g.gift.name or lookup_gift(g.giftId)[0]
             if not gift_name:
+                logger.warning("[douyin] 礼物查表未命中（丢弃事件）：giftId=%s", g.giftId)
                 return None
             unit_price = lookup_gift(g.giftId)[1]
             return {

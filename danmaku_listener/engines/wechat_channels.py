@@ -41,6 +41,10 @@ from danmaku_listener.engines.protocol.wxsp_gift_prices import (
     lookup_price,
 )
 
+# reward_amount_in_wecoin（微信豆）→ 元换算。锚点=微信豆率 0.1 元/豆
+# （与薯币/快币/钻石同源 0.1 元档）；漂移管控清单见 docs/danmaku_module.md 补丁台账
+WECOIN_TO_YUAN = 0.1
+
 BACKEND_URL = "https://channels.weixin.qq.com/platform/live/liveBuild"
 #: 弹幕轮询接口锚点（wxlivespy 同款）
 FEED_API_PATTERN = "mmfinderassistant-bin/live/msg"
@@ -615,7 +619,10 @@ class WechatChannelsEngine(ControlledPageEngine):
                            "gift_name": gift_name,
                            "gift_id": gift_payload.get("reward_product_id", ""),
                            "gift_count": count,
+                           # 主路径 wecoin 金额（微信豆）×WECOIN_TO_YUAN 折元
+                           # （R2-P1 修复：原直透豆值低 10 倍）；回退=元表单价×count
                            "gift_value": gift_payload.get("reward_amount_in_wecoin", 0)
+                                         * WECOIN_TO_YUAN
                                          or unit_price * count,
                            "raw": gift_payload}
                 await self._emit_business(room_id, "GIFT", payload, msg_id=seq_id, ts=ts)

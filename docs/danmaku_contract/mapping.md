@@ -24,5 +24,13 @@
 - **抖音 GIFT.count 语义（2026-09-29）**：取 GiftMessage.totalCount 原样透传——
   **累计值**（连击期间持续增长），下游（AUTOlive 触发逻辑）勿按增量消费；
   groupCount/repeatCount/comboCount 不参与（连击合并 defer，见 TODOS）。
+- **gift_value 单位语义（2026-10-22 元口径定案）**：`gift_value` = 礼物单价
+  （**元 RMB**）× payload.`gift_count`（字段原值）。gift_count 来源按平台**别名表**：
+  抖音=totalCount（累计，即上方 2026-09-29 条目）、B站=num（本条）、
+  快手=batchSize×comboCount（burst 内累计）、斗鱼=gn、虎牙=item_count、
+  小红书=count、视频号=combo_product_count——实现**不得绕过 payload.gift_count
+  别名**直取其他 combo/累计字段做乘数。下游消费者（AUTOlive danmaku_consumer）
+  按累计差值去重入账：total_price = 单价 × 增量（首见视为 1、重复丢弃）。
+  价格表 7 张已于 2026-10-22 重定基为**元**（用户重整对照表转录）。
 - **抖音粉丝团回退**：Web WS 路线 proto 的 FansclubMessage 字段语义未实测，
   无法可靠映射—— SOCIAL 暂不承载粉丝团事件（TODOS）。

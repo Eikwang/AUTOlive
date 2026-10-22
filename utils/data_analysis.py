@@ -394,7 +394,8 @@ class Data_Analysis:
             option = {
                 'title': {
                     'text': '礼物榜单',
-                    'left': 'center'
+                    'left': 'center',
+                    'subtext': '2026-10-22 起礼物价值统一为元口径；此前数据为历史口径（部分平台偏低 10 倍），仅供对照'
                 },
                 'tooltip': {
                     'trigger': 'axis',

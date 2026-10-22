@@ -167,16 +167,24 @@ def _map_danmu_msg(info: list, seq: int, ts: int) -> Optional[Dict[str, Any]]:
     return {"category": "business", "type": "DANMU", "payload": payload, "seq": seq, "timestamp": ts}
 
 
+# 协议 SEND_GIFT price → 元换算。锚点=现行 price/1000 实现与 bili_gifts.py 元表
+# 2026-10-22 转录逐条吻合（真实 SEND_GIFT 原始样本入库前，跨路径一致断言限可
+# 对照样本、缺失时 skip——见 tests；漂移管控清单见 docs/danmaku_module.md 补丁台账）
+PROTOCOL_PRICE_TO_YUAN = 0.001
+
+
 def _map_gift(data: dict, seq: int, ts: int) -> Optional[Dict[str, Any]]:
     try:
         gift_id = data.get("giftId")
-        # 礼物名/价格：协议 giftName/price 优先（price/1000=电池），空则查静态
-        # 对照表（2026-10-02 用户实测 69 项，电池计价）
+        # 礼物名/价格：协议 giftName/price 优先（price×PROTOCOL_PRICE_TO_YUAN=元
+        # 单价），空则查静态元表（2026-10-22 用户重整 69 项）。gift_value 契约=
+        # 单价(元)×gift_count 总价（本条 num——B站 gift_count=num 本条语义）
         gift_name = str(data.get("giftName", "")) or lookup_gift(gift_id)[0]
+        num = int(data.get("num", 1))
         price = data.get("price")
-        gift_value = float(price) / 1000.0 if price else None
+        gift_value = float(price) * PROTOCOL_PRICE_TO_YUAN * num if price else None
         if gift_value is None and gift_name:
-            gift_value = lookup_gift(gift_id)[1] * int(data.get("num", 1))
+            gift_value = lookup_gift(gift_id)[1] * num
         payload = {
             "type": "GIFT",
             "user_name": str(data.get("uname", "")),
@@ -348,7 +356,8 @@ def _map_send_gift_v2(pb_b64: str, seq: int, ts: int) -> Optional[Dict[str, Any]
             "gift_name": gift_name,
             "gift_id": str(gift_id) if gift_id else "",
             "gift_count": int(count),
-            "gift_value": 0,  # V2 pb 未暴露价格字段——待价格源补充
+            "gift_value": lookup_gift(gift_id)[1] * int(count)
+                          if gift_id else 0,  # V2 pb 未暴露价格——按 ID 查元表回填（2026-10-22）
         },
         "seq": seq,
         "timestamp": ts,

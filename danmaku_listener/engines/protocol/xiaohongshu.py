@@ -35,6 +35,10 @@ from danmaku_listener.engines.protocol.controlled_base import (
 )
 from danmaku_listener.engines.protocol.xhs_gift_prices import lookup_price
 
+# 协议 base_gift_info.coins（薯币）→ 元换算。单位假设未实测样本锚定——仅用于
+# 元表未收录礼物的回退折算；漂移管控清单见 docs/danmaku_module.md 补丁台账
+XHS_COIN_TO_YUAN = 0.1
+
 PROTOCOL_VERSION = "xiaohongshu-1"
 
 LIVE_URL_TEMPLATE = "https://www.xiaohongshu.com/livestream/{room_id}"
@@ -190,8 +194,14 @@ def map_custom_data(cd: Dict[str, Any], seq: int, ts: int,
         send_id, send_nick = str(send.get("id", "")), str(send.get("nick_name", ""))
         if send_id and send_nick:
             cache[send_id] = send_nick
-        # 价格：按名查实测价格表（薯币）；coins（协议自带单价）优先
-        unit = gift.get("coins") or lookup_price(gift_name)
+        # 价格：查元表（2026-10-22 用户重整 115 项转录）为权威；coins（协议自带
+        # 单价）仅作未收录礼物回退并按薯币率折元（XHS_COIN_TO_YUAN——单位假设未
+        # 实测样本锚定，漂移管控清单登记）。gift_value=单价(元)×gift_count
+        unit = gift.get("coins")
+        if unit:
+            unit = unit * XHS_COIN_TO_YUAN
+        else:
+            unit = lookup_price(gift_name)
         return {**base, "type": "GIFT",
                 "payload": {"type": "GIFT",
                             "user_name": send_nick,

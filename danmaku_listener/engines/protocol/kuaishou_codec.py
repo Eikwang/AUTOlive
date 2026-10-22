@@ -128,8 +128,9 @@ def map_feed_push(payload: bytes, seq_start: int, ts: int) -> List[Dict[str, Any
     for gift in push.giftFeeds:
         seq += 1
         fields = _user_fields(gift.user)
-        # 礼物名/价格：静态映射表（2026-10-02 用户实测 92 项）——
-        # SCWebFeedPush 推流只含 giftId，名称需查表（此前前端显示 undefined）
+        # 礼物名/价格：静态元表（2026-10-22 用户重整 95 项转录，快币率×0.1 折元
+        # 由转录完成）——SCWebFeedPush 推流只含 giftId，名称需查表（此前前端显示
+        # undefined）。gift_count 别名=batchSize×comboCount（burst 内累计——mapping.md）
         gift_name, gift_price = lookup_gift(gift.giftId)
         results.append({
             "category": "business", "type": "GIFT",

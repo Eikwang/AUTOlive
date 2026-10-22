@@ -173,3 +173,21 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 | P1 | fastrag-python/config.py | KB_DIR/INDEX_DIR 改指父级（knowledgebase/kbindex_py 统一） | 数据位置与 rust 版统一+python 索引格式隔离 | （fastrag 无 git 仓，副本基线 2026-07-24） |
 | P2 | fastrag-python/server.py | uvicorn host 0.0.0.0→127.0.0.1 | Eng F-E7 高危绑定收敛 | （同 P1） |
 | P3 | fastrag-python/config.py | 末尾加载 config_override.py 外部覆盖 | 参数页落盘重启即生效（F-E10 优先方案） | （同 P1） |
+
+## danmaku_listener 受管副本补丁台账——礼物计价元口径批次（2026-10-22）
+
+> **本副本自 2026-10-22 起为礼物计价的临时事实源**（至上游 replay 完成为止）。
+> 下次从 D:\AI\DanmakuListener 同步受管副本前，**必须先**将本批变更 replay 至上游
+> （native CEO F3 截止条件），否则同步将冲掉元口径成果。
+
+| # | 文件 | 变更 | 原因 |
+|---|---|---|---|
+| G1 | engines/protocol/{bili,douyin,douyu,huya,kuaishou}_gifts.py、{xhs,wxsp}_gift_prices.py | 7 张价格表重定基为**元**（用户重整对照表 2026-10-22 逐条转录；lookup 未命中首见 warning） | 契约语义=元·总价；表=元消除发射点换算层 |
+| G2 | engines/protocol/bilibili_codec.py | 协议路径 price×PROTOCOL_PRICE_TO_YUAN(0.001)×num 补总价语义；SEND_GIFT_V2 恒 0 → 按 gift_id 查表回填；注释"price/1000=电池"订正为元 | B站三路径单位不一（协议单价/回退电池/V2 恒 0） |
+| G3 | engines/protocol/huya_codec.py | 在线路径按 item_type 查表回填单价×item_count；静态路径补 ×item_count | 原在线路径恒 0、静态路径未乘数量 |
+| G4 | engines/wechat_channels.py | 主路径 reward_amount_in_wecoin×WECOIN_TO_YUAN(0.1) | 原直透微信豆低 10 倍 |
+| G5 | engines/protocol/xiaohongshu.py | 元表为权威单价；coins 仅回退并×XHS_COIN_TO_YUAN(0.1，单位假设未实测锚定) | 原 coins 直透薯币低 10 倍 |
+| G6 | engines/protocol/{douyin,douyu_codec,kuaishou_codec}.py | 注释更新（元口径+别名表）；douyin 未命中丢弃前 warning | 文档-代码一致性（F8 漂移管控） |
+
+**汇率常量锚点**：PROTOCOL_PRICE_TO_YUAN=0.001（B站 price/1000 现行实现与元表逐条吻合）、
+WECOIN/XHS_COIN_TO_YUAN=0.1（微信豆/薯币 0.1 元档）。回放校验：tests/test_danmaku_gift_pricing.py。

@@ -136,7 +136,8 @@ def map_upstream(fields: Dict[str, Any], seq: int, ts: int) -> Optional[Dict[str
         except ValueError:
             count = 1
         # 礼物名/价格：协议 gs 优先，但 "0"/纯数字为占位值（2026-10-03 用户
-        # 实测前端显示"送出 0"）——视为缺失走静态对照表（79 项，鱼翅计价）
+        # 实测前端显示"送出 0"）——视为缺失走静态元表（2026-10-22 用户重整
+        # 79 项转录，鱼翅率=元数值不变）。gift_value=单价(元)×gift_count（累计）
         _gs = fields.get("gs", "")
         gs_valid = bool(_gs) and not _gs.isdigit()
         gfid = fields.get("gfid") or fields.get("eid")

@@ -517,15 +517,20 @@ def map_upstream(payload: bytes, uri: int, seq: int, ts: int,
     if uri == URI_SEND_ITEM_SUB_BROADCAST:
         d = decode_send_item(payload)
         item_type = d.get("item_type") or 0
-        # 三级回退：getPropsList 在线礼物表 → 静态对照表（2026-10-01 用户
-        # 实测 189 项，docs/虎牙礼物编号名称对照表.md）→ 编号本身
+        item_count = d.get("item_count", 1) or 1
+        # 三级回退：getPropsList 在线礼物表（只出名，价格按 item_type 查元表回填
+        # 单价×item_count——2026-10-22 修复在线路径恒 0）→ 静态元表（2026-10-22
+        # 用户重整 189 项转录，静态路径本批补 ×item_count——此前未乘数量）
+        # → 编号本身。gift_count=item_count 本条语义（连击少计同类，见 TODOS）
         gift_name = (gift_items or {}).get(item_type)
         gift_value = 0.0
-        if not gift_name:
+        if gift_name:
+            gift_value = lookup_gift(item_type)[1] * item_count
+        else:
             static_name, static_price = lookup_gift(item_type)
             if static_name:
                 gift_name = static_name
-                gift_value = static_price
+                gift_value = static_price * item_count
         if not gift_name:
             gift_name = str(item_type)
         return {
@@ -538,7 +543,7 @@ def map_upstream(payload: bytes, uri: int, seq: int, ts: int,
                 "user_name": d.get("sender_nick") or "",
                 "user_id": str(d["sender_uid"]) if d.get("sender_uid") else None,
                 "gift_name": gift_name,
-                "gift_count": d.get("item_count", 1),
+                "gift_count": item_count,
                 "gift_value": gift_value,
             },
         }

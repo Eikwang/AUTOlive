@@ -259,10 +259,180 @@ def create_platform_config_tab(
                 "success": f"登录成功：{plat}", "failed": f"登录失败：{plat}",
                 "timeout": f"登录超时：{plat}"}.get(status, "登录：空闲")
 
+    # ---------- 发送：行内发送处理器 + 全局发送设置（autoplan 2026-10-22 批次） ----------
+    #
+    # 结构（用户裁决=行内化；规格审查 C1/C4 + design F1-F15 + eng E1-E2 全规格）：
+    # - 独立"弹幕发送"卡删除；每个监听中房间行内联输入框+发送按钮（仅 running）；
+    #   服务运行中未监听房间=禁用发送行+占位提示；main_down 全页无发送行
+    # - 输入态双保险：渲染签名跳过 + platform:room 草稿快照回填 + 焦点恢复
+    # - 发送设置收进房间管理卡"发送设置（全局）"折叠区：token/白名单/实发/对账
+    # - 回执=行内持久微指示（保留至下次发送）+短 toast；失败/unknown 不自动消失
+
+    state["last_request_id"] = ""
+    state.setdefault("send_drafts", {})    # platform:room -> 草稿（重建回填；成功即清/失败保留/停止保留）
+    state.setdefault("receipts", {})       # platform:room -> {"kind","text","rid"} 最近回执
+    state.setdefault("rooms_render_sig", None)
+    state.setdefault("send_inputs", {})    # platform:room -> 输入组件引用（草稿快照/焦点恢复用）
+    state.setdefault("last_focus_key", None)
+    state.setdefault("send_inflight", set())
+
+    def _disk_token() -> str:
+        """发送 token 磁盘真相（config.ws_token_file——webui 与 main 同机直接读
+        文件。此前只存 app.storage.browser：webui 重启/NiceGUI 存储目录清理后
+        丢失，每次重启都要重填——2026-10-13 用户报告）。"""
+        try:
+            path = str(_disk_danmaku_section().get("ws_token_file")
+                       or "persistence_data/send_token.txt")
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    async def _send_token() -> str:
+        return (send_token_input.value or "").strip() or _disk_token()
+
+    def _apply_receipt(key: str, r: Dict[str, Any]) -> None:
+        """回执四态 → 行内持久微指示 + 短 toast（长引导进 tooltip，F14）。"""
+        code = r.get("status_code")
+        if code == 503:
+            kind, text = "warn", f"发送未配置：{r.get('error', '')}"
+        elif code == 401:
+            kind, text = "fail", "token 不匹配——核对 persistence_data/send_token.txt"
+        else:
+            status = str(r.get("status") or "")
+            rid = str(r.get("request_id") or "")
+            state["last_request_id"] = rid
+            reason = str(r.get("reason_code") or "")
+            if status == "sent":
+                kind, text = "ok", f"已发送｜{rid}"
+            elif status == "dry_run":
+                kind, text = "dry", f"演练：已记录不发送｜{rid}"
+            elif status == "unknown":
+                kind, text = "warn", f"回执未知｜{rid}"
+            else:
+                kind = "fail"
+                text = {"ROOM_NOT_LISTENED": "该房间未在监听",
+                        "SENDER_DISABLED": "平台未在发送白名单",
+                        "PLATFORM_REJECTED": "平台登录态失效——请先在该行重新登录",
+                        "RATE_LIMITED": "触发限速守卫——稍后重试",
+                        "BLANK": "内容为空"}.get(reason, (f"发送失败" + (f"：{reason}" if reason else "")))
+            if r.get("error"):
+                text += f"｜{r['error']}"
+        state["receipts"][key] = {"kind": kind, "text": text,
+                                  "rid": str(r.get("request_id") or "")}
+        toast_kind = {"ok": "positive", "dry": "info", "warn": "warning"}.get(kind, "negative")
+        ui.notify(text, type=toast_kind,
+                  **({} if kind in ("ok", "dry") else {"close_button": "知道了", "timeout": 0}))
+
+    async def _send_from_row(key: str, platform: str, room_id: str, inp, btn):
+        if key in state["send_inflight"]:
+            return
+        content = (inp.value or "").strip()
+        if not content:
+            await _toast("弹幕内容不能为空", "warning")
+            return
+        if len(content) > 100:
+            await _toast("弹幕单条上限 100 字", "warning")
+            return
+        tok = await _send_token()
+        if not tok:
+            await _toast("未配置发送 token——展开『发送设置（全局）』填入", "warning")
+            return
+        state["send_inflight"].add(key)
+        btn.text = "发送中"
+        btn.disable()
+        try:
+            try:
+                r = await asyncio.wait_for(
+                    _api(config, "POST", "/danmaku/send", body={
+                        "platform": platform, "room_id": room_id,
+                        "content": content, "token": tok}, timeout=80), 15.0)
+            except asyncio.TimeoutError:
+                state["receipts"][key] = {"kind": "warn",
+                                          "text": "发送超时（15s 无回执）——可重试", "rid": ""}
+                ui.notify("发送超时——可重试", type="warning", close_button="知道了")
+                return
+            if not isinstance(r, dict):
+                state["receipts"][key] = {"kind": "fail",
+                                          "text": "发送请求失败（控制面不可达）", "rid": ""}
+                ui.notify("发送请求失败（控制面不可达）", type="negative",
+                          close_button="知道了", timeout=0)
+                return
+            _apply_receipt(key, r)
+            if str(r.get("status") or "") in ("sent", "dry_run"):
+                # 草稿生命周期（F6）：成功即清；失败保留
+                state["send_drafts"][key] = ""
+                inp.value = ""
+        finally:
+            state["send_inflight"].discard(key)
+            btn.text = "发送"
+            btn.enable()
+
+    async def _do_reconcile():
+        rid = state.get("last_request_id") or ""
+        if not rid:
+            await _toast("无最近 request_id——先发送一次", "warning")
+            return
+        tok = await _send_token()
+        r = await _api(config, "POST", "/danmaku/send-results",
+                       body={"request_id": rid, "token": tok}, timeout=10)
+        if not isinstance(r, dict):
+            await _toast("对账请求失败", "negative")
+            return
+        seen = r.get("result")
+        ui.notify(f"对账 {rid}: {(str(seen)[:160] if seen else '无记录')}",
+                  type="info", close_button="知道了")
+
+    async def _save_send_platforms(e):
+        # e.value 保证是新值（on_value_change 官方契约）——此前 on("update:model-value")
+        # 触发时 select.value 仍是旧值，把旧白名单写回磁盘（界面已选、落盘不变的假保存）
+        val = ",".join(str(x) for x in (list(e.value or []) if e is not None else []))
+        # main 可达时 Settings.save 会磁盘回读覆盖 danmaku_listener 节（F-ENG-2
+        # 写者分配矩阵）——直写被静默丢弃，必须走运行面窄端点（对齐 F1 房间开关）
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/send-config", {"platforms": val})
+            if not isinstance(r, dict) or not r.get("success"):
+                await _err_notify(r or {"error": "发送平台保存失败（运行面不可达）"})
+                return
+        else:
+            ok = set_config_callback("danmaku_listener", "send_enabled_platforms",
+                                     value=val, _notify=False)
+            if ok is False:
+                await _err_notify({"error": "发送平台保存失败", "fix_hint": "配置未变更"})
+                return
+        if state["mode"] == "running":
+            await _toast("发送平台已保存——关闭再开启『启用监听』开关（重建监听）后生效", "info")
+        else:
+            await _toast("发送平台已保存——启动系统后生效", "info")
+
+    async def _save_send_dry_run(e):
+        live = bool(e.value) if e is not None else bool(send_live_switch.value)
+        # 分流同 _save_send_platforms（F-ENG-2：main 可达时直写不落盘）
+        if state["mode"] in ("running", "service_disabled"):
+            r = await _api(config, "POST", "/danmaku/send-config", {"dry_run": not live})
+            if not isinstance(r, dict) or not r.get("success"):
+                await _err_notify(r or {"error": "发送模式保存失败（运行面不可达）"})
+                return
+        else:
+            ok = set_config_callback("danmaku_listener", "send_dry_run",
+                                     value=not live, _notify=False)
+            if ok is False:
+                await _err_notify({"error": "发送模式保存失败", "fix_hint": "配置未变更"})
+                return
+        if live:
+            await _toast("已开启实发——生效后弹幕将真实发送至直播间", "warning")
+        else:
+            await _toast("已开启观察模式（dry_run：只记录不发送）", "info")
+
     # ---------- 卡①：房间管理（首屏主对象——Design D-1） ----------
 
     with ui.card().style(card_css):
         ui.label("房间管理").style("font-size:var(--font-size-card-title,16px);font-weight:600")
+        # 发送全局态徽标（常驻卡顶——design F2/F11：可发现性；_poll 内随磁盘真相刷新）
+        send_dry_badge = ui.badge("演练模式（不会真实发送）").props(
+            "outline color=warning").style("display:none")
+        send_token_badge = ui.badge("未配置发送 token").props(
+            "outline color=negative").style("display:none")
 
         # 添加表单（Design D-2：分组下拉，白名单平台）
         with ui.row().classes("w-full items-end gap-2"):
@@ -309,6 +479,26 @@ def create_platform_config_tab(
         login_progress = ui.label("").style(
             "font-size:var(--font-size-tiny,11px);color:var(--color-info, #31ccec);display:none")
         list_host = ui.column().classes("w-full")
+
+        # 发送设置（全局）折叠区（默认折叠——design F15 归属表述；安全态全保留）
+        with ui.expansion("发送设置（全局）").classes("w-full").props("dense"):
+            ui.label("token 与白名单为跨房间全局配置；运行期变更在监听重建后生效").style(
+                "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
+            send_token_input = ui.input(
+                label="发送 token（自动读取本机文件，可修改）", password=True,
+                value=_disk_token()).style("width:var(--input-width-lg,400px)")
+            _send_sec0 = _disk_danmaku_section()
+            send_platforms_select = ui.select(
+                label="发送启用平台（白名单——保存后重启监听生效）",
+                options={p: _PLATFORM_LABELS[p] for p in _ALL_PLATFORMS},
+                multiple=True,
+                value=[p.strip() for p in str(_send_sec0.get("send_enabled_platforms") or "").split(",")
+                       if p.strip()],
+            ).classes("w-full")
+            send_live_switch = ui.switch(
+                "实发模式（关闭=观察 dry_run，仅记录不发送）",
+                value=not bool(_send_sec0.get("send_dry_run", True)))
+            ui.button("对账最近（按最近一次发送的 request_id）", on_click=_do_reconcile).props("outline")
 
     # ---------- 卡②：关键词屏蔽（J2 固定文案；运行期热生效 M-1 ③） ----------
 
@@ -383,176 +573,9 @@ def create_platform_config_tab(
                     ui.label(kw).style("font-size:var(--font-size-small,12px)")
                     ui.button(icon="close", on_click=_rm).props("flat dense size=xs")
 
-    # ---------- 弹幕发送（O2 第一阶段：单条手动；鉴权=组件 send_token） ----------
 
-    state["last_request_id"] = ""
-
-    def _disk_token() -> str:
-        """发送 token 磁盘真相（config.ws_token_file——webui 与 main 同机直接读
-        文件。此前只存 app.storage.browser：webui 重启/NiceGUI 存储目录清理后
-        丢失，每次重启都要重填——2026-10-13 用户报告）。"""
-        try:
-            path = str(_disk_danmaku_section().get("ws_token_file")
-                       or "persistence_data/send_token.txt")
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except Exception:
-            return ""
-
-    async def _send_token() -> str:
-        # 输入框已预填磁盘值（密码框掩码显示）；用户改动即用，空则回读文件兜底
-        return (send_token_input.value or "").strip() or _disk_token()
-
-    def _render_send_result(r: Dict[str, Any]):
-        code = r.get("status_code")
-        if code == 503:
-            send_result_label.text = ""
-            ui.notify(f"发送未配置：{r.get('error')}｜{r.get('fix_hint', '')}",
-                      type="warning", close_button="知道了")
-            return
-        if code == 401:
-            send_result_label.text = ""
-            ui.notify("token 不匹配——核对 persistence_data/send_token.txt",
-                      type="negative", close_button="知道了")
-            return
-        status = str(r.get("status") or "")
-        rid = str(r.get("request_id") or "")
-        state["last_request_id"] = rid
-        kind = {"sent": "positive", "dry_run": "info", "unknown": "warning"}.get(status, "negative")
-        msg = f"回执 {status or '无'}｜request_id={rid}"
-        if r.get("reason_code"):
-            msg += f"｜{r.get('reason_code')}"
-        if r.get("fix_hint"):
-            msg += f"｜{r.get('fix_hint')}"
-        send_result_label.text = msg
-        ui.notify(msg, type=kind, close_button="知道了")
-        if r.get("reason_code") == "SENDER_DISABLED":
-            ui.notify("该平台未在发送白名单——在『发送启用平台』中勾选并保存，"
-                      "然后关闭再开启『启用监听』开关（或重启系统）生效",
-                      type="warning", close_button="知道了")
-        if r.get("reason_code") == "PLATFORM_REJECTED":
-            ui.notify("发送会话登录态失效——在房间列表点该平台的『登录』按钮重新登录"
-                      "（一次登录同时恢复监听与发送），完成后重新发送",
-                      type="warning", close_button="知道了")
-        if status in ("sent", "dry_run", "unknown"):
-            send_content.value = ""
-
-    async def _do_send():
-        key = send_room_select.value
-        room = state["run_rooms"].get(key) if key else None
-        if not room:
-            await _toast("请选择在听房间（服务未运行或无在听房间）", "warning")
-            return
-        content = (send_content.value or "").strip()
-        if not content:
-            await _toast("弹幕内容不能为空", "warning")
-            return
-        tok = await _send_token()
-        if not tok:
-            await _toast("首次发送需填入发送 token（persistence_data/send_token.txt 内容）", "warning")
-            return
-        r = await _api(config, "POST", "/danmaku/send", body={
-            "platform": room.get("platform"), "room_id": room.get("room_id"),
-            "content": content, "token": tok}, timeout=80)
-        if not isinstance(r, dict):
-            await _toast("发送请求失败（控制面不可达）", "negative")
-            return
-        _render_send_result(r)
-
-    async def _do_reconcile():
-        rid = state.get("last_request_id") or ""
-        if not rid:
-            await _toast("无最近 request_id——先发送一次", "warning")
-            return
-        tok = await _send_token()
-        r = await _api(config, "POST", "/danmaku/send-results",
-                       body={"request_id": rid, "token": tok}, timeout=10)
-        if not isinstance(r, dict):
-            await _toast("对账请求失败", "negative")
-            return
-        seen = r.get("result")
-        ui.notify(f"对账 {rid}: {(str(seen)[:160] if seen else '无记录')}",
-                  type="info", close_button="知道了")
-
-    async def _save_send_platforms(e):
-        # e.value 保证是新值（on_value_change 官方契约）——此前 on("update:model-value")
-        # 触发时 select.value 仍是旧值，把旧白名单写回磁盘（界面已选、落盘不变的假保存）
-        val = ",".join(str(x) for x in (list(e.value or []) if e is not None else []))
-        # main 可达时 Settings.save 会磁盘回读覆盖 danmaku_listener 节（F-ENG-2
-        # 写者分配矩阵）——直写被静默丢弃，必须走运行面窄端点（对齐 F1 房间开关）
-        if state["mode"] in ("running", "service_disabled"):
-            r = await _api(config, "POST", "/danmaku/send-config", {"platforms": val})
-            if not isinstance(r, dict) or not r.get("success"):
-                await _err_notify(r or {"error": "发送平台保存失败（运行面不可达）"})
-                return
-        else:
-            ok = set_config_callback("danmaku_listener", "send_enabled_platforms",
-                                     value=val, _notify=False)
-            if ok is False:
-                await _err_notify({"error": "发送平台保存失败", "fix_hint": "配置未变更"})
-                return
-        if state["mode"] == "running":
-            await _toast("发送平台已保存——关闭再开启『启用监听』开关（重建监听）后生效", "info")
-        else:
-            await _toast("发送平台已保存——启动系统后生效", "info")
-
-    async def _save_send_dry_run(e):
-        live = bool(e.value) if e is not None else bool(send_live_switch.value)
-        # 分流同 _save_send_platforms（F-ENG-2：main 可达时直写不落盘）
-        if state["mode"] in ("running", "service_disabled"):
-            r = await _api(config, "POST", "/danmaku/send-config", {"dry_run": not live})
-            if not isinstance(r, dict) or not r.get("success"):
-                await _err_notify(r or {"error": "发送模式保存失败（运行面不可达）"})
-                return
-        else:
-            ok = set_config_callback("danmaku_listener", "send_dry_run",
-                                     value=not live, _notify=False)
-            if ok is False:
-                await _err_notify({"error": "发送模式保存失败", "fix_hint": "配置未变更"})
-                return
-        if live:
-            await _toast("已开启实发——生效后弹幕将真实发送至直播间", "warning")
-        else:
-            await _toast("已开启观察模式（dry_run：只记录不发送）", "info")
-
-    with ui.card().style(card_css):
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("弹幕发送").style("font-size:var(--font-size-card-title,16px);font-weight:600")
-            send_result_label = ui.label("").style(
-                "font-size:var(--font-size-small,12px);color:var(--text-hint)")
-        ui.label("单条手动发送（限速/熔断由组件守卫链兜底）；观察模式只记录不发送，实发需开启『实发模式』").style(
-            "font-size:var(--font-size-tiny,11px);color:var(--text-hint)")
-        with ui.row().classes("w-full items-center gap-2"):
-            send_room_select = ui.select(
-                label="目标房间（在听）", options={}).style("width:var(--input-width-md,250px)")
-            send_token_input = ui.input(
-                label="发送 token（自动读取本机文件，可修改）", password=True,
-                value=_disk_token()).style(
-                "width:var(--input-width-md,250px)")
-        # 发送白名单（config send_enabled_platforms，逗号分隔）+ 实发模式（send_dry_run
-        # 取反）——发送是敏感操作，组件出厂默认全关+观察（R10/DX-F1 安全态）。保存写
-        # config；settings 重灌只发生在监听重建（_async_start），故运行期改后需
-        # 关再开『启用监听』或重启系统生效。
-        _send_sec = _disk_danmaku_section()
-        send_platforms_select = ui.select(
-            label="发送启用平台（白名单——保存后重启监听生效）",
-            options={p: _PLATFORM_LABELS[p] for p in _ALL_PLATFORMS},
-            multiple=True,
-            value=[p.strip() for p in str(_send_sec.get("send_enabled_platforms") or "").split(",")
-                   if p.strip()],
-        ).classes("w-full")
-        send_live_switch = ui.switch(
-            "实发模式（关闭=观察 dry_run，仅记录不发送）",
-            value=not bool(_send_sec.get("send_dry_run", True)))
-        send_content = ui.input(label="弹幕内容（单条上限 100 字）").classes("w-full")
-        with ui.row().classes("w-full items-center gap-2"):
-            ui.button("发送", on_click=_do_send).props("unelevated color=primary")
-            ui.button("对账最近", on_click=_do_reconcile).props("outline")
-            # （2026-10-14 D2a 终门裁定）『发送登录』按钮已移除——v0.8.0 一次登录
-            # 双载体齐活，房间行『登录』一次扫码即恢复监听+发送；发送登录态失效
-            # 时 PLATFORM_REJECTED 引导指向『登录』按钮
-        send_platforms_select.on_value_change(_save_send_platforms)
-        send_live_switch.on_value_change(_save_send_dry_run)
+    send_platforms_select.on_value_change(_save_send_platforms)
+    send_live_switch.on_value_change(_save_send_dry_run)
 
     # ---------- 登录编排（CEO F2 onboard_room 单入口） ----------
 
@@ -623,9 +646,41 @@ def create_platform_config_tab(
                 return "running"
         return "saved_pending"
 
+    # 渲染签名（F7：单一元组集中构造——新增渲染依赖必须入签名，否则界面静默停更）
+    # 依赖：房间集合/enabled/run_state(含 stalled 标记)/登录徽章/回执(kind+rid)/模式
+    def _room_signature() -> str:
+        items = []
+        for r in _rooms():
+            p, rid = str(r.get("platform")), str(r.get("room_id"))
+            key = f"{p}:{rid}"
+            logged = bool(login_svc.check_login(p)) if p in _CONFIG_LOGIN_PLATFORMS else True
+            rec = state["receipts"].get(key) or {}
+            items.append((key, bool(r.get("enabled")), _room_run_state(r), logged,
+                          str(rec.get("kind", "")), str(rec.get("rid", "")),
+                          state["mode"]))
+        return repr(items)
+
+    _RECEIPT_BADGE = {"ok": ("check_circle", "positive"), "dry": ("science", "info"),
+                      "warn": ("error_outline", "warning"),
+                      "fail": ("cancel", "negative")}
+
     def _render_rooms():
+        # 输入态双保险（规格审查 C1）：签名不变跳过重建（焦点/值自然保留）；
+        # 重建前按 platform:room 草稿快照回填（保字），焦点恢复到最后聚焦输入
+        # （保字保焦——F9；光标落尾为已知取舍，选区恢复属 P3 细化）
+        sig = _room_signature()
+        if sig == state["rooms_render_sig"]:
+            return
+        for key, el in list(state["send_inputs"].items()):
+            try:
+                state["send_drafts"][key] = el.value
+            except Exception:
+                pass
         list_host.clear()
+        state["send_inputs"] = {}
+        state["rooms_render_sig"] = sig
         rooms = _rooms()
+        import time as _time
         with list_host:
             if not rooms:
                 ui.label("还没有监听房间——① 选择平台 → ② 填房间号或粘贴链接 → ③ 添加并扫码登录") \
@@ -633,6 +688,7 @@ def create_platform_config_tab(
                 return
             for r in rooms:
                 p, rid = str(r.get("platform")), str(r.get("room_id"))
+                key = f"{p}:{rid}"
                 run_state = _room_run_state(r)
                 text, color = _ROOM_STATE_TEXT[run_state]
                 enabled = bool(r.get("enabled"))
@@ -642,7 +698,10 @@ def create_platform_config_tab(
                     ui.label(rid).style("font-size:var(--font-size-body,14px)")
                     ui.label(text).style(f"color:{color};font-size:var(--font-size-small,12px);font-weight:500")
                     if run_state == "stalled":
-                        ui.label(f"最近消息 {state['run_status'].get('last_msg_age_s')}s 前——确认开播或查日志") \
+                        # 冻结时刻绝对时间（design F10：相对时间冻结会变成错误信息）
+                        age = state["run_status"].get("last_msg_age_s") or 0
+                        abs_hm = _time.strftime("%H:%M", _time.localtime(_time.time() - age))
+                        ui.label(f"最近消息 {abs_hm}（暂停刷新）——确认开播或查日志") \
                             .style("font-size:var(--font-size-tiny,11px);color:var(--color-negative,#c10015)")
                     ui.element("div").classes("col")
                     # 登录徽章（平台级——Design S-1；J-3 三级灰/绿）
@@ -713,8 +772,8 @@ def create_platform_config_tab(
                         "清除该平台登录态并重新弹出登录窗口（一次登录同时恢复监听与发送，"
                         "完成后自动恢复监听）")
 
-                    # 删除（运行态两步走——M-1 ②：先窄端点停再删配置）
-                    async def _remove(_e=None, pp=p, rd=rid):
+                    # 删除（运行态两步走——M-1 ②：先窄端点停再删配置；eng E2 清草稿/回执）
+                    async def _remove(_e=None, pp=p, rd=rid, k=key):
                         if state["mode"] == "running":
                             await _api(config, "POST", f"/danmaku/rooms/{pp}/{rd}/enabled",
                                        {"enabled": False}, timeout=10)
@@ -723,8 +782,63 @@ def create_platform_config_tab(
                         if not await _write_rooms(kept):
                             await _err_notify({"error": "删除保存失败", "fix_hint": "房间列表未变更"})
                             return
+                        state["send_drafts"].pop(k, None)
+                        state["receipts"].pop(k, None)
                         await _toast("房间已删除")
                     ui.button("删除", on_click=_remove).props("flat dense color=negative")
+
+                # ---- 行内发送行（用户裁决=行内化；design F1/F5/F8/F13 分态） ----
+                # main_down/disabled 不渲染（全页一致）；服务运行中未监听=禁用占位；
+                # 未登录（配置期登录平台）=禁用+请先登录；监听中=完整发送行
+                if state["mode"] != "running":
+                    continue
+                if run_state != "running":
+                    if enabled:
+                        ui.input(placeholder="房间未在监听，启动后可发送").classes(
+                            "w-full q-ml-md").disable()
+                    continue
+                if p in _CONFIG_LOGIN_PLATFORMS and not login_svc.check_login(p):
+                    ui.input(placeholder="请先登录后再发送（点上方『登录』）").classes(
+                        "w-full q-ml-md").disable()
+                    continue
+                with ui.row().classes("w-full items-center gap-2 q-ml-md q-pl-sm").style(
+                        "border-left:2px solid var(--border-color,#e0e0e0)"):
+                    inp = ui.input(placeholder="输入要发送的弹幕…（回车发送）",
+                                   value=state["send_drafts"].get(key, "")).classes("w-full")
+                    state["send_inputs"][key] = inp
+                    inp.on("focus", lambda k=key: state.__setitem__("last_focus_key", k))
+                    receipt = state["receipts"].get(key)
+                    if receipt:
+                        icon, col = _RECEIPT_BADGE.get(str(receipt.get("kind")), ("help_outline", "grey"))
+                        tip = str(receipt.get("text") or "")
+                        rid_txt = str(receipt.get("rid") or "")
+                        if rid_txt:
+                            tip = tip + "｜request_id=" + rid_txt
+                        ui.badge(icon).props("outline color=" + col).tooltip(tip)
+                    send_btn = ui.button("发送")
+
+                    async def _row_send(k=key, pp=p, rd=rid, i=inp, _btn=send_btn):
+                        await _send_from_row(k, pp, rd, i, _btn)
+                    send_btn.on("click", _row_send)
+
+                    def _on_enter(_e=None, k=key, pp=p, rd=rid, i=inp, _btn=send_btn):
+                        import asyncio as _aio
+                        try:
+                            loop = _aio.get_running_loop()
+                            loop.create_task(_send_from_row(k, pp, rd, i, _btn))
+                        except RuntimeError:
+                            pass
+                    inp.on("keydown.enter", _on_enter)
+
+        # 焦点恢复（F9 保字保焦）：重建后聚焦最后聚焦的房间输入
+        fk = state.get("last_focus_key")
+        if fk and fk in state["send_inputs"]:
+            _el = state["send_inputs"][fk]
+            try:
+                _el.run_javascript(
+                    'const e=document.getElementById("c' + str(_el.id) + '"); if(e) e.focus();')
+            except Exception:
+                pass
 
 
     # ---------- 轮询（3s） ----------
@@ -754,15 +868,11 @@ def create_platform_config_tab(
             if isinstance(rr, dict):
                 state["run_rooms"] = {f"{x.get('platform')}:{x.get('room_id')}": x
                                       for x in (rr.get("rooms") or []) if isinstance(x, dict)}
-            # 发送卡目标房间联动（O2 第一阶段）
-            _rooms_now = list(state["run_rooms"].keys())
-            if list(send_room_select.options or []) != _rooms_now:
-                send_room_select.options = _rooms_now
-                if send_room_select.value not in _rooms_now:
-                    send_room_select.value = None
-                # NiceGUI 3.x：options 属性赋值不自动推前端（value 是 reactive
-                # 而 options 不是）——缺 update() 则前端下拉永远显示旧选项
-                send_room_select.update()
+            # 发送全局态徽标（design F2/F11：磁盘真相随轮询刷新）
+            dry_on = bool(sec.get("send_dry_run", True))
+            send_dry_badge.style("display:" + ("inline-flex" if dry_on else "none"))
+            has_token = bool(_disk_token()) or bool((send_token_input.value or "").strip())
+            send_token_badge.style("display:" + ("none" if has_token else "inline-flex"))
         # 开关不回读运行态（2026-10-12 语义修复）：开关=配置意图（磁盘 config
         # enabled，仅用户点击经直写/toggle 落盘变更，初值读磁盘）；监听的实际
         # 运行状态由 _render_pill 状态胶囊承担——二者职责分离。

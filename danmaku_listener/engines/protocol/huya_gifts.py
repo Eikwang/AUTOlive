@@ -1,10 +1,10 @@
-"""虎牙礼物编号→名称/价格映射（2026-10-01 用户实测对照表，docs/虎牙礼物编号名称对照表.md）
+"""HUYA_GIFT_MAP（ID→价格映射，元计价）
 
-价格单位：虎牙币（1 虎牙币 = 1 元人民币）；价格 0.1 表示 1 角档（电池类）。
-来源为主播端实测清单，未覆盖的新礼物编号回退显示编号本身。
+价格单位：元人民币（2026-10-22 用户重整对照表转录，来源 D:/AI/DanmakuListener\各平台礼物信息/虎牙礼物编号名称对照表.md）。
+文档未列的旧表条目按旧单位率（×1.0）折元保留，行尾标注。
 """
 
-# gift_id -> (礼物名称, 单价/虎牙币)
+# gift_id -> (礼物名称, 单价/元)
 HUYA_GIFT_MAP: dict[int, tuple[str, float]] = {
     4: ("虎粮", 0.1),
     12: ("藏宝图", 5000),
@@ -198,9 +198,28 @@ HUYA_GIFT_MAP: dict[int, tuple[str, float]] = {
 }
 
 
-def lookup_gift(gift_id) -> tuple[str, float]:
-    """礼物名/价格查询；未知编号返回 ("", 0.0)"""
+import logging
+
+_logger = logging.getLogger(__name__)
+_seen_missing: set = set()
+
+
+def _warn_missing(key) -> None:
+    """查表未命中首见告警（按 key 节流防刷屏——native CEO F4 漂移可观测）。"""
+    key = str(key)
+    if key not in _seen_missing:
+        _seen_missing.add(key)
+        _logger.warning("[gifts] %s 查表未命中（首见）：key=%s", "HUYA_GIFT_MAP", key)
+
+
+def lookup_gift(gift_id):
+    """(名称, 单价/元)；未知返回 ("", 0.0)——未命中记首见告警"""
     try:
-        return HUYA_GIFT_MAP.get(int(gift_id), ("", 0.0))
+        key = int(gift_id)
     except (TypeError, ValueError):
         return ("", 0.0)
+    entry = HUYA_GIFT_MAP.get(key)
+    if entry is None:
+        _warn_missing(key)
+        return ("", 0.0)
+    return entry
