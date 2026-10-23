@@ -197,8 +197,16 @@ def create_svc_tab(
         with ui.row().style("align-items:center;gap:8px"):
             stream_btn = ui.button("启动变声", on_click=lambda: _toggle_stream())
 
+        # 服务就绪自愈（2026-10-23 排障批）：rvc-vc 随主系统 main.py 托管
+        # （webui.auto_run=false 时不自动拉起，点「启动系统」后约 10s 初始化），
+        # 页签先于服务就绪打开时首次枚举必失败——此前错误常驻、下拉恒空
+        # （唯一出路手动刷新），用户感知「变声无法使用」。loaded/pending 让
+        # _poll 探测到服务上线后自动补枚举+就绪清错，不再依赖手动刷新。
+        _devices_state = {"loaded": False, "pending": False}
+
         async def _refresh_devices():
-            """E-9：/devices 枚举（io_bound 卸载）→ 填充下拉；空态禁用启动。"""
+            """E-9：/devices 枚举（io_bound 卸载）→ 填充下拉；空态禁用启动。
+            pending 防并发（首次枚举/补枚举在途时跳过）；失败给行动指引不锁死。"""
             def _enum():
                 d = client.devices()
                 out = {"input": [], "output": []}
@@ -211,11 +219,20 @@ def create_svc_tab(
                     if dev.get("max_output_channels", 0) > 0:
                         out["output"].append(name)
                 return out
+            if _devices_state["pending"]:
+                return
+            _devices_state["pending"] = True
             try:
                 devs = await run.io_bound(_enum)
             except Exception as e:
-                _show_error(f"设备枚举失败（服务未就绪？）：{str(e)[:120]}")
+                _show_error(f"变声服务未连接——主系统未启动或服务初始化中。"
+                            f"请点侧边栏「启动系统」，服务就绪后设备将自动加载"
+                            f"（也可稍后点「刷新设备」重试）[{str(e)[:80]}]")
                 return
+            finally:
+                _devices_state["pending"] = False
+            _devices_state["loaded"] = True
+            _clear_error()
             in_sel.options = sorted(set(devs["input"]))
             out_sel.options = sorted(set(devs["output"]))
             in_sel.update(); out_sel.update()
@@ -276,7 +293,9 @@ def create_svc_tab(
                 st = await run.io_bound(client.status, _timeout_none := None) \
                     if False else await run.io_bound(client.status)
             except Exception:
-                status_label.set_text("○ 服务未就绪（rvc-vc 未运行或端口不符）")
+                _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
+                status_label.set_text(
+                    "○ 服务未就绪——点侧边栏「启动系统」后约 10-20 秒自动就绪")
                 return
             running = st.get("state") == "running"
             model = (st.get("model") or {}).get("pth", "")
@@ -295,6 +314,9 @@ def create_svc_tab(
                 _stream_state["error_shown"] = last_err
                 _show_error(f"服务端报告：{last_err}")
             model_label_cache["pth"] = model
+            # 服务就绪自愈：设备未成功枚举过（服务晚于页面就绪/服务重启）→ 补枚举
+            if not _devices_state["loaded"] and not _devices_state["pending"]:
+                background_tasks.create(_refresh_devices())
 
         _active_timers.append(ui.timer(2.0, _poll))
 
