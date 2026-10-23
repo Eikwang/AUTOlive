@@ -148,46 +148,75 @@ class ChoreoEngine:
     # ---------- 触发判定（同步纯内存，on_gift/on_keyword/on_song 路径） ----------
 
     def decide_trigger(self, trigger_type: str, match_value: str, data: dict) -> dict:
-        """触发判定。Returns: {accepted, takeover, rule, commands}"""
+        """触发判定。Returns: {accepted, takeover, rule, commands, reason, retry_after_s}
+
+        reason 枚举（GAP-3/F2 义务）：拒绝值 = no_match / below_min_price /
+        throttled{retry_after_s} / hold{retry_after_s} / in_progress / disabled；
+        接受值 = accepted（DEFAULT 启动）/ interrupted（条件3 打断）/
+        requeued（条件2 重排，accepted=true 说明值）。模拟触发与观测消费。
+        """
         now = self.clock()
         commands: List = []
         if not self.cfg.enable or not self.enabled_rules:
-            return {"accepted": False, "takeover": False, "rule": None, "commands": commands}
-        rule = self._match_rule(trigger_type, match_value, data)
+            return {"accepted": False, "takeover": False, "rule": None, "commands": commands,
+                    "reason": "disabled", "retry_after_s": None}
+        rule, match_reason = self._match_rule(trigger_type, match_value, data)
         if rule is None:
-            return {"accepted": False, "takeover": False, "rule": None, "commands": commands}
+            return {"accepted": False, "takeover": False, "rule": None, "commands": commands,
+                    "reason": match_reason or "no_match", "retry_after_s": None}
 
         # 节流窗口（每规则 min_retrigger_s，防连点风暴）：忽略不计数（WP-6 同语义）
         last = self.key_last.get(rule.rule_id)
         if last is not None and (now - last) < self.cfg.min_retrigger_s:
             self.key_last[rule.rule_id] = now
-            return {"accepted": False, "takeover": False, "rule": rule, "commands": commands}
+            return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
+                    "reason": "throttled",
+                    "retry_after_s": round(self.cfg.min_retrigger_s - (now - last), 2)}
+        # 计数时间衰减（GAP-2，设计文档 reset_after 语义）：窗口锚点=最后一次尝试
+        # （含被节流拒绝的，与 key_last 同源——Eng F5）；位置=节流判定之后、计数+1 之前，
+        # 超窗清零后本轮从 1 重新累计；reset_after_s=0 禁用衰减。
+        if self.cfg.reset_after_s > 0 and last is not None and (now - last) > self.cfg.reset_after_s:
+            self.counters[rule.rule_id] = 0
         self.key_last[rule.rule_id] = now
 
         if self.state == "sequence" and self.seq is not None:
             seq = self.seq
             # 全局序列最小展示时间（F5）：hold 内他键触发忽略（不终止不计数）
             if rule.rule_id != seq["rule_id"] and now < seq["hold_until"]:
-                return {"accepted": False, "takeover": False, "rule": rule, "commands": commands}
+                return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
+                        "reason": "hold", "retry_after_s": round(seq["hold_until"] - now, 2)}
             if rule.rule_id == seq["rule_id"]:
                 # 条件2（同键再触发）
                 if not seq["main_done"]:
                     # main 未完成：忽略本次触发且不计数（WP-6）
-                    return {"accepted": False, "takeover": False, "rule": rule, "commands": commands}
+                    return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
+                            "reason": "in_progress", "retry_after_s": None}
                 # main 已完成（处 exit 步）：当前 exit 播完后重排完整三步（WP-9）
                 self.counters[rule.rule_id] = self.counters.get(rule.rule_id, 0) + 1
                 self._seq_counter += 1
                 seq["pending_requeue"] = build_steps(rule, self.counters[rule.rule_id], self._seq_counter)
                 commands.append(LogCmd("info", f"[编排] 规则 {rule.rule_id} 同键重入（第 {self.counters[rule.rule_id]} 次），当前 exit 播完后重排"))
-                return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands}
+                return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands,
+                        "reason": "requeued", "retry_after_s": None}
             # 条件3（他键触发，beyond hold）
-            return self._interrupt_sequence(rule, data, now, commands)
+            result = self._interrupt_sequence(rule, data, now, commands)
+            result["reason"] = "interrupted"
+            result["retry_after_s"] = None
+            return result
 
         # DEFAULT 态：启动新序列（条件1 的正常入口）
-        return self._start_sequence(rule, data, now, commands)
+        result = self._start_sequence(rule, data, now, commands)
+        result["reason"] = "accepted"
+        result["retry_after_s"] = None
+        return result
 
-    def _match_rule(self, trigger_type: str, match_value: str, data: dict) -> Optional[RuleCfg]:
-        """规则匹配（义务 C3-3/WP-10：gift 全等+min_price / keyword 独立词表子串 / song 可空=任意）。"""
+    def _match_rule(self, trigger_type: str, match_value: str, data: dict):
+        """规则匹配（义务 C3-3/WP-10：gift 全等+min_price / keyword 独立词表子串 / song 可空=任意）。
+
+        Returns: (rule, reason)——reason 仅在 rule=None 时非 None：
+        no_match（无命中）/ below_min_price（礼物名命中但价值未达门槛，GAP-3 reason 枚举）。
+        """
+        price_gate_hit = False
         for rule in self.enabled_rules:
             if rule.trigger_type != trigger_type:
                 continue
@@ -198,14 +227,15 @@ class ChoreoEngine:
                     except (TypeError, ValueError):
                         total_price = 0.0
                     if total_price >= rule.min_price:
-                        return rule
+                        return rule, None
+                    price_gate_hit = True
             elif trigger_type == "keyword":
                 if _normalize_text(match_value).find(_normalize_text(rule.match)) >= 0:
-                    return rule
+                    return rule, None
             elif trigger_type == "song":
                 if not rule.match or _normalize_text(match_value).find(_normalize_text(rule.match)) >= 0:
-                    return rule
-        return None
+                    return rule, None
+        return None, ("below_min_price" if price_gate_hit else "no_match")
 
     def _start_sequence(self, rule: RuleCfg, data: dict, now: float, commands: List) -> dict:
         """DEFAULT→SEQUENCE：计数+1、按档位物化三步、发出 enter 切换。"""
@@ -405,11 +435,20 @@ class ChoreoEngine:
         return commands
 
     def on_restore_result(self, ok: bool, now: float) -> List:
-        """恢复默认结果回填：失败重试（恢复是回默认唯一路径，义务 S1-1）。"""
+        """恢复默认结果回填：失败重试（恢复是回默认唯一路径，义务 S1-1）。
+
+        F1 竞态守卫：仅 DEFAULT 态（无活动序列）才重试——序列已启动则放弃本次
+        重试（计数归零，新序列 exit 完成后 _complete_step 自然再走恢复），
+        消除 EDTalk 抖动期"重试 schedule 覆盖已接受 enter 段"的画面打架。
+        """
         if ok:
             self._restore_attempts = 0
             return []
         self._restore_attempts += 1
+        if self.state != "default" or self.seq is not None:
+            logger.info("[编排] 恢复重试让位于新序列（F1 守卫，放弃本次重试）")
+            self._restore_attempts = 0
+            return []
         if self._restore_attempts <= RESTORE_RETRY_MAX:
             pool = self._default_pool()
             if pool:
@@ -463,7 +502,11 @@ class ChoreoEngine:
                 RestoreDefault(self._default_pool())]
 
     def get_state(self) -> dict:
-        """状态快照（P2 状态条/测试断言用：当前模式/活动序列/各键计数/降级计数）。"""
+        """状态快照（P2 状态条/测试断言用：当前模式/活动序列/各键计数/降级计数）。
+
+        GAP-4/F4 扩展：pending_requeue（重排待执行标志）+ step_remaining_s（当前步
+        剩余秒数，None=无计时中步骤）；worker_alive/queue_depth 由门面 get_state 补。
+        """
         seq = self.seq
         return {
             "ready": self.ready,
@@ -476,6 +519,9 @@ class ChoreoEngine:
             "hold_remaining": max(0.0, (seq["hold_until"] - self.clock())) if seq else 0.0,
             "degrade_total": self.degrade_total,
             "enabled_rules": [r.rule_id for r in self.enabled_rules],
+            "pending_requeue": bool(seq.get("pending_requeue")) if seq else False,
+            "step_remaining_s": (round(seq["current_deadline"] - self.clock(), 1)
+                                 if seq and seq.get("current_deadline") is not None else None),
         }
 
 
@@ -495,11 +541,43 @@ class ActionChoreographer:
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
         # enable=false 或 EDTalk 客户端缺失：不启动 worker（订阅点短路直通，
-        # 关闭=全链零行为变化——义务"总开关"）
-        if self.cfg.enable and self.edtalk_client is not None:
+        # 关闭=全链零行为变化——义务"总开关"）。_ensure_worker 幂等（GAP-1：
+        # __init__ 与 apply_config 共用单一启动路径，is_alive 判定不二次 start）。
+        with self._lock:
+            self._ensure_worker()
+
+    def _ensure_worker(self, enable=None) -> bool:
+        """确保 worker 线程在运行（GAP-1/Eng 钉子：幂等，持锁调用）。
+
+        enable：显式生效开关（apply_config 换装前按 new_cfg 判定用）；None=self.cfg.enable。
+
+        Returns: True=worker 在运行（含已在跑）；False=无需启动（enable=false
+        或客户端缺失）或启动失败（调用方按义务三段式处置）。
+        """
+        if self._worker is not None and self._worker.is_alive():
+            return True
+        eff_enable = self.cfg.enable if enable is None else enable
+        if not (eff_enable and self.edtalk_client is not None):
+            return False
+        try:
             self._worker = threading.Thread(target=self._worker_main, daemon=True,
                                             name="action-choreographer")
             self._worker.start()
+            logger.info("[编排] worker 线程启动（热启用生效）")
+            return True
+        except Exception as e:
+            # DX CAP6:apply:fix/recovery——启动失败三段式；self._worker 复位，
+            # 调用方（apply_config）整体回滚换装（side effects=none 二值）。
+            self._worker = None
+            logger.error(
+                f"[编排] worker 启动失败：problem=编排执行线程未运行；"
+                f"cause={type(e).__name__}: {e}；fix=检查配置与 EDTalk 启用状态后重新应用（fix and retry）"
+            )
+            return False
+
+    def worker_alive(self) -> bool:
+        """worker 存活观测（GAP-4/F4：三态区分"未启用/已启未就绪/就绪运行"）。"""
+        return bool(self._worker is not None and self._worker.is_alive())
 
     # ---------- 同步判定 API（分类分发层订阅点调用，微秒级返回） ----------
 
@@ -550,7 +628,96 @@ class ActionChoreographer:
 
     def get_state(self) -> dict:
         with self._lock:
-            return self.engine.get_state()
+            state = self.engine.get_state()
+            state["worker_alive"] = self.worker_alive()
+            state["queue_depth"] = self._events.qsize()
+            return state
+
+    # ---------- 模拟触发（GAP-3：管理页验证通道，与真实事件同链路） ----------
+
+    _SIM_MESSAGES = {
+        "no_match": "没有命中的启用规则",
+        "below_min_price": "礼物价值未达规则 min_price 门槛",
+        "throttled": "触发过快被节流",
+        "hold": "序列最小展示窗口内，他键触发被忽略",
+        "in_progress": "同规则序列 main 未完成，忽略不计数",
+        "disabled": "编排器未启用（enable=false）或 worker 未运行",
+        "requeued": "已排队：当前 exit 播完后重排完整序列",
+        "interrupted": "已打断当前序列并启动新序列",
+        "accepted": "已启动新序列",
+    }
+    _SIM_FIXES = {
+        "no_match": "检查规则 match 与触发值是否一致（keyword 为 NFKC 子串匹配）",
+        "below_min_price": "降低规则 min_price 或使用真实礼物（裸 API 载荷 total_price 缺省 0）",
+        "throttled": "等待 retry_after_s 后重试",
+        "hold": "等待当前序列展示窗口结束（hold_remaining 秒）",
+        "in_progress": "等待 main 步完成（exit 步中再触发会重排）",
+        "disabled": "打开 choreography.enable 并应用，或检查 worker 启动日志",
+        "requeued": "观察状态条 pending_requeue，exit 完成后自动重排",
+        "interrupted": "观察状态条活动序列",
+        "accepted": "观察状态条活动序列与画面切换",
+    }
+
+    def simulate_trigger(self, payload: dict) -> dict:
+        """模拟触发（GAP-3）：与真实事件同链路（decide_trigger+worker 执行）。
+
+        载荷两形态（义务 F3 裁决）：
+        - 管理页主形态 {"rule_id": ...}：端点从规则配置合成载荷——gift 规则
+          total_price := rule.min_price（恰好满足门槛），下拉任一规则必可触发；
+        - 裸 API 形态 {"trigger_type", "match_value", 可选 "gift"}：gift 载荷
+          白名单 gift_name/total_price/gift_num/unit_price，total_price 缺省 0
+          （min_price>0 规则不命中为诚实门槛语义）。
+
+        Returns: {accepted, reason, rule_id, retry_after_s, code, message, fix}
+        reason 枚举见 decide_trigger（六拒绝值+accepted/interrupted/requeued）。
+        """
+        try:
+            rule_id = payload.get("rule_id")
+            with self._lock:
+                if not self.worker_alive():
+                    # 诚实失败（DX channel 裁决）：指令不进队列（无消费者堆积）
+                    return self._sim_result({"accepted": False, "reason": "disabled",
+                                             "retry_after_s": None}, None)
+                if rule_id:
+                    rule = self.engine.cfg.rule_by_id(str(rule_id))
+                    if rule is None:
+                        return self._sim_result({"accepted": False, "reason": "no_match",
+                                                 "retry_after_s": None}, None)
+                    data = {}
+                    if rule.trigger_type == "gift":
+                        data = {"gift_name": rule.match,
+                                "total_price": float(rule.min_price),
+                                "gift_num": 1, "unit_price": 0}
+                    decision = self.engine.decide_trigger(rule.trigger_type, rule.match, data)
+                else:
+                    trigger_type = str(payload.get("trigger_type", "") or "")
+                    match_value = str(payload.get("match_value", "") or "")
+                    gift = payload.get("gift") if isinstance(payload.get("gift"), dict) else {}
+                    data = {k: gift[k] for k in ("gift_name", "total_price", "gift_num", "unit_price")
+                            if k in gift}
+                    decision = self.engine.decide_trigger(trigger_type, match_value, data)
+                self._dispatch(decision["commands"])
+            result = self._sim_result(decision, decision.get("rule"))
+            logger.info(
+                f"[编排][模拟] rule={result.get('rule_id')} trigger={payload.get('trigger_type') or 'rule_id形态'} "
+                f"accepted={result['accepted']} reason={result['reason']}"
+            )
+            return result
+        except Exception as e:
+            logger.error(f"[编排][模拟] 异常：problem=模拟触发失败；cause={type(e).__name__}: {e}；fix=查看编排日志")
+            return {"accepted": False, "reason": "error", "rule_id": None,
+                    "retry_after_s": None, "code": "error",
+                    "message": f"模拟触发异常：{type(e).__name__}: {e}",
+                    "fix": "查看编排日志"}
+
+    def _sim_result(self, decision: dict, rule) -> dict:
+        reason = decision.get("reason") or ("accepted" if decision.get("accepted") else "no_match")
+        return {"accepted": bool(decision.get("accepted")), "reason": reason,
+                "rule_id": (rule.rule_id if rule is not None else None),
+                "retry_after_s": decision.get("retry_after_s"),
+                "code": str(reason),
+                "message": self._SIM_MESSAGES.get(reason, reason),
+                "fix": self._SIM_FIXES.get(reason, "查看编排日志")}
 
     def apply_config(self, cfg_node: dict) -> dict:
         """运行时热换装（P2 管理页「应用」按钮；写者=orchestration.api 持久化）。
@@ -593,6 +760,21 @@ class ActionChoreographer:
                                    if k in enabled_ids}
             new_engine.degrade_total = self.engine.degrade_total
             old_engine = self.engine
+            old_cfg = self.cfg
+            # GAP-1：换装前补启动 worker（初始 enable=false → 管理页热启用场景）。
+            # 启动失败=整体回滚换装（side effects 仅 complete/none 二值无 partial，
+            # DX CAP6:apply:recovery）。
+            need_worker = bool(new_cfg.enable and self.edtalk_client is not None)
+            if need_worker and not self._ensure_worker(enable=new_cfg.enable):
+                logger.error(
+                    "[编排] 热启用失败已整体回滚：problem=worker 启动失败配置未生效；"
+                    "cause=线程启动异常（见上方三段式日志）；"
+                    "fix=检查配置与 EDTalk 启用状态后重新应用（fix and retry）"
+                )
+                return {"applied": False, "status": 503, "enabled_rules": [],
+                        "rejected": rejected, "missing_all": [],
+                        "worker_started": False, "ready": self.engine.ready,
+                        "message": "worker 启动失败，配置未应用（已回滚；检查 EDTalk 启用状态后重试）"}
             self.engine = new_engine
             self.cfg = new_cfg
             # 重新下发 DEFAULT 轮播（default_segments 可能已变；权属线 CP-5）
@@ -606,6 +788,8 @@ class ActionChoreographer:
                     "enabled_rules": [r.rule_id for r in new_engine.enabled_rules],
                     "rejected": rejected,
                     "missing_all": result["missing_all"],
+                    "worker_started": True,
+                    "ready": new_engine.ready,
                     "message": "已应用并恢复默认轮播"}
 
     # ---------- 内部 ----------

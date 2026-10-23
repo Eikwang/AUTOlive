@@ -264,14 +264,6 @@
       "speed_max": 1.2
     }
   },
-  "so_vits_svc": {
-    "enable": true,
-    "config_path": "E:\\so-vits-svc\\configs\\ikaros_v1.json",
-    "api_ip_port": "http://127.0.0.1:1145",
-    "spk": "ikaros",
-    "tran": 1.0,
-    "wav_format": "wav"
-  },
   "gpt_sovits": {
     "backend": "inproc",
     "api_ip_port": "http://127.0.0.1:9880",
@@ -1310,11 +1302,6 @@
             "name": "字幕打印",
             "tab_key": "web_captions_printer",
             "enabled": true
-          },
-          {
-            "name": "日志",
-            "tab_key": "log_config",
-            "enabled": true
           }
         ]
       },
@@ -1543,6 +1530,7 @@
     "min_retrigger_s": 2,
     "min_sequence_hold_s": 5,
     "step_timeout_s": 60,
+    "reset_after_s": 300,
     "rules": [
       {
         "rule_id": "girl_A_dance",
@@ -1737,7 +1725,8 @@
     }
   },
   "rvc_vc": {
-    "runtime_python": "D:\\AI\\RVC20240604Nvidia\\runtime\\python.exe"
+    "runtime_python": "D:\\AI\\RVC20240604Nvidia\\runtime\\python.exe",
+    "enabled": true
   },
   "train_streamer": {
     "fine_tune_iter": 20000,

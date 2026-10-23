@@ -70,6 +70,7 @@ class ChoreographyConfig:
     min_retrigger_s: float = 2.0
     min_sequence_hold_s: float = 5.0
     step_timeout_s: float = 60.0
+    reset_after_s: float = 300.0            # GAP-2：计数时间窗口；0=禁用衰减
     rules: list = field(default_factory=list)  # list[RuleCfg]，已剔除被拒规则
 
     def rule_by_id(self, rule_id: str) -> Optional[RuleCfg]:
@@ -165,6 +166,26 @@ def load_choreography_config(config) -> ChoreographyConfig:
     except (TypeError, ValueError):
         step_timeout_s = 60.0
 
+    # GAP-2：计数时间窗口（设计文档 reset_after=300）。0=合法禁用值；
+    # 负值/非数值回退缺省 300 并告警（spec C-3，沿 min_retrigger_s 先例形态但
+    # 与其 ≤0 即回退的口径区分——本键 0 有语义）。
+    reset_after_s = 300.0
+    raw_reset = node.get("reset_after_s", 300)
+    try:
+        parsed_reset = float(raw_reset)
+        if parsed_reset < 0:
+            logger.warning(
+                "choreography.reset_after_s 负值无效，problem=配置告警；"
+                f"cause={raw_reset!r}（须 ≥0，0=禁用衰减）；fix=已回退缺省 300"
+            )
+        else:
+            reset_after_s = parsed_reset
+    except (TypeError, ValueError):
+        logger.warning(
+            "choreography.reset_after_s 非数值，problem=配置告警；"
+            f"cause={raw_reset!r}；fix=已回退缺省 300"
+        )
+
     rules: list = []
     for raw in node.get("rules") or []:
         if not isinstance(raw, dict):
@@ -247,7 +268,8 @@ def load_choreography_config(config) -> ChoreographyConfig:
                              default_segments=default_segments,
                              min_retrigger_s=min_retrigger_s,
                              min_sequence_hold_s=min_sequence_hold_s,
-                             step_timeout_s=step_timeout_s, rules=rules)
+                             step_timeout_s=step_timeout_s,
+                             reset_after_s=reset_after_s, rules=rules)
     cfg._rejections = rejections
     return cfg
 

@@ -334,7 +334,7 @@ def create_visual_body_tab(
     if not isinstance(choreo_node, dict) or "enable" not in choreo_node:
         choreo_node = {"enable": False, "default_mode": "rotate", "default_segments": [],
                        "min_retrigger_s": 2, "min_sequence_hold_s": 5, "step_timeout_s": 60,
-                       "rules": []}
+                       "reset_after_s": 300, "rules": []}
     choreo_node.setdefault("rules", [])
     choreo_node.setdefault("default_segments", [])
     choreo_avail = {"segments": []}
@@ -441,6 +441,14 @@ def create_visual_body_tab(
                     with ui.row():
                         ui.button("删除规则", on_click=lambda i=idx: _delete_rule(i)).props(
                             "outline color=negative")
+        # GAP-3：规则增删后同步模拟触发下拉选项（控件在下方创建，首次调用晚于其定义）
+        try:
+            choreo_sim_select.options = {
+                str(r.get("rule_id")): f"{r.get('rule_id')}（{r.get('trigger_type')}:{r.get('match', '')}）"
+                for r in (choreo_node.get("rules") or [])}
+            choreo_sim_select.update()
+        except NameError:
+            pass
 
     def _delete_rule(idx: int):
         try:
@@ -478,7 +486,12 @@ def create_visual_body_tab(
                       message=f"应用失败（运行系统未启动？）：{e}")
 
     async def _poll_choreo_status():
-        """编排状态条 5s 轮询（main API；未装配/未启动=提示态，不报错刷屏）。"""
+        """编排状态条 5s 轮询（main API；未装配/未启动=提示态，不报错刷屏）。
+
+        GAP-4/F4 三态区分：未启用（enable=false）/已启用但 worker 未运行
+        （worker_alive=false，GAP-1 防护提示）/运行中（含 pending_requeue 与
+        step_remaining_s 观测字段）。
+        """
         try:
             import requests
             resp = await asyncio.to_thread(
@@ -496,9 +509,17 @@ def create_visual_body_tab(
             choreo_status_label.set_text("状态：已停用（开关关闭，订阅点短路直通）").style(
                 "color: var(--text-hint)")
             return
+        if not st.get("worker_alive", True):
+            choreo_status_label.set_text(
+                "状态：已启用但 worker 未运行（检查启动日志三段式：[编排] worker 启动失败）").style(
+                "color: var(--color-negative)")
+            return
         if st.get("state") == "sequence":
             mood = f" · {st.get('mood')}" if st.get("mood") else ""
-            text = (f"执行中：{st.get('active_rule')} · {st.get('step')}{mood} · "
+            pend = " · 重排待执行" if st.get("pending_requeue") else ""
+            remain = st.get("step_remaining_s")
+            remain_txt = f" · 剩余 {remain}s" if remain is not None else ""
+            text = (f"执行中：{st.get('active_rule')} · {st.get('step')}{mood}{pend}{remain_txt} · "
                     f"计数 {st.get('counters', {})} · 降级 {st.get('degrade_total', 0)}")
             choreo_status_label.set_text(text).style("color: var(--color-warning)")
         else:
@@ -518,7 +539,7 @@ def create_visual_body_tab(
                  "改动后点『应用』= 校验 + 热生效 + 写回 config（重启后按 config 装载）。"
                  "前置：EDTalk 驱动启用且服务运行（段名校验依赖 available_segments）").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
-        with ui.grid(columns=5):
+        with ui.grid(columns=6):
             ui.switch("总开关", value=bool(choreo_node.get("enable")),
                       on_change=lambda e: choreo_node.__setitem__("enable", e.value))
             FormField.create_select(
@@ -546,6 +567,12 @@ def create_visual_body_tab(
                     "step_timeout_s", float(e.value or 60) if str(e.value or "").replace(".", "", 1).isdigit() else 60),
                 tooltip="音轨步骤完成回调丢失时的强制推进上限（F1 看门狗）",
                 style="width:100%;")
+            FormField.create_input(
+                label='计数窗口(s)', value=str(choreo_node.get("reset_after_s", 300)),
+                on_change=lambda e: choreo_node.__setitem__(
+                    "reset_after_s", float(e.value or 300) if str(e.value or "").replace(".", "", 1).lstrip("-").isdigit() else 300),
+                tooltip="情绪分级计数时间窗口（GAP-2）：超过该秒数未触发则计数清零重新累计；0=禁用衰减",
+                style="width:100%;")
         default_seg_area = ui.textarea(
             label='默认画面段名池（一行一个；序列段结束后恢复轮播的池）',
             value="\n".join(str(s) for s in (choreo_node.get("default_segments") or [])),
@@ -559,6 +586,50 @@ def create_visual_body_tab(
                                                     _render_rules())).props("outline")
             ui.button("刷新可用段", on_click=_fetch_avail_segments).props("outline")
             ui.button("应用（校验+热生效+写回）", on_click=_apply_choreography)
+
+        async def _simulate_trigger():
+            """GAP-3 模拟触发（rule_id 主形态；与「应用」分行+outline 弱化防误触）。"""
+            rid = choreo_sim_select.value
+            if not rid:
+                ui.notify(position="top", type="warning", message="先选择要模拟的规则")
+                return
+            try:
+                import requests
+                resp = await asyncio.to_thread(
+                    requests.post, f"{_main_api_url()}/choreography/trigger",
+                    json={"rule_id": rid}, timeout=8)
+                if resp.status_code == 403:
+                    ui.notify(position="top", type="negative",
+                              message="403：非本机来源被拒（编排控制仅限本机）")
+                    return
+                data = (resp.json() or {}) if resp.status_code == 200 else {}
+                if resp.status_code == 200:
+                    if data.get("accepted"):
+                        ui.notify(position="top", type="positive",
+                                  message=f"已触发：{data.get('message')}（观察画面与状态条）")
+                    else:
+                        ras = data.get("retry_after_s")
+                        extra = f"，{ras}s 后可重试" if ras else ""
+                        ui.notify(position="top", type="warning",
+                                  message=f"未触发[{data.get('reason')}]：{data.get('message')}{extra}"
+                                          f" · 修复：{data.get('fix')}")
+                else:
+                    ui.notify(position="top", type="warning",
+                              message=f"触发失败（HTTP {resp.status_code}）：{data.get('detail') or ''}")
+            except Exception as e:
+                ui.notify(position="top", type="negative",
+                          message=f"触发失败（运行系统未启动？）：{e}")
+
+        # 模拟触发分区（义务：与「应用」按钮分行分隔；outline 弱化——CEO S11 防误触）
+        ui.label("模拟触发（闲时调试用：直播中会干扰实时编排状态——计数/hold/节流/序列打断）").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
+        with ui.row():
+            choreo_sim_select = ui.select(
+                options={str(r.get("rule_id")): f"{r.get('rule_id')}（{r.get('trigger_type')}:{r.get('match', '')}）"
+                         for r in (choreo_node.get("rules") or [])},
+                label="选择规则", value=None,
+            ).style("min-width:280px")
+            ui.button("模拟触发", on_click=_simulate_trigger).props("outline")
         ui.label("改链提示：新增规则引用的段名必须存在于 EDTalk available_segments，"
                  "否则该规则被禁用并计入资产缺口报告（启动日志三段式）").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")

@@ -46,6 +46,10 @@ def _facade(node=None, worker=False):
                              clock=lambda: 1000.0)
     if not worker:
         ch._worker = None  # 停掉真线程，同步驱动
+        # GAP-1（2026-10-23 补完）：apply_config 现在会补启动 worker——本文件场景
+        # 模拟"worker 已在运行"（幂等成功语义，与初始真线程行为一致），不触发
+        # 回滚分支；热启用真路径由 tests/test_choreography_completion.py::TestHotEnable 专测。
+        ch._ensure_worker = lambda enable=None: True
     return ch, client
 
 
@@ -147,7 +151,11 @@ class TestRoutes:
         app = FastAPI()
         cfg = DottedConfig({"choreography": node})
         choreo_api.register_choreography_routes(app, cfg)
-        return TestClient(app)
+        client = TestClient(app)
+        # GAP-3（2026-10-23）：POST 路由现在带回环校验依赖（非回环 403）——本文件
+        # 测路由业务逻辑，放行门禁；403 行为由 tests/test_choreography_completion.py::TestEndpoints 专测。
+        client.app.dependency_overrides[choreo_api._require_loopback] = lambda: None
+        return client
 
     def test_status_assembled(self):
         ch, _ = _facade()
