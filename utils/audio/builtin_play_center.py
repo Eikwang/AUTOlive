@@ -424,6 +424,24 @@ class AUDIO_PLAY_CENTER:
         # 解码统一转 wav（mp3 等格式依赖 ffmpeg，既有系统依赖）
         try:
             audio = AudioSegment.from_file(voice_path)
+            # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path 伴奏轨时
+            # 本地播放=pydub overlay 混音单流（单流播，同步天然成立）；音量线性系数
+            # 转 dB 增益。伴奏缺失/失败→整轨降级（F-S5 告警可见，不中断播放）。
+            _backing_path = data_json.get("backing_path") or ""
+            if _backing_path:
+                if not os.path.isfile(_backing_path):
+                    self._record_error(f"[song] 伴奏轨缺失，整轨降级：{_backing_path}")
+                else:
+                    try:
+                        _backing = AudioSegment.from_file(_backing_path)
+                        _vol = max(0.0, min(1.0, float(data_json.get("backing_volume", 0.8) or 0.8)))
+                        if _vol > 0:
+                            import math as _math
+                            _backing = _backing.apply_gain(20.0 * _math.log10(_vol))
+                            audio = audio.overlay(_backing[:len(audio)])
+                    except Exception:
+                        self._record_error(f"[song] 伴奏混音失败，整轨降级：{_backing_path}\n"
+                                           + traceback.format_exc())
             tmp_audio_path = os.path.join(
                 self.audio_out_path, "tmp_" + str(int(time.time() * 1000)) + ".wav")
             os.makedirs(self.audio_out_path, exist_ok=True)

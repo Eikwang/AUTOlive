@@ -17,6 +17,51 @@ from utils.web_captions import get_captions_manager
 PLAYER_KEYS = ["audio_player", "audio_player_v2", "builtin"]
 
 
+def _play_backing_local(backing_path: str, volume: float):
+    """R6 双轨伴奏外放（/autoplan 2026-10-23 批次，EDTalk 激活场景）：点歌伴奏轨
+    独立 pyaudio 流本地播放（人声从数字人端出、伴奏本地出——双设备分工），随播完
+    自退。失败仅告警不抛（R6 降级语义=人声照唱，伴奏缺失不黑场；F-S5 可观测）。"""
+    tmp_path = None
+    pa = stream = wf = None
+    try:
+        import math
+        import wave as _wave
+        import pyaudio as _pa
+        from pydub import AudioSegment
+        seg = AudioSegment.from_file(backing_path)
+        vol = max(0.0, min(1.0, float(volume or 0.8)))
+        if vol <= 0 or not seg:
+            return
+        seg = seg.apply_gain(20.0 * math.log10(vol))
+        tmp_path = backing_path + ".backing.tmp.wav"
+        seg.export(tmp_path, format="wav")
+        wf = _wave.open(tmp_path, "rb")
+        pa = _pa.PyAudio()
+        stream = pa.open(
+            format=pa.get_format_from_width(wf.getsampwidth()),
+            channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
+        chunk = 1024 * wf.getnchannels() * wf.getsampwidth()
+        data = wf.readframes(1024)
+        while data:
+            stream.write(data)
+            data = wf.readframes(1024)
+        logger.info(f"[song] 伴奏外放完成：{backing_path}")
+    except Exception as e:
+        logger.warning(f"[song] 伴奏外放失败（人声照唱，伴奏缺失不黑场）：{backing_path} → {e}")
+    finally:
+        for closer in (lambda: stream.stop_stream(), lambda: stream.close(),
+                       lambda: wf.close(), lambda: pa.terminate()):
+            try:
+                closer()
+            except Exception:
+                pass
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 class PlaybackMixin:
     """音频播放管理Mixin类"""
     
@@ -123,6 +168,19 @@ class PlaybackMixin:
                     # 判定（背压），失败降级记录不阻塞直播主流程。
                     # 根据播放器类型进行区分
                     if is_edtalk_active(self.config):
+                        # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path
+                        # 伴奏轨时——人声轨推 EDTalk 驱动对口型（数字人端出声），伴奏轨
+                        # 本地外放并行起播（粗同步，偏差判据 <0.5s=R6 义务）；伴奏线程
+                        # 随文件播完自退，push_full 返回=人声飞行完成。R12 时序：伴奏与
+                        # 人声同起，无三路并发（文案播报已在队列前序完成）。
+                        _backing_path = data_json.get("backing_path") or ""
+                        if _backing_path and os.path.isfile(_backing_path):
+                            threading.Thread(
+                                target=_play_backing_local,
+                                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8)),
+                                name="song-backing", daemon=True).start()
+                        elif data_json.get("backing_path"):
+                            logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )

@@ -531,6 +531,9 @@ class My_handle(metaclass=SingletonMeta):
     def choose_song_handle(self, data):
         return self.feature_handler.choose_song_handle(data)
 
+    def choose_song_gift_trigger(self, data):
+        return self.feature_handler.choose_song_gift_trigger(data)
+
     def integral_handle(self, type, data):
         return self.feature_handler.integral_handle(type, data)
     

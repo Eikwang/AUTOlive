@@ -82,12 +82,15 @@ class SynthesisMixin:
 
             # 判断是否是点歌模式
             if message['type'] == "song":
-                # 拼接json数据，存入队列
+                # 拼接json数据，存入队列（R6 双轨：backing_path 伴奏轨+音量透传，
+                # /autoplan 2026-10-23 批次——EDTalk 分支伴奏外放/builtin 分支 overlay 混音）
                 data_json = {
                     "type": message['type'],
                     "tts_type": "none",
                     "voice_path": message['content'],
-                    "content": message["content"]
+                    "content": message["content"],
+                    "backing_path": message.get("backing_path") or "",
+                    "backing_volume": message.get("backing_volume", 0.8),
                 }
 
                 # 是否开启了音频播放 

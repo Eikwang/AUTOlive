@@ -14,6 +14,118 @@ from pypinyin import pinyin, Style
 from ..base import logger
 
 
+# ---------- 点歌匹配引擎（/autoplan 2026-10-23 批次 R2，模块级纯函数）----------
+# 双触发链路（弹幕意图/礼物映射）共用；前端预演复用同一实现消除 D4 双口径。
+
+# 触发词命中后剥离的疑问/语气后缀（场景 2/4："主播会唱X吗？"）
+_QUESTION_SUFFIX_RE = re.compile(r"[吗嘛么么呢吧呀啊呐?？!！。～~\s]+$")
+
+
+def match_song_intent(text: str, trigger_words, song_names, similarity: float = 0.5):
+    """弹幕点歌意图匹配（R2：contains 命中——句中关键词，非前缀命令）。
+
+    规则：
+    1. 任一触发词在弹幕中 contains 命中（最长触发词优先，取首个命中点）；
+    2. 歌名候选=触发词后缀段（"主播会唱X吗"）+前缀段（"X，能唱吗"），剥离
+       疑问/语气后缀与衔接标点（R9 边界：触发词后置，native F1）；
+    3. 候选对 song_names（歌曲列表的 song 字段集合）先子串采信（ratio=1.0），
+       再 SequenceMatcher 相似度兜底（同 find_best_match 口径）。
+
+    Returns:
+        ("matched", song_name, ratio) 触发且命中——调用方播引导文案；
+        ("triggered", None, None) 触发但列表无此歌——调用方播失败文案（场景 4）；
+        None 未触发——静默（不处理，返回 False 交回弹幕链）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    hit_tw = None
+    for tw in sorted((t for t in (trigger_words or []) if t), key=len, reverse=True):
+        if tw in text:
+            hit_tw = tw
+            break
+    if hit_tw is None:
+        return None
+    idx = text.index(hit_tw)
+    rest_after = _QUESTION_SUFFIX_RE.sub("", text[idx + len(hit_tw):]).strip(" ，,、的")
+    rest_before = _QUESTION_SUFFIX_RE.sub("", text[:idx]).strip(" ，,、的")
+    names = [n for n in (song_names or []) if n]
+    for candidate in (rest_after, rest_before):
+        if not candidate:
+            continue
+        # ① 互为子串直接采信（"你是我的眼" in "你是我的眼（Live）"）
+        for name in names:
+            if name == candidate or name in candidate or candidate in name:
+                return ("matched", name, 1.0)
+        # ② 相似度兜底（与 find_best_match 同口径：最高 ratio 达阈值即命中）
+        best, best_ratio = None, 0.0
+        for name in names:
+            ratio = difflib.SequenceMatcher(None, candidate, name).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = name, ratio
+        if best is not None and best_ratio >= float(similarity or 0):
+            return ("matched", best, best_ratio)
+    return ("triggered", None, None)
+
+
+def match_gift_to_song_entry(gift_name: str, gift_song_map):
+    """礼物名→歌曲映射匹配（R2/R5：归一后包含命中，最长键优先）。
+
+    归一口径=CoverQueue.normalize_song（去空格/括注/大小写）——礼物归一与歌名
+    归一同源（native F5：禁止第三套礼物匹配口径）。包含命中（"超级小火箭"命中
+    "小火箭"）对齐前端 match_gift_to_song 预演语义，保证预演=实播。
+
+    Returns:
+        song_name 或 None。
+    """
+    if not gift_name or not isinstance(gift_song_map, dict) or not gift_song_map:
+        return None
+    from utils.cover_worker import CoverQueue
+    target = CoverQueue.normalize_song(gift_name)
+    if not target:
+        return None
+    # 精确（归一后相等）优先，其次包含命中（键⊂礼物名），均最长键优先
+    normalized = {}
+    for key, song in gift_song_map.items():
+        if not key or not song:
+            continue
+        normalized[CoverQueue.normalize_song(key)] = (key, str(song).strip())
+    for nk in sorted(normalized, key=len, reverse=True):
+        if nk and nk == target:
+            return normalized[nk][1]
+    for nk in sorted(normalized, key=len, reverse=True):
+        if nk and nk in target:
+            return normalized[nk][1]
+    return None
+
+
+def match_gift_to_song_preview(gift_name: str, gift_song_map, song_names, similarity: float = 0.5):
+    """礼物→歌曲完整预演匹配（前端预演与 utils 实播同规则的单一事实源）：
+    ① match_gift_to_song_entry 映射命中；② 目标歌名对曲库包含命中采信；
+    ③ SequenceMatcher 相似度兜底（同 find_best_match 口径）。
+
+    Returns:
+        (命中歌名, 相似度, 命中方式说明) 或 None（未命中）。
+    """
+    target = match_gift_to_song_entry(gift_name, gift_song_map)
+    if target is None:
+        return None
+    via_key = next((k for k, v in (gift_song_map or {}).items()
+                    if str(v).strip() == target), "")
+    names = [n for n in (song_names or []) if n]
+    for name in names:
+        if name == target or name in target or target in name:
+            return (name, 1.0, f"映射[{via_key}]→包含命中")
+    best, best_ratio = None, 0.0
+    for name in names:
+        ratio = difflib.SequenceMatcher(None, target, name).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = name, ratio
+    if best is None or best_ratio < float(similarity or 0):
+        return None
+    return (best, best_ratio, f"映射[{via_key}]→相似度命中")
+
+
 class TextMixin:
     """文本处理 Mixin"""
 

@@ -151,6 +151,13 @@ class EventHandler:
                 logger.warning(f"动作编排 on_gift 异常（降级直通）：{_choreo_err}")
             if _choreo_takeover:
                 logger.info(f"[{username}] 礼物 {gift_name} 由动作编排接管（画面序列含 tts 答谢）")
+            # 点歌触发（/autoplan 2026-10-23 批次 R2/R5）：编排订阅之后、答谢之前——
+            # 命中=点歌播报+播放（答谢照旧在下方走），未命中=仅答谢（语义不变）。
+            # 异常已在 choose_song_gift_trigger 内降级，不中断礼物主流程。
+            try:
+                self.my_handle.choose_song_gift_trigger(data)
+            except Exception as _song_err:
+                logger.warning(f"礼物点歌触发异常（降级仅答谢）：{_song_err}")
             try:
                 lowest_price = float(self.my_handle.config.get("thanks", "lowest_price") or 0)
             except (TypeError, ValueError):

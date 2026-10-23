@@ -349,200 +349,293 @@ class FeatureHandler:
             logger.error(f"本地问答处理失败：{e}")
             return False
     
+    # ---------- 点歌模式（/autoplan 2026-10-23 批次：礼物驱动重构 R1-R5/R7/R12）----------
+    # 架构：双触发（弹幕意图/礼物映射）→ 纯函数匹配引擎（text_mixin.match_song_intent /
+    # match_gift_to_song_entry）→ 三输出（文案播报 / 翻唱入队 / SongMode 播放）。
+    # 编排订阅 on_song（WP-10）与 C-5 插播回调保留；同歌冷却+回应节流防刷屏。
+
+    _SONG_REPLY_DEFAULT_COOLDOWN_S = 30
+    _SONG_PLAY_COOLDOWN_DEFAULT_S = 300
+
+    def _song_copy_message(self, username, copy_text):
+        """R4 助播路由：assistant_anchor.type 含 "song" → 文案走助播通道
+        （type=assistant_anchor_text + 助播名，享受助播优先级）；未开启走默认
+        TTS（type=comment 原路）。返回可直接 audio_synthesis_handle 的消息。"""
+        anchor_types = []
+        try:
+            anchor_types = self.my_handle.config.get("assistant_anchor", "type") or []
+        except Exception:
+            pass
+        if "song" in anchor_types:
+            anchor_name = ""
+            try:
+                anchor_name = self.my_handle.config.get("assistant_anchor", "username") or ""
+            except Exception:
+                pass
+            return {
+                "type": "assistant_anchor_text",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": anchor_name or "助播",
+                "content": copy_text,
+            }
+        return {
+            "type": "comment",
+            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+            "config": self.my_handle.config.get("filter"),
+            "username": username,
+            "content": copy_text,
+        }
+
+    def _render_song_copy(self, template, user="", content="", gift=""):
+        """R3 四文案渲染：统一变量池 {user}/{content}/{gift}，缺变量渲染为空串
+        不抛异常（str.format_map + SafeDict——模板含未提供变量时静默留空）。"""
+        if not template:
+            return ""
+        class _SafeDict(dict):
+            def __missing__(self, key):
+                return ""
+        try:
+            return template.format_map(_SafeDict(user=user or "", content=content or "", gift=gift or ""))
+        except Exception:
+            # 模板自身格式错误（如孤立 { ）不中断直播，退回原文
+            return template
+
+    def _song_song_names(self):
+        """歌曲列表的 song 字段集合（R2：弹幕匹配面=映射表歌名，非磁盘目录）。"""
+        mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+        if not isinstance(mapping, dict):
+            return []
+        return sorted({str(v).strip() for v in mapping.values() if str(v).strip()})
+
+    def _song_find_audio(self, song_name):
+        """R2 song 字段→音频文件解析：内部根目录及 covers/ 内按归一歌名匹配
+        wav/mp3（复用 CoverQueue.normalize_song 口径）。返回 (audio_path, backing_path)，
+        backing_path=分轨伴奏（R6 主方案：covers/<song>__<profile>_inst.wav），无分轨为 None。"""
+        from utils.autolive_paths import song_audio_root
+        from utils.cover_worker import CoverQueue
+        root = song_audio_root(self.my_handle.config)
+        target = CoverQueue.normalize_song(song_name)
+        if not target or not os.path.isdir(root):
+            return None
+        main_hit = backing = None
+        for fn in os.listdir(root):
+            base, ext = os.path.splitext(fn)
+            low = ext.lower()
+            if low not in (".mp3", ".wav", ".flac"):
+                continue
+            if CoverQueue.normalize_song(base) == target:
+                main_hit = os.path.join(root, fn)
+                break
+        if main_hit is None:
+            return None
+        # 分轨伴奏：covers/ 下 <成品名>_inst.wav（T5 翻唱分轨保留，R6 主方案）
+        covers_dir = os.path.join(root, "covers")
+        if os.path.isdir(covers_dir):
+            stem = os.path.splitext(os.path.basename(main_hit))[0]
+            for fn in sorted(os.listdir(covers_dir), reverse=True):
+                b, e = os.path.splitext(fn)
+                if e.lower() == ".wav" and b.endswith("_inst") and CoverQueue.normalize_song(b[:-5]).startswith(target):
+                    backing = os.path.join(covers_dir, fn)
+                    break
+        return (main_hit, backing)
+
+    def _song_covers_hit(self, song_name):
+        """covers/ 翻唱成品查找（P3-2 语义）：返回 (成品路径, 分轨伴奏或 None, base) 或 None。
+        成品名=<song>__<profile>.wav；分轨=<song>__<profile>_vocal.wav/_inst.wav（R6）。"""
+        from utils.autolive_paths import song_audio_root
+        from utils.cover_worker import CoverQueue
+        covers_dir = os.path.join(song_audio_root(self.my_handle.config), "covers")
+        if not os.path.isdir(covers_dir):
+            return None
+        target = CoverQueue.normalize_song(song_name)
+        if not target:
+            return None
+        for fn in sorted(os.listdir(covers_dir), reverse=True):
+            base, ext = os.path.splitext(fn)
+            if ext.lower() not in (".wav", ".mp3") or base.endswith("_vocal") or base.endswith("_inst"):
+                continue
+            if CoverQueue.normalize_song(base.split("__")[0]) == target:
+                vocal = os.path.join(covers_dir, base + "_vocal.wav")
+                inst = os.path.join(covers_dir, base + "_inst.wav")
+                full = os.path.abspath(os.path.join(covers_dir, fn))
+                if os.path.isfile(vocal) and os.path.isfile(inst):
+                    return (full, vocal, inst)
+                return (full, None, None)
+        return None
+
+    def _song_cooldown_check(self, song_name):
+        """同歌最小冷却（native 后悔场景 1）：冷却内返回 False 防刷屏。"""
+        try:
+            cooldown = int(self.my_handle.config.get("choose_song", "song_cooldown_s")
+                           or self._SONG_PLAY_COOLDOWN_DEFAULT_S)
+        except (TypeError, ValueError):
+            cooldown = self._SONG_PLAY_COOLDOWN_DEFAULT_S
+        now = time.time()
+        last = getattr(self, "_song_last_play_ts", {}).get(song_name, 0)
+        if now - last < cooldown:
+            logger.info(f"[点歌] 同歌冷却中（{cooldown}s）：{song_name}")
+            return False
+        if not hasattr(self, "_song_last_play_ts"):
+            self._song_last_play_ts = {}
+        self._song_last_play_ts[song_name] = now
+        return True
+
+    def _song_reply_throttled(self):
+        """点歌判断回应节流（F-S3：既有 filter 无弹幕重复节流）。"""
+        try:
+            cooldown = int(self.my_handle.config.get("choose_song", "reply_cooldown_s")
+                           or self._SONG_REPLY_DEFAULT_COOLDOWN_S)
+        except (TypeError, ValueError):
+            cooldown = self._SONG_REPLY_DEFAULT_COOLDOWN_S
+        now = time.time()
+        last = getattr(self, "_song_reply_last_ts", 0)
+        if now - last < cooldown:
+            logger.info(f"[点歌] 回应节流中（{cooldown}s）")
+            return True
+        self._song_reply_last_ts = now
+        return False
+
+    def _song_play_message(self, username, audio_path, backing_path, song_name):
+        """SongMode 播放入队（R6/R12：song 消息扩展 backing_path 伴奏轨；
+        编排订阅 on_song 保留 WP-10——画面序列接管，音频走 SongMode 原路）。"""
+        try:
+            from utils.orchestration import get_choreographer
+            _choreo = get_choreographer()
+            if _choreo is not None:
+                _choreo.on_song(song_name)
+        except Exception:
+            pass
+        message = {
+            "type": "song",
+            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+            "config": self.my_handle.config.get("filter"),
+            "username": username,
+            "content": audio_path,
+            "voice_path": audio_path,
+            "backing_path": backing_path or "",
+            "backing_volume": self.my_handle.config.get("choose_song", "backing_volume") or 0.8,
+        }
+        self.my_handle.audio_synthesis_handle(message)
+
+    def _song_announce_and_play(self, username, song_name, gift_name):
+        """礼物/点歌命中后的播报+播放主路径（R2/R5/R7）：
+        ① covers 成品命中→成功文案+播放（分轨双轨或整轨）；
+        ② 无成品→prepare_copy+入队翻唱（C-5 产出后自动插播）。
+        返回 True=已处理（礼物触发场景答谢照旧由调用方保证）。"""
+        hit = self._song_covers_hit(song_name)
+        if hit is not None:
+            cover_full, vocal, inst = hit
+            # R6 主方案：分轨齐全→人声轨驱动+伴奏外放；缺失→整轨自动降级
+            audio_path, backing = (vocal, inst) if vocal else (cover_full, None)
+            copy_text = self._render_song_copy(
+                self.my_handle.config.get("choose_song", "match_success_copy") or "",
+                user=username, content=song_name, gift=gift_name or "")
+            logger.info(f"[点歌] 命中翻唱成品: {cover_full}（分轨={'有' if vocal else '无→整轨'}）")
+            self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, copy_text)
+            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, copy_text))
+            self._song_play_message(username, audio_path, backing, song_name)
+            return True
+        # 无成品：prepare_copy 确认 + 异步入队翻唱（DX-5/C-5 既有语义）
+        prepare_text = self._render_song_copy(
+            self.my_handle.config.get("choose_song", "prepare_copy") or "",
+            user=username, content=song_name, gift=gift_name or "")
+        logger.info(f"[点歌] 无成品，准备翻唱: {song_name}")
+        if prepare_text:
+            self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, prepare_text)
+            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, prepare_text))
+        self._song_enqueue_cover(username, song_name)
+        return True
+
+    def _song_enqueue_cover(self, username, song_name):
+        """无成品→CoverQueue 入队（DX-5）；队列满/冷却静默（D6 既有语义）。"""
+        try:
+            from utils.cover_worker import CoverQueue
+            _cq = getattr(self.my_handle, "cover_queue", None)
+            if _cq is None:
+                _cq = CoverQueue(self.my_handle.config, None)
+                self.my_handle.cover_queue = _cq
+            if getattr(_cq, "on_done", None) is None:
+                _cq.on_done = self._play_cover_done
+            _profile_id = self.my_handle.config.get("choose_song", "cover_profile_id") or "default"
+            _r = _cq.enqueue(username, song_name, _profile_id)
+            if _r["action"] == "queued":
+                _cq.ensure_worker()
+                logger.info(f"[点歌] 翻唱已入队（{song_name}，第 {_r['position']} 位）")
+            elif _r["action"] == "queue_full":
+                logger.info(f"[点歌] 队列已满，跳过翻唱入队: {song_name}")
+            # cooldown/cached: 静默（D6 有意设计）
+        except Exception:
+            logger.error("[点歌] 翻唱入队异常（不阻塞播报）", exc_info=True)
+
+    def choose_song_gift_trigger(self, data):
+        """R2/R5 礼物触发点歌（gift_handle 前段挂钩）：归一礼物名匹配
+        gift_song_map→命中=答谢照旧（调用方保证）+成功播报+播放/入队；
+        未命中=返回 False（仅答谢，语义不变）。异常不中断礼物主流程。"""
+        try:
+            if not self.my_handle.config.get("choose_song", "enable"):
+                return False
+            gift_name = (data.get("gift_name") or "").strip()
+            username = data.get("username") or ""
+            if not gift_name:
+                return False
+            from utils.common.text_mixin import match_gift_to_song_entry
+            mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+            song_name = match_gift_to_song_entry(gift_name, mapping)
+            if song_name is None:
+                return False
+            if not self._song_cooldown_check(song_name):
+                return True  # 冷却内：跳过点歌但答谢照旧
+            logger.info(f"[点歌] 礼物命中：[{username}] {gift_name} → {song_name}")
+            return self._song_announce_and_play(username, song_name, gift_name)
+        except Exception:
+            logger.error("礼物点歌触发异常（降级仅答谢）", exc_info=True)
+            return False
+
     def choose_song_handle(self, data):
-        """
-        点歌处理
-        
-        Args:
-            data (dict): 数据
-            
-        Returns:
-            bool: 是否触发并处理
-        """
+        """R1/R2 弹幕点歌判断：contains 触发词命中→剥离后对歌曲列表（映射表
+        song 字段）相似度匹配。命中→guide_copy 引导打赏（回应，不执行点歌播放）；
+        未命中→match_fail_copy（回应，不播放）。移除 stop_cmd/random_cmd/song_path
+        （/autoplan 2026-10-23 批次 R1）。回应受 reply_cooldown_s 节流（F-S3）。"""
         try:
             username = data["username"]
             content = data["content"]
-            
+
             # 合并字符串末尾连续的*  主要针对获取不到用户名的情况
             username = self.my_handle.common.merge_consecutive_asterisks(username)
-            
-            if self.my_handle.config.get("choose_song")["enable"] == True:
-                start_cmd = self.my_handle.common.starts_with_any(content, self.my_handle.config.get("choose_song", "start_cmd"))
-                stop_cmd = self.my_handle.common.starts_with_any(content, self.my_handle.config.get("choose_song", "stop_cmd"))
-                random_cmd = self.my_handle.common.starts_with_any(content, self.my_handle.config.get("choose_song", "random_cmd"))
-                
-                # 判断随机点歌命令是否正确
-                if random_cmd:
-                    resp_content = self.my_handle.common.random_search_a_audio_file(self.my_handle.config.get("choose_song", "song_path"))
-                    if resp_content is None:
-                        return True
-                    
-                    logger.info(f"随机到的音频路径：{resp_content}")
-                    
-                    message = {
-                        "type": "song",
-                        "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                        "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                        "config": self.my_handle.config.get("filter"),
-                        "username": username,
-                        "content": resp_content
-                    }
-                    
-                    self.my_handle.audio_synthesis_handle(message)
-                    
-                    self.my_handle.webui_show_chat_log_callback("点歌", data, resp_content)
-                    
-                    return True
-                # 判断点歌命令是否正确
-                elif start_cmd:
-                    logger.info(f"[{username}]: {content}")
-                    
-                    # 获取本地音频文件夹内所有的音频文件名（不含拓展名）
-                    choose_song_song_lists = self.my_handle.audio.get_dir_audios_filename(self.my_handle.config.get("choose_song", "song_path"), 1)
-                    
-                    # 去除命令前缀
-                    content = content[len(start_cmd):]
-                    
-                    # 说明用户仅发送命令，没有发送歌名，说明用户不会用
-                    if content == "":
-                        resp_content = f'点歌命令错误，命令为 {self.my_handle.config.get("choose_song", "start_cmd")}+歌名'
-                        message = {
-                            "type": "comment",
-                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                            "config": self.my_handle.config.get("filter"),
-                            "username": username,
-                            "content": resp_content
-                        }
-                        
-                        self.my_handle.audio_synthesis_handle(message)
-                        
-                        self.my_handle.webui_show_chat_log_callback("点歌", data, resp_content)
-                        
-                        return True
-                    
-                    # P3-2: 先查 covers/ 已有翻唱成品（命中直接回播，零延迟）
-                    try:
-                        from utils.cover_worker import CoverQueue
-                        _cq = getattr(self.my_handle, "cover_queue", None)
-                        if _cq is None:
-                            _cq = CoverQueue(self.my_handle.config, None)
-                            self.my_handle.cover_queue = _cq
-                        _norm = _cq.normalize_song(content)
-                        _covers_dir = _cq._covers_dir()
-                        if os.path.isdir(_covers_dir):
-                            for _fn in os.listdir(_covers_dir):
-                                _base, _ext = os.path.splitext(_fn)
-                                if _ext.lower() in (".wav", ".mp3") and _cq.normalize_song(_base.split("__")[0]) == _norm:
-                                    _cover_full = os.path.abspath(os.path.join(_covers_dir, _fn))
-                                    logger.info(f"[点歌] covers 命中: {_cover_full}")
-                                    # 动作编排订阅点（/autoplan 2026-10-21 批次）：on_song 命中=
-                                    # 画面序列接管（唱歌画面切换）；点歌音频走 SongMode 原路
-                                    # （义务 WP-10：编排不复制不拦截音频）
-                                    try:
-                                        from utils.orchestration import get_choreographer
-                                        _choreo = get_choreographer()
-                                        if _choreo is not None:
-                                            _choreo.on_song(_base.split("__")[0])
-                                    except Exception:
-                                        pass
-                                    _msg = {"type": "song",
-                                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                                            "config": self.my_handle.config.get("filter"),
-                                            "username": username, "content": _cover_full}
-                                    self.my_handle.audio_synthesis_handle(_msg)
-                                    self.my_handle.webui_show_chat_log_callback("点歌(翻唱)", data, _cover_full)
-                                    return True
-                    except Exception:
-                        logger.error("[点歌] covers 检查异常（回退原逻辑）", exc_info=True)
 
-                    # 判断是否有此歌曲
-                    song_filename = self.my_handle.common.find_best_match(content, choose_song_song_lists, similarity=self.my_handle.config.get("choose_song", "similarity"))
-                    if song_filename is None:
-                        # resp_content = f"抱歉，我还没学会唱{content}"
-                        # 根据配置的 匹配失败回复文案来进行合成
-                        resp_content = self.my_handle.config.get("choose_song", "match_fail_copy").format(content=content)
-                        logger.info(f"[AI回复{username}]：{resp_content}")
-                        
-                        message = {
-                            "type": "comment",
-                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                            "config": self.my_handle.config.get("filter"),
-                            "username": username,
-                            "content": resp_content
-                        }
-                        
-                        self.my_handle.audio_synthesis_handle(message)
-                        
-                        self.my_handle.webui_show_chat_log_callback("点歌", data, resp_content)
-                        
-                        return True
-                    
-                    resp_content = self.my_handle.audio.search_files(self.my_handle.config.get('choose_song', 'song_path'), song_filename, True)
-                    if resp_content == []:
-                        return True
-                    
-                    logger.debug(f"匹配到的音频原相对路径：{resp_content[0]}")
-                    
-                    # 拼接音频文件路径
-                    resp_content = f"{self.my_handle.config.get('choose_song', 'song_path')}/{resp_content[0]}"
-                    resp_content = os.path.abspath(resp_content)
-                    logger.info(f"点歌成功！匹配到的音频路径：{resp_content}")
-                    # 动作编排订阅点（/autoplan 2026-10-21 批次）：本地匹配成功——
-                    # on_song 命中=画面序列接管，音频走 SongMode 原路（义务 WP-10）
-                    try:
-                        from utils.orchestration import get_choreographer
-                        _choreo = get_choreographer()
-                        if _choreo is not None:
-                            _choreo.on_song(song_filename)
-                    except Exception:
-                        pass
-                    # P3-2/DX-5: 异步入队翻唱（成品下次点歌零延迟）
-                    try:
-                        from utils.cover_worker import CoverQueue
-                        _cq = getattr(self.my_handle, "cover_queue", None)
-                        if _cq is None:
-                            _cq = CoverQueue(self.my_handle.config, None)
-                            self.my_handle.cover_queue = _cq
-                        # C-5 自动插播（/autoplan 2026-10-14 终门 uc1a）：翻唱 done
-                        # 即播——复用点歌播放通道（弹幕线程同构调用，通道内排队/
-                        # 打断语义与点歌一致）；回调失败不影响成品落盘
-                        if getattr(_cq, "on_done", None) is None:
-                            _cq.on_done = self._play_cover_done
-                        # C-2 修复（/autoplan 2026-10-14）：翻唱档案=RVC 专属语义，
-                        # 读 choose_song.cover_profile_id（C-3 前端写、本处读）——
-                        # 旧实现借 gpt_sovits.voice_profile_id（TTS 档案）当 RVC 档案。
-                        _profile_id = self.my_handle.config.get("choose_song", "cover_profile_id") or "default"
-                        _r = _cq.enqueue(username, song_filename, _profile_id)
-                        if _r["action"] == "queued":
-                            _cq.ensure_worker()
-                            logger.info(f"[点歌] 翻唱已入队（{song_filename}，第 {_r['position']} 位）")
-                        elif _r["action"] == "queue_full":
-                            logger.info(f"[点歌] 队列已满，跳过翻唱入队: {song_filename}")
-                        # cooldown/cached: 静默（D6 有意设计）
-                    except Exception:
-                        logger.error("[点歌] 翻唱入队异常（不阻塞播放）", exc_info=True)
-                    message = {
-                        "type": "song",
-                        "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                        "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                        "config": self.my_handle.config.get("filter"),
-                        "username": username,
-                        "content": resp_content
-                    }
-                    
-                    self.my_handle.webui_show_chat_log_callback("点歌", data, resp_content)
-                    
-                    self.my_handle.audio_synthesis_handle(message)
-                    
+            if self.my_handle.config.get("choose_song", "enable"):
+                from utils.common.text_mixin import match_song_intent
+                trigger_words = self.my_handle.config.get("choose_song", "start_cmd") or []
+                similarity = self.my_handle.config.get("choose_song", "similarity")
+                song_names = self._song_song_names()
+                verdict = match_song_intent(content, trigger_words, song_names, similarity)
+                if verdict is None:
+                    return False  # 未触发：静默交回弹幕链
+                state, song_name, _ratio = verdict
+                logger.info(f"[点歌] 弹幕意图{'命中' if state == 'matched' else '触发（列表无歌）'}："
+                            f"[{username}] {content}" + (f" → {song_name}" if song_name else ""))
+                if self._song_reply_throttled():
                     return True
-                # 判断取消点歌命令是否正确
-                elif stop_cmd:
-                    self.my_handle.audio.stop_current_audio()
-
-                    return True
+                mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+                if state == "matched":
+                    gift_for_song = next((str(k) for k, v in mapping.items()
+                                          if str(v).strip() == song_name), "")
+                    # 场景 2：仅回应引导打赏，不执行点歌播放
+                    guide_text = self._render_song_copy(
+                        self.my_handle.config.get("choose_song", "guide_copy") or "",
+                        user=username, content=song_name, gift=gift_for_song)
+                else:
+                    # 场景 4：列表无歌→失败文案，回应不播放
+                    guide_text = self._render_song_copy(
+                        self.my_handle.config.get("choose_song", "match_fail_copy") or "",
+                        user=username, content=content, gift="")
+                self.my_handle.webui_show_chat_log_callback("点歌", data, guide_text)
+                self.my_handle.audio_synthesis_handle(self._song_copy_message(username, guide_text))
+                return True
 
             return False
         except Exception as e:

@@ -63,7 +63,10 @@ class CoverQueue:
         return base
 
     def _song_path(self) -> str:
-        return self.config.get("choose_song", "song_path") or "song"
+        """歌曲音频根目录（/autoplan 2026-10-23 批次 R1：song_path 用户配置键退役，
+        改内部约定常量经 autolive_paths.song_audio_root 锚定，R13 遗留键迁移告警内聚于此）。"""
+        from utils.autolive_paths import song_audio_root
+        return song_audio_root(self.config)
 
     def _covers_dir(self) -> str:
         return os.path.join(self._song_path(), "covers")
@@ -269,6 +272,10 @@ class CoverQueue:
             shutil.copy2(produced, tmp)
             os.replace(tmp, cover)
             logger.info(f"[cover] 完成: {song} → {cover}")
+            # R6 分轨保留（/autoplan 2026-10-23 批次）：人声轨+伴奏轨复制入 covers/
+            # 供 SongMode 双轨播放（人声驱动 EDTalk 对口型+伴奏外放）；缺失静默
+            # （feature_handler._song_covers_hit 自动降级整轨）。
+            self._retain_split_tracks(job, cover)
             # C-5 自动插播（/autoplan 2026-10-14 终门 uc1a=立即插播）：回调由
             # feature_handler 注入（复用点歌播放通道）；成品已落盘，回调失败不影响任务
             cb = getattr(self, "on_done", None)
@@ -279,6 +286,44 @@ class CoverQueue:
                     logger.error("[cover] 插播回调异常（成品已落盘不影响任务）", exc_info=True)
         else:
             self._fail(job, policies)
+
+    def _retain_split_tracks(self, job: Dict, cover: str):
+        """R6 分轨保留：从 song_output 定位本次任务的 ai_vocals（RVC 人声）与
+        *_Instrumental.wav（伴奏），复制为 covers/<成品base>_vocal.wav / _inst.wav。
+        定位失败（上游产物名变化）仅告警不失败——播放侧自动降级整轨成品。"""
+        try:
+            out_root = os.path.join(self._aicovergen_src(), "..", "song_output")
+            if not os.path.isdir(out_root):
+                return
+            started = job.get("started_at", 0)
+            vocal = inst = None
+            for dirpath, _, filenames in os.walk(out_root):
+                for fn in filenames:
+                    if not fn.endswith(".wav"):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    if os.path.getmtime(full) <= started:
+                        continue
+                    low = fn.lower()
+                    if "mixed" in low or " ver)." in low or "_inst.wav" in low or "_vocal.wav" in low:
+                        continue
+                    if low.endswith("_instrumental.wav") and inst is None:
+                        inst = full
+                    elif "_p" in fn and "_i" in fn and vocal is None:
+                        m = os.path.getmtime(full)
+                        if vocal is None or m > os.path.getmtime(vocal):
+                            vocal = full
+            base = os.path.splitext(cover)[0]
+            if vocal and os.path.isfile(vocal):
+                shutil.copy2(vocal, base + "_vocal.wav")
+            if inst and os.path.isfile(inst):
+                shutil.copy2(inst, base + "_inst.wav")
+            if vocal and inst:
+                logger.info(f"[cover] 分轨保留: {base}_vocal.wav + _inst.wav")
+            else:
+                logger.warning(f"[cover] 分轨定位不全（vocal={vocal is not None}, inst={inst is not None}），播放将走整轨降级")
+        except Exception:
+            logger.error("[cover] 分轨保留异常（不影响成品）", exc_info=True)
 
     def _postprocess_fallback(self, job: Dict):
         """效果链+混音补刀（零 torch 干净进程）：主跑崩在 effects 段时，

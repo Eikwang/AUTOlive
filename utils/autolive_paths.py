@@ -60,6 +60,41 @@ def config_get(config, *keys):
     return config.get(*keys)
 
 
+# 点歌模式歌曲音频根目录（/autoplan 2026-10-23 批次 R1：song_path 用户配置键
+# 退役后的内部约定常量，经本函数锚定，不再暴露为用户配置参数）。
+SONG_AUDIO_DIR_DEFAULT = "song"
+
+# R13 迁移告警一次性标记（进程级，避免每歌曲解析刷屏）
+_SONG_PATH_MIGRATION_WARNED = False
+
+
+def song_audio_root(config=None, home: Optional[str] = None) -> str:
+    """歌曲音频根目录（R1 内部约定）：autolive_home 锚定的 song/。
+    config 双形态兼容（config_get）；仅接受 autolive_home 覆盖，无用户配置键。
+
+    R13 一次性迁移：config choose_song 节若残留历史 song_path 键且非默认值，
+    告警并采纳为本次运行根目录（提示用户将文件移至默认目录后删除该键）。
+    """
+    global _SONG_PATH_MIGRATION_WARNED
+    root = None
+    legacy = config_get(config, "choose_song", "song_path") if config is not None else None
+    if legacy and str(legacy).strip() and str(legacy).strip() != SONG_AUDIO_DIR_DEFAULT:
+        root = str(legacy).strip()
+        if not _SONG_PATH_MIGRATION_WARNED:
+            _SONG_PATH_MIGRATION_WARNED = True
+            logger.warning(
+                f"[choose_song] 检测到遗留 song_path 配置 '{legacy}'（本批已退役该用户配置键），"
+                f"本次运行采纳为歌曲根目录；请将歌曲文件移至默认目录 '{SONG_AUDIO_DIR_DEFAULT}' 后删除该键")
+    if root is None:
+        base = home
+        if not base and config is not None:
+            base = config_get(config, "paths", "autolive_home")
+        if not base:
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        root = os.path.join(base, SONG_AUDIO_DIR_DEFAULT)
+    return os.path.abspath(root)
+
+
 class AutolivePaths:
     """外部路径统一解析器。所有路径先取 config `paths` 节，缺省回落本机布局。"""
 

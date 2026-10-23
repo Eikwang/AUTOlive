@@ -42,7 +42,11 @@ flowchart TD
         %% 裁决(差异D14,重扫新增): 积分档位播报出边——旧图 F5 已修正、重绘时丢失，补边恢复（积分回复进播放链）
 
         Keymap --> |是| SendPort(发送串口<br>串口/文案/音频三型):::subLogicNode
-        SongMode --> |匹配成功|Match(匹配成功):::subLogicNode
+        SongMode --> |触发词命中+列表有歌|Match(引导文案回应<br>不播放·打赏即唱):::subLogicNode
+        SongMode --> |触发词命中+列表无歌|SongFail(失败文案回应<br>不播放):::subLogicNode
+        %% 裁决(/autoplan 2026-10-23 批次 R2): 弹幕语义反转=意图判断仅回应（场景2/4）；
+        % contains 触发词命中（feature_handler.choose_song_handle→match_song_intent）
+        %% 礼物点歌触发挂 gift_handle 前段（R2/R5）：礼物→gift_song_map→命中播报+播放/入队翻唱
 
         Filter --> Stats{数据统计}:::listenNode
         Stats --> |开启| DB[写入数据库]:::listenNode

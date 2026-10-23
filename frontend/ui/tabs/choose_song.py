@@ -18,6 +18,8 @@ from nicegui import ui
 from typing import Dict, Any, Callable
 from frontend.ui.components.config_helper import get_nested_value
 from frontend.utils.common import textarea_data_change
+from utils.autolive_paths import song_audio_root, SONG_AUDIO_DIR_DEFAULT
+from utils.common.text_mixin import match_gift_to_song_preview, match_song_intent
 
 # main 侧窄端点轮询（nicegui3 教训：requests trust_env=False 禁系统代理+线程池解耦）
 _session = requests.Session()
@@ -31,10 +33,11 @@ AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac")
 def list_song_names(song_path: str) -> list:
     """读取歌曲目录的候选歌名（不含扩展名，排序稳定）。
 
-    与 utils 侧点歌链路的取曲库方式同源（feature_handler.choose_song_handle 经
-    audio.get_dir_audios_filename(song_path, 1) 取不含扩展名的文件名列表）。
-    """
-    if not song_path or not os.path.isdir(song_path):
+    /autoplan 2026-10-23 批次 R1：song_path 用户配置键退役——实参传 None/空串时
+    回落内部约定根目录（song_audio_root）；显式传路径仍生效（测试兼容）。"""
+    if not song_path:
+        song_path = song_audio_root()
+    if not os.path.isdir(song_path):
         return []
     names = []
     for fn in os.listdir(song_path):
@@ -52,37 +55,10 @@ def match_gift_to_song(
 ):
     """礼物名→歌曲 匹配（纯函数，供映射预演与测试共用）。
 
-    规则与 utils 侧点歌匹配同规则：包含命中优先，相似度兜底
-    （utils/common/text_mixin.py find_best_match 的 difflib.SequenceMatcher 口径，
-    阈值读 choose_song.similarity）。因完整匹配流程嵌在 feature_handler 方法内
-    无法直接 import，前端内实现同规则（计划 D4 授权路线）。
-
-    Returns:
-        (命中歌名, 相似度, 命中方式说明) 或 None（未命中）
-    """
-    if not gift_name or not gift_song_map:
-        return None
-    # ① 映射表命中：礼物名包含映射键即命中，最长键优先（"超级小火箭"命中"小火箭"）
-    target = via_key = None
-    for key in sorted((k for k in gift_song_map if k), key=len, reverse=True):
-        if key in gift_name:
-            target, via_key = gift_song_map[key], key
-            break
-    if not target:
-        return None
-    # ② 目标歌名→曲库：包含命中（互为子串）直接采信
-    for name in song_lists or []:
-        if name == target or name in target or target in name:
-            return (name, 1.0, f"映射[{via_key}]→包含命中")
-    # ③ 相似度兜底（与 find_best_match 同口径：取最高比例，低于阈值判未命中）
-    best, best_ratio = None, 0.0
-    for name in song_lists or []:
-        ratio = difflib.SequenceMatcher(None, target, name).ratio()
-        if ratio > best_ratio:
-            best, best_ratio = name, ratio
-    if best is None or best_ratio < float(similarity or 0):
-        return None
-    return (best, best_ratio, f"映射[{via_key}]→相似度命中")
+    /autoplan 2026-10-23 批次 D-20 统一口径：委托 utils.common.text_mixin.
+    match_gift_to_song_preview——前端预演与主进程实播同规则（native F5 归一
+    同源：CoverQueue.normalize_song），消除 D4 时期的前后端双实现漂移。"""
+    return match_gift_to_song_preview(gift_name, gift_song_map, song_lists, similarity)
 
 
 def _main_base(config) -> str:
@@ -102,18 +78,53 @@ def create_choose_song_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="choose_song")
 
-    # 点歌模式
+    # 点歌模式（/autoplan 2026-10-23 批次 R1：移除 取消点歌命令/随机点歌命令/
+    # 歌曲路径 三控件——歌曲目录改为内部约定 song/；R2/R3 新增四文案+冷却+伴奏音量）
     with ui.card().style(card_css):
         ui.label('点歌模式')
+        ui.label("弹幕含触发关键词+歌名 → 播报引导文案（打赏礼物即唱）；打赏礼物 → 匹配歌曲列表直接开唱。歌曲音频目录为内置 song/（无需配置）").style(
+            "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.textarea(label='点歌触发命令', value=textarea_data_change(get_nested_value(config, "choose_song", "start_cmd")), placeholder='点歌触发命令，换行分隔').style("width:100%;"), keys=("choose_song", "start_cmd"))
-            _auto_save(ui.textarea(label='取消点歌命令', value=textarea_data_change(get_nested_value(config, "choose_song", "stop_cmd")), placeholder='停止点歌命令，换行分隔').style("width:100%;"), keys=("choose_song", "stop_cmd"))
-            _auto_save(ui.textarea(label='随机点歌命令', value=textarea_data_change(get_nested_value(config, "choose_song", "random_cmd")), placeholder='随机点歌命令，换行分隔').style("width:100%;"), keys=("choose_song", "random_cmd"))
+                _auto_save(ui.textarea(label='点歌触发关键词', value=textarea_data_change(get_nested_value(config, "choose_song", "start_cmd")), placeholder='弹幕中包含即触发点歌判断，换行分隔\n例如：主播会唱 / 可以唱 / 能唱').style("width:100%;"), keys=("choose_song", "start_cmd"))
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.input(label='匹配失败文案', value=get_nested_value(config, "choose_song", "match_fail_copy"), placeholder='列表没有这首歌时回应\n变量：{user} {content}').style("width:100%;"), keys=("choose_song", "match_fail_copy"))
+                _auto_save(ui.input(label='引导文案（列表有歌）', value=get_nested_value(config, "choose_song", "guide_copy"), placeholder='弹幕问歌未打赏时回应，不播放\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "guide_copy"))
+            with ui.column().style("width:100%;"):
+                _auto_save(ui.input(label='匹配成功文案（礼物点歌）', value=get_nested_value(config, "choose_song", "match_success_copy"), placeholder='礼物命中歌曲后播报\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "match_success_copy"))
+                _auto_save(ui.input(label='准备文案（翻唱生成中）', value=get_nested_value(config, "choose_song", "prepare_copy"), placeholder='命中但无成品、翻唱生成中播报\n变量：{user} {content}').style("width:100%;"), keys=("choose_song", "prepare_copy"))
         with ui.grid(columns=3):
-            _auto_save(ui.input(label='歌曲路径', value=get_nested_value(config, "choose_song", "song_path"), placeholder='歌曲音频存放的路径').style("width:100%;"), keys=("choose_song", "song_path"))
-            _auto_save(ui.input(label='匹配失败文案', value=get_nested_value(config, "choose_song", "match_fail_copy"), placeholder='匹配失败返回的音频文案').style("width:100%;"), keys=("choose_song", "match_fail_copy"))
-            _auto_save(ui.input(label='匹配最低相似度', value=get_nested_value(config, "choose_song", "similarity"), placeholder='最低音频匹配相似度').style("width:100%;"), keys=("choose_song", "similarity"))
+            with ui.column().style("width:100%;"):
+                similarity_val = float(get_nested_value(config, "choose_song", "similarity") or 0.5)
+                simlab = ui.label(f'匹配最低相似度: {similarity_val:.2f}').style("font-size:12px")
+                ui.slider(min=0.1, max=1.0, step=0.05, value=similarity_val,
+                          on_change=lambda e: (simlab.set_text(f'匹配最低相似度: {float(e.value):.2f}'),
+                                               set_config_callback("choose_song", "similarity", float(e.value)))
+                          ).props("label-always").style("width:100%")
+            with ui.column().style("width:100%;"):
+                cd_val = int(get_nested_value(config, "choose_song", "song_cooldown_s") or 300)
+                cdlab = ui.label(f'同歌冷却间隔: {cd_val}s').style("font-size:12px")
+                ui.slider(min=0, max=1800, step=30, value=cd_val,
+                          on_change=lambda e: (cdlab.set_text(f'同歌冷却间隔: {int(e.value)}s'),
+                                               set_config_callback("choose_song", "song_cooldown_s", int(e.value)))
+                          ).props("label-always").style("width:100%")
+            with ui.column().style("width:100%;"):
+                rc_val = int(get_nested_value(config, "choose_song", "reply_cooldown_s") or 30)
+                rclab = ui.label(f'弹幕回应节流: {rc_val}s').style("font-size:12px")
+                ui.slider(min=0, max=300, step=5, value=rc_val,
+                          on_change=lambda e: (rclab.set_text(f'弹幕回应节流: {int(e.value)}s'),
+                                               set_config_callback("choose_song", "reply_cooldown_s", int(e.value)))
+                          ).props("label-always").style("width:100%")
+        with ui.grid(columns=2):
+            with ui.column().style("width:100%;"):
+                bv_val = float(get_nested_value(config, "choose_song", "backing_volume") or 0.8)
+                bvlab = ui.label(f'伴奏音量（数字人演唱时）: {bv_val:.0%}').style("font-size:12px")
+                ui.slider(min=0.0, max=1.0, step=0.05, value=bv_val,
+                          on_change=lambda e: (bvlab.set_text(f'伴奏音量（数字人演唱时）: {float(e.value):.0%}'),
+                                               set_config_callback("choose_song", "backing_volume", float(e.value)))
+                          ).props("label-always").style("width:100%")
+            ui.label("伴奏音量：数字人演唱时伴奏从直播设备外放的音量（0=静音）").style(
+                "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
 
     # ---------- 礼物点歌映射表+匹配预演（D4：choose_song.gift_song_map 新键） ----------
     with ui.card().style(card_css):
@@ -132,7 +143,26 @@ def create_choose_song_tab(
                         for gi, si in live_rows
                         if (gi.value or "").strip() and (si.value or "").strip()}
 
+            def _validate_rows() -> str:
+                """R8 录入校验（CP-1+native F5）：空行自动忽略；礼物名归一后冲突拒绝
+                （归一口径=CoverQueue.normalize_song 与实播一致）。返回错误说明或 ''。"""
+                from utils.cover_worker import CoverQueue
+                seen = {}
+                for gi, si in live_rows:
+                    g, s = (gi.value or "").strip(), (si.value or "").strip()
+                    if not g or not s:
+                        continue
+                    nk = CoverQueue.normalize_song(g)
+                    if nk in seen and seen[nk] != s:
+                        return f"礼物名「{g}」与「{seen[nk]}对应行」归一后重复（{nk}），请合并或改名"
+                    seen[nk] = s
+                return ""
+
             def _sync_gift_map():
+                err = _validate_rows()
+                if err:
+                    ui.notify(err, type="warning")
+                    return
                 cfg = config.setdefault("choose_song", {}) if isinstance(config, dict) else None
                 if cfg is None:
                     return
@@ -176,7 +206,7 @@ def create_choose_song_tab(
                     preview_result.set_text("请先输入礼物名")
                     return
                 similarity = get_nested_value(config, "choose_song", "similarity", default=0.5)
-                songs = list_song_names(str(get_nested_value(config, "choose_song", "song_path") or "song"))
+                songs = list_song_names("")  # 内部约定根目录（R1：song_path 配置键退役）
                 hit = match_gift_to_song(gift, _map_from_rows(), songs, similarity)
                 if hit is None:
                     preview_result.set_text(
@@ -189,7 +219,7 @@ def create_choose_song_tab(
 
     # ---------- 歌曲翻唱（C-3：折叠分组防卡片墙，Design P4/P7） ----------
     with ui.card().style(card_css):
-        with ui.expansion("歌曲翻唱（弹幕点歌自动翻唱→自动插播）", value=False).style("width:100%"):
+        with ui.expansion("歌曲翻唱（点歌命中自动翻唱→成品自动插播）", value=False).style("width:100%"):
             # ① 队列状态卡（/cover/status 轮询；to_thread 解耦事件循环——nicegui3 教训）
             status_lab = ui.label("队列状态查询中…").style("font-size:12px;color:var(--text-secondary)")
 
@@ -246,15 +276,26 @@ def create_choose_song_tab(
             ui.label("音高单位=八度（男转女 +1）；AI 翻唱内部换算半音").style(
                 "font-size:11px;color:var(--text-secondary)")
 
-            # ③ 成品列表（song/covers/）+ EMPTY 引导
-            covers_dir = os.path.join(
-                get_nested_value(config, "choose_song", "song_path") or "song", "covers")
+            # ③ 成品列表（内部约定 song/covers/，R1）+ 试听入口（R7 UI 三项）+ EMPTY 引导
+            covers_dir = os.path.join(song_audio_root(), "covers")
             covers = sorted((f for f in (os.listdir(covers_dir) if os.path.isdir(covers_dir) else [])
-                             if f.endswith(".wav")), reverse=True)
+                             if f.endswith(".wav") and not (f.endswith("_vocal.wav") or f.endswith("_inst.wav"))),
+                            reverse=True)
             if not covers:
-                ui.label("暂无翻唱成品——弹幕点歌命中后将自动翻唱，成品在此列出").style(
+                ui.label("暂无翻唱成品——礼物点歌命中后将自动翻唱，成品在此列出并可试听").style(
                     "font-size:12px;color:var(--text-secondary)")
             else:
-                with ui.column().style("width:100%;gap:2px;max-height:180px;overflow:auto"):
+                try:
+                    from nicegui import app as _app
+                    if not any(r.path == "/song_audio" for r in _app._stack.routes if hasattr(r, "path")):
+                        _app.add_media_files("/song_audio", covers_dir)
+                except Exception:
+                    pass  # 静态服务注册失败仅降级为无试听（列表仍可用）
+                with ui.column().style("width:100%;gap:2px;max-height:240px;overflow:auto"):
                     for fn in covers[:20]:
-                        ui.label(f"🎵 {fn}").style("font-size:12px")
+                        with ui.row().style("width:100%;align-items:center;gap:6px"):
+                            ui.label(f"🎵 {fn}").style("font-size:12px;flex:1")
+                            try:
+                                ui.audio(f"/song_audio/{fn}", controls=True).style("height:32px;width:260px")
+                            except Exception:
+                                pass
