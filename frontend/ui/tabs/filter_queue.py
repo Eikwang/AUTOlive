@@ -126,9 +126,10 @@ def create_filter_queue_tab(
     # ---------- 优先级（D5：单一有序列表+来源分组+预设按钮） ----------
     with ui.card().style(card_css):
         ui.label('优先级配置')
-        with ui.element('div').classes('p-2 bg-blue-100'):
-            ui.label("统一列表按当前优先级降序编号（修改数值后刷新页面重排）。方向恒定：数值越大越优先，就会优先合成音频播放。请使用正整数。")
-            ui.label("另外需要注意，由于shi山原因，目前这个队列内容是文本切分后计算的长度，所以如果回复内容过长，可能会有丢数据的情况")
+        # UI-16 批次 R7：提示文案按用户给定文本替换（含笔误修正+删除免责段），
+        # DV-1d 暗色适配走 hint-callout 组件类；丢数据风险说明迁至项目文档+TODOS 欠账
+        with ui.element('div').classes('p-2 hint-callout'):
+            ui.label("统一列表按当前优先级降序编号，修改数值后刷新页面会重排。数值越大，系统就会优先合成音频并播放。请使用正整数。")
 
         # 预设按钮（D5）：一键写入各键，走 _auto_save 同通道落盘
         preset_inputs: Dict[str, Any] = {}

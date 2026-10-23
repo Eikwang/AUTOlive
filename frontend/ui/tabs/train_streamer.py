@@ -264,23 +264,25 @@ def create_train_streamer_tab(
             _render_stage_btn(idx)
 
         def _render_stage_btn(idx: int):
-            """选中=主色底白字；未选=灰底半透明。"""
+            """选中=主色底白字；未选=灰底半透明。
+            UI-16 批次 R9/DV-1g：改两态类切换（stage-btn-selected/unselected，
+            全局 CSS 成对令牌）——原 .style() 字符串累积会在同一元素上留下两份
+            color 声明（CSS 取第一个），这是选中态文字发灰的根因。"""
             stage_buttons[idx].style(
                 "padding: 6px 12px; border-radius: var(--radius-md); "
-                + ("background: var(--color-primary); color: var(--text-on-primary); "
-                   if (idx + 1) in selected_stages else
-                   "background: var(--bg-hover); color: var(--text-secondary); opacity: 0.55; ")
-                + "font-size: var(--font-size-body); cursor: pointer")
+                "font-size: var(--font-size-body); cursor: pointer")
+            stage_buttons[idx].classes(remove='stage-btn-selected stage-btn-unselected')
+            stage_buttons[idx].classes(add='stage-btn-selected' if (idx + 1) in selected_stages else 'stage-btn-unselected')
 
         with ui.row().classes("q-mt-sm q-gutter-sm"):
             for _i, _name in enumerate(TrainPipeline.STAGE_NAMES):
                 _btn = ui.button(_name, on_click=lambda _, i=_i: _toggle_stage(i)).props(
                     "flat dense no-caps").style(
                     "padding: 6px 12px; border-radius: var(--radius-md); "
-                    "background: var(--color-primary); color: var(--text-on-primary); "
                     "font-size: var(--font-size-body)")
                 _btn.tooltip("点击选择/取消该阶段；可任意组合，按序号顺序执行")
                 stage_buttons.append(_btn)
+                _render_stage_btn(_i)  # UI-16 批次 R9：初始两态类渲染（默认全选=主色白字）
 
         def _set_stage_state(idx: int, state: str):
             """state: pending/running/done/failed（运行态染色，覆盖选中样式）"""

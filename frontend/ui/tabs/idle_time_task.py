@@ -54,12 +54,12 @@ def create_idle_time_task_tab(
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('文案模式', value=get_nested_value(config, "idle_time_task", "copywriting", "enable")).style(switch_internal_css), ("idle_time_task", "copywriting", "enable"))
                 _auto_save(ui.switch('随机文案', value=get_nested_value(config, "idle_time_task", "copywriting", "random")).style(switch_internal_css), ("idle_time_task", "copywriting", "random"))
-                _auto_save(ui.textarea(label='文案列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "copywriting", "copy")), placeholder='文案列表，换行分隔').style("width:100%;"), ("idle_time_task", "copywriting", "copy"))
+                _auto_save(ui.textarea(label='文案列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "copywriting", "copy")), placeholder='文案列表，换行分隔').style("width:100%; min-height:16rem;"), ("idle_time_task", "copywriting", "copy"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('弹幕触发LLM模式', value=get_nested_value(config, "idle_time_task", "comment", "enable")).style(switch_internal_css), ("idle_time_task", "comment", "enable"))
                 _auto_save(ui.switch('随机弹幕', value=get_nested_value(config, "idle_time_task", "comment", "random")).style(switch_internal_css), ("idle_time_task", "comment", "random"))
-                _auto_save(ui.textarea(label='弹幕列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "comment", "copy")), placeholder='弹幕列表，换行分隔').style("width:100%;"), ("idle_time_task", "comment", "copy"))
+                _auto_save(ui.textarea(label='弹幕列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "comment", "copy")), placeholder='弹幕列表，换行分隔').style("width:100%; min-height:16rem;"), ("idle_time_task", "comment", "copy"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('本地音频模式', value=get_nested_value(config, "idle_time_task", "local_audio", "enable")).style(switch_internal_css), ("idle_time_task", "local_audio", "enable"))
                 _auto_save(ui.switch('随机本地音频', value=get_nested_value(config, "idle_time_task", "local_audio", "random")).style(switch_internal_css), ("idle_time_task", "local_audio", "random"))
-                _auto_save(ui.textarea(label='本地音频路径列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "local_audio", "path")), placeholder='本地音频路径列表，换行分隔').style("width:100%;"), ("idle_time_task", "local_audio", "path"))
+                _auto_save(ui.textarea(label='本地音频路径列表', value=textarea_data_change(get_nested_value(config, "idle_time_task", "local_audio", "path")), placeholder='本地音频路径列表，换行分隔').style("width:100%; min-height:16rem;"), ("idle_time_task", "local_audio", "path"))

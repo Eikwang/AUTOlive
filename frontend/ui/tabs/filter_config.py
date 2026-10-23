@@ -29,46 +29,11 @@ def create_filter_config_tab(
     with ui.card().style(card_css):
         ui.label('过滤')
 
-        # ---------- 过滤总开关（D4：filter.filter_master_enable 新键，默认 True 与存量一致） ----------
-        # 逻辑短路在 utils 消费方接线（归收尾批）；本批仅 UI+键落盘。
-        def _save_master(value: bool):
-            cfg = config.setdefault("filter", {}) if isinstance(config, dict) else None
-            if cfg is not None:
-                cfg["filter_master_enable"] = bool(value)
-            set_config_callback("filter", "filter_master_enable", value=bool(value))
-
-        def _confirm_close_master():
-            master_confirm.close()
-            _save_master(False)
-
-        def _cancel_close_master():
-            master_confirm.close()
-            master_switch.set_value(True)  # 回弹；走开启分支幂等保存
-
-        master_switch = ui.switch('过滤总开关', value=bool(get_nested_value(config, "filter", "filter_master_enable", default=True))).style(switch_internal_css).tooltip('总开关：关闭后本页全部过滤逻辑失效（含违禁词过滤）。默认开启，与存量行为一致')
-        # 常驻风险提示（D-24：与 0.0.0.0 绑定告警同级处理）
-        ui.label('关闭后违禁词过滤同时失效——直播中可能播出违禁内容').style(
-            'color: var(--color-warning, #d97706); font-size: var(--font-size-assist, 12px);')
-
-        # 关闭前二次确认（D-24 风险提示确认）
-        with ui.dialog() as master_confirm, ui.card().style("min-width: 320px;"):
-            ui.label("确认关闭过滤总开关").style(
-                "font-size: var(--font-size-card-title, 16px); font-weight: var(--font-weight-title, 600); color: var(--text-title); margin-bottom: 4px;")
-            ui.label("关闭后违禁词过滤同时失效——直播中可能播出违禁内容").style(
-                "color: var(--text-body);")
-            with ui.row().style("justify-content: flex-end; width: 100%; gap: 8px; margin-top: 8px;"):
-                ui.button("取消", on_click=lambda: _cancel_close_master()).props("flat no-caps")
-                ui.button("确认关闭", on_click=lambda: _confirm_close_master()).props(
-                    "unelevated no-caps").style(
-                    "background: var(--color-danger); color: var(--text-on-primary);")
-
-        def _on_master_change(e):
-            if e.value:
-                _save_master(True)
-            else:
-                master_confirm.open()  # 关闭动作须经风险确认
-
-        master_switch.on_value_change(_on_master_change)
+        # ---------- 过滤总开关（UI-16 批次 R3：参数页开关已移除） ----------
+        # 总开关迁至二级菜单（enable_paths.py 注册 filter_config →
+        # filter.filter_master_enable）；D-24 关闭二次确认由 layout.py
+        # per-path 确认注册表（CONFIRM_CLOSE_PATHS）承接，防呆语义不变。
+        # 键名与消费语义（关闭后本页全部过滤逻辑失效含违禁词过滤）保持不变。
 
         ui.separator()
         # 弹幕/LLM 前后缀过滤（3列网格）

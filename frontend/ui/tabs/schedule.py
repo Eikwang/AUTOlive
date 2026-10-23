@@ -197,7 +197,7 @@ def create_schedule_tab(
         if not existing_groups:
             # 存量兼容：无 groups 键时显示迁移提示（存量任务继续生效，不受影响）
             with groups_container:
-                with ui.element('div').classes('p-2 bg-blue-100'):
+                with ui.element('div').classes('p-2 hint-callout'):
                     ui.label(f"尚未配置任务组。检测到存量单任务 {len(config.get('schedule', []) or [])} 条——"
                              "点击下方按钮将映射为任务组（首组命名「默认组」，存量任务继续生效不受影响）；"
                              "也可直接「添加任务组」从零开始")

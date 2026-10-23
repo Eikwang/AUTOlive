@@ -41,7 +41,7 @@ def create_filter_forget_tab(
 
     with ui.card().style(card_css):
         with ui.expansion('消息遗忘&保留设置', icon="settings", value=True).classes('w-full'):
-            with ui.element('div').classes('p-2 bg-blue-100'):
+            with ui.element('div').classes('p-2 hint-callout'):
                 ui.label("遗忘间隔 指的是每隔这个间隔时间（秒），就会丢弃这个间隔时间中接收到的数据，但会保留最新的n个数据；保留数 指的是保留最新收到的数据的数量")
 
             # 7 行表格：行=消息类型，列=遗忘间隔/保留数（D5）

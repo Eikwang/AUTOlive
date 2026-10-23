@@ -18,6 +18,9 @@ ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
     "trends_copywriting": ("trends_copywriting", "enable"),
     "filter_dedup": ("filter", "limited_time_deduplication", "enable"),
     "blacklist": ("filter", "blacklist", "enable"),
+    # UI-16 批次 R3：过滤总开关迁移至二级菜单（原 filter_config.py 参数页开关移除；
+    # D-24 关闭二次确认由 layout.py per-path 确认注册表承接，语义不变）
+    "filter_config": ("filter", "filter_master_enable"),
     "read_comment": ("read_comment", "enable"),
     "idle_time_task": ("idle_time_task", "enable"),
     "assistant_anchor": ("assistant_anchor", "enable"),
@@ -25,7 +28,6 @@ ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
     "translate": ("translate", "enable"),
     "choose_song": ("choose_song", "enable"),
     "key_mapping": ("key_mapping", "enable"),
-    "local_dir_endpoint": ("webui", "local_dir_to_endpoint", "enable"),
     "trends_config": ("trends_config", "enable"),
 }
 

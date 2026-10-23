@@ -12,6 +12,17 @@ from frontend.config.enable_paths import ENABLE_PATHS
 from frontend.ui.components.service_status import ServiceStatusStrip
 from utils.my_log import logger
 
+# UI-16 批次 R3/D-7/EV-1h：per-path 关闭确认注册表——命中路径的「关闭」动作须经
+# 确认对话框（persistent：ESC/点遮罩不可关闭，仅两个按钮可离开=全关闭路径覆盖，
+# 取消/非确认一律回弹，防「开关显示关、配置实际开」静默分叉）。D-24 防呆语义
+# 从 filter_config.py 参数页开关迁移至此，随二级菜单开关长期保留。
+CONFIRM_CLOSE_PATHS: Dict[tuple, Dict[str, str]] = {
+    ("filter", "filter_master_enable"): {
+        "title": "确认关闭过滤总开关",
+        "message": "关闭后违禁词过滤同时失效——直播中可能播出违禁内容",
+    },
+}
+
 
 class RuntimeStatusStrip:
     """D1 运行状态条（侧边栏底部常驻区，2026-10-19 批次切片 2）。
@@ -322,6 +333,35 @@ class DrawerLayout:
         }}
         .q-uploader__list:empty {{
             display: none;
+        }}
+
+        /* ============ 提示横幅组件类（UI-16 批次 DV-1d 组件类级全修） ============ */
+        /* 页内提示/hint 组件统一走本类：令牌驱动，暗色模式自动适配（body--dark
+           覆盖令牌），替代硬编码 Tailwind 调色类（bg-blue-100 等）——根因根治，
+           所有引用点自动痊愈。 */
+        .hint-callout {{
+            background: var(--color-primary-soft);
+            border-left: 3px solid var(--color-primary);
+            border-radius: var(--radius-sm);
+            color: var(--text-body);
+            padding: var(--spacing-sm) var(--spacing-md);
+            line-height: 1.6;
+            white-space: pre-line;
+        }}
+
+        /* ============ 训练阶段选择按钮两态（UI-16 批次 R9/DV-1g） ============ */
+        /* 选中/未选为成对令牌类切换（禁散配）；类切换替代 style 字符串累积——
+           NiceGUI .style() 多次调用会追加，两份 color 声明 CSS 取第一个，
+           这是「选中态字发灰」的根因。 */
+        .stage-btn-selected {{
+            background: var(--color-primary) !important;
+            color: var(--text-on-primary) !important;
+            opacity: 1;
+        }}
+        .stage-btn-unselected {{
+            background: var(--bg-hover) !important;
+            color: var(--text-secondary) !important;
+            opacity: 0.55;
         }}
 
         /* ============ 统一标题层级 ============ */
@@ -1446,6 +1486,13 @@ class DrawerLayout:
         if bool(e.value) == bool(current):
             return
 
+        # per-path 关闭确认（R3/D-7/EV-1h）：命中注册表的「关闭」动作先弹确认，
+        # 确认/取消在对话框闭包内完成落库或回弹；本处理器在此直接返回。
+        confirm_spec = CONFIRM_CLOSE_PATHS.get(tuple(path))
+        if not e.value and confirm_spec:
+            self._open_close_confirm(func_name, path, e, confirm_spec)
+            return
+
         set_cb = self._create_set_config_callback()
         ok = set_cb(*path, value=bool(e.value), _notify=False)
         if ok:
@@ -1459,6 +1506,37 @@ class DrawerLayout:
             # UI 回滚（内存字典已由 set_config 恢复旧值）；回滚赋值若再触发
             # 本处理器，命中幂等护栏自然返回
             e.sender.value = bool(current)
+
+    def _open_close_confirm(self, func_name: str, path: tuple, e, spec: Dict[str, str]):
+        """per-path 关闭确认对话框（R3/D-7/EV-1h）：persistent 全关闭路径覆盖。"""
+        current = bool(get_nested_value(self.config, *path))
+        set_cb = self._create_set_config_callback()
+
+        def _apply_close():
+            dialog.close()
+            ok = set_cb(*path, value=False, _notify=False)
+            if ok:
+                ui.notify(position="top", type="positive", message=f"已关闭 {func_name}")
+                if (self.config_status_label is not None
+                        and self._current_page_enable_path == path):
+                    self.config_status_label.set_visibility(True)
+            else:
+                e.sender.value = current
+
+        def _cancel():
+            dialog.close()
+            e.sender.value = current  # 回弹；命中幂等护栏自然终止，无循环无重复 toast
+
+        with ui.dialog().props('persistent') as dialog, ui.card().style('min-width: 320px;'):
+            ui.label(spec["title"]).style(
+                'font-size: var(--font-size-card-title); font-weight: var(--font-weight-title); '
+                'color: var(--text-title); margin-bottom: 4px;')
+            ui.label(spec["message"]).style('color: var(--text-body);')
+            with ui.row().style('justify-content: flex-end; width: 100%; gap: 8px; margin-top: 8px;'):
+                ui.button("取消", on_click=_cancel).props("flat no-caps")
+                ui.button("确认关闭", on_click=_apply_close).props("unelevated no-caps").style(
+                    "background: var(--color-danger); color: var(--text-on-primary);")
+        dialog.open()
 
     def show_config_page(self, function_name: str):
         """显示配置页面"""
@@ -1618,8 +1696,6 @@ class DrawerLayout:
             'database_config': lambda: database_config.create_database_tab(self.config, theme_config, set_cb),
             # 系统设置
             'webui_config': lambda: system_settings.create_webui_config_tab(self.config, theme_config, set_cb),
-            'local_dir_endpoint': lambda: system_settings.create_local_dir_endpoint_tab(self.config, theme_config, set_cb),
-            'config_template': lambda: system_settings.create_config_template_tab(self.config, theme_config, set_cb),
             'account_manage': lambda: system_settings.create_account_manage_tab(self.config, theme_config, set_cb),
             'trends_config': lambda: system_settings.create_trends_config_tab(self.config, theme_config, set_cb),
             'abnormal_alarm': lambda: system_settings.create_abnormal_alarm_tab(self.config, theme_config, set_cb),

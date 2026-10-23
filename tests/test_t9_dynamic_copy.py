@@ -30,6 +30,9 @@ def scheduler(tmp_path: Path):
             "llm_type": "chatgpt",
             "random_play": False,
             "play_interval": 1,
+            # UI-16 批次 R5③：提示词转换页级化（原逐条目键退役，消费点读页级）
+            "prompt_change_enable": True,
+            "prompt_change_content": "请改写下面的内容，保持含义但换个说法",
             "copywriting": [
                 {"folder_path": str(tmp_path / "文案"), "prompt_change_enable": True,
                  "prompt_change_content": "请改写下面的内容，保持含义但换个说法"}
@@ -77,6 +80,7 @@ class TestCopywritingPlayback:
     def test_copy_file_reaches_playback(self, scheduler):
         """本地文案文件内容进入播放链（T9 核心修复：原来只记日志）。"""
         ts, mh, tmp = scheduler
+        ts.config._cfg["trends_copywriting"]["prompt_change_enable"] = False  # 页级改写关（R5③）
         ts.config._cfg["trends_copywriting"]["copywriting"][0]["prompt_change_enable"] = False
         d = tmp / "文案"
         d.mkdir()
@@ -144,6 +148,7 @@ class TestEdgeCases:
     def test_gbk_file_readable(self, scheduler):
         """E4：GBK 编码文案文件可读（UTF-8 失败回退），不静默跳过。"""
         ts, mh, tmp = scheduler
+        ts.config._cfg["trends_copywriting"]["prompt_change_enable"] = False  # 页级改写关（R5③）
         ts.config._cfg["trends_copywriting"]["copywriting"][0]["prompt_change_enable"] = False
         d = tmp / "文案"
         d.mkdir()

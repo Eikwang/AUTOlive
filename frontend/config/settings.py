@@ -341,6 +341,25 @@ def _ensure_defaults(config: "Settings") -> None:
     if _migrated_changed:
         cfg["custom_llm"] = _migrated
         changed = True
+
+    # UI-16 批次 R10/EV-1g：念弹幕触发周期 min/max 合并为单键 periodic_time
+    # （合并语义=固定单值不再区间随机；存量迁移口径=max(periodic_time_min,
+    # periodic_time_max) 回填，保守不提频；缺省 60 秒；旧 min/max 键退役并
+    # 入守卫测试范围）。local_qa/thanks 各节不受影响（分支隔离）。
+    _read_pt = cfg.get("read_comment", {}).get("periodic_trigger") if isinstance(cfg.get("read_comment"), dict) else None
+    if isinstance(_read_pt, dict):
+        if "periodic_time" not in _read_pt:
+            try:
+                _migrated = max(int(_read_pt.get("periodic_time_min", 60)), int(_read_pt.get("periodic_time_max", 60)))
+            except (TypeError, ValueError):
+                _migrated = 60
+            _read_pt["periodic_time"] = max(1, int(_migrated))
+            changed = True
+        for _old_key in ("periodic_time_min", "periodic_time_max"):
+            if _old_key in _read_pt:
+                del _read_pt[_old_key]
+                changed = True
+
     if changed:
         try:
             config.save()

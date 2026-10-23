@@ -334,44 +334,66 @@ class TaskScheduler:
         def run_trends_copywriting():
             logger.info("动态文案任务线程运行中...")
             file_cursor = 0
+            copy_cursor = 0
 
             try:
                 while self.is_running:
-                    # 收集全部文案文件（copywriting[].folder_path 列表）
+                    # UI-16 批次 R5②/EV-1f：文案来源双链——优先读前端直输 copy 列表
+                    # （每项=一条文案）；copy 空时回退存量 folder_path 文件链（迁移期
+                    # 兼容：页面迁移完成前存量行为不变；copy 非空即走新链）。
+                    # EV-1f：空文案行跳过；全空保持 D-8 空列表静默语义。
+                    direct_copy_list = [
+                        str(c).strip() for c in (self.config.get("trends_copywriting", "copy") or [])
+                        if str(c).strip()
+                    ]
                     file_path_list = []
-                    for copywriting in self.config.get("trends_copywriting", "copywriting") or []:
-                        file_path_list.extend(self.common.get_all_file_paths(copywriting.get("folder_path", "")))
+                    if not direct_copy_list:
+                        # 旧链回退：copywriting[].folder_path 列表（迁移期兼容）
+                        for copywriting in self.config.get("trends_copywriting", "copywriting") or []:
+                            file_path_list.extend(self.common.get_all_file_paths(copywriting.get("folder_path", "")))
 
-                    if not file_path_list:
-                        logger.warning("动态文案：文案目录为空或无文件，本轮跳过（D-8 空列表静默语义）")
-                        time.sleep(60)
-                        continue
-
-                    if self.config.get("trends_copywriting", "random_play"):
-                        source_path = random.choice(file_path_list)
+                    if direct_copy_list:
+                        if self.config.get("trends_copywriting", "random_play"):
+                            resp_content = random.choice(direct_copy_list)
+                            source_path = "config 文案列表"
+                        else:
+                            resp_content = direct_copy_list[copy_cursor % len(direct_copy_list)]
+                            copy_cursor += 1
+                            source_path = "config 文案列表"
                     else:
-                        source_path = file_path_list[file_cursor % len(file_path_list)]
-                        file_cursor += 1
+                        if not file_path_list:
+                            logger.warning("动态文案：文案目录为空或无文件，本轮跳过（D-8 空列表静默语义）")
+                            time.sleep(60)
+                            continue
 
-                    source_content = _read_copy_file(source_path)
-                    if not source_content:
-                        time.sleep(60)
-                        continue
+                        if self.config.get("trends_copywriting", "random_play"):
+                            source_path = random.choice(file_path_list)
+                        else:
+                            source_path = file_path_list[file_cursor % len(file_path_list)]
+                            file_cursor += 1
+
+                        source_content = _read_copy_file(source_path)
+                        if not source_content:
+                            time.sleep(60)
+                            continue
+                        resp_content = source_content
 
                     # S-3 注入防护：改写输入仅限本地文案原文+配置内固定提示词，
-                    # 不接入任何弹幕/事件变量；原文截断 500 字符防爆 LLM/TTS
-                    resp_content = source_content[:500]
-                    prompt_change_enable = False
-                    for copywriting in self.config.get("trends_copywriting", "copywriting") or []:
-                        if copywriting.get("folder_path", "") in source_path:
-                            prompt_change_enable = bool(copywriting.get("prompt_change_enable"))
-                            prompt_change_content = copywriting.get("prompt_change_content", "")
-                            break
+                    # 不接入任何弹幕/事件变量；原文截断 500 字符防爆 LLM/TTS。
+                    # 新链（config 文案列表）与旧链（本地文件）来源性质一致：
+                    # 均为配置内固定文案，无观众输入注入点。
+                    resp_content = resp_content[:500]
+                    # R5③/EV-1e：提示词转换读页级新键（trends_copywriting 根），
+                    # 逐条目旧键退役；页级值同样为配置内固定提示词（S-3 性质不变）
+                    prompt_change_enable = bool(self.config.get("trends_copywriting", "prompt_change_enable"))
+                    prompt_change_content = self.config.get("trends_copywriting", "prompt_change_content") or ""
 
                     if prompt_change_enable:
-                        # llm_type 枚举迁移（A5 精神）：chatgpt→custom_llm，其余未知值降级 custom_llm
+                        # R5①/EV-1j：llm_type 收敛 {custom_llm, fastrag}（fastrag 走
+                        # llm_handle 共享层三通道，服务不可达由共享层托底熔断）；
+                        # 未知值（存量 chatgpt 等）降级 custom_llm
                         llm_type = self.config.get("trends_copywriting", "llm_type") or "custom_llm"
-                        if llm_type != "custom_llm":
+                        if llm_type not in ("custom_llm", "fastrag"):
                             llm_type = "custom_llm"
                         rewrite_prompt = f"{prompt_change_content}\n原文案：{resp_content}"
                         try:

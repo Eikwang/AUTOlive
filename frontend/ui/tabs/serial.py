@@ -80,7 +80,7 @@ def create_serial_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="serial")
 
     # 提示信息
-    with ui.element('div').classes('p-2 bg-blue-100'):
+    with ui.element('div').classes('p-2 hint-callout'):
         ui.label('此页完成串口配置后，可以在"通用配置"的 串口映射配置功能\n 注意！！！此处连接测试完成后，请 关闭串口，因为程序是跨进程使用的，所以不关掉会占用串口，导致无法正常使用！')
 
     # 增删按钮

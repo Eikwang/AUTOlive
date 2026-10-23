@@ -85,10 +85,13 @@ def create_data_analysis_tab(
                 ).style(echart_css)
                 new_echart.move(data_analysis_integral_card, 0)
 
-            ui.button('获取积分榜', on_click=lambda: update_echart_integral('integral'))
-            ui.button('获取观看榜', on_click=lambda: update_echart_integral('view_num'))
-            ui.button('获取签到榜', on_click=lambda: update_echart_integral('sign_num'))
-            ui.button('获取金额榜', on_click=lambda: update_echart_integral('total_price'))
+        # UI-16 批次 R9/D-4/DV-1g：四按钮一行显示 flex 均分等宽（移出 3 列网格，
+        # 防按钮被网格切行；窄视口自动 2×2 换行）
+        with ui.row().style('width:100%; display:flex; gap:8px; flex-wrap:wrap;'):
+            ui.button('获取积分榜', on_click=lambda: update_echart_integral('integral')).style('flex:1 1 140px; min-width:140px;')
+            ui.button('获取观看榜', on_click=lambda: update_echart_integral('view_num')).style('flex:1 1 140px; min-width:140px;')
+            ui.button('获取签到榜', on_click=lambda: update_echart_integral('sign_num')).style('flex:1 1 140px; min-width:140px;')
+            ui.button('获取金额榜', on_click=lambda: update_echart_integral('total_price')).style('flex:1 1 140px; min-width:140px;')
 
     # 礼物榜
     data_analysis_gift_card = ui.card()

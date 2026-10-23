@@ -49,9 +49,9 @@ def create_web_captions_printer_tab(
         ui.label('字幕打印')
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "web_captions_printer", "enable", default=False)).style(switch_internal_css).tooltip(
-                    '启用后，播放音频时会把内容推送到字幕页显示。\n'
-                    '样式与开关均即时生效（无需重启）；字幕页地址见下方回显。'), ("web_captions_printer", "enable"))
+                # UI-16 批次 R2：参数页「启用」开关已移除——二级菜单开关（enable_paths.py
+                # 注册 web_captions_printer.enable）与本开关同键，保留二级菜单唯一入口；
+                # 参数页未启用提示由 layout.py config_status_label（DG-B1）机制承接。
                 _auto_save(ui.switch('字幕时长对齐音频', value=get_nested_value(config, "web_captions_printer", "keep_time_align_audio", default=True)).style(switch_internal_css).tooltip(
                     '开启：字幕保持至音频播完（起点与语音起点对齐）。\n'
                     '关闭：按文本长度自动计算显示时长（旧行为）。'), ("web_captions_printer", "keep_time_align_audio"))

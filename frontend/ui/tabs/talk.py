@@ -38,7 +38,7 @@ def create_talk_tab(
             scroll_area_chat_box = ui.scroll_area().style("width:100%; height:700px;")
 
     # 基础配置
-    with ui.grid(columns=3):
+    with ui.grid(columns=2):
         _auto_save(ui.switch('启用按键监听', value=get_nested_value(config, "talk", "key_listener_enable")).style(switch_internal_css).tooltip("启用后，可以通过键盘单击下放配置的录音按键，启动语音识别对话功能"), ("talk", "key_listener_enable"))
         _auto_save(ui.switch('直接语音对话', value=get_nested_value(config, "talk", "direct_run_talk")).style(switch_internal_css).tooltip("如果启用了，将在首次运行时直接进行语音识别，而不需手动点击开始按键。"), ("talk", "direct_run_talk"))
 
@@ -71,7 +71,7 @@ def create_talk_tab(
         _auto_save(ui.switch('连续对话', value=get_nested_value(config, "talk", "continuous_talk")).style(switch_internal_css).tooltip('仅需按一次录音按键，后续就不需要按了'), ("talk", "continuous_talk"))
 
     # 录音配置
-    with ui.grid(columns=3):
+    with ui.grid(columns=2):
         _auto_save(ui.select(
             label='录音类型',
             options={"google": "google", "baidu": "baidu", "faster_whisper": "faster_whisper", "sensevoice": "sensevoice"},
@@ -129,7 +129,7 @@ def create_talk_tab(
 
     # 对话打断
     with ui.expansion('对话打断', icon="settings", value=True).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             with ui.column().style("width:100%;"):
                 ui.switch('启用', value=get_nested_value(config, "talk", "interrupt_talk", "enable")).style(switch_internal_css)
                 ui.textarea(label='打断关键词', placeholder='如：等一下、住嘴 多个请换行分隔', value="\n".join(get_nested_value(config, "talk", "interrupt_talk", "keywords") or [])).style("width:100%;")
@@ -141,7 +141,7 @@ def create_talk_tab(
 
     # 语音唤醒与睡眠
     with ui.expansion('语音唤醒与睡眠', icon="settings", value=True).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             with ui.column().style("width:100%;"):
                 ui.switch('启用', value=get_nested_value(config, "talk", "wakeup_sleep", "enable")).style(switch_internal_css)
                 ui.select(label='唤醒模式', options={"长期唤醒": "长期唤醒", "单次唤醒": "单次唤醒"}, value=get_nested_value(config, "talk", "wakeup_sleep", "mode")).style("width:100%").tooltip("长期唤醒：说完唤醒词后，会触发提示语；单次唤醒：每次对话都需要携带唤醒词")
@@ -152,19 +152,19 @@ def create_talk_tab(
 
     # 谷歌STT
     with ui.expansion('谷歌', icon="settings", value=False).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             ui.select(label='目标翻译语言', options={"zh-CN": "zh-CN", "en-US": "en-US", "ja-JP": "ja-JP"}, value=get_nested_value(config, "talk", "google", "tgt_lang")).style("width:100%;")
 
     # 百度STT
     with ui.expansion('百度', icon="settings", value=False).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             ui.input(label='AppID', value=get_nested_value(config, "talk", "baidu", "app_id"), placeholder='百度云 语音识别应用的 AppID').style("width:100%;")
-            ui.input(label='API Key', value=get_nested_value(config, "talk", "baidu", "api_key"), placeholder='百度云 语音识别应用的 API Key', password=True, password_icon_visibility=False).style("width:100%;")
-            ui.input(label='Secret Key', value=get_nested_value(config, "talk", "baidu", "secret_key"), placeholder='百度云 语音识别应用的 Secret Key', password=True, password_icon_visibility=False).style("width:100%;")
+            ui.input(label='API Key', value=get_nested_value(config, "talk", "baidu", "api_key"), placeholder='百度云 语音识别应用的 API Key', password=True, password_toggle_button=True).style("width:100%;")
+            ui.input(label='Secret Key', value=get_nested_value(config, "talk", "baidu", "secret_key"), placeholder='百度云 语音识别应用的 Secret Key', password=True, password_toggle_button=True).style("width:100%;")
 
     # faster_whisper
     with ui.expansion('faster_whisper', icon="settings", value=False).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             ui.input(label='model_size', value=get_nested_value(config, "talk", "faster_whisper", "model_size"), placeholder='Size of the model to use').style("width:100%;")
             ui.select(label='识别语言', options={l: l for l in ["自动识别", 'zh', 'en', 'ja', 'ko', 'yue']}, value=get_nested_value(config, "talk", "faster_whisper", "language")).style("width:100%;")
             ui.select(label='device', options={"cuda": "cuda", "cpu": "cpu", "auto": "auto"}, value=get_nested_value(config, "talk", "faster_whisper", "device")).style("width:100%;")
@@ -174,7 +174,7 @@ def create_talk_tab(
 
     # SenseVoice
     with ui.expansion('SenseVoice', icon="settings", value=False).classes('w-2/3'):
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             ui.input(label='ASR 模型路径', value=get_nested_value(config, "talk", "sensevoice", "asr_model_path"), placeholder='ASR模型路径').style("width:100%;").tooltip("ASR模型路径")
             ui.input(label='VAD 模型路径', value=get_nested_value(config, "talk", "sensevoice", "vad_model_path"), placeholder='VAD模型路径').style("width:100%;").tooltip("VAD模型路径")
             ui.input(label='VAD 单段最大语音时间', value=get_nested_value(config, "talk", "sensevoice", "vad_max_single_segment_time"), placeholder='VAD单段最大语音时间').style("width:100%;").tooltip("VAD单段最大语音时间")

@@ -242,11 +242,6 @@ class AutoliveApp:
         output_dir = get_output_dir()
         logger.debug(f"输出目录: {output_dir}")
         
-        # 初始化静态文件目录
-        if get_nested_value(self.config._config, "webui", "local_dir_to_endpoint", "enable"):
-            for tmp in get_nested_value(self.config._config, "webui", "local_dir_to_endpoint", "config"):
-                app.add_static_files(tmp['url_path'], tmp['local_dir'])
-        
         logger.debug("项目相关文件夹初始化完成")
     
     def set_config(self, *keys, value):

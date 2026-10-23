@@ -33,11 +33,15 @@ class TimerHandler:
             type = "read_comment"
             # 计时+1
             self.my_handle.task_data[type]["time"] += 1
-            
-            periodic_time_min = int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time_min"))
-            periodic_time_max = int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time_max"))
-            # 生成触发周期值
-            periodic_time = random.randint(periodic_time_min, periodic_time_max)
+
+            # UI-16 批次 R10/EV-1g：触发周期合并为固定单值 periodic_time（不再区间
+            # 随机）；缺省 60 秒+正整数校验（存量 min/max 键已由 settings.py 迁移
+            # 退役）。本分支为 read_comment 专用——local_qa/thanks 等分支保持
+            # min/max+randint 不变（分支隔离约束）。
+            try:
+                periodic_time = max(1, int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time")))
+            except (TypeError, ValueError):
+                periodic_time = 60
             logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
 
             # 计时时间是否超过限定的触发周期

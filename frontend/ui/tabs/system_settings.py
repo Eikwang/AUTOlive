@@ -39,56 +39,6 @@ def create_webui_config_tab(config, theme_config, set_config_callback):
 
 
 # ============================================================
-# 本地路径指定URL路径访问
-# ============================================================
-def create_local_dir_endpoint_tab(config, theme_config, set_config_callback):
-    """创建本地路径访问页面"""
-    card_css = theme_config.get("card", "")
-    switch_internal_css = theme_config.get("switch_internal", "")
-    button_internal_color = theme_config.get("button_internal_color", "primary")
-    button_internal_css = theme_config.get("button_internal_css", "")
-    _auto_save = _get_auto_save(config, set_config_callback, tab_key="local_dir_endpoint")
-
-    with ui.card().style(card_css):
-        ui.label("本地路径指定URL路径访问")
-        with ui.row():
-            ui.input(label='配置索引', value="", placeholder='配置组的排序号')
-            ui.button('增加配置组', color=button_internal_color).style(button_internal_css)
-            ui.button('删除配置组', color=button_internal_color).style(button_internal_css)
-        with ui.grid(columns=3):
-            webui_local_dir_to_endpoint_config_card = ui.card()
-            for index, endpoint_config in enumerate(config.get("webui", {}).get("local_dir_to_endpoint", {}).get("config", [])):
-                with webui_local_dir_to_endpoint_config_card.style(card_css):
-                    with ui.grid(columns=3):
-                        ui.input(label=f"URL路径#{index + 1}", value=endpoint_config.get("url_path", ""), placeholder='URL路径').style("width:100%;")
-                        ui.input(label=f"本地文件夹路径#{index + 1}", value=endpoint_config.get("local_dir", ""), placeholder='本地文件夹路径').style("width:100%;")
-
-
-# ============================================================
-# 配置模板
-# ============================================================
-def create_config_template_tab(config, theme_config, set_config_callback):
-    """创建配置模板页面"""
-    card_css = theme_config.get("card", "")
-    button_internal_color = theme_config.get("button_internal_color", "primary")
-    button_internal_css = theme_config.get("button_internal_css", "")
-
-    with ui.card().style(card_css):
-        ui.label("配置模板")
-        with ui.row():
-            ui.select(
-                label='配置模板路径',
-                options={},
-                value=None,
-                with_input=True,
-                new_value_mode='add-unique',
-                clearable=True
-            )
-            ui.button('保存webui配置到文件', color=button_internal_color).style(button_internal_css)
-            ui.button('读取模板到本地（慎点）', color=button_internal_color).style(button_internal_css)
-
-
-# ============================================================
 # 板块显示/隐藏
 # ============================================================
 
@@ -140,21 +90,61 @@ def create_trends_config_tab(config, theme_config, set_config_callback):
         ui.label('按观看人数段保存配置模板，运行中按人数自动切换（D-21：新事件走新模板，在途任务自然流干）').classes('text-xs')
 
         # 人数段→模板绑定（既有数据结构保留，路径改为模板名引用默认目录）
-        for index, trends_config_path in enumerate(config.get("trends_config", {}).get("path", [])):
-            with ui.grid(columns=3):
-                _auto_save(
-                    ui.input(label="在线人数范围", value=trends_config_path.get("online_num", "0-999999999"), placeholder='在线人数范围').style("width:100%;"),
-                    ("trends_config", "path", index, "online_num"))
-                _auto_save(
-                    ui.input(label="模板名", value=os.path.splitext(os.path.basename(trends_config_path.get("path", "")))[0], placeholder='模板名（存于 config_templates/）').style("width:100%;"),
-                    ("trends_config", "path", index, "path"))
+        # UI-16 批次 R6/D-5/DV-1c：①存量重复条目在线去重 ②条目删除能力（防重复再现）
+        # ③空态提示 ④条目区可刷新容器（删除后重建绑定，防 index 漂移写错位）
+        _trends_path_list = list(config.get("trends_config", {}).get("path", []) or [])
+        _seen_keys = set()
+        _deduped = []
+        for _entry in _trends_path_list:
+            _key = (str((_entry or {}).get("online_num", "")), str((_entry or {}).get("path", "")))
+            if _key in _seen_keys:
+                continue
+            _seen_keys.add(_key)
+            _deduped.append(_entry)
+        if len(_deduped) != len(_trends_path_list):
+            config.setdefault("trends_config", {})["path"] = _deduped
+            set_config_callback("trends_config", "path", value=_deduped)
+            ui.notify(position="top", type="positive",
+                      message=f"已清理 {len(_trends_path_list) - len(_deduped)} 条重复的人数段绑定")
+
+        entries_container = ui.column().style("width:100%; gap:4px;")
+
+        def _delete_entry(index: int):
+            path_list = list(config.get("trends_config", {}).get("path", []) or [])
+            if 0 <= index < len(path_list):
+                path_list.pop(index)
+                set_config_callback("trends_config", "path", value=path_list)
+                ui.notify(position="top", type="positive", message="人数段绑定已删除")
+                _render_entries()
+
+        def _render_entries():
+            entries_container.clear()
+            with entries_container:
+                path_list = list(config.get("trends_config", {}).get("path", []) or [])
+                if not path_list:
+                    # DV-1c：人数段条目清空后的空态提示（模板保存/应用不受影响，两机制独立）
+                    ui.label("暂无人数段绑定——模板保存/应用不受影响（与人数段自动切换是两个机制）").style(
+                        'font-size: var(--font-size-assist, 12px); opacity: 0.7;')
+                for index, trends_config_path in enumerate(path_list):
+                    with ui.row().style("width:100%; align-items:center; gap:8px; flex-wrap:wrap;"):
+                        _auto_save(
+                            ui.input(label="在线人数范围", value=trends_config_path.get("online_num", "0-999999999"), placeholder='在线人数范围').style("width:220px;"),
+                            ("trends_config", "path", index, "online_num"))
+                        _auto_save(
+                            ui.input(label="模板名", value=os.path.splitext(os.path.basename(trends_config_path.get("path", "")))[0], placeholder='模板名（存于 config_templates/）').style("width:220px;"),
+                            ("trends_config", "path", index, "path"))
+                        ui.button(icon='delete', on_click=lambda _, i=index: _delete_entry(i)).props('flat dense').tooltip('删除此人数段绑定')
+
+        _render_entries()
 
         ui.separator()
-        with ui.grid(columns=3):
+        # UI-16 批次 R6/DV-1c：布局写死完整纵向顺序=模板名→选择模板（纵向相邻，用户
+        # 显式指定）→保存→应用（纵向相邻）；D-4 两按钮同尺寸（width:100% 等宽）
+        with ui.grid(columns=2).style("width:100%;"):
             template_name = ui.input(label='模板名', placeholder='例如：高人数档', value='').style("width:100%;")
-            ui.button('保存当前配置为模板', color=button_internal_color, on_click=lambda: _save_template(template_name.value)).style(button_internal_css)
+            ui.button('保存当前配置为模板', color=button_internal_color, on_click=lambda: _save_template(template_name.value)).style(button_internal_css + '; width:100%;')
             template_select = ui.select(label='选择模板', options=_list_templates(), value=None, with_input=True).style("width:100%;")
-            ui.button('应用模板（慎点，覆盖当前配置）', color=button_internal_color, on_click=lambda: _apply_template(template_select.value)).style(button_internal_css)
+            ui.button('应用模板（慎点，覆盖当前配置）', color=button_internal_color, on_click=lambda: _apply_template(template_select.value)).style(button_internal_css + '; width:100%;')
 
     def _save_template(name: str):
         import json
