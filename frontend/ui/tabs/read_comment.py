@@ -32,7 +32,8 @@ def create_read_comment_tab(
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('念用户名', value=get_nested_value(config, "read_comment", "read_username_enable")).style(switch_internal_css), keys=("read_comment", "read_username_enable"))
                 _auto_save(ui.input(label='用户名最大长度', value=get_nested_value(config, "read_comment", "username_max_len"), placeholder='需要保留的用户名的最大长度，超出部分将被丢弃').style("width:100%;").tooltip('需要保留的用户名的最大长度，超出部分将被丢弃'), keys=("read_comment", "username_max_len"))
-            _auto_save(ui.switch('变声', value=get_nested_value(config, "read_comment", "voice_change")).style(switch_internal_css), keys=("read_comment", "voice_change"))
+            # 「变声」开关已退役（/autoplan 2026-10-22 批次 A-6：变声=独立 rvc-vc
+            # 流程，主流程念弹幕音频直通播放，不再经变声环节）
         with ui.grid(columns=3):
             _auto_save(ui.textarea(
                 label='念用户名文案',

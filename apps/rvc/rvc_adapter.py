@@ -17,6 +17,13 @@ def bootstrap(autolive_home: str):
     home = os.path.abspath(autolive_home)
     if home not in sys.path:
         sys.path.insert(0, home)
+    # E-7①：harvest 进程池 Windows spawn——子进程 unpickle Harvest 按
+    # __module__="rvc_realtime_service" 查找，须能解析 utils/rvc_realtime_service.py
+    # （主模块经 spec_from_file_location 绕过 utils/__init__ 巨石导入链加载，
+    # sys.path 补 utils/ 让 multiprocessing spawn 的 import 可达）
+    utils_dir = os.path.join(home, "utils")
+    if os.path.isdir(utils_dir) and utils_dir not in sys.path:
+        sys.path.insert(0, utils_dir)
     os.environ.setdefault("AUTOLIVE_HOME", home)
 
 

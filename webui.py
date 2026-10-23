@@ -1,9 +1,3 @@
-# -*- coding: UTF-8 -*-
-"""
-Luna AI WebUI - 入口文件
-调用 frontend 模块化结构
-"""
-
 import sys
 import os
 from pathlib import Path

@@ -14,7 +14,7 @@ from typing import Dict, Tuple
 ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
     "audio_play": ("play_audio", "enable"),
     "web_captions_printer": ("web_captions_printer", "enable"),
-    "svc": ("so_vits_svc", "enable"),
+    "svc": ("rvc_vc", "enabled"),
     "trends_copywriting": ("trends_copywriting", "enable"),
     "filter_dedup": ("filter", "limited_time_deduplication", "enable"),
     "blacklist": ("filter", "blacklist", "enable"),

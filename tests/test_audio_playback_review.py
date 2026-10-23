@@ -368,7 +368,6 @@ class TestGatingAndSvcFail:
     def _harness(self, enable=True, edtalk=False):
         cfg = _FakeConfig(extra={
             ("play_audio", "enable"): enable,
-            ("read_comment", "voice_change"): False,
         })
         return _SynthHarness(cfg, edtalk_active=edtalk)
 
@@ -408,18 +407,23 @@ class TestGatingAndSvcFail:
         finally:
             h.close()
 
-    def test_svc_fail_not_enqueued(self):
-        """A12/E1：voice_change 返回 None（svc 失败）→ 不入队（报警在 voice_change 内已触发）"""
+    def test_direct_enqueue_after_voice_change_retirement(self):
+        """A-6 退役直通断言：变声环节退役后 TTS 产物直接入队（无 svc 失败丢弃路径）。
+
+        Value: protects=退役后 reply/read_comment/comment 音频正常入队播放；
+        fails_when=直通路径误删或队列漏入；why_new=A12 语义反转（旧测试断言
+        失败不入队已随 voice_change 退役失效）；seam=none;
+        no_claim=真实音频内容（mock 队列；单元级）
+        """
         h = self._harness(enable=True, edtalk=False)
         try:
-            async def _failing_change(path):
-                return None
-            h.voice_change = _failing_change
-            msg = {"type": "comment", "tts_type": "edge_tts", "content": "hi",
+            assert not hasattr(h, "voice_change"), "voice_change 已退役，不得残留"
+            msg = {"type": "read_comment", "tts_type": "edge_tts", "content": "hi",
                    "config": {"max_len": 100, "max_char_len": 100}}
             h.tts_handle = h._fake_tts
             _run(h.my_play_voice(msg))
-            assert h.captured == []
+            assert len(h.captured) == 1
+            assert h.captured[0][0] == "待播放音频列表"
         finally:
             h.close()
 

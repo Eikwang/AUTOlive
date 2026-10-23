@@ -3,7 +3,6 @@
     "enable": true,
     "read_username_enable": true,
     "username_max_len": 10,
-    "voice_change": false,
     "read_username_copywriting": [
       "{username}说:",
       "{username}说道:"
@@ -931,13 +930,6 @@
       "type": "local_audio",
       "local_audio_path": "data/异常报警/tts"
     },
-    "svc": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警/svc"
-    },
     "visual_body": {
       "enable": false,
       "start_alarm_error_num": 5,
@@ -1138,9 +1130,6 @@
       },
       "tts": {
         "gpt_sovits": true
-      },
-      "svc": {
-        "so_vits_svc": true
       },
       "visual_body": {}
     }

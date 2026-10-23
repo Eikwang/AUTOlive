@@ -70,9 +70,6 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin, AlarmMixin):
         "tts": {
             "error_count": 0
         },
-        "svc": {
-            "error_count": 0
-        },
         "visual_body": {
             "error_count": 0
         },

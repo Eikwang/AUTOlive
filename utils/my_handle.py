@@ -79,9 +79,6 @@ class My_handle(metaclass=SingletonMeta):
         "tts": {
             "error_count": 0
         },
-        "svc": {
-            "error_count": 0
-        },
         "visual_body": {
             "error_count": 0
         },
@@ -495,7 +492,7 @@ class My_handle(metaclass=SingletonMeta):
     
     def tuning_handle(self, data):
         return self.comment_handler.tuning_handle(data)
-    
+
     def comment_handle(self, data):
         return self.comment_handler.comment_handle(data)
     

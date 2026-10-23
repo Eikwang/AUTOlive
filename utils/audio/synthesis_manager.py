@@ -62,41 +62,8 @@ class SynthesisMixin:
             except Exception as e:
                 logger.error(traceback.format_exc())
 
-
-    async def so_vits_svc_api(self, audio_path=""):
-        """调用so-vits-svc的api"""
-        try:
-            url = f"{self.config.get('so_vits_svc', 'api_ip_port')}/wav2wav"
-            
-            params = {
-                "audio_path": audio_path,
-                "tran": self.config.get("so_vits_svc", "tran"),
-                "spk": self.config.get("so_vits_svc", "spk"),
-                "wav_format": self.config.get("so_vits_svc", "wav_format")
-            }
-
-            # logger.info(params)
-
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=params) as response:
-                    if response.status == 200:
-                        file_name = 'so-vits-svc_' + self.common.get_bj_time(4) + '.wav'
-
-                        voice_tmp_path = self.common.get_new_audio_path(self.config.get("play_audio", "out_path"), file_name)
-                        
-                        with open(voice_tmp_path, 'wb') as file:
-                            file.write(await response.read())
-
-                        logger.debug(f"so-vits-svc转换完成，音频保存在：{voice_tmp_path}")
-
-                        return voice_tmp_path
-                    else:
-                        logger.error(await response.text())
-
-                        return None
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            return None
+    # so_vits_svc_api 已随主流程变声退役（/autoplan 2026-10-22 批次 A-6：
+    # 变声=独立 rvc-vc 流程，不参与系统主流程；外部 so-vits-svc 服务依赖解除）
 
 
     def audio_synthesis(self, message):
@@ -226,31 +193,8 @@ class SynthesisMixin:
             return
 
 
-    async def voice_change(self, voice_tmp_path):
-        """音频变声 so-vits-svc
-
-        Args:
-            voice_tmp_path (str): 待变声音频路径
-
-        Returns:
-            str: 变声后的音频路径
-        """
-        # 转换为绝对路径
-        voice_tmp_path = os.path.abspath(voice_tmp_path)
-
-        # 是否启用so-vits-svc来变声
-        if True == self.config.get("so_vits_svc", "enable"):
-            voice_tmp_path = await self.so_vits_svc_api(audio_path=voice_tmp_path)
-            if voice_tmp_path:
-                logger.info(f"so_vits_svc合成成功，输出到={voice_tmp_path}")
-            else:
-                logger.error(f"so_vits_svc合成失败，请检查配置")
-                self.abnormal_alarm_handle("svc")
-                
-                return None
-        
-        return voice_tmp_path
-    
+    # voice_change 已随主流程变声退役（/autoplan 2026-10-22 批次 A-6：变声=独立
+    # rvc-vc 流程不参与主流程；so_vits_svc 分支退役后本方法为空壳，一并移除）
 
     def _resolve_random_synth_speed(self):
         """A2（2026-10-22 审查批次）：随机语速源迁移合成侧（义务 R2-A2/spec C-1）。
@@ -455,8 +399,9 @@ class SynthesisMixin:
             return
         
 
-        # 判断消息类型，再变声并封装数据发到队列 减少冗余
-        async def voice_change_and_put_to_queue(message, voice_tmp_path, synth_speed=None):
+        # 封装数据发到队列（/autoplan 2026-10-22 批次 A-6：变声已退役为独立
+        # rvc-vc 流程，主流程音频直通入队——reply/read_comment 不再经变声环节）
+        async def put_to_queue(message, voice_tmp_path, synth_speed=None):
             # 拼接json数据，存入队列
             data_json = {
                 "type": message['type'],
@@ -476,31 +421,6 @@ class SynthesisMixin:
             # 豁免仅限经 TTS→push_full 的类型（本函数即 TTS 链收口）。
             _playback_gate = (self.config.get("play_audio", "enable")
                               or is_edtalk_active(self.config))
-            # 区分消息类型是否是 回复xxx 并且 关闭了变声
-            if message["type"] == "reply":
-                # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
-                if _playback_gate:
-                    self.data_priority_insert("待播放音频列表", data_json)
-                    return True
-            # 区分消息类型是否是 念弹幕 并且 关闭了变声
-            elif message["type"] == "read_comment" and not self.config.get("read_comment", "voice_change"):
-                # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
-                if _playback_gate:
-                    self.data_priority_insert("待播放音频列表", data_json)
-                    return True
-
-            voice_tmp_path = await self.voice_change(voice_tmp_path)
-
-            # A12（2026-10-22 审查批次，义务 R7/E1）：变声失败（svc 返回 None）不再入队——
-            # 报警已在 voice_change 内触发（abnormal_alarm_handle("svc")），旧路径 None
-            # 照常入队导致播放侧二次报"无法加载音频文件"刷屏（审查发现 E1）。
-            if not voice_tmp_path:
-                logger.error("变声失败（svc 返回空路径），本次音频不入播放队列（报警已触发）")
-                return False
-
-            # 更新音频路径
-            data_json["voice_path"] = voice_tmp_path
-
             # 是否开启了音频播放，如果没开，则不会传文件路径给播放队列
             if _playback_gate:
                 self.data_priority_insert("待播放音频列表", data_json)
@@ -522,7 +442,7 @@ class SynthesisMixin:
         
         logger.info(f"[{message['tts_type']}]合成成功，合成内容：【{message['content']}】，音频存储在 {voice_tmp_path}")
 
-        await voice_change_and_put_to_queue(
+        await put_to_queue(
             message, voice_tmp_path,
             synth_speed=resp_json.get("result", {}).get("synth_speed"))
 

@@ -168,8 +168,8 @@ def test_update_params_value_domain():
     assert out["pitch"] == 5 and out["formant"] == -1.5 and out["protect"] == 0.5
     with pytest.raises(ValueError):  # 超域拒绝
         vc.update_params({"pitch": 99})
-    with pytest.raises(ValueError):  # 未知键拒绝
-        vc.update_params({"block_time": 0.5})
+    with pytest.raises(ValueError):  # 未知键拒绝（E-1 后 block_time 已是合法管线键，改用真未知键）
+        vc.update_params({"no_such_key": 0.5})
     with pytest.raises(ValueError):  # enum 拒绝
         vc.update_params({"f0method": "harvest42"})
 
