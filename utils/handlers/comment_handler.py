@@ -229,33 +229,16 @@ class CommentHandler:
 
             # 输出当前用户发送的弹幕消息
             logger.info(f"[{username}]: {content}")
-            
-            # 记录数据库
-            if self.my_handle.config.get("database", "comment_enable"):
-                from datetime import datetime
-                insert_data_sql = '''
-                INSERT INTO danmu (username, content, ts) VALUES (?, ?, ?)
-                '''
-                self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
-            
-            # 0、积分机制运转
-            if self.my_handle.integral_handle("comment", data):
-                return
-            if self.my_handle.integral_handle("crud", data):
-                return
-            
-            """
-            用户名也得过滤一下，防止炸弹人
-            """
+
             # 用户名以及弹幕违禁判断
             username = self.prohibitions_handle(username)
             if username is None:
                 return
-            
+
             content = self.prohibitions_handle(content)
             if content is None:
                 return
-            
+
             # 弹幕格式检查和特殊字符替换和指定语言过滤
             content = self.comment_check_and_replace(content)
             if content is None:
@@ -268,6 +251,22 @@ class CommentHandler:
             # 判断字符串是否全为标点符号，是的话就过滤
             if self.my_handle.common.is_punctuation_string(content):
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
+                return
+
+            # 记录数据库（UC-2 写库/过滤顺序，/autoplan 2026-10-22 流程图批次终门 uc2a
+            # 批准+2026-10-23 TODOS 批次实施：过滤链已上移至写库前——违禁弹幕不入库，
+            # 写库内容=过滤后弹幕；数据分析历史口径：旧数据含违禁原文、新数据不含）
+            if self.my_handle.config.get("database", "comment_enable"):
+                from datetime import datetime
+                insert_data_sql = '''
+                INSERT INTO danmu (username, content, ts) VALUES (?, ?, ?)
+                '''
+                self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
+
+            # 0、积分机制运转
+            if self.my_handle.integral_handle("comment", data):
+                return
+            if self.my_handle.integral_handle("crud", data):
                 return
 
             # 动作编排关键词订阅（/autoplan 2026-10-21 批次）：违禁/黑名单/格式检查

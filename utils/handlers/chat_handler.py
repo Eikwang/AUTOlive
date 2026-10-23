@@ -227,6 +227,33 @@ class ChatHandler:
             # 输出当前用户发送的弹幕消息
             logger.debug(f"[{username}]: {content}")
 
+            """
+            用户名也得过滤一下，防止炸弹人
+            """
+            # 用户名以及弹幕违禁判断（UC-2 写库/过滤顺序：过滤上移至写库前——
+            # /autoplan 2026-10-22 流程图批次终门 uc2a，2026-10-23 TODOS 批次双链同改）
+            username = self.my_handle.prohibitions_handle(username)
+            if username is None:
+                return
+
+            content = self.my_handle.prohibitions_handle(content)
+            if content is None:
+                return
+
+            # 弹幕格式检查和特殊字符替换和指定语言过滤
+            content = self.my_handle.comment_check_and_replace(content)
+            if content is None:
+                return
+
+            # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
+            if not self.my_handle.lang_filter_pass(content):
+                return
+
+            # 判断字符串是否全为标点符号，是的话就过滤
+            if self.my_handle.common.is_punctuation_string(content):
+                logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
+                return
+
             if self.my_handle.config.get("talk", "show_chat_log"):
                 if "ori_username" not in data:
                     data["ori_username"] = data["username"]
@@ -253,6 +280,7 @@ class ChatHandler:
 
             # 记录数据库（窄 try 隔离：DB 异常仅丢日志，不中断回复链——T4/ENG H-1，
             # 此前 datetime NameError 被外层 try 吞掉导致其后整条回复链静默跳过）
+            # UC-2 写库/过滤顺序：过滤已上移（违禁弹幕不入库，写库内容=过滤后弹幕）
             if self.my_handle.config.get("database", "comment_enable"):
                 try:
                     insert_data_sql = '''
@@ -266,32 +294,6 @@ class ChatHandler:
             if self.my_handle.integral_handle("comment", data):
                 return
             if self.my_handle.integral_handle("crud", data):
-                return
-
-            """
-            用户名也得过滤一下，防止炸弹人
-            """
-            # 用户名以及弹幕违禁判断
-            username = self.my_handle.prohibitions_handle(username)
-            if username is None:
-                return
-            
-            content = self.my_handle.prohibitions_handle(content)
-            if content is None:
-                return
-            
-            # 弹幕格式检查和特殊字符替换和指定语言过滤
-            content = self.my_handle.comment_check_and_replace(content)
-            if content is None:
-                return
-
-            # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
-            if not self.my_handle.lang_filter_pass(content):
-                return
-
-            # 判断字符串是否全为标点符号，是的话就过滤
-            if self.my_handle.common.is_punctuation_string(content):
-                logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
 
             # 判断按键映射触发类型

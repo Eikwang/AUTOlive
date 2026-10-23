@@ -108,8 +108,10 @@ class TestFunctionMigration:
         from frontend.ui.layout import DrawerLayout
         layout = DrawerLayout(config)
         layout.migrate_tabs()
-        # Then: function_items 保留启用状态
-        assert layout.function_items["通用配置"]["enabled"] is False
+        # Then: function_items 仅存 tab_key（2026-10-23 TODOS 批次 0923节#10：
+        # enabled 僵尸字段退役——下游零消费，不再保留）
+        assert "enabled" not in layout.function_items["通用配置"]
+        assert layout.function_items["通用配置"]["tab_key"] == "common_config"
 
     def test_migrate_tabs_preserves_tab_key(self):
         """测试 migrate_tabs 保留 tab_key"""

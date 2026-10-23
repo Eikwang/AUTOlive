@@ -193,6 +193,58 @@ def create_choose_song_tab(
             with ui.row():
                 ui.button('添加映射', on_click=lambda: _add_row()).props('outline dense')
 
+            # CP-6（2026-10-23 TODOS 批次）：歌曲列表 JSON 导入导出（歌曲数多时批量配置）
+            def _export_map():
+                import json as _json
+                m = _map_from_rows()
+                if not m:
+                    ui.notify('当前映射为空，无可导出内容', type='warning')
+                    return
+                ui.download(
+                    _json.dumps(m, ensure_ascii=False, indent=2).encode('utf-8'),
+                    'gift_song_map.json')
+
+            def _import_map():
+                import json as _json
+                from utils.cover_worker import CoverQueue
+                with ui.dialog() as dlg, ui.card().style(card_css):
+                    ui.label('粘贴 gift_song_map JSON（{"礼物名": "歌曲名"}）').style(
+                        "font-size: var(--font-size-body, 14px);")
+                    ta = ui.textarea().style("width:100%;min-height:160px")
+                    with ui.row():
+                        def _do_import():
+                            try:
+                                data = _json.loads(ta.value or "{}")
+                                if not isinstance(data, dict):
+                                    raise ValueError("顶层必须是对象")
+                                clean = {str(k).strip(): str(v).strip()
+                                         for k, v in data.items() if str(k).strip() and str(v).strip()}
+                                seen = {}
+                                for k, v in clean.items():
+                                    nk = CoverQueue.normalize_song(k)
+                                    if nk in seen and seen[nk] != v:
+                                        ui.notify(f'礼物名「{k}」归一后与既有行重复，导入中止', type='negative')
+                                        return
+                                    seen[nk] = v
+                            except Exception as e:
+                                ui.notify(f'JSON 解析失败：{e}', type='negative')
+                                return
+                            for gi, si in list(live_rows):
+                                live_rows[:] = [r for r in live_rows if r[0] is not gi]
+                                gi.parent.delete()
+                            for g, s in clean.items():
+                                _add_row(g, s)
+                            _sync_gift_map()
+                            dlg.close()
+                            ui.notify(f'已导入 {len(clean)} 条映射', type='positive')
+                        ui.button('导入', on_click=_do_import).props('outline dense')
+                        ui.button('取消', on_click=dlg.close).props('flat dense')
+                dlg.open()
+
+            with ui.row():
+                ui.button('导出映射', on_click=_export_map).props('outline dense')
+                ui.button('导入映射', on_click=_import_map).props('outline dense')
+
             # 匹配预演（D4/D-23：输入礼物名预览命中结果，防直播中误触发不可撤回）
             ui.separator()
             with ui.row().style("width:100%;align-items:flex-end;gap:8px"):

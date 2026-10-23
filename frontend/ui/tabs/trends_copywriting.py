@@ -34,7 +34,11 @@ def create_trends_copywriting_tab(
                 _llm_type_options = {'custom_llm': '自定义LLM'}
                 if _llm_type_val and _llm_type_val not in _llm_type_options:
                     _llm_type_options[_llm_type_val] = _llm_type_val
-                _auto_save(ui.select(label='LLM类型', options=_llm_type_options, value=_llm_type_val).style("width:100%;"), ("trends_copywriting", "llm_type"))
+                _llm_select = _auto_save(ui.select(label='LLM类型', options=_llm_type_options, value=_llm_type_val).style("width:100%;"), ("trends_copywriting", "llm_type"))
+                # 基础功能节#6：存量 'chatgpt' 等历史值展示但不生效（task_scheduler
+                # 强制回退 custom_llm）——加载时提示防误导
+                if _llm_type_val and _llm_type_val != 'custom_llm':
+                    ui.notify(f'LLM类型存量值「{_llm_type_val}」已失效，运行时按「自定义LLM」处理；可改选后保存清除', type='warning')
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('随机播放', value=get_nested_value(config, "trends_copywriting", "random_play")).style(switch_internal_css), ("trends_copywriting", "random_play"))
                 _auto_save(ui.input(label='文案播放间隔', value=get_nested_value(config, "trends_copywriting", "play_interval"), placeholder='文案之间的播放间隔时间（秒）').style("width:100%;"), ("trends_copywriting", "play_interval"))

@@ -3,41 +3,41 @@
 ## Deferred Items from /autoplan (2026-10-23) — 点歌模式重构批次（R0-R13 义务块，用户预授权直接实施）
 
 1. **CP-2 完整最近播放去重**（P3, S）— CEO defer：同歌最小冷却已入本批（choose_song.song_cooldown_s）；完整去重=跨会话记忆最近 N 首不重复，防长直播周期性重复。依赖：点歌功能实播稳定后。
-2. **CP-6 歌曲列表 JSON 导入导出**（P3, S）— CEO defer：gift_song_map 表格编辑已可用；批量导入导出（粘贴 JSON）在歌曲数 >20 时才有价值。依赖：无。
+2. **CP-6 歌曲列表 JSON 导入导出**【2026-10-23 已实施：choose_song.py 导出（download gift_song_map.json）+导入（粘贴对话框+归一判重校验+表格重建）】（P3, S）— CEO defer：gift_song_map 表格编辑已可用；批量导入导出（粘贴 JSON）在歌曲数 >20 时才有价值。依赖：无。
 3. **供给源抽象（text-to-song 替代曲线）**（P3, M）— native CEO 战略备注：歌曲供给接口已是"歌名→音频文件"，架构可替换；竞品用生成式秒级出歌时本方案分钟级翻唱显旧。登记防下次做新内容类型时重写触发面；同时"礼物→内容"通用触发引擎（歌曲为第一内容源）同属此抽象。依赖：无。
 
 ## Deferred Items from /autoplan (2026-10-22) — 日志功能全链移除批次（main-20261022-180708，终门 rec 批准实施）
 
 1. **DB 驱动弹幕历史查看面意向**（P3, M-L）— CEO F2b/DX d3a：日志功能全链退役后，内容史（弹幕/回复原文）唯一留存通道=database 入库（实测默认值 comment_enable/entrance_enable/gift_enable 全 true，两配置源一致——内容史默认已在 DB 留存）；但 DB 无用户查看面，"弹幕历史在哪看"目前只能 SQL 回答。被拆除的「日志」导航位是黄金位，未来可改造为 DB 驱动的历史页（弹幕/回复/礼物流水+过滤）。登记为特性意向，触发条件=用户提出内容史查看需求时优先于此设计。依赖：无（database 入库已在运行）。
-2. **local_qa.py:43 标签「弹幕日志类型」命名债**（P3, S）— Eng F3（日志移除批 T9 预登记例外）：该标签绑定 `local_qa.text.type`（本地问答存储格式选择），与已退役的 comment_log_type（弹幕日志）无关，系历史命名撞名；docs/系统审查任务.md:553 已记载"应为'存储格式'"。下次触碰 local_qa 页时改标签为「存储格式」。依赖：local_qa 页触碰。
-3. **validate_enable_paths 文档串失准**（P3, S）— Eng F7：enable_paths.py:35-38 文档串称"启动即响"，实测该函数仅测试面调用（无运行时启动调用点）。修正文档串或补启动接线，二选一。依赖：无。
-4. **features.json show_card 死块**（P3, S）— R2 C2（日志移除批 NOT in scope 登记）：`config/features/features.json:1128` `webui.show_card.log=true` 为零消费者死键（show_card 全块 frontend/utils 零代码引用），随「混合配置文件收官」批次整体清理。依赖：混合配置文件收官批。
+2. **local_qa.py:43 标签「弹幕日志类型」命名债**【2026-10-23 已修复：标签改「存储格式」】（P3, S）— Eng F3（日志移除批 T9 预登记例外）：该标签绑定 `local_qa.text.type`（本地问答存储格式选择），与已退役的 comment_log_type（弹幕日志）无关，系历史命名撞名；docs/系统审查任务.md:553 已记载"应为'存储格式'"。下次触碰 local_qa 页时改标签为「存储格式」。依赖：local_qa 页触碰。
+3. **validate_enable_paths 文档串失准**【2026-10-23 已修正：docstring 诚实化为"仅测试面调用"，附启动接线指引】（P3, S）— Eng F7：enable_paths.py:35-38 文档串称"启动即响"，实测该函数仅测试面调用（无运行时启动调用点）。修正文档串或补启动接线，二选一。依赖：无。
+4. **features.json show_card 死块**【2026-10-23 已清理：show_card 全块（common_config/llm/tts/visual_body）删除——零消费者独立清理，收官批依赖解除】（P3, S）— R2 C2（日志移除批 NOT in scope 登记）：`config/features/features.json:1128` `webui.show_card.log=true` 为零消费者死键（show_card 全块 frontend/utils 零代码引用），随「混合配置文件收官」批次整体清理。依赖：混合配置文件收官批。
 
 ## Deferred Items from /autoplan (2026-10-22) — 字幕打印功能审查批次（main-20261022-162614，终门 rec 批准实施）
 
-1. **copywriting 变速死配置清理**（P3, S）— CEO defer：`audio_random_speed.copywriting` 节仅前端 UI 有配置（audio_play.py:148-150），代码无读取点（全仓仅 playback_manager 读 normal 节，A2 批次后连 normal 也退役）——UI 开关误导用户。建议：设置页移除该节配置或后端补语义。依赖：音频播放页下次触碰。
+1. **copywriting 变速死配置清理**【2026-10-23 核实已闭环：A3 批次已完成 UI 移除+features.json audio_random_speed.copywriting 死键清除（核实 audio_random_speed 节已空），台账过时】（P3, S）— CEO defer：`audio_random_speed.copywriting` 节仅前端 UI 有配置（audio_play.py:148-150），代码无读取点（全仓仅 playback_manager 读 normal 节，A2 批次后连 normal 也退役）——UI 开关误导用户。建议：设置页移除该节配置或后端补语义。依赖：音频播放页下次触碰。
 2. **TODOS #9 失准台账修正**（P3, S）— spec 第 2 轮 N2：#9 原文「.gitignore:286 使 42+ 测试文件不入库」已过时——实测 .gitignore:290 根锚定 `/test_*.py` 不匹配 tests/（:291 `!tests/` 反选），tests/features 86 文件在库。修正本条目措辞，防误导。依赖：无。
 3. **字幕差异化方向登记**（P3, M）— native 1.2+4.3+5.1 合并：字幕的 10x 价值=与弹幕/数字人/计费链路联动（弹幕问答上字幕、礼物计价信息上屏、数字人状态联动样式），而非继续追求孤立时序精度；平台自带 AI 字幕（抖音/B站直播伴侣）成熟后自建字幕差异化只剩联动能力。下次字幕相关规划先读此条。依赖：无。
-4. **builtin「无 speed 语义」假设失效条件 + :413 退役顺带项**（P3, S）— native 2.3+Eng A1：CaptionsManager keep_time 取文件时长依赖「builtin 条目 speed 恒 1」——失效条件=playback_manager 条目重建处（:152/:165 一带）speed 硬编码 1 被改为透传 synth_speed（届时 builtin_play_center.py:413 残留的采样率折算会生效，真实播放时长偏离文件时长 speed 倍）。下次触碰播放链路时：①确认该假设仍成立 ②顺带退役 :413 折算残留。依赖：播放链路触碰。
+4. **builtin「无 speed 语义」假设失效条件 + :413 退役顺带项**【2026-10-23 已退役：builtin_play_center rate=speed×framerate 折算移除（恒 framerate）——A2 语义固化，防未来误透传致 keep_time 漂移；假设仍成立（playback_manager 条目重建硬编码 1 已核实）】（P3, S）— native 2.3+Eng A1：CaptionsManager keep_time 取文件时长依赖「builtin 条目 speed 恒 1」——失效条件=playback_manager 条目重建处（:152/:165 一带）speed 硬编码 1 被改为透传 synth_speed（届时 builtin_play_center.py:413 残留的采样率折算会生效，真实播放时长偏离文件时长 speed 倍）。下次触碰播放链路时：①确认该假设仍成立 ②顺带退役 :413 折算残留。依赖：播放链路触碰。
 5. **EDTalk「公共段后移=同步改善」推断收口**（P3, S）— native 2.4：对 pygame/外部模式公共段后移贴近开播成立；EDTalk 走数字人生成链路（音频→驱动→虚拟摄像头），改善幅度未证。随 R10-② 实测一并收口（见第 9 条）。依赖：第 9 条。
 6. **「实际播放者统一推送」替代方案评估**（P3, M）— native 4.1：本批 F3 已为 builtin 采用播放器回调推送（正确架构方向）；更内聚方案=谁实际开播谁推送+公共段仅兜底无回调能力的播放器（该方案下 F2 门控的 EDTalk 短路补丁不需要存在）。升级触发条件：下次触碰播放链路时重估（含 EDTalk 原生回调可用性）。依赖：播放链路触碰。
 7. **外部模式移除触发条件**（P3, S）— native 4.2：audio_player/audio_player_v2 外部模式保留（沿 2026-09-25 §7 兼容承诺），但与「不得回退外接 API」红线并存的混淆成本随时间累积。触发条件：下次触碰 captions_manager 时顺带评估移除（配合 sunset 判据，见 2026-09-25 节 #1）。依赖：captions_manager 触碰。
-8. **999 让位窗口绕过 E-4 暂停同步**（P3, S）— Eng E1：builtin_play_center 让位分支（:258-266 一带）只 stop_stream 不置 pause_event——`get_status().paused=False`，CaptionsManager 的字幕挂起判定（E-4）在让位窗口失效，字幕继续走 keep_time 而音频已停，续播回退 1 秒后偏移=挂起时长。A7×E-4 批次交界缝隙。修复方向：让位分支同置 pause_event，或 get_status 增加 suspended 态并把字幕挂起判定纳入。依赖：A7 机制下次触碰。
+8. **999 让位窗口绕过 E-4 暂停同步**【2026-10-23 核实已闭环：_wait_loop 让位分支已同置 pause_event+续播 clear（E-4 注记完整），台账描述过时】（P3, S）— Eng E1：builtin_play_center 让位分支（:258-266 一带）只 stop_stream 不置 pause_event——`get_status().paused=False`，CaptionsManager 的字幕挂起判定（E-4）在让位窗口失效，字幕继续走 keep_time 而音频已停，续播回退 1 秒后偏移=挂起时长。A7×E-4 批次交界缝隙。修复方向：让位分支同置 pause_event，或 get_status 增加 suspended 态并把字幕挂起判定纳入。依赖：A7 机制下次触碰。
 9. **R10-② EDTalk 字幕偏移实测【阻塞待测】**（P1, S）— 义务 R10-②（本批次完成定义项，M1 离线替代路径）：**阻塞原因**=实测需 EDTalk 实时推理服务在线（启动 EDTalk serve+虚拟摄像头链路），实施窗口内未满足。**复测条件**=EDTalk 模式开播任意一次直播/手动拉起推理服务后，运行 `python Scripts/smoke_builtin_captions.py --captions`（check_edtalk_offset 段）人工比对字幕 message 到达与 EDTalk 开口偏移，判据 <0.5s（冒烟脚本已锚定；自动化断言为既有 TODO 桩）。实测完成后据实更新 2026-09-25 节 #2「EDTalk 回调驱动字幕」条件触发状态，并收口第 5 条推断。依赖：EDTalk 实时推理服务可用。
 
 ## Deferred Items from /autoplan (2026-10-22) — 系统流程审查批次（新版 flowchartTD 对齐，main-20261022-161815，终门 rec 全推荐批准）
 
-1. **UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。
+1. **UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 【2026-10-23 已实施：TODOS 处理批次——comment_handler+chat_handler 双链过滤链上移至写库前（违禁弹幕不入库，写库内容=过滤后弹幕），tests/test_uc2_write_order.py 7 断言双链覆盖；chat_handler 为实施中发现的第二写库点（D-20 矩阵捕获）；前置 comment_handler 在飞改动已随 354a3cff 落地；落地即闭环 2026-10-20 节 #2 写库/过滤顺序语义决策】按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。
 2. **UC-1/3/4/5 图侧修正已并入本批 T2 主干图修正任务**（无独立待办）— 终门 uc1a/uc3a/uc4a/uc5a 全部为图修正（图改回独立语义/入队前翻译/订阅边/互斥两路+字幕从属），随 T2 实施闭环；主干图头部加版本行+四态图例+"改图必开批次"约定。依赖：无（本批实施）。
 
 ## Deferred Items from /autoplan (2026-10-22) — 基础功能版块审查与修复批次
 
-1. **WebUI LLM 通道"测试连接"按钮**（P3, S）— 配置 fastrag 后故障首见于真实弹幕且只能翻日志（DX native medium）；一次性手动试连（POST /query 或 local_qa_match 试匹配）与 R2-2 方案 a（不轮询）裁决不冲突。依赖：无。
+1. **WebUI LLM 通道"测试连接"按钮**【2026-10-23 已落地：llm 页 fastrag 卡「测试问答」按钮——POST /query 真实契约试连（四态反馈），health 探测旁】（P3, S）— 配置 fastrag 后故障首见于真实弹幕且只能翻日志（DX native medium）；一次性手动试连（POST /query 或 local_qa_match 试匹配）与 R2-2 方案 a（不轮询）裁决不冲突。依赖：无。
 2. **熔断首连败停顿窗口降档**（P3, S）— 首次 3 连败期间每条弹幕最长阻塞 60s 才降级托底（服务挂起场景直播感知差）；候选=首超时计双次或对已判失败通道降档超时。依赖：T1 熔断落地后评估。
 3. **TTHW 正式度量**（P3, M）— 配置改动→生效验证的自动化度量；与 2026-10-11 O2 DX 埋点项（TODOS DanmakuListener v0.7.0 节）合并推进。依赖：O2。
 4. **gpt_sovits 引擎懒启动评估**（P3, M）— 引擎现为共享资源无条件 inproc 启动（G8 拒绝条件启动的裁决：合成测试页/翻唱/字幕依赖）；懒启动=首次调用拉起/空闲回收，评估显存收益与链路风险。依赖：无。
 5. **fastrag /query 集成冒烟**（P3, S）— Fastrag_LLM 契约经 mock HTTP 单测（no_claim=provider acceptance），真实服务契约漂移靠注释锚定人工核对；补 enable=true 且端口可达时跑一例真实 /query 的可选冒烟。依赖：fastrag 服务实跑环境。
-6. **动态文案页存量 chatgpt llm_type 值展示不生效**（P3, S）— trends_copywriting.py:33 存量值 'chatgpt' 入 options 展示，但 task_scheduler.py:374 强制回退 custom_llm（ENG 既有债）；前端选项收敛或后端提示。依赖：无。
+6. **动态文案页存量 chatgpt llm_type 值展示不生效**【2026-10-23 已处置：存量非 custom_llm 值加载时 ui.notify 警告提示（展示保留+语义明示）】（P3, S）— trends_copywriting.py:33 存量值 'chatgpt' 入 options 展示，但 task_scheduler.py:374 强制回退 custom_llm（ENG 既有债）；前端选项收敛或后端提示。依赖：无。
 
 
 ## Deferred Items from /autoplan (2026-10-22) — 弹幕监听模块审查与优化批次
@@ -75,15 +75,15 @@
 ### A 组：弹幕链刷屏错误（每条弹幕触发，真实直播间实测发现）
 
 1. **so_vits_svc 变声链每弹幕 ConnectionRefused**（P2, S）— 【2026-10-22 已闭环：实时变声重构批次（/autoplan main-20261022-190418 终门 rec 批准）A-6 退役根治——voice_change/so_vits_svc_api 方法体退役+调用点直通入队+config so_vits_svc 节归档，主流程不再有任何变声分支；变声=独立 rvc-vc 流程（见 docs/rvc-vc-troubleshooting.md）】实测：每条弹幕音频合成后触发 `synthesis_manager.voice_change → so_vits_svc_api`，连接失败报错刷屏（`so_vits_svc合成失败，请检查配置`）；疑似 config 残留变声开启但服务不存在，或触发条件缺陷（不应无条件走变声链）。修复=查明触发条件（config 开关/调用点判定）+关闭残留开关或修条件。注意与 RVC 翻唱链的关系辨析（变声 vs 翻唱两链）。
-2. **多音字.txt 相对路径 Errno 2**（P2, S）— TTS 前处理多音字词典以相对路径打开（`[Errno 2] No such file or directory: '多音字.txt'`），工作目录依赖：非仓库根启动即失效。修复=路径改为相对仓库根锚定（utils.autolive_paths 语义）或确认词典文件入库位置。
+2. **多音字.txt 相对路径 Errno 2**【2026-10-23 已修复：打开点=编译后 .pyd 内部（源码不可改），多音字.txt（91B）落仓库根供相对 cwd 命中；apps/gpt-sovits/ 原件保留】（P2, S）— TTS 前处理多音字词典以相对路径打开（`[Errno 2] No such file or directory: '多音字.txt'`），工作目录依赖：非仓库根启动即失效。修复=路径改为相对仓库根锚定（utils.autolive_paths 语义）或确认词典文件入库位置。
 3. **luna_ai 写弹幕日志 'NoneType' .get 失败**（P2, S）— 【2026-10-22 已闭环：日志功能全链移除批次（/autoplan main-20261022-180708 终门 rec 批准）根治——根因=comment_log 键在三配置源中不存在，comment_handler.write_to_comment_log :225 `.get("comment_log")` 返回 None → :228 None.get AttributeError，每回复刷 2 行 error；随日志功能整体退役，write_to_comment_log 方法+两调用点+my_handle 包装+启动建文件全链删除，弹幕日志噪音清零】原记录：数据库写入路径某 dict 为 None（`写入弹幕日志失败：'NoneType' object has no attribute 'get'` 每弹幕报），弹幕日志功能实际失效。修复=定位 None 来源（大概率 config 节缺失未兜底）。
-4. **data/badwords.txt 违禁词文件缺失**（P2, S）— config `badwords.path=data/badwords.txt` 指向文件不存在，每次弹幕 Errno 2，违禁词过滤实际未生效。修复=补文件（含违禁拼音表 data/违禁拼音.txt 同查）或 config 判空跳过。
+4. **data/badwords.txt 违禁词文件缺失**【2026-10-23 核实已闭环：data/badwords.txt 已存在（70631 行，git 已跟踪），Errno 2 消除】（P2, S）— config `badwords.path=data/badwords.txt` 指向文件不存在，每次弹幕 Errno 2，违禁词过滤实际未生效。修复=补文件（含违禁拼音表 data/违禁拼音.txt 同查）或 config 判空跳过。
 
 ### B 组：批次收尾验证项
 
 5. **P25 多参考音频音色人耳判定**（P2, S）— 合成已出音频（`out/gpt_sovits_inproc_*.wav`），用户试听确认多参考音色质量即裁决（spike 收尾）。
 6. **P26 双语速时长对比**（P3, S）— synth_speed 透传链路已通；跑 synth(1.0) vs synth(2.0) 时长对比验证生效性（spike 收尾，pydub 回退已保底）。
-7. **gptsovits S1/S2 两断言存量失败**（P3, S）— test_gptsovits_deep_integration.py 两项失败；config 键恢复实验已否定键假设，待查（引擎 mock 态/单测环境 GPU 依赖方向）。
+7. **gptsovits S1/S2 两断言存量失败**【2026-10-23 核实已闭环：test_gptsovits_deep_integration 13 passed（历史批次已修），台账过时】（P3, S）— test_gptsovits_deep_integration.py 两项失败；config 键恢复实验已否定键假设，待查（引擎 mock 态/单测环境 GPU 依赖方向）。
 
 ### C 组：批次遗留小项
 
@@ -135,10 +135,10 @@
 5. **前端 ARIA/屏幕阅读器增强**（P3, S）— 设计审查 Pass 6：Quasar 自带基础 ARIA 兜底；确认对话框的屏幕阅读器语义、导航区 landmark 标注待增强。依赖：本批落地后随 /design-review 实测评估。
 6. **webui 网络暴露面收敛**（P2, S）— eng 审查安全附注：webui 默认绑定 0.0.0.0（main.py L874）且 /sys_cmd 的 run/stop/restart/factory 无鉴权——局域网任意主机可启停系统/覆写配置；本批新按钮使该能力显性化。建议：默认绑定改 127.0.0.1 或为 /sys_cmd 加 token。依赖：与使用场景确认（是否需要局域网访问）。
 7. **running_flag check-then-act 竞态窗口**（P3, S）— eng F10：main.py L278/L284 之间存在 TOCTOU 窗口（UI executor 线程与 /sys_cmd async endpoint 理论可并发）；单机自用风险极低。建议后续用 threading.Lock 或单一调度路径收口。
-8. **config.json.bak 缺失致 factory 必炸**（P3, S）— eng F11：/sys_cmd factory 依赖根目录 config.json.bak，仓库当前不存在该文件，恢复出厂必失败。与「重启按钮是恢复路径」叙事相邻，修复 = 生成/维护该备份或移除 factory 入口。
+8. **config.json.bak 缺失致 factory 必炸**【2026-10-23 核实已闭环：ensure_config_backup 已双进程幂等接线（frontend/main.py:83/:182），台账过时】（P3, S）— eng F11：/sys_cmd factory 依赖根目录 config.json.bak，仓库当前不存在该文件，恢复出厂必失败。与「重启按钮是恢复路径」叙事相邻，修复 = 生成/维护该备份或移除 factory 入口。
 9. **测试资产入库**（P2, S）— 实施发现：.gitignore:286 的 `test_*.py` 规则使整个测试套件（42+ 文件）不进版本库——改写后的 test_task_16_new.py 也无法提交，测试改动在协作间丢失。建议：收窄该规则（如仅忽略报告文件）并把 tests/features 入库。
 
-10. **functions[].enabled 僵尸数据退役**（P3, S）— batch2 CEO native 发现6：二级开关迁移后该字段退出消费，43 个 enabled 全 True 与实际业务状态不符，遗留误导。后续以 migrate 脚本一次性删除或注释 deprecated（确认 validate_integration 等无依赖）。
+10. **functions[].enabled 僵尸数据退役**【2026-10-23 已实施：layout.py 3 处僵尸写入清理（:823 function_items/:1060 搜索结果/:1152 存储点——下游仅读 tab_key 已核实），test_task_17 迁移断言同步更新；config functions[] 已空】（P3, S）— batch2 CEO native 发现6：二级开关迁移后该字段退出消费，43 个 enabled 全 True 与实际业务状态不符，遗留误导。后续以 migrate 脚本一次性删除或注释 deprecated（确认 validate_integration 等无依赖）。
 
 ## Deferred Items from /autoplan (2026-09-22) — runtime312 启动脚本切换
 
@@ -214,9 +214,9 @@
 
 ## Deferred Items from /design-review (2026-10-15) — EDTalk 整合三页面视觉审查
 
-1. **uploader 空列表黑色死区**（polish, S）— NiceGUI ui.upload 空态文件列表渲染为黑色矩形（训练页/llm 页两处）；改全局 .q-uploader 样式影响面超本批，单独任务处理（如空态高度收敛+虚线框提示）。
-2. **长值输入框截断无省略号**（polish, S）— 知识库目录等长路径值在固定宽度输入框被硬裁剪（如 `edtalk/fastrag/knowledgeba…`），无 ellipsis 视觉提示；统一输入框 text-overflow 行为。
-3. **侧边栏主题切换按钮语义歧义**（polish, S，存量非本批）— label 显示当前模式（深色模式下显示"深色模式"）而点击执行切换，状态/动作语义混用；建议改为"切换到浅色模式"式动作文案。
+1. **uploader 空列表黑色死区**【2026-10-23 已修复：layout.py inject_global_styles 全局 CSS——空列表 min-height 收敛+empty 隐藏】（polish, S）— NiceGUI ui.upload 空态文件列表渲染为黑色矩形（训练页/llm 页两处）；改全局 .q-uploader 样式影响面超本批，单独任务处理（如空态高度收敛+虚线框提示）。
+2. **长值输入框截断无省略号**【2026-10-23 已修复：全局 .q-field__native text-overflow ellipsis】（polish, S）— 知识库目录等长路径值在固定宽度输入框被硬裁剪（如 `edtalk/fastrag/knowledgeba…`），无 ellipsis 视觉提示；统一输入框 text-overflow 行为。
+3. **侧边栏主题切换按钮语义歧义**【2026-10-23 已修复：按钮文本改动作语义「切换到浅色/深色模式」（初始+toggle 两处对齐）】（polish, S，存量非本批）— label 显示当前模式（深色模式下显示"深色模式"）而点击执行切换，状态/动作语义混用；建议改为"切换到浅色模式"式动作文案。
 4. **三段式错误前缀 UI 格式化**（note, M）— `problem=/cause=/fix=` 机器格式直出用户界面（训练校验/摄像头重测等本批多处一致，属 /autoplan 义务口径）；如需人话排版另立任务统一改渲染层。
 5. **间距/字号令牌 Tab 层零引用**（仓库级既有债, M）— /design-review 子代理审计：三 Tab 文件对 --spacing-*/--font-size-* 零引用、全内联 px，与 tts/train_voice/svc 老基线一脉相承；系统性收敛属全局任务（本批数值多贴近档位、视觉不发散，不构成回归）。
 6. **三段式消息渲染面与覆盖面裁决**（M）— train/llm 走 toast、visual_body 落行内标签双通道并存，且同类错误约半数为自由文本（"获取失败/服务未连接"）；与延期项 4（三段式 UI 格式化）合并：统一渲染通道+格式化+覆盖清单。
@@ -225,9 +225,9 @@
 
 1. **~~全量测试套件 149 项存量失败（features 历史验收测试漂移）~~（已完成 2026-10-20）**— 门禁 A 批次（74b932d1）150 失败→0：asyncio.run 根因修复×4+独立路径防竞争+按现行功能现实重写/退役过期断言，最终套件 619 passed + 72 retired skip。
 2. **虚拟摄像头"已安装"态无重装/改名入口**（P3, S）— visual_body 摄像头卡仅在未安装态渲染安装按钮；改名/重装需手动 regsvr32。旧安装 dll 指向 D:\AI\EDTalk\UNITYC~1（仍有效），清理该目录前须先重装（安装件在 edtalk/UnityCapture-master/Install/）。
-3. **test_cover_queue GPU 环境依赖**（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
+3. **test_cover_queue GPU 环境依赖**【2026-10-23 核实已闭环：test_cover_queue 6 passed（GPU 断言已 mock 化），台账过时】（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
 
 ## Deferred Items from /autoplan (2026-10-22) — 音频播放功能审查批次（CEO/Eng 两阶段收官，待 Phase 4 终门）
 
 1. **reread_top_priority 生产端接线**（P2, M）— 本审查证实 999 权重唯一生产入口 /send 当前 TypeError 500（A6 修复后签名通但 type 语义仍按普通复读处理）；完整接线=弹幕高优词表→reread_top_priority 消息生产→999 暂停-续播链路真实触发（A7 的 E2E 浸泡依赖此）。属复读模块非播放模块，故 Deferred。依赖：A6（T2）+A7（T4）落地后。
-2. **闲时任务清零功能重建评估**（P3, S）— info_to_callback 参数移除（A3）后其声称用途"闲时清零"核实为已死链（/callback 端点仅日志、wait_play_audio_num 恒 0 从未写入），移除零功能损失；若未来需要闲时清零语义，应走进程内直查（get_audio_info）而非 HTTP 回调。依赖：无。
+2. **闲时任务清零功能重建评估**【2026-10-23 收口：评估结论=死链确认（/callback 仅日志、wait_play_audio_num 恒 0），移除零损失；未来需要闲时清零语义走进程内直查 get_audio_info，不恢复 HTTP 回调】（P3, S）— info_to_callback 参数移除（A3）后其声称用途"闲时清零"核实为已死链（/callback 端点仅日志、wait_play_audio_num 恒 0 从未写入），移除零功能损失；若未来需要闲时清零语义，应走进程内直查（get_audio_info）而非 HTTP 回调。依赖：无。

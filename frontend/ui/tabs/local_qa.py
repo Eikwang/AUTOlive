@@ -40,7 +40,7 @@ def create_local_qa_tab(
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('启用文本匹配', value=get_nested_value(config, "local_qa", "text", "enable")).style(switch_internal_css), ("local_qa", "text", "enable"))
                 _auto_save(ui.select(
-                    label='弹幕日志类型',
+                    label='存储格式',
                     options={'json': '自定义json', 'text': '一问一答'},
                     value=get_nested_value(config, "local_qa", "text", "type")
                 ).style("width:100%;"), ("local_qa", "text", "type"))

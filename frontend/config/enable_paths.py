@@ -31,7 +31,9 @@ ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
 
 
 def validate_enable_paths(config: dict) -> list:
-    """校验所有路径都能在 config 中解析（F11：漂移时启动即响）。
+    """校验所有路径都能在 config 中解析（日志节#3 文档串修正：本函数当前仅
+    测试面调用——tests/features/test_task_07_new.py，无运行时启动接线；如需
+    "漂移启动即响"，须先在 frontend/main.py 启动处显式接线）。
 
     Returns:
         缺失路径的描述列表（空列表 = 全部通过）。注意：路径"存在但值为

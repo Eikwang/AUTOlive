@@ -475,7 +475,10 @@ class AUDIO_PLAY_CENTER:
             except (TypeError, ValueError):
                 device_index = -1
 
-            rate = int(wf.getframerate() * float(data_json.get("speed", 1) or 1))
+            # A2 语义（字幕节#4 退役）：播放链不变速——条目 speed 恒 1（playback_manager
+            # 重建硬编码），语速在合成侧生效（gpt_sovits speed_factor/edge-tts rate）。
+            # speed 乘算退役：防未来误透传时真实播放时长偏离文件时长（字幕 keep_time 漂移）。
+            rate = int(wf.getframerate())
             self._current_output_rate = rate  # F-5：999 续播回退 1 秒的折算基准
 
             self.stream = self.audio.open(

@@ -309,6 +309,21 @@ class DrawerLayout:
             scrollbar-width: none;
         }}
 
+        /* ============ 表单组件统一行为（2026-10-23 TODOS 批次） ============ */
+        /* 设计节#2：长值输入框截断带省略号（统一 text-overflow 行为） */
+        .q-field__native, .q-field__prefix, .q-field__suffix {{
+            text-overflow: ellipsis;
+        }}
+        /* 设计节#1：ui.upload 空列表黑色死区收敛（NiceGUI 空态渲染为实心黑块） */
+        .q-uploader__list:not(:has(.q-uploader__file)) {{
+            min-height: 0;
+            height: auto;
+            background: transparent;
+        }}
+        .q-uploader__list:empty {{
+            display: none;
+        }}
+
         /* ============ 统一标题层级 ============ */
         /* 页面标题（三级页面顶部） */
         .page-title {{
@@ -549,9 +564,9 @@ class DrawerLayout:
         # NiceGUI 的 dark_mode 是一个布尔值
         self.dark_mode.value = not self.dark_mode.value
 
-        # 更新按钮文本与图标（随态切换）
+        # 更新按钮文本与图标（随态切换；设计节#3：动作语义——文本=点击后进入的模式）
         if hasattr(self, 'theme_button') and self.theme_button:
-            self.theme_button.text = "深色模式" if self.dark_mode.value else "浅色模式"
+            self.theme_button.text = "切换到浅色模式" if self.dark_mode.value else "切换到深色模式"
             self.theme_button.props(
                 f'icon={"light_mode" if self.dark_mode.value else "dark_mode"}'
             )
@@ -805,11 +820,10 @@ class DrawerLayout:
             for func in group.get("functions", []):
                 func_name = func["name"]
                 tab_key = func.get("tab_key", "")
-                enabled = func.get("enabled", True)
 
-                # 添加到 function_items
+                # 添加到 function_items（任务6/0923节#10：enabled 僵尸字段退役——
+                # 下游仅读 tab_key，enabled 写入零消费）
                 self.function_items[func_name] = {
-                    "enabled": enabled,
                     "tab_key": tab_key
                 }
 
@@ -931,7 +945,7 @@ class DrawerLayout:
 
                 # 主题切换按钮（任务2.3：flat 改 unelevated，悬停高亮整个按钮）
                 self.theme_button = ui.button(
-                    "深色模式" if self.dark_mode and self.dark_mode.value else "浅色模式",
+                    "切换到浅色模式" if self.dark_mode and self.dark_mode.value else "切换到深色模式",
                     on_click=self.toggle_theme, color=None
                 ).props('icon=dark_mode unelevated no-caps').classes('theme-btn').style('''
                     width: 100%;
@@ -1042,7 +1056,6 @@ class DrawerLayout:
                         "name": func["name"],
                         "group": group["name"],
                         "tab_key": func.get("tab_key", ""),
-                        "enabled": func.get("enabled", True),
                         "type": "function"
                     })
 
@@ -1133,9 +1146,8 @@ class DrawerLayout:
                         func_name = result["name"]
                         group_name = result["group"]
 
-                        # 存储功能信息
+                        # 存储功能信息（任务6：enabled 僵尸写入退役，仅存 tab_key）
                         self.function_items[func_name] = {
-                            "enabled": result.get("enabled", True),
                             "tab_key": result.get("tab_key", "")
                         }
 
