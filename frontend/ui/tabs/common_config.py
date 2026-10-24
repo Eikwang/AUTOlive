@@ -98,4 +98,4 @@ def create_common_config_tab(
                 label='回复模板',
                 placeholder='此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量',
                 value=textarea_data_change(get_nested_value(config, "reply_template", "copywriting"))
-            ).style("width:100%;").tooltip('此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("reply_template", "copywriting"))
+            ).style("width:100%;").tooltip('此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("reply_template", "copywriting"), split_lines=True)

@@ -69,7 +69,10 @@ def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_conf
         # 调用回调函数保存配置
         if set_config_callback:
             try:
-                set_config_callback(*keys, value=e.value)
+                # 三轮验收修复：落盘传归一化后的 value（原 bug 传 e.value 原始
+                # 字符串——内存 dict 归一化为 list 但 config.json 落盘仍是 str，
+                # 用户实测「显示正确了但配置文件保存的是文本，系统无法解析」）
+                set_config_callback(*keys, value=value)
             except Exception as ex:
                 print(f"保存配置失败: {ex}")
 

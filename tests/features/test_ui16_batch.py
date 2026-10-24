@@ -228,10 +228,10 @@ class TestR8PageRemoval:
         assert "local_dir_to_endpoint" not in src
 
     def test_config_templates_directory_untouched(self):
-        """红线（EV-1d）：config_templates/ 目录=动态模板活体存储，必须仍存在。"""
+        """红线（EV-1d）：config_templates/ 目录=动态模板活体存储，目录必须仍存在
+        （文件内容/数量为用户数据随实播增删，不做断言——2026-10-24 用户清理测试模板）。"""
         d = REPO / "config_templates"
         assert d.is_dir()
-        assert any(d.glob("*.json"))  # 测试.json 等活体模板仍在
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +437,40 @@ class TestRound2Fixes:
         assert tdc("a" + nl + "b") == "a" + nl + "b"
         # None/空串
         assert tdc(None) == "" == tdc("")
+
+    def test_split_lines_persists_normalized_value(self):
+        """三轮验收：落盘传归一化后的 value（原 bug 传 e.value 原始 str——
+        内存 list 但 config.json 落盘文本，系统无法解析）。行为级：模拟
+        on_change 验证 set_config_callback 收到 list。"""
+        from frontend.utils import config_auto_save as cas
+        captured = {}
+        def fake_set_cb(*keys, value, _notify=True):
+            captured["value"] = value
+            return True
+        class FakeTA:
+            label = "文案"
+            def on_value_change(self, cb):
+                self._cb = cb
+            def on(self, *a, **k):
+                pass
+        ta = FakeTA()
+        cfg = {"idle_time_task": {"copywriting": {"copy": []}}}
+        cas.auto_bind(ta, cfg, ("idle_time_task", "copywriting", "copy"),
+                      fake_set_cb, tab_key="test", split_lines=True)
+        nl = chr(10)
+        ta._cb(type("V", (), {"value": f"第一行{nl}第二行{nl}"})())
+        assert cfg["idle_time_task"]["copywriting"]["copy"] == ["第一行", "第二行"]  # 内存
+        assert captured["value"] == ["第一行", "第二行"]  # 落盘同步归一化（原 bug 处）
+        # 源级：set_config_callback 传 value（归一化后）而非 e.value
+        src = _src("frontend/utils/config_auto_save.py")
+        assert "set_config_callback(*keys, value=value)" in src
+        assert "set_config_callback(*keys, value=e.value)" not in src
+
+    def test_reply_template_split_lines(self):
+        """三轮验收：回复模板绑定补 split_lines（common_config 漏网——二轮只改了
+        thanks/idle/trends 三文件，回复模板在 common_config.py 未覆盖）。"""
+        src = _src("frontend/ui/tabs/common_config.py")
+        assert '("reply_template", "copywriting"), split_lines=True)' in src
 
     def test_filter_four_switches_one_row(self):
         """任务 16：四开关同行并列。"""
