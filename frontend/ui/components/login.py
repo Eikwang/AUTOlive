@@ -54,7 +54,7 @@ class LoginForm:
             
             with self.login_card:
                 self.label_login = ui.label('AUTOlive').style(
-                    "font-size: 30px;letter-spacing: 5px;color: #3b3838;font-weight: 800;text-transform: uppercase;"
+                    "font-size: 30px;letter-spacing: 5px;color: var(--text-title, #3b3838);font-weight: 800;text-transform: uppercase;"
                 )
                 
                 self.username_input = ui.input(
