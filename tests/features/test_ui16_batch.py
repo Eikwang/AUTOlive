@@ -70,16 +70,18 @@ class TestR10PeriodicTimeMigration:
 
     def test_other_branches_isolated(self):
         """分支隔离：local_qa/thanks 各节的 min/max 保持不动（EV-1c-a 隔离断言）。"""
+        # UI-16 二轮验收（任务 10）：thanks 三通道也合并单值；local_qa 不动（隔离）
         cfg = {
             "read_comment": {"periodic_trigger": {"periodic_time_min": 5, "periodic_time_max": 10}},
             "local_qa": {"periodic_trigger": {"periodic_time_min": 1, "periodic_time_max": 2}},
             "thanks": {"gift": {"periodic_trigger": {"periodic_time_min": 3, "periodic_time_max": 4}}},
         }
         out = self._migrate(cfg)
-        assert out["local_qa"]["periodic_trigger"]["periodic_time_min"] == 1
+        assert out["local_qa"]["periodic_trigger"]["periodic_time_min"] == 1  # 隔离不动
         assert out["local_qa"]["periodic_trigger"]["periodic_time_max"] == 2
-        assert out["thanks"]["gift"]["periodic_trigger"]["periodic_time_min"] == 3
-        assert out["thanks"]["gift"]["periodic_trigger"]["periodic_time_max"] == 4
+        assert out["thanks"]["gift"]["periodic_trigger"]["periodic_time"] == 4  # max 回填
+        assert "periodic_time_min" not in out["thanks"]["gift"]["periodic_trigger"]
+        assert out["thanks"].get("entrance", {}).get("periodic_trigger") is None  # 无节不创建
 
     def test_timer_handler_branch_isolation_source(self):
         """源级：timer_handler read_comment 分支单值化，其余分支保持 randint。"""
@@ -87,8 +89,10 @@ class TestR10PeriodicTimeMigration:
         assert 'self.my_handle.config.get(type, "periodic_trigger", "periodic_time")' in src
         assert "except (TypeError, ValueError):\n                periodic_time = 60" in src
         # 分支隔离：local_qa/thanks 分支的 min/max+randint 必须仍在
-        assert src.count("random.randint(periodic_time_min, periodic_time_max)") >= 3
-        assert src.count('periodic_trigger", "periodic_time_min') >= 3
+        assert src.count("random.randint(periodic_time_min, periodic_time_max)") == 1  # 仅 local_qa
+        assert src.count('periodic_trigger", "periodic_time_min') == 1
+        # thanks 三分支（type2 区分）+read_comment 均单值化
+        assert src.count('"periodic_trigger", "periodic_time")') == 4
 
     def test_read_comment_ui_merged(self):
         """源级：read_comment.py 单参数「触发周期（秒）」，min/max 输入框已移除。"""
@@ -292,7 +296,8 @@ class TestBatchMisc:
         """R10：答谢页周期触发标签全中文（半中半英清零）。"""
         src = _src("frontend/ui/tabs/thanks.py")
         assert "label=f'触发{pt_key}'" not in src
-        assert "触发周期最小值（秒）" in src
+        assert "触发周期（秒）" in src  # 二轮任务 10：单值周期
+        assert src.count("['periodic_time', 'trigger_num_min', 'trigger_num_max']") == 3  # 旧键循环清零（注释提及不计）
         assert "触发次数最大值" in src
 
     def test_thanks_single_lowest_price_in_gift_section(self):
@@ -319,7 +324,7 @@ class TestBatchMisc:
     def test_idle_textarea_height_quadrupled(self):
         """R11：闲时任务三 textarea 高度四倍（min-height:16rem）。"""
         src = _src("frontend/ui/tabs/idle_time_task.py")
-        assert src.count("min-height:16rem") == 3
+        assert src.count("input-style=") == 3 and src.count("min-height: 16rem") == 3
 
     def test_filter_queue_copy_replaced(self):
         """R7：队列提示文案替换（免责段删除+笔误修正）。"""
@@ -335,3 +340,75 @@ class TestBatchMisc:
         assert "_delete_entry" in src
         assert "已清理" in src  # 存量重复清理
         assert "暂无人数段绑定" in src  # 空态提示
+
+
+class TestRound2Fixes:
+    """二轮验收修复守卫（2026-10-24：7 项任务）。"""
+
+    def test_split_lines_normalization(self):
+        """任务 10：auto_save split_lines 归一化+调用点计数。"""
+        src = _src("frontend/utils/config_auto_save.py")
+        assert "split_lines: bool = False" in src
+        assert "value.split" in src and "if line.strip()" in src
+        for rel, n in [("frontend/ui/tabs/thanks.py", 3), ("frontend/ui/tabs/idle_time_task.py", 3),
+                       ("frontend/ui/tabs/trends_copywriting.py", 1)]:
+            assert _src(rel).count("split_lines=True") == n
+
+    def test_textarea_data_change_str_guard(self):
+        """任务 10 根因：textarea_data_change 字符串原样返回（不按字符迭代）。"""
+        from frontend.utils.common import textarea_data_change
+        assert textarea_data_change("单字符串") == "单字符串"
+        assert textarea_data_change(["a", "b"]) == "a" + chr(10) + "b" + chr(10)
+        assert textarea_data_change(None) == ""
+
+    def test_backend_copy_dual_shape(self):
+        """后端消费点 str/list 双形态（G7 模式）。"""
+        assert 'isinstance(copy_list, str)' in _src("utils/handlers/event_handler.py")
+        assert 'isinstance(_copy_raw, str)' in _src("utils/task_scheduler.py")
+        sched = _src("utils/task_scheduler.py")
+        assert sched.count('isinstance(tmp, str)') == 1  # 闲时任务三列表加载
+
+    def test_chat_log_buffer_wired(self):
+        """任务 14：/callback TODO 空实现修复+talk 页轮询渲染。"""
+        assert 'TODO: 实现聊天记录显示' not in _src("frontend/main.py")
+        assert 'append_chat(payload)' in _src("frontend/main.py")
+        talk_src = _src("frontend/ui/tabs/talk.py")
+        assert 'from frontend.utils.chat_log_buffer import snapshot' in talk_src
+        assert 'ui.timer(2.0, _refresh_chat_log)' in talk_src
+
+    def test_trends_labels_renamed_and_chatgpt_removed(self):
+        """任务 13：随机生成/生成间隔+chatgpt 选项彻底移除。"""
+        src = _src("frontend/ui/tabs/trends_copywriting.py")
+        assert "ui.switch('随机播放'" not in src and "label='文案播放间隔'" not in src
+        assert "ui.switch('随机生成'" in src and "label='生成间隔'" in src
+        assert "（已停用）" not in src  # 置灰方案被用户指令替换为彻底移除
+        # 顺序：LLM类型 → 随机生成 → 生成间隔（同 grid 内先 select 后 column）
+        _sq = chr(39)  # 单引号（label 值引号形态，避免引号嵌套）
+        _llm_pos = src.find("label=" + _sq + "LLM类型" + _sq)
+        _rand_pos = src.find("ui.switch(" + _sq + "随机生成" + _sq)
+        _interval_pos = src.find("label=" + _sq + "生成间隔" + _sq)
+        assert -1 < _llm_pos < _rand_pos < _interval_pos
+
+    def test_read_comment_single_column(self):
+        """任务 11：触发周期/次数纵向单列（原三列网格移除）。"""
+        src = _src("frontend/ui/tabs/read_comment.py")
+        assert "一列显示" in src
+        # 单列顺序：周期 → 次数min → 次数max
+        _sq = chr(39)
+        _period_pos = src.find("label=" + _sq + "触发周期（秒）" + _sq)
+        _min_pos = src.find("label=" + _sq + "触发次数最小值" + _sq)
+        _max_pos = src.find("label=" + _sq + "触发次数最大值" + _sq)
+        assert -1 < _period_pos < _min_pos < _max_pos
+
+    def test_filter_four_switches_one_row(self):
+        """任务 16：四开关同行并列。"""
+        src = _src("frontend/ui/tabs/filter_config.py")
+        row_block = src[src.find("四开关同一行并列"):src.find("违禁词路径")]
+        for label in ("违禁词过滤", "违禁语句丢弃", "用户名中的数字转中文", "弹幕表情过滤"):
+            assert f"ui.switch('{label}'" in row_block
+
+    def test_stage_button_text_white(self):
+        """任务 6：selected 态 text-white 双保险。"""
+        src = _src("frontend/ui/tabs/train_streamer.py")
+        assert "stage-btn-selected text-white" in src  # 双保险
+        assert "remove='stage-btn-selected stage-btn-unselected text-white'" in src

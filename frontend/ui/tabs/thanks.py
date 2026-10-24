@@ -13,10 +13,11 @@ from frontend.ui.components.config_helper import get_nested_value
 from frontend.utils.common import textarea_data_change
 
 
-# UI-16 批次 R10：周期触发参数标签全中文映射（config 键名不变，仅 UI 标签）
+# UI-16 二轮验收（任务 10）：触发周期 min/max 合并为单键 periodic_time
+# （固定周期内计算触发，与念弹幕同语义；settings.py 存量迁移 max 回填），
+# 触发次数 min/max 保留；config 键名不变仅 UI 标签中文化
 _PT_KEY_LABELS = {
-    'periodic_time_min': '触发周期最小值（秒）',
-    'periodic_time_max': '触发周期最大值（秒）',
+    'periodic_time': '触发周期（秒）',
     'trigger_num_min': '触发次数最小值',
     'trigger_num_max': '触发次数最大值',
 }
@@ -44,38 +45,38 @@ def create_thanks_tab(
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('启用入场欢迎', value=get_nested_value(config, "thanks", "entrance_enable")).style(switch_internal_css), ("thanks", "entrance_enable"))
                     _auto_save(ui.switch('随机选取', value=get_nested_value(config, "thanks", "entrance_random")).style(switch_internal_css), ("thanks", "entrance_random"))
-                    _auto_save(ui.textarea(label='入场文案', value=textarea_data_change(get_nested_value(config, "thanks", "entrance_copy")), placeholder='用户进入直播间的相关文案，请勿动 {username}，此字符串用于替换用户名').style("width:100%;"), ("thanks", "entrance_copy"))
+                    _auto_save(ui.textarea(label='入场文案', value=textarea_data_change(get_nested_value(config, "thanks", "entrance_copy")), placeholder='用户进入直播间的相关文案，请勿动 {username}，此字符串用于替换用户名').style("width:100%;"), ("thanks", "entrance_copy"), split_lines=True)
                 # UI-16 批次 R10：入场区的「最低答谢礼物价格」已移除（与礼物答谢区
                 # 重复且绑同键 thanks.lowest_price，保留礼物答谢区唯一入口）
             with ui.grid(columns=3):
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "thanks", "entrance", "periodic_trigger", "enable")).style(switch_internal_css), ("thanks", "entrance", "periodic_trigger", "enable"))
                     # UI-16 批次 R10：标签全中文（原「触发periodic_time_min」半中半英）
-                    for pt_key in ['periodic_time_min', 'periodic_time_max', 'trigger_num_min', 'trigger_num_max']:
+                    for pt_key in ['periodic_time', 'trigger_num_min', 'trigger_num_max']:
                         _auto_save(ui.input(label=_PT_KEY_LABELS[pt_key], value=get_nested_value(config, "thanks", "entrance", "periodic_trigger", pt_key), placeholder='例如：5').style("width:100%;"), ("thanks", "entrance", "periodic_trigger", pt_key))
         with ui.expansion('礼物设置', icon="settings", value=True).classes('w-full'):
             with ui.grid(columns=3):
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('启用礼物答谢', value=get_nested_value(config, "thanks", "gift_enable")).style(switch_internal_css), ("thanks", "gift_enable"))
                     _auto_save(ui.switch('随机选取', value=get_nested_value(config, "thanks", "gift_random")).style(switch_internal_css), ("thanks", "gift_random"))
-                    _auto_save(ui.textarea(label='礼物文案', value=textarea_data_change(get_nested_value(config, "thanks", "gift_copy")), placeholder='用户赠送礼物的相关文案').style("width:100%;"), ("thanks", "gift_copy"))
+                    _auto_save(ui.textarea(label='礼物文案', value=textarea_data_change(get_nested_value(config, "thanks", "gift_copy")), placeholder='用户赠送礼物的相关文案').style("width:100%;"), ("thanks", "gift_copy"), split_lines=True)
                     # R10：最低答谢礼物价格置于礼物文案下方（原在 column 外独立单元）
                     _auto_save(ui.input(label='最低答谢礼物价格', value=get_nested_value(config, "thanks", "lowest_price"), placeholder='设置最低答谢礼物的价格（元）').style("width:100%;"), ("thanks", "lowest_price"))
             with ui.grid(columns=3):
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "thanks", "gift", "periodic_trigger", "enable")).style(switch_internal_css), ("thanks", "gift", "periodic_trigger", "enable"))
                     # UI-16 批次 R10：标签全中文（原「触发periodic_time_min」半中半英）
-                    for pt_key in ['periodic_time_min', 'periodic_time_max', 'trigger_num_min', 'trigger_num_max']:
+                    for pt_key in ['periodic_time', 'trigger_num_min', 'trigger_num_max']:
                         _auto_save(ui.input(label=_PT_KEY_LABELS[pt_key], value=get_nested_value(config, "thanks", "gift", "periodic_trigger", pt_key), placeholder='例如：5').style("width:100%;"), ("thanks", "gift", "periodic_trigger", pt_key))
         with ui.expansion('关注设置', icon="settings", value=True).classes('w-full'):
             with ui.grid(columns=3):
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('启用关注答谢', value=get_nested_value(config, "thanks", "follow_enable")).style(switch_internal_css), ("thanks", "follow_enable"))
                     _auto_save(ui.switch('随机选取', value=get_nested_value(config, "thanks", "follow_random")).style(switch_internal_css), ("thanks", "follow_random"))
-                    _auto_save(ui.textarea(label='关注文案', value=textarea_data_change(get_nested_value(config, "thanks", "follow_copy")), placeholder='用户关注时的相关文案').style("width:100%;"), ("thanks", "follow_copy"))
+                    _auto_save(ui.textarea(label='关注文案', value=textarea_data_change(get_nested_value(config, "thanks", "follow_copy")), placeholder='用户关注时的相关文案').style("width:100%;"), ("thanks", "follow_copy"), split_lines=True)
             with ui.grid(columns=3):
                 with ui.column().style("width:100%;"):
                     _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "thanks", "follow", "periodic_trigger", "enable")).style(switch_internal_css), ("thanks", "follow", "periodic_trigger", "enable"))
                     # UI-16 批次 R10：标签全中文（原「触发periodic_time_min」半中半英）
-                    for pt_key in ['periodic_time_min', 'periodic_time_max', 'trigger_num_min', 'trigger_num_max']:
+                    for pt_key in ['periodic_time', 'trigger_num_min', 'trigger_num_max']:
                         _auto_save(ui.input(label=_PT_KEY_LABELS[pt_key], value=get_nested_value(config, "thanks", "follow", "periodic_trigger", pt_key), placeholder='例如：5').style("width:100%;"), ("thanks", "follow", "periodic_trigger", pt_key))

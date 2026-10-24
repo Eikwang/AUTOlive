@@ -40,18 +40,15 @@ def create_read_comment_tab(
                 placeholder='念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用',
                 value=textarea_data_change(get_nested_value(config, "read_comment", "read_username_copywriting"))
             ).style("width:100%;").tooltip('念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用'), keys=("read_comment", "read_username_copywriting"))
-        with ui.grid(columns=3):
-            # UI-16 批次 R10/DV-1e/DV-1g：触发周期 min/max 合并为单参数「触发周期」
-            # （固定单值语义，后端 timer_handler 直接使用该值不再区间随机；新键
-            # periodic_time 由 settings.py 存量迁移=max 回填；行为变更已告知）。
-            # 纵向堆叠（周期在上，含单位标注）：触发周期→触发次数最小值→触发次数最大值
-            with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "read_comment", "periodic_trigger", "enable")).style(switch_internal_css), keys=("read_comment", "periodic_trigger", "enable"))
-                _auto_save(ui.input(
-                    label='触发周期（秒）',
-                    value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time"),
-                    placeholder='例如：60'
-                ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能（固定单值，不再区间随机；正整数）'), keys=("read_comment", "periodic_trigger", "periodic_time"))
+        # UI-16 二轮验收（任务 11）：一列显示（纵向堆叠）——依次为触发周期、
+        # 触发次数最小值、触发次数最大值（周期单值语义沿用 R10 合并）
+        with ui.column().style("width:100%; gap:4px;"):
+            _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "read_comment", "periodic_trigger", "enable")).style(switch_internal_css), keys=("read_comment", "periodic_trigger", "enable"))
+            _auto_save(ui.input(
+                label='触发周期（秒）',
+                value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time"),
+                placeholder='例如：60'
+            ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能（固定单值，不再区间随机；正整数）'), keys=("read_comment", "periodic_trigger", "periodic_time"))
             _auto_save(ui.input(
                 label='触发次数最小值',
                 value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_min"),

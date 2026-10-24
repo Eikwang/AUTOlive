@@ -9,17 +9,26 @@ import json
 def textarea_data_change(data: Optional[List[str]]) -> str:
     """
     字符串数组数据格式转换
-    
+
     Args:
         data: 字符串数组
-        
+
     Returns:
-        转换后的字符串
+        转换后的字符串（每项一行）
+
+    UI-16 二轮验收修复：存量配置中该键可能被存为字符串（旧数据/异常保存），
+    字符串直接进 for 会按字符迭代——每个字符独占一行（用户实测「每个字符都
+    换行」的根因）。字符串原样返回，非列表非字符串返回空串。
     """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, (list, tuple)):
+        return ""
     tmp_str = ""
-    if data is not None:
-        for tmp in data:
-            tmp_str = tmp_str + tmp + "\n"
+    for tmp in data:
+        tmp_str = tmp_str + str(tmp) + "\n"
     return tmp_str
 
 

@@ -32,10 +32,37 @@ def create_talk_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="talk")
 
-    # 聊天记录区域
-    with ui.row().style("position:fixed; top: 100px; right: 20px;"):
+    # 聊天记录区域（UI-16 二轮验收任务 14：/callback 共享缓冲接线渲染，
+    # ui.timer 轮询——timer 回调只读内存无同步 IO，沿事件循环安全先例）
+    from frontend.utils.chat_log_buffer import snapshot as _chat_snapshot
+    # 可见性开关=talk.show_chat_log 已在 core 数据源侧生效（utils_handler
+    # webui_show_chat_log_callback 发送前检查），webui 端无需再绑定
+    with ui.row().style("position:fixed; top: 100px; right: 20px; z-index: 10;"):
         with ui.expansion('聊天记录', icon="question_answer", value=True):
             scroll_area_chat_box = ui.scroll_area().style("width:100%; height:700px;")
+            chat_log_container = ui.column().style("gap:4px; width:100%; padding:8px;")
+
+    _chat_rendered_count = {"n": -1}
+
+    def _refresh_chat_log():
+        entries = _chat_snapshot()
+        if len(entries) == _chat_rendered_count["n"]:
+            return
+        _chat_rendered_count["n"] = len(entries)
+        chat_log_container.clear()
+        with chat_log_container:
+            if not entries:
+                ui.label('暂无聊天记录——启动系统后，弹幕与回复会实时显示在这里').style(
+                    'font-size: var(--font-size-assist, 12px); color: var(--text-hint);')
+            for _entry in entries:
+                _tag = {'question': '问', 'answer': '答'}.get(_entry.get('content_type'), '聊')
+                ui.label(f"[{_entry.get('timestamp', '')}] [{_entry.get('type', '')}] "
+                         f"{_entry.get('username', '')}（{_tag}）：{_entry.get('content', '')}").style(
+                    'font-size: var(--font-size-small, 12px); color: var(--text-body); '
+                    'word-break: break-all; white-space: pre-wrap; width:100%;')
+
+    _refresh_chat_log()
+    ui.timer(2.0, _refresh_chat_log)
 
     # 基础配置
     with ui.grid(columns=2):

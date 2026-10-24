@@ -360,6 +360,23 @@ def _ensure_defaults(config: "Settings") -> None:
                 del _read_pt[_old_key]
                 changed = True
 
+    # UI-16 二轮验收（任务 10）：答谢三通道（entrance/gift/follow）周期同样
+    # 合并为单键 periodic_time（max 回填+旧键退役；local_qa 不动）
+    for _th_type in ("entrance", "gift", "follow"):
+        _th_node = cfg.get("thanks", {}).get(_th_type, {}).get("periodic_trigger") if isinstance(cfg.get("thanks"), dict) else None
+        if isinstance(_th_node, dict):
+            if "periodic_time" not in _th_node:
+                try:
+                    _th_mig = max(int(_th_node.get("periodic_time_min", 60)), int(_th_node.get("periodic_time_max", 60)))
+                except (TypeError, ValueError):
+                    _th_mig = 60
+                _th_node["periodic_time"] = max(1, int(_th_mig))
+                changed = True
+            for _old_key in ("periodic_time_min", "periodic_time_max"):
+                if _old_key in _th_node:
+                    del _th_node[_old_key]
+                    changed = True
+
     if changed:
         try:
             config.save()

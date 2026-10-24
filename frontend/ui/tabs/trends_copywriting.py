@@ -8,8 +8,8 @@
 - 开关+关联参数 为上下结构单元：开关在上，输入框在下
 
 UI-16 批次 R5（任务 13 唯一逻辑变更任务）：
-- LLM 选项收敛 {custom_llm, fastrag（内置）}；存量 chatgpt 等历史值渲染为置灰
-  禁用项（option key 保持存储值，显示「（已停用）」——EV-1j 防保存回写显示文案）
+- LLM 选项收敛 {custom_llm, fastrag（内置）}；存量 chatgpt 等历史值彻底移除
+  不展示（二轮验收任务 13 用户指令，替代一轮的置灰禁用方案）
 - 文案来源从 folder_path 文件夹改为前端 textarea 直输（回车分段、即时保存，
   复用闲时任务 idle_time_task 模式）；后端消费链见 task_scheduler.run_trends_copywriting
 - 提示词转换上移为页级参数（作用于全部文案条目；关闭态=置灰禁用保留展示）
@@ -78,19 +78,19 @@ def create_trends_copywriting_tab(
     with ui.card().style(card_css):
         ui.label('动态文案')
         with ui.grid(columns=3):
-            # R5①/DV-1b⑦/EV-1j：选项收敛 + 存量历史值置灰禁用（key=存储值防回写）
+            # UI-16 二轮验收（任务 13）：LLM 选项只保留 {自定义LLM, fastrag（内置）}，
+            # 存量 chatgpt 等历史值彻底移除不展示（回落默认，保存即清除）；
+            # 随机播放→「随机生成」、文案播放间隔→「生成间隔」，两参数在 LLM 类型下方
             _llm_type_val = get_nested_value(config, "trends_copywriting", "llm_type") or "custom_llm"
             _llm_type_options = {'custom_llm': '自定义LLM', 'fastrag': 'fastrag（内置）'}
-            _llm_stale = bool(_llm_type_val) and _llm_type_val not in _llm_type_options
-            if _llm_stale:
-                _llm_type_options[_llm_type_val] = f'{_llm_type_val}（已停用）'
-            _llm_select = _auto_save(ui.select(label='LLM类型', options=_llm_type_options, value=_llm_type_val).style("width:100%;"), ("trends_copywriting", "llm_type"))
-            if _llm_stale:
-                ui.notify(f'LLM类型存量值「{_llm_type_val}」已停用——请改选「自定义LLM」或「fastrag（内置）」后保存',
+            if _llm_type_val not in _llm_type_options:
+                _llm_type_val = 'custom_llm'
+                ui.notify('LLM类型存量值已停用——已回落为「自定义LLM」，保存后生效；可选「fastrag（内置）」',
                           type='warning', close_button='知道了')
+            _llm_select = _auto_save(ui.select(label='LLM类型', options=_llm_type_options, value=_llm_type_val).style("width:100%;"), ("trends_copywriting", "llm_type"))
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('随机播放', value=get_nested_value(config, "trends_copywriting", "random_play")).style(switch_internal_css), ("trends_copywriting", "random_play"))
-                _auto_save(ui.input(label='文案播放间隔', value=get_nested_value(config, "trends_copywriting", "play_interval"), placeholder='文案之间的播放间隔时间（秒）').style("width:100%;"), ("trends_copywriting", "play_interval"))
+                _auto_save(ui.switch('随机生成', value=get_nested_value(config, "trends_copywriting", "random_play")).style(switch_internal_css), ("trends_copywriting", "random_play"))
+                _auto_save(ui.input(label='生成间隔', value=get_nested_value(config, "trends_copywriting", "play_interval"), placeholder='文案之间的生成间隔时间（秒）').style("width:100%;"), ("trends_copywriting", "play_interval"))
 
         # R5③/DV-1g：提示词转换页级化（开关+内容框，作用于全部文案条目；
         # 关闭态=置灰禁用保留展示，与站内开关行为对齐）
@@ -115,8 +115,8 @@ def create_trends_copywriting_tab(
             label='文案列表',
             value=textarea_data_change(get_nested_value(config, "trends_copywriting", "copy")),
             placeholder='每行一条文案，回车分段',
-        ).style("width:100%; min-height:16rem;").tooltip('每行一条文案，回车分段；保存后即时生效（随机播放受上方开关控制）'),
-            ("trends_copywriting", "copy"))
+        ).props('input-style="min-height: 16rem"').style("width:100%;").tooltip('每行一条文案，回车分段；保存后即时生效（随机生成受上方开关控制）'),
+            ("trends_copywriting", "copy"), split_lines=True)
 
         # 存量迁移状态行（DV-1b⑥：迁移结果/失败指引的持久可见面）
         _migrate_status = ui.label('').style(

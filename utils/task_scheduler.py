@@ -172,7 +172,13 @@ class TaskScheduler:
             return []
         
         logger.debug(f"type={data_type}, tmp={tmp}")
-        return copy.copy(tmp) if tmp else []
+        if tmp is None or tmp == "":
+            return []
+        # UI-16 二轮验收（任务 10）：str/list 双形态兼容（G7 先例）——存量 config
+        # 为 str 时 random.choice/遍历按字符迭代（闲时播报单字符）
+        if isinstance(tmp, str):
+            tmp = [line for line in tmp.split("\n") if line.strip()]
+        return copy.copy(tmp)
     
     def do_task(self, last_mode: int, copywriting_copy_list: List,
                 comment_copy_list: List, local_audio_path_list: List) -> tuple:
@@ -342,10 +348,11 @@ class TaskScheduler:
                     # （每项=一条文案）；copy 空时回退存量 folder_path 文件链（迁移期
                     # 兼容：页面迁移完成前存量行为不变；copy 非空即走新链）。
                     # EV-1f：空文案行跳过；全空保持 D-8 空列表静默语义。
-                    direct_copy_list = [
-                        str(c).strip() for c in (self.config.get("trends_copywriting", "copy") or [])
-                        if str(c).strip()
-                    ]
+                    _copy_raw = self.config.get("trends_copywriting", "copy") or []
+                    # UI-16 二轮验收：str/list 双形态（split_lines 保存前存量可为 str）
+                    if isinstance(_copy_raw, str):
+                        _copy_raw = _copy_raw.split("\n")
+                    direct_copy_list = [str(c).strip() for c in _copy_raw if str(c).strip()]
                     file_path_list = []
                     if not direct_copy_list:
                         # 旧链回退：copywriting[].folder_path 列表（迁移期兼容）

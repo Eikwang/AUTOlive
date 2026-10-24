@@ -271,8 +271,10 @@ def create_train_streamer_tab(
             stage_buttons[idx].style(
                 "padding: 6px 12px; border-radius: var(--radius-md); "
                 "font-size: var(--font-size-body); cursor: pointer")
-            stage_buttons[idx].classes(remove='stage-btn-selected stage-btn-unselected')
-            stage_buttons[idx].classes(add='stage-btn-selected' if (idx + 1) in selected_stages else 'stage-btn-unselected')
+            stage_buttons[idx].classes(remove='stage-btn-selected stage-btn-unselected text-white')
+            # text-white=Quasar 原生工具类（color:#fff!important）——与令牌类双保险，
+            # 二轮验收：用户实测选中态仍灰，加一层与 Quasar 体系同源的强制白
+            stage_buttons[idx].classes(add=('stage-btn-selected text-white' if (idx + 1) in selected_stages else 'stage-btn-unselected'))
 
         with ui.row().classes("q-mt-sm q-gutter-sm"):
             for _i, _name in enumerate(TrainPipeline.STAGE_NAMES):

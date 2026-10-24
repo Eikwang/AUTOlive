@@ -1016,11 +1016,16 @@ class AutoliveApp:
 
         @app.post('/callback')
         async def api_callback(request: Request):
-            """数据回调（聊天记录）"""
+            """数据回调（聊天记录）——UI-16 二轮验收任务 14：TODO 空实现修复，
+            core 侧 webui_show_chat_log_callback 的聊天数据入共享缓冲，talk 页签
+            ui.timer 轮询渲染（frontend/utils/chat_log_buffer.py）。"""
             try:
                 data_json = await request.json()
                 logger.info(f'WEBUI API callback接口收到数据：{data_json}')
-                # TODO: 实现聊天记录显示
+                payload = (data_json or {}).get("data") or {}
+                if payload:
+                    from frontend.utils.chat_log_buffer import append_chat
+                    append_chat(payload)
                 return {"code": 200, "message": "成功"}
             except Exception as e:
                 logger.error(f"callback处理失败: {e}")

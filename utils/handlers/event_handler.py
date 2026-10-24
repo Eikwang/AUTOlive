@@ -48,6 +48,10 @@ class EventHandler:
     def _thanks_copy(self, type2: str) -> str:
         """按随机/顺序取答谢文案（thanks.<type2>_copy + <type2>_random）。"""
         copy_list = self.my_handle.config.get("thanks", f"{type2}_copy") or []
+        # UI-16 二轮验收：str/list 双形态兼容（G7 先例）——存量 config 为 str 时
+        # random.choice/索引按字符迭代（播报单字符），先按行拆成列表
+        if isinstance(copy_list, str):
+            copy_list = [line for line in copy_list.split("\n") if line.strip()]
         if not copy_list:
             return ""
         if self.my_handle.config.get("thanks", f"{type2}_random"):

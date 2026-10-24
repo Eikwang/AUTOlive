@@ -110,10 +110,12 @@ class TimerHandler:
             # 计时+1
             self.my_handle.task_data[type][type2]["time"] += 1
 
-            periodic_time_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_min"))
-            periodic_time_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_max"))
-            # 生成触发周期值
-            periodic_time = random.randint(periodic_time_min, periodic_time_max)
+            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
+            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
+            try:
+                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
+            except (TypeError, ValueError):
+                periodic_time = 60
             logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
 
             # 计时时间是否超过限定的触发周期
@@ -144,10 +146,12 @@ class TimerHandler:
             # 计时+1
             self.my_handle.task_data[type][type2]["time"] += 1
 
-            periodic_time_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_min"))
-            periodic_time_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_max"))
-            # 生成触发周期值
-            periodic_time = random.randint(periodic_time_min, periodic_time_max)
+            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
+            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
+            try:
+                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
+            except (TypeError, ValueError):
+                periodic_time = 60
             logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
 
             # 计时时间是否超过限定的触发周期
@@ -178,10 +182,12 @@ class TimerHandler:
             # 计时+1
             self.my_handle.task_data[type][type2]["time"] += 1
 
-            periodic_time_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_min"))
-            periodic_time_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time_max"))
-            # 生成触发周期值
-            periodic_time = random.randint(periodic_time_min, periodic_time_max)
+            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
+            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
+            try:
+                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
+            except (TypeError, ValueError):
+                periodic_time = 60
             logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
 
             # 计时时间是否超过限定的触发周期
