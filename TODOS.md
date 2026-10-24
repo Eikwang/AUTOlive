@@ -49,7 +49,7 @@
 ## Deferred Items from /autoplan (2026-10-22) — 弹幕监听模块审查与优化批次
 
 1. **存量 gift 表口径迁移工具**（P3, M）— gift/integral 表历史行单位混杂（抖音/快手/小红书/视频号低 10 倍、B站连击少计、虎牙在线路径恒 0），本批不迁移；重算能力以因子常量文档化保留（原始币值÷因子=元，因子表在引擎代码+docs/danmaku_contract/mapping.md 双记载）。榜单侧已加口径切换说明行（data_analysis.py subtext）。迁移需用户裁决历史口径语义后启动。依赖：无。
-2. **上游 DanmakuListener 同步（有截止）**（P2, M）— 本批受管副本 7 张价格表元重定基+4 引擎修复+未命中告警（台账见 docs/danmaku_module.md 礼物计价批次节，G1-G6）。**截止条件=下次从 D:\AI\DanmakuListener 同步受管副本前必须完成 replay**，否则同步冲掉元口径成果（本副本=临时事实源至 replay 完成）。依赖：无。
+2. **~~上游 DanmakuListener 同步（有截止）~~**（P2, M）— 【2026-10-24 已完成：replay 至上游提交 4f4f32a+749768c（已推 origin/main）——G1-G6 元口径+词表分离+2 项移植测试+2 项上游旧断言元口径更新+7 张对照表删除收编；上游全量 763 passed/0 failed。临时事实源状态解除，下次同步无冲掉风险。】原记录：本批受管副本 7 张价格表元重定基+4 引擎修复+未命中告警（台账见 docs/danmaku_module.md 礼物计价批次节，G1-G6）。截止条件=下次从 D:\AI\DanmakuListener 同步受管副本前必须完成 replay。依赖：无。
 3. **B站及同类平台连击复发少计 + fixture 采集**（P2, S）— B站 gift_count=num 本条语义与消费者差值去重不匹配（连击/重复少计）；快手 comboCount 跨 burst 复位场景同类（以实测为准）。修复需 combo_total_num 真实样本语义验证——先采集 B站真实连击 SEND_GIFT 原始样本存 fixture（tests/fixtures），再做计数语义对齐。交付说明已显式标注该残留（native CEO F1 终门 uc1a 裁决）。依赖：真实直播间样本采集。
 4. **contract v2 unit-tagged 备选**（P3, S）— gift_value 契约演进方向：载荷带单位标签字段（unit-tagged）替代发射点换算常量，消除 7 处漂移点（native CEO F6）。依赖：上游契约变更窗口。
 
@@ -108,7 +108,7 @@
 7. **GPU 时间片方案**（P3, M）— F7 长期缓解：训练与直播的时间片调度（错峰自动化/资源预留），当前靠双向互斥+错峰引导。依赖：多角色队列。
 8. **训练四阶段接口化**（P3, M）— F2/F12 架构注记：preprocess→底模→评估→口型的可插拔接口，未来换口型引擎（MuseTalk/LatentSync 等快变量）时前端与编排复用。推理侧已有 EMBEDDING v0 契约，训练侧补齐等价边界。依赖：本期训练管线稳定运行一个版本。
 9. **虚拟摄像头选型分析**（P3, S）— F10：UnityCapture vs OBS Virtual Camera/pyvirtualcam/共享内存对比登记，以 F6 脆弱性（DirectShow 老滤镜+单读者）为重评触发条件。本期胜出理由=集成成本最低。
-10. **词表分离上游化 PR**（P2, S）— 既有项（2026-10-14 登记）：AUTOlive 的 send_blocked_keywords 分离提回上游 DanmakuListener。
+1. **~~词表分离上游化 PR~~**（P2, S）— 【2026-10-24 已完成：随 replay 提交 4f4f32a 收编进上游（settings.send_blocked_keywords 字段+wiring SendGuard 换源+test_send_guard_keywords 回归测试随行移植），已推上游 origin/main。每轮重放债消除。】原记录：AUTOlive 的 send_blocked_keywords 分离提回上游 DanmakuListener 收编后永久消除该补丁的每轮重放债。依赖：v0.8.0 同步落地后执行。
 
 ## Deferred Items from /autoplan (2026-10-14) — DanmakuListener v0.8.0 模块更新
 

@@ -53,7 +53,7 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 | `danmaku_listener/config/settings.py` | +`send_blocked_keywords: str = ""` 字段 | 发送屏蔽词独立词表（AUTOlive 8926b9fe，通用需求） | `pytest tests/test_send_guard_keywords.py` |
 | `danmaku_listener/senders/wiring.py` | SendGuard 改用独立 `send_blocked_keywords`（不复用 `bridge._blocked_keywords`） | 同上——短词子串误拦根治 | 同上 |
 
-> 台账首条即词表分离——上游 PR 提回收编后本表该项退役（TODOS.md 2026-10-14 项）。
+> 台账首条即词表分离——**已随 2026-10-24 replay 收编进上游（4f4f32a）**，本表该项可退役（TODOS.md 2026-10-14 项闭环）。
 
 ## 手动重登（v0.8.0 会话刷新编排，2026-10-14）
 
@@ -176,9 +176,10 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 
 ## danmaku_listener 受管副本补丁台账——礼物计价元口径批次（2026-10-22）
 
-> **本副本自 2026-10-22 起为礼物计价的临时事实源**（至上游 replay 完成为止）。
-> 下次从 D:\AI\DanmakuListener 同步受管副本前，**必须先**将本批变更 replay 至上游
-> （native CEO F3 截止条件），否则同步将冲掉元口径成果。
+> **✅ replay 已完成（2026-10-24，上游提交 4f4f32a+749768c，已推 origin/main）**——
+> 临时事实源状态解除。下次从 D:\AI\DanmakuListener 同步受管副本**不再有冲掉风险**
+> （元口径/词表分离已是上游代码）。上游旧断言已同步更新至元口径
+> （test_bilibili_protocol 5.0 总价/test_wechat_channels 0.1×2 表价）。
 
 | # | 文件 | 变更 | 原因 |
 |---|---|---|---|
