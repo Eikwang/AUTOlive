@@ -29,6 +29,33 @@ class TestConfig:
         config = Config(temp_config_file)
         assert config.config is not None
         assert config.config == sample_config
+
+    def test_constructor_noop_then_reload_reads_disk(self, tmp_path):
+        """2026-10-24 实测修复回归：构造函数类级缓存 no-op 语义锁定 +
+        Config.reload 真读盘。
+
+        缺陷现场：UI 改键落盘后主系统进程 Config(path) 构造永不重读——
+        页面测试链 edge_tts.rate 恒为启动快照（语速设置无效恒 +0% 根因）。
+        """
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"edge_tts": {"rate": "+10%"}}), encoding="utf-8")
+        try:
+            first = Config(str(cfg_file))
+            assert first.get("edge_tts", "rate") == "+10%"
+            # 磁盘变更后：构造 no-op（类级缓存现状锁定），reload 真读盘
+            cfg_file.write_text(json.dumps({"edge_tts": {"rate": "+30%"}}), encoding="utf-8")
+            second = Config(str(cfg_file))
+            assert second.get("edge_tts", "rate") == "+10%"
+            assert Config.reload(str(cfg_file)) is True
+            # 类缓存刷新后所有实例（含旧实例）可见新值
+            assert first.get("edge_tts", "rate") == "+30%"
+            assert second.get("edge_tts", "rate") == "+30%"
+        finally:
+            # 类级缓存进程全局——复位防污染后续测试（同 setup_method 口径）
+            Config.config = None
+            Config._config_path = None
+            Config._is_multi_file = False
+            Config._config_files = []
     
     def test_init_with_invalid_file(self, tmp_path):
         """Test initialization with invalid file"""

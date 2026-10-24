@@ -90,14 +90,18 @@ def speed_to_edge_rate(speed: float) -> str:
     """speed_factor 倍率 → edge-tts rate 百分比字符串（P26 映射，edge_rate_to_speed 逆变换）。
 
     1.2 → "+20%"，0.9 → "-10%"，1.0 → "+0%"（edge-tts 合法形式，等同不变速）。
+    2026-10-24 实测修复：百分比整数化——edge-tts 7.3.1 校验 ^[+-]\\d+%$，
+    随机语速因子的小数（1.0788 → "+7.88%"）被拒 "Invalid rate"（实证：
+    +7.88% REJECT，+8% OK），弹幕链合成全灭。
     """
     try:
         s = float(speed)
     except (TypeError, ValueError):
         s = 1.0
     percent = (s - 1.0) * 100.0
-    sign = "+" if percent >= 0 else "-"
-    return f"{sign}{round(abs(percent), 2):g}%"
+    value = round(abs(percent))
+    sign = "+" if (percent >= 0 or value == 0) else "-"
+    return f"{sign}{value}%"
 
 
 def clamp_speed_factor(speed, log_bad=None) -> float:
@@ -126,12 +130,16 @@ def speed_to_edge_pitch(speed: float) -> str:
     设计公式：pitch_hz = (factor - 1) * 50，即 +1.2 倍语速 → "+10Hz"、
     0.9 倍 → "-5Hz"；可调范围 ±50Hz，越界截断（义务 R2-A2）。
     1.0（不变速）→ "+0Hz"（edge-tts 合法形式，等效不调）。
+    2026-10-24 实测修复：Hz 整数化（同 speed_to_edge_rate——edge-tts 7.3.1
+    拒收小数，实证 "+7.88Hz" REJECT）；原 "-37.5Hz" 类输出在 pitch 联动
+    随机语速下即崩点形态。
     """
     s = clamp_speed_factor(speed)
     hz = (s - 1.0) * 50.0
     hz = max(-50.0, min(50.0, hz))
-    sign = "+" if hz >= 0 else "-"
-    return f"{sign}{round(abs(hz), 2):g}Hz"
+    value = round(abs(hz))
+    sign = "+" if (hz >= 0 or value == 0) else "-"
+    return f"{sign}{value}Hz"
 
 
 def normalize_edge_rate(rate) -> Optional[str]:
@@ -140,8 +148,10 @@ def normalize_edge_rate(rate) -> Optional[str]:
     edge-tts 7.x 要求带符号增量（"+0%"/"+20%"/"-10%"），裸 "100%" 会抛
     Invalid rate。UI 语义是"语速百分比"（100%=基准），与 edge-tts 的
     "相对增量"语义差 100：裸值 X% 先换算 speed=X/100 再映射增量
-    （"120%"→"+20%"，"90%"→"-10%"）；带符号值原样返回（已是原生语义）。
-    无效输入返回 None（调用方落默认值）。
+    （"120%"→"+20%"，"90%"→"-10%"）。
+    2026-10-24 实测修复：带符号值不再原样透传——解析后整数化重出
+    （"+7.88%"→"+8%"，edge-tts 7.3.1 只收整数百分比）；无法解析（含无
+    % 号裸值如 "+20"）返回 None（调用方落默认值）。
     """
     if rate is None:
         return None
@@ -149,7 +159,10 @@ def normalize_edge_rate(rate) -> Optional[str]:
     if not r:
         return None
     if r[0] in "+-":
-        return r
+        m = re.fullmatch(r"([+-])(\d+(?:\.\d+)?)\s*%", r)
+        if not m:
+            return None
+        return f"{m.group(1)}{round(float(m.group(2)))}%"
     try:
         s = float(r.rstrip("%")) / 100.0
     except ValueError:

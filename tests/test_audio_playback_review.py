@@ -14,6 +14,7 @@
 """
 
 import asyncio
+import json
 import threading
 import types
 
@@ -220,7 +221,7 @@ class TestSpeedClampAndPitch:
 
     def test_pitch_clamped_to_50hz(self):
         assert speed_to_edge_pitch(3.0) == "+50Hz"   # (3-1)*50=100 → 截断
-        assert speed_to_edge_pitch(0.25) == "-37.5Hz"
+        assert speed_to_edge_pitch(0.25) == "-38Hz"  # 原 -37.5Hz（小数）即 edge-tts 崩点形态，整数化后 -38
 
     def test_rate_roundtrip_unchanged(self):
         """P26 既有映射不回归"""
@@ -717,3 +718,56 @@ class TestPlayIntervalResolve:
             ("play_audio", "play_interval_max"): "inf",
         })
         assert _resolve_play_interval(cfg) == (0.3, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# edge-tts rate/pitch 整数化 + reload 真读盘（2026-10-24 实测修复）
+# ---------------------------------------------------------------------------
+
+class TestEdgeTtsIntegerEmission:
+    """edge-tts 7.3.1 校验 ^[+-]\\d+%$ / Hz（实证 +7.88% REJECT、+8% OK；
+    "+7.88Hz" REJECT）——随机语速因子的小数必须整数化，否则弹幕链合成全灭
+    （"Invalid rate '+7.88%'"）。pitch 联动同源（speed_to_edge_pitch），一并锁定。
+    """
+
+    def test_random_speed_factor_emits_integer_rate(self):
+        assert speed_to_edge_rate(1.0788) == "+8%"
+        assert speed_to_edge_rate(0.938) == "-6%"
+
+    def test_pitch_emits_integer_hz(self):
+        assert speed_to_edge_pitch(1.0788) == "+4Hz"   # (1.0788-1)*50=3.94 → 4
+
+    def test_pitch_clamp_boundary_still_integer(self):
+        assert speed_to_edge_pitch(0.25) == "-38Hz"    # 原 -37.5Hz 即崩点形态
+        assert speed_to_edge_pitch(4.0) == "+50Hz"
+
+
+class TestUtilsMixinReloadReadsDisk:
+    """2026-10-24 实测修复：reload_config 必须真读盘。
+
+    缺陷现场：utils/config.py Config 构造在类级缓存非 None 时 no-op——
+    UI 改 edge_tts.rate 落盘后，页面测试链的"重载配置"仍读启动快照，
+    语速恒为默认 +0%（无论用户怎么设置都无效的根因）。
+    """
+
+    def test_reload_config_sees_disk_changes(self, tmp_path, monkeypatch):
+        import utils.audio.utils_manager as um
+        # MY_TTS 换轻量替身（避免拖起 SSL/Common 全量构造；真 Config 参与断言）
+        monkeypatch.setattr(um, "MY_TTS", lambda path: types.SimpleNamespace(config=um.Config(path)))
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"edge_tts": {"rate": "+10%"}}), encoding="utf-8")
+        u = object.__new__(um.UtilsMixin)
+        try:
+            u.reload_config(str(cfg_file))
+            assert u.config.get("edge_tts", "rate") == "+10%"
+            assert u.my_tts.config.get("edge_tts", "rate") == "+10%"
+            # 磁盘变更后再 reload——必须看到新值（修复前恒旧快照）
+            cfg_file.write_text(json.dumps({"edge_tts": {"rate": "+30%"}}), encoding="utf-8")
+            u.reload_config(str(cfg_file))
+            assert u.config.get("edge_tts", "rate") == "+30%"
+        finally:
+            # 类级缓存进程全局——复位防污染后续测试（同 test_config setup_method 口径）
+            um.Config.config = None
+            um.Config._config_path = None
+            um.Config._is_multi_file = False
+            um.Config._config_files = []

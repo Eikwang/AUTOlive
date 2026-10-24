@@ -13,7 +13,14 @@ class UtilsMixin:
     """音频工具Mixin类"""
     
     def reload_config(self, config_path):
-        """重载config"""
+        """重载config
+
+        2026-10-24 实测修复：Config(path) 构造在类级缓存非 None 时 no-op
+        （utils/config.py 类缓存语义）——UI 改键落盘后本进程永远读启动快照
+        （页面测试链 edge_tts 语速恒 +0% 根因）。真读盘走 Config.reload
+        （刷新类缓存，全部实例可见）。
+        """
+        Config.reload(config_path)
         self.config = Config(config_path)
         self.my_tts = MY_TTS(config_path)
 

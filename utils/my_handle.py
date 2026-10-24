@@ -308,6 +308,10 @@ class My_handle(metaclass=SingletonMeta):
 
     # 重载config
     def reload_config(self, config_path):
+        # 2026-10-24 实测修复：Config(path) 构造在类级缓存非 None 时 no-op——
+        # 真读盘必须走 Config.reload（刷新类缓存，audio/my_translate 等子组件
+        # 全部可见）；否则 UI 改键落盘后本进程永远读启动快照。
+        Config.reload(config_path)
         My_handle.config = Config(config_path)
         My_handle.audio.reload_config(config_path)
         My_handle.my_translate.reload_config(config_path)

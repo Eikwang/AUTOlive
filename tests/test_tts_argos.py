@@ -25,7 +25,7 @@ import pytest
 from utils.audio_handle.tts_params import (
     EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_VOICES,
     build_inproc_refs, edge_rate_to_speed, filter_edge_voices,
-    normalize_ref_paths, parse_edge_extra_args, speed_to_edge_rate)
+    normalize_edge_rate, normalize_ref_paths, parse_edge_extra_args, speed_to_edge_rate)
 from utils import translate_argos
 
 
@@ -54,6 +54,25 @@ class TestEdgeRateSpeedMapping:
         # 往返一致性
         for speed in (0.5, 0.8, 1.0, 1.3, 2.0):
             assert edge_rate_to_speed(speed_to_edge_rate(speed)) == pytest.approx(speed)
+
+    def test_speed_to_rate_integer_emission(self):
+        """2026-10-24 实测修复：edge-tts 7.3.1 校验 ^[+-]\\d+%$，小数百分比被拒
+        （实证 +7.88% → Invalid rate，+8% OK）——随机语速 1.0788 必须产出整数形式"""
+        assert speed_to_edge_rate(1.0788) == "+8%"
+        assert speed_to_edge_rate(0.938) == "-6%"
+        for speed in (0.25, 0.5, 0.8, 1.0, 1.0788, 1.3, 2.0, 4.0):
+            rate = speed_to_edge_rate(speed)
+            assert rate.endswith("%") and "." not in rate, rate
+
+    def test_normalize_edge_rate_signed_normalization(self):
+        """2026-10-24 实测修复：带符号值解析+整数化（原样透传会让手填小数直抵
+        edge-tts 校验崩掉）；无法解析（含无 % 号裸值）返回 None 落默认"""
+        assert normalize_edge_rate("110%") == "+10%"
+        assert normalize_edge_rate("+20%") == "+20%"
+        assert normalize_edge_rate("+7.88%") == "+8%"
+        assert normalize_edge_rate("-10%") == "-10%"
+        assert normalize_edge_rate("+20") is None
+        assert normalize_edge_rate("abc") is None
 
 
 # ---------- edge-tts voice 清单过滤 ----------
