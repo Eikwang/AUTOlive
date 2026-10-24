@@ -23,29 +23,39 @@ class UtilsHandler:
         """
         self.my_handle = my_handle
     
-    def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str):
+    def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str, content_type: str = "answer"):
         """
         回传给webui，用于聊天内容显示
-        
+
         Args:
             data_type (str): 数据内容的类型（多指LLM）
             data (dict): 数据JSON
             resp_content (str): 显示的聊天内容的文本
+            content_type (str): question=用户输入 / answer=系统回复
+
+        UI-16 二轮验收（任务 14 语义修正）：聊天记录只显示聊天功能互动
+        （语音对话 chat_source=voice / 聊天框发送 chat_source=chatbox），
+        弹幕监听链（无标记）在此网关丢弃。标记由 /send（chatbox）与
+        conversation_manager（voice）入口打点，经 data 自然透传到本处。
         """
         try:
-            if self.my_handle.config.get("talk", "show_chat_log") == True: 
+            if self.my_handle.config.get("talk", "show_chat_log") == True:
+                chat_source = (data or {}).get("chat_source", "")
+                if chat_source not in ("voice", "chatbox"):
+                    return  # 弹幕监听等非聊天互动来源不进聊天记录
                 if "ori_username" not in data:
                     data["ori_username"] = data["username"]
                 if "ori_content" not in data:
                     data["ori_content"] = data["content"]
-                    
+
                 # 返回给webui的数据
                 return_webui_json = {
                     "type": "llm",
                     "data": {
                         "type": data_type,
-                        "username": data["ori_username"], 
-                        "content_type": "answer",
+                        "chat_source": chat_source,
+                        "username": data["ori_username"],
+                        "content_type": content_type,
                         "content": f"错误：{data_type}无返回，请查看日志" if resp_content is None else resp_content,
                         "timestamp": self.my_handle.common.get_bj_time(0)
                     }

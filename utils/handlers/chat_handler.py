@@ -262,11 +262,14 @@ class ChatHandler:
                 if "user_face" not in data:
                     data["user_face"] = 'https://robohash.org/ui'
 
-                # 返回给webui的数据
+                # UI-16 二轮验收（任务 14 语义修正）：本链=语音对话（talk），输入侧
+                # 发送 type 字面改「语音对话」（原误导性「弹幕信息」），chat_source
+                # 透传（webui /callback 白名单：仅 voice/chatbox 进聊天记录）
                 return_webui_json = {
                     "type": "llm",
                     "data": {
-                        "type": "弹幕信息",
+                        "type": "语音对话",
+                        "chat_source": data.get("chat_source", "voice"),
                         "username": data["ori_username"],
                         "user_face": data["user_face"],
                         "content_type": "question",
@@ -397,6 +400,13 @@ class ChatHandler:
             }
 
             self.my_handle.audio_synthesis_handle(message)
+
+            # UI-16 二轮验收（任务 14 语义修正）：语音对话的回复侧补发聊天记录
+            # （上游缺失——只有输入侧 question，无 answer，记录只有半边）
+            if self.my_handle.config.get("talk", "show_chat_log"):
+                self.my_handle.webui_show_chat_log_callback(
+                    "语音对话", dict(data, chat_source=data.get("chat_source", "voice")),
+                    resp_content, content_type="answer")
 
             return message
         except Exception as e:

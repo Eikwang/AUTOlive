@@ -1023,7 +1023,10 @@ class AutoliveApp:
                 data_json = await request.json()
                 logger.info(f'WEBUI API callback接口收到数据：{data_json}')
                 payload = (data_json or {}).get("data") or {}
-                if payload:
+                # UI-16 二轮验收（任务 14 语义修正）：白名单——聊天记录只收聊天
+                # 功能互动（voice=语音对话/chatbox=聊天框发送），弹幕链等其余
+                # 来源（无标记/点歌/积分/本地问答的弹幕触发路径）在此丢弃
+                if payload and payload.get("chat_source") in ("voice", "chatbox"):
                     from frontend.utils.chat_log_buffer import append_chat
                     append_chat(payload)
                 return {"code": 200, "message": "成功"}

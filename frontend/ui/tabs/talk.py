@@ -56,7 +56,8 @@ def create_talk_tab(
                     'font-size: var(--font-size-assist, 12px); color: var(--text-hint);')
             for _entry in entries:
                 _tag = {'question': '问', 'answer': '答'}.get(_entry.get('content_type'), '聊')
-                ui.label(f"[{_entry.get('timestamp', '')}] [{_entry.get('type', '')}] "
+                _src_label = {'voice': '语音', 'chatbox': '聊天框'}.get(_entry.get('chat_source'), '')
+                ui.label(f"[{_entry.get('timestamp', '')}] [{_src_label or _entry.get('type', '')}] "
                          f"{_entry.get('username', '')}（{_tag}）：{_entry.get('content', '')}").style(
                     'font-size: var(--font-size-small, 12px); color: var(--text-body); '
                     'word-break: break-all; white-space: pre-wrap; width:100%;')

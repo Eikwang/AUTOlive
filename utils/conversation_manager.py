@@ -62,9 +62,12 @@ class ConversationManager:
         try:
             # 处理聊天内容：走 talk 通道（chat_handler.talk_handle 聊天处理链），
             # 传与弹幕路径同构的 dict——此前传 (content, "comment") 会让 str 进入
-            # comment_handle 的 data["username"] 索引（T4/ENG H-2）
+            # comment_handle 的 data["username"] 索引（T4/ENG H-2）。
+            # UI-16 二轮验收（任务 14 语义修正）：chat_source=voice 来源标记，
+            # 聊天记录只显示聊天功能互动（语音对话+聊天框发送）
             self.my_handle.process_data(
-                {"username": self.config.get("talk", "username"), "content": content},
+                {"username": self.config.get("talk", "username"), "content": content,
+                 "chat_source": "voice"},
                 "talk",
             )
             return {"success": True, "awake_result": awake_result}

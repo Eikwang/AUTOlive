@@ -23,6 +23,7 @@ def append_chat(entry: Dict) -> None:
         return
     _BUFFER.append({
         "type": str(entry.get("type") or ""),
+        "chat_source": str(entry.get("chat_source") or ""),
         "username": str(entry.get("username") or ""),
         "content_type": str(entry.get("content_type") or ""),
         "content": str(entry.get("content") or ""),

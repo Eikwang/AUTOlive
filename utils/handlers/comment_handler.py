@@ -230,6 +230,18 @@ class CommentHandler:
             # 输出当前用户发送的弹幕消息
             logger.info(f"[{username}]: {content}")
 
+            # UI-16 二轮验收（任务 14 语义修正）：聊天框发送（chat_source=chatbox，
+            # web_server /send 打标）进聊天记录；弹幕监听源无标记不显示。
+            # 输入侧 question + 回复侧 answer 成对发送（下方回复段）
+            _is_chatbox = data.get("chat_source") == "chatbox"
+            if _is_chatbox and self.my_handle.config.get("talk", "show_chat_log"):
+                if "ori_username" not in data:
+                    data["ori_username"] = data["username"]
+                if "ori_content" not in data:
+                    data["ori_content"] = data["content"]
+                self.my_handle.webui_show_chat_log_callback(
+                    "聊天发送", data, data["ori_content"], content_type="question")
+
             # 用户名以及弹幕违禁判断
             username = self.prohibitions_handle(username)
             if username is None:
@@ -382,5 +394,11 @@ class CommentHandler:
             }
 
             self.my_handle.audio_synthesis_handle(message)
+
+            # UI-16 二轮验收（任务 14 语义修正）：聊天框发送的回复侧 answer
+            # （输入侧 question 在本函数头部 chatbox 标记处；弹幕源不发送）
+            if _is_chatbox and self.my_handle.config.get("talk", "show_chat_log"):
+                self.my_handle.webui_show_chat_log_callback(
+                    "聊天发送", data, resp_content, content_type="answer")
         except Exception as e:
             logger.error(traceback.format_exc())

@@ -226,6 +226,10 @@ class WebServer:
                 if data_json["type"] in ["reread", "reread_top_priority"]:
                     self.my_handle.reread_handle(data_json, type=data_json["type"])
                 elif data_json["type"] == "comment":
+                    # UI-16 二轮验收（任务 14 语义修正）：聊天框发送来源标记——
+                    # 聊天记录只显示聊天功能互动（chat_source=voice/chatbox），
+                    # 弹幕监听链无此标记不进聊天记录
+                    data_json["chat_source"] = "chatbox"
                     self.my_handle.process_data(data_json, "comment")
                 elif data_json["type"] == "tuning":
                     self.my_handle.tuning_handle(data_json)

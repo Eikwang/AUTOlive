@@ -376,6 +376,28 @@ class TestRound2Fixes:
         assert 'from frontend.utils.chat_log_buffer import snapshot' in talk_src
         assert 'ui.timer(2.0, _refresh_chat_log)' in talk_src
 
+    def test_chat_log_semantics_chat_only(self):
+        """任务 14 语义修正：聊天记录只收聊天功能互动（voice/chatbox），
+        弹幕监听链（无 chat_source 标记）在 core 网关与 webui 白名单双层过滤。"""
+        ws = _src("utils/web_server.py")
+        assert ws.count('data_json["chat_source"] = "chatbox"') == 1  # 聊天框发送打标
+        conv = _src("utils/conversation_manager.py")
+        assert '"chat_source": "voice"' in conv  # 语音对话打标
+        uh = _src("utils/handlers/utils_handler.py")
+        assert 'chat_source not in ("voice", "chatbox")' in uh  # core 网关白名单
+        assert 'return  # 弹幕监听等非聊天互动来源不进聊天记录' in uh
+        fm = _src("frontend/main.py")
+        assert 'payload.get("chat_source") in ("voice", "chatbox")' in fm  # webui 白名单
+        # 发送对：语音输入 question（talk_handle）+语音回复 answer（补发）
+        chat = _src("utils/handlers/chat_handler.py")
+        assert '"type": "语音对话"' in chat  # 原误导性「弹幕信息」type 改正
+        assert chat.count('content_type="answer"') == 1  # 回复侧补发
+        # 聊天框：输入 question+回复 answer 成对（comment_handler chatbox 标记处）
+        cm = _src("utils/handlers/comment_handler.py")
+        assert 'content_type="question"' in cm
+        assert 'content_type="answer"' in cm
+        assert cm.count('_is_chatbox') >= 3  # 标记判定复用（输入+回复）
+
     def test_trends_labels_renamed_and_chatgpt_removed(self):
         """任务 13：随机生成/生成间隔+chatgpt 选项彻底移除。"""
         src = _src("frontend/ui/tabs/trends_copywriting.py")
