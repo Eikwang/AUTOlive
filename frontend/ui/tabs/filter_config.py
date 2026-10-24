@@ -61,3 +61,11 @@ def create_filter_config_tab(
             _auto_save(ui.input(label='违禁词路径', value=get_nested_value(config, "filter", "badwords", "path"), placeholder='本地违禁词数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁词数据路径（你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "path"))
             _auto_save(ui.input(label='违禁拼音路径', value=get_nested_value(config, "filter", "badwords", "bad_pinyin_path"), placeholder='本地违禁拼音数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁拼音数据路径（你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "bad_pinyin_path"))
             _auto_save(ui.input(label='违禁词替换', value=get_nested_value(config, "filter", "badwords", "replace"), placeholder='在不丢弃违禁语句的前提下，将违禁词替换成此项的文本').style("width:100%;").tooltip('在不丢弃违禁语句的前提下，将违禁词替换成此项的文本'), keys=("filter", "badwords", "replace"))
+
+        # ---------- 复读触发（T10 同期：reread 节生产端接线——此前无 UI 无默认节，复读死链） ----------
+        with ui.card().style(card_css):
+            ui.label('复读触发')
+            with ui.row().style("align-items:center; gap:16px; flex-wrap:wrap;"):
+                _auto_save(ui.switch('启用复读', value=bool(get_nested_value(config, "reread", "enable"))).style(switch_internal_css).tooltip('启用后，弹幕命中复读词表将触发原文复读（普通=正常队列；最高优先级=999 插队首）'), keys=("reread", "enable"))
+            _auto_save(ui.textarea(label='复读关键词', value=textarea_data_change(get_nested_value(config, "reread", "keywords")), placeholder='命中即触发原文复读（换行分隔）').props('input-style="min-height: 6rem"').style("width:100%;"), keys=("reread", "keywords"), split_lines=True)
+            _auto_save(ui.textarea(label='最高优先级关键词', value=textarea_data_change(get_nested_value(config, "reread", "top_priority_keywords")), placeholder='命中即触发 999 插队首复读（换行分隔）').props('input-style="min-height: 6rem"').style("width:100%;").tooltip('最高优先级：暂停当前播放，复读完续播（A7 时序链路）'), keys=("reread", "top_priority_keywords"), split_lines=True)

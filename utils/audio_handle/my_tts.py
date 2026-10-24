@@ -266,185 +266,52 @@ class MY_TTS:
         backend = (self.config.get("gpt_sovits", "backend") or "inproc")
         if backend == "inproc":
             return await self._gpt_sovits_inproc(data)
-        import base64
-        import mimetypes
-        import websockets
-        import asyncio
-
-        def file_to_data_url(file_path):
-            # 根据文件扩展名确定 MIME 类型
-            mime_type, _ = mimetypes.guess_type(file_path)
-
-            # 读取文件内容
-            with open(file_path, "rb") as file:
-                file_content = file.read()
-
-            # 转换为 Base64 编码
-            base64_encoded_data = base64.b64encode(file_content).decode('utf-8')
-
-            # 构造完整的 Data URL
-            return f"data:{mime_type};base64,{base64_encoded_data}"
-
-               
+        # v2 兜底单通道（TODOS 基础功能 2026-10-22 节 #10 评估落地：inproc 为主后
+        # 旧六分支数据链为死功能——UI 参数卡（v2_api_0821/WebTTS 等）已随切片 3
+        # 退役且 config gpt_sovits 节无任何旧 API 子节存量，data[data["type"]]
+        # 必 KeyError。兜底开关语义保留（inproc 异常逃逸口+回滚通道），数据链随
+        # 键迁移重建：参数源=gpt_sovits.params 白名单（UI 唯一存活参数面）+
+        # data 运行时值，与 _gpt_sovits_inproc 装配同源；上游未白名单化的 v2
+        # 推理参数（top_k/temperature 等）取 v2 api 默认值。
         try:
-            logger.debug(f"data={data}")
-            
-            if data["type"] == "gradio_0322":
-                # gradio_client.predict() 是同步阻塞调用，使用 run_in_executor 避免阻塞事件循环
-                loop = asyncio.get_event_loop()
-                voice_tmp_path = await loop.run_in_executor(
-                    None,
-                    lambda: Client(data["gradio_ip_port"]).predict(
-                        data["content"],	# str  in '需要合成的文本' Textbox component
-                        data["api_0322"]["text_lang"],	# Literal['中文', '英文', '日文', '中英混合', '日英混合', '多语种混合']  in '需要合成的语种' Dropdown component
-                        data["api_0322"]["ref_audio_path"],	# filepath  in '请上传3~10秒内参考音频，超过会报错！' Audio component
-                        data["api_0322"]["prompt_text"],	# str  in '参考音频的文本' Textbox component
-                        data["api_0322"]["prompt_lang"],	# Literal['中文', '英文', '日文', '中英混合', '日英混合', '多语种混合']  in '参考音频的语种' Dropdown component
-                        data["api_0322"]["top_k"],	# float (numeric value between 1 and 100) in 'top_k' Slider component
-                        data["api_0322"]["top_p"],	# float (numeric value between 0 and 1) in 'top_p' Slider component
-                        data["api_0322"]["temperature"],	# float (numeric value between 0 and 1) in 'temperature' Slider component
-                        data["api_0322"]["text_split_method"],	# Literal['不切', '凑四句一切', '凑50字一切', '按中文句号。切', '按英文句号.切', '按标点符号切']  in '怎么切' Radio component
-                        int(data["api_0322"]["batch_size"]),	# float (numeric value between 1 and 200) in 'batch_size' Slider component
-                        float(data["api_0322"]["speed_factor"]),	# float (numeric value between 0.25 and 4) in 'speed_factor' Slider component
-                        data["api_0322"]["split_bucket"],	# bool  in '开启无参考文本模式。不填参考文本亦相当于开启。' Checkbox component
-                        data["api_0322"]["return_fragment"],	# bool  in '数据分桶(可能会降低一点计算量,选就对了)' Checkbox component
-                        data["api_0322"]["fragment_interval"],	# float (numeric value between 0.01 and 1) in '分段间隔(秒)' Slider component
-                        api_name="/inference"
-                    )
-                )
-                if voice_tmp_path:
-                    new_file_path = self.common.move_file(voice_tmp_path, os.path.join(self.audio_out_path, 'gpt_sovits_' + self.common.get_bj_time(4)), 'gpt_sovits_' + self.common.get_bj_time(4))
-
-                return new_file_path
-            elif data["type"] == "api":
-                try:
-                    data_json = {
-                        "refer_wav_path": data["ref_audio_path"],
-                        "prompt_text": data["prompt_text"],
-                        "prompt_language": data["prompt_language"],
-                        "text": data["content"],
-                        "text_language": data["language"]
-                    }
-                                        
-                    return await self.download_audio("gpt_sovits", data["api_ip_port"], self.timeout, "post", None, data_json)
-                except aiohttp.ClientError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits请求失败: {e}')
-                except Exception as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits未知错误: {e}')
-            elif data["type"] == "api_0322":
-                try:
-
-                    data_json = {
-                        "text": data["content"],
-                        "text_lang": data["api_0322"]["text_lang"],
-                        "ref_audio_path": data["api_0322"]["ref_audio_path"],
-                        "prompt_text": data["api_0322"]["prompt_text"],
-                        "prompt_lang": data["api_0322"]["prompt_lang"],
-                        "top_k": data["api_0322"]["top_k"],
-                        "top_p": data["api_0322"]["top_p"],
-                        "temperature": data["api_0322"]["temperature"],
-                        "text_split_method": data["api_0322"]["text_split_method"],
-                        "batch_size":int(data["api_0322"]["batch_size"]),
-                        "speed_factor":float(data["api_0322"]["speed_factor"]),
-                        "split_bucket":data["api_0322"]["split_bucket"],
-                        "return_fragment":data["api_0322"]["return_fragment"],
-                        "fragment_interval":data["api_0322"]["fragment_interval"],
-                    }
-                                        
-                    return await self.download_audio("gpt_sovits", data["api_ip_port"], self.timeout, "post", None, data_json)
-                except aiohttp.ClientError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits请求失败: {e}')
-                except Exception as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits未知错误: {e}')
-            elif data["type"] == "api_0706":
-                try:
-
-                    data_json = {
-                        "text": data["content"],
-                        "refer_wav_path": data["api_0706"]["refer_wav_path"],
-                        "text_language": data["api_0706"]["text_language"],
-                        "prompt_text": data["api_0706"]["prompt_text"],
-                        "prompt_language": data["api_0706"]["prompt_language"],
-                        "cut_punc": data["api_0706"]["cut_punc"],
-                    }
-                                        
-                    return await self.download_audio("gpt_sovits", data["api_ip_port"], self.timeout, "post", None, data_json)
-                except aiohttp.ClientError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits请求失败: {e}')
-                except Exception as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits未知错误: {e}')
-            elif data["type"] == "v2_api_0821":
-                try:
-                    data_json = {
-                        "text": data["content"],
-                        "text_lang": data[data["type"]]["text_lang"],
-                        "ref_audio_path": data[data["type"]]["ref_audio_path"],
-                        "aux_ref_audio_paths": data[data["type"]]["aux_ref_audio_paths"],
-                        "prompt_text": data[data["type"]]["prompt_text"],
-                        "prompt_lang": data[data["type"]]["prompt_lang"],
-                        "top_k": int(data[data["type"]]["top_k"]),
-                        "top_p": float(data[data["type"]]["top_p"]),
-                        "temperature": float(data[data["type"]]["temperature"]),
-                        "text_split_method": data[data["type"]]["text_split_method"],
-                        "batch_size": int(data[data["type"]]["batch_size"]),
-                        "split_bucket": data[data["type"]]["split_bucket"],
-                        "speed_factor": float(data[data["type"]]["speed_factor"]),
-                        "fragment_interval": float(data[data["type"]]["fragment_interval"]),
-                        "seed": int(data[data["type"]]["seed"]),
-                        "media_type": data[data["type"]]["media_type"],
-                        "streaming_mode": data[data["type"]]["streaming_mode"],
-                        "parallel_infer": data[data["type"]]["parallel_infer"],
-                        "repetition_penalty": float(data[data["type"]]["repetition_penalty"]),
-                    }
-
-                    API_URL = urljoin(data["api_ip_port"], '/tts')
-
-                    return await self.download_audio("gpt_sovits", API_URL, self.timeout, "post", None, data_json)
-                except aiohttp.ClientError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits请求失败: {e}')
-                except Exception as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits未知错误: {e}')
-            
-            elif data["type"] == "webtts":
-                try:
-                    # 使用字典推导式构建 params 字典，只包含非空字符串的值
-                    params = {
-                        key: value
-                        for key, value in data["webtts"].items()
-                        if value != ""
-                        if key != "api_ip_port"
-                    }
-
-                    params["speed"] = self.get_random_float(params["speed"])
-                    params["text"] = data["content"]
-
-                    if params["version"] in ["1", "2"]:
-                        return await self.download_audio("gpt_sovits", data["webtts"]["api_ip_port"], self.timeout, "get", params)
-                    elif params["version"] == "1.4":
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(data["webtts"]["api_ip_port"], params=params, timeout=self.timeout) as response:
-                                resp_json = await response.json()
-
-                                url = urljoin(data["webtts"]["api_ip_port"], resp_json['url'])
-
-                                return await self.download_audio("gpt_sovits", url, self.timeout, "get", params)
-                except aiohttp.ClientError as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits请求失败: {e}')
-                except Exception as e:
-                    logger.error(traceback.format_exc())
-                    logger.error(f'gpt_sovits未知错误: {e}')
+            _params = data.get("params") or {}
+            if not _params:
+                # 测试链（audio_synthesis_use_local_config）data 无 params 键——
+                # 直读 config（与 _gpt_sovits_inproc 装配同源，C-1 事实来源）
+                _gs = self.config.get("gpt_sovits") or {}
+                _params = _gs.get("params") or {}
+            try:
+                _speed = float(data.get("speed")) if data.get("speed") is not \
+                    None else float(_params.get("speed_factor", 1.0))
+            except (TypeError, ValueError):
+                _speed = 1.0
+            data_json = {
+                "text": data.get("content", ""),
+                "text_lang": _params.get("text_lang") or data.get("language") or "zh",
+                "ref_audio_path": _params.get("ref_audio_path") or data.get("ref_audio_path", ""),
+                "aux_ref_audio_paths": _params.get("aux_ref_audio_paths") or [],
+                "prompt_text": _params.get("prompt_text") or data.get("prompt_text", ""),
+                "prompt_lang": _params.get("prompt_lang") or data.get("prompt_language", "zh"),
+                "top_k": 15,
+                "top_p": 1.0,
+                "temperature": 1.0,
+                "text_split_method": _params.get("text_split_method") or data.get("cut", "cut3"),
+                "batch_size": 1,
+                "split_bucket": False,
+                "speed_factor": _speed,
+                "fragment_interval": 1.0,
+                "repetition_penalty": 1.35,
+                "media_type": "wav",
+                "streaming_mode": False,
+            }
+            API_URL = urljoin(data.get("api_ip_port", ""), '/tts')
+            return await self.download_audio("gpt_sovits", API_URL, self.timeout, "post", None, data_json)
+        except aiohttp.ClientError as e:
+            logger.error(traceback.format_exc())
+            logger.error(f'gpt_sovits请求失败: {e}')
         except Exception as e:
             logger.error(traceback.format_exc())
-            logger.error(f'gpt_sovits未知错误，请检查您的gpt_sovits推理是否启动/配置是否正确，报错内容: {e}')
-        
+            logger.error(f'gpt_sovits未知错误: {e}')
+
         return None
 

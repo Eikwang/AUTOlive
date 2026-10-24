@@ -23,14 +23,14 @@ class TestSendGuardKeywordSeparation(unittest.TestCase):
         """接收词表内容不再进入发送守卫——含 "sb" 的内容应通过。"""
         guard = SendGuard(Settings(send_enabled_platforms="douyin"),
                           blocked_keywords=[])   # 词表分离后的默认形态（wiring 换源）
-        ok, reason, _ = guard.check("douyin", "481334729111", "usb 测试消息")
+        ok, reason, _ = guard.check("douyin", "uid-douyin-test-01", "usb 测试消息")
         self.assertTrue(ok, f"含 sb 序列的内容被误拦: {reason}")
 
     def test_send_blocked_keywords_still_enforced(self):
         """显式配置的发送屏蔽词仍生效（守卫原语义锁定）。"""
         guard = SendGuard(Settings(send_enabled_platforms="douyin"),
                           blocked_keywords=["违禁词"])
-        ok, reason, _ = guard.check("douyin", "481334729111", "含违禁词的内容")
+        ok, reason, _ = guard.check("douyin", "uid-douyin-test-01", "含违禁词的内容")
         self.assertFalse(ok)
         self.assertEqual(reason, "KEYWORD_BLOCKED")
 

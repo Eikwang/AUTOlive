@@ -5,6 +5,25 @@ AUTOlive 变更日志（Keep a Changelog 格式，随批次更新）。
 
 ## [Unreleased]
 
+### 2026-10-24（第二批：待办收尾批次）
+
+- **reread_top_priority 生产端接线**（TODOS 音频批次节 #1）：弹幕链复读触发段
+  （高优词表→999 暂停-续播/普通词表→原队列，命中不走 LLM）+filter_config 复读触发卡
+  （enable+双词表）+settings reread 节 defaults（此前 config 无此节复读整体死链）+
+  聊天页三按钮接线（发送/直接复读/直接复读-插队首→POST core /send）。守卫 5 项。
+- **LLM 熔断首连败停顿窗口降档**（TODOS 基础功能节 #2）：LLMBreaker 首败双权重
+  （2 次失败即开路，最长停顿 3×超时→2×超时；half-open 探测兜底误开路）。
+- **D-15 首启退役键面告知**（TODOS 基础功能节 #9）：`_RETIRED_CONFIG_KEYS` 四键面
+  扫描→首启 notify+log 一次性告知（标志防重复）。守卫 2 项。
+- **任务 12 长回复切分丢数据根修**（TODOS 音频批次节）：切分段 split_group 组绑定+
+  入队前容量预检 warning+四丢弃/取代点组上下文附注（info→warning，丢段可定位）。
+  守卫 2 项。
+- **v2 backend=api 兜底数据链收敛**（TODOS 基础功能节 #10 评估落地）：死功能实锤
+  （UI 参数卡退役+config 无子节存量）——旧六分支退役为 v2 兜底单通道（params
+  白名单装配，与 inproc 同源）+synthesis_manager 死透传键清理。
+- **gpt_sovits 引擎懒启动评估**（TODOS 基础功能节 #4）：结论=维持无条件启动不实施
+  （显存诉求正解=backend=api 外置；首调 10~60s 延迟不可接受；回收致 TTS 断供窗口）。
+
 ### 2026-10-24
 
 - **T10 语音对话链接通**（46ae0483）：ASR 引擎适配层（`utils/asr_engine.py`，对齐项目既有

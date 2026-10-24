@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 import os
 import random
+import time
 import traceback
 from copy import deepcopy
 from ..my_log import logger
@@ -179,9 +180,28 @@ class SynthesisMixin:
             # 是否语句切分
             if self.config.get("play_audio", "text_split_enable"):
                 sentences = self.common.split_sentences(message['content'])
-                for s in sentences:
+                # 任务 12 根修（TODOS 2026-10-22 音频批次节：UI-16 R7 免责段删除后
+                # 失效模式失去用户可见面）：切分段带组绑定标记（split_group），
+                # 队满丢段时 queue_manager 据此输出组上下文 warning（第几段/共几段），
+                # 丢数据从静默 info 升级为可定位的可见告警；入队前容量预检提前暴露
+                # 丢弃风险（log warning，不打断切分——防丢优先于防提示）。
+                _group_id = f"{message['type']}_{time.time_ns()}"
+                _total = len(sentences)
+                try:
+                    _mq_max = int(self.config.get("filter", "message_queue_max_len"))
+                    _mq_now = len(self.message_queue)
+                    if _total > max(0, _mq_max - _mq_now):
+                        logger.warning(
+                            f"[长回复切分] {message['type']} 共 {_total} 段，消息队列余量 "
+                            f"{max(0, _mq_max - _mq_now)}——超容部分将被丢弃（"
+                            f"filter.message_queue_max_len={_mq_max}）；"
+                            f"fix=调大队列上限或关闭 play_audio.text_split_enable")
+                except Exception:
+                    pass
+                for _seq, s in enumerate(sentences):
                     message_copy = deepcopy(message)  # 创建 message 的副本
                     message_copy["content"] = s  # 修改副本的 content
+                    message_copy["split_group"] = {"id": _group_id, "seq": _seq, "total": _total}
                     logger.debug(f"s={s}")
                     if not self.common.is_all_space_and_punct(s):
                         self.data_priority_insert("等待合成消息", message_copy)  # 将副本放入队列中
@@ -270,21 +290,18 @@ class SynthesisMixin:
                     _lang_code = _need_to_text_lang[_need_lang]
                     language = _lang_code
 
+                # 兜底数据链收敛（TODOS 基础功能节 #10 评估落地）：my_tts.gpt_sovits_api
+                # 旧六分支退役为 v2 单通道（params 装配）——本构造同步清理死键
+                # （type/gradio_ip_port/api_0322/api_0706/v2_api_0821/webtts，UI 侧
+                # 已无参数卡+config 无存量，透传键无消费端）。
                 data = {
-                    "type": _gdata.get("type", "gpt_sovits"),
-                    "gradio_ip_port": _gdata.get("gradio_ip_port", ""),
                     "api_ip_port": _gdata.get("api_ip_port", ""),
-                    "backend": _gdata.get("backend", "inproc"),
                     "params": _params,
                     "ref_audio_path": _gdata.get("ref_audio_path", _params.get("ref_audio_path", "")),
                     "prompt_text": _gdata.get("prompt_text", _params.get("prompt_text", "")),
                     "prompt_language": _gdata.get("prompt_language", _params.get("prompt_lang", "zh")),
                     "language": _lang_code,
                     "cut": _gdata.get("cut", _params.get("text_split_method", "cut3")),
-                    "api_0322": _gdata.get("api_0322", {}),
-                    "api_0706": _gdata.get("api_0706", {}),
-                    "v2_api_0821": _gdata.get("v2_api_0821", {}),
-                    "webtts": _gdata.get("webtts", {}),
                     # P26/A2：运行时语速透传（合成参数变速；None=系统默认）
                     "speed": _random_speed,
                     "content": message["content"]
@@ -411,6 +428,10 @@ class SynthesisMixin:
                 "voice_path": voice_tmp_path,
                 "content": message["content"]
             }
+
+            # 任务 12 根修：切分段组绑定透传（音频队列丢段可见面，queue_manager 消费）
+            if message.get("split_group"):
+                data_json["split_group"] = message["split_group"]
 
             # P26：合成侧已应用语速时随条目透传（playback_manager 据此跳过 pydub 变速）
             if synth_speed is not None:

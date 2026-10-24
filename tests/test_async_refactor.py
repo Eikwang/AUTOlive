@@ -101,10 +101,11 @@ class TestMYTTSAsync(unittest.TestCase):
         """测试 gpt_sovits_api 是异步方法"""
         self.assertIn("async def gpt_sovits_api", self.source)
 
-    def test_gradio_call_wrapped_with_executor(self):
-        """测试 gradio_client.predict() 使用 run_in_executor 避免阻塞"""
-        # 关键：client.predict 应该在 run_in_executor 中调用
-        self.assertIn("run_in_executor", self.source)
+    def test_blocking_call_wrapped(self):
+        """测试阻塞调用被隔离出事件循环（gradio 分支已退役——兜底单通道化，
+        2026-10-24；inproc 合成以 to_thread 承接同语义）"""
+        self.assertNotIn("run_in_executor", self.source)  # gradio 同步调用面已删
+        self.assertIn("asyncio.to_thread", self.source)
 
     def test_no_blocking_sync_http(self):
         """测试没有阻塞的同步 HTTP 调用"""

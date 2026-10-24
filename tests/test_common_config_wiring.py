@@ -76,6 +76,27 @@ class TestLLMBreaker:
             b.record_failure()
         assert b.allow_request() is False, "达阈值后开路，不放行"
 
+    def test_first_failure_double_weight(self):
+        """首败双权重（TODOS 基础功能节 #2 停顿窗口降档）：服务挂起场景
+        首条 60s 超时已是强信号——2 次失败即开路（2+1≥3），最长停顿
+        3×超时 → 2×超时。"""
+        b = LLMBreaker("test")
+        b.record_failure()
+        with b._lock:
+            assert b._consecutive_failures == 2, "首败计 2"
+        assert b.allow_request() is True, "首败尚不开路"
+        b.record_failure()
+        assert b.allow_request() is False, "第 2 次失败（2+1≥3）即开路"
+
+    def test_success_resets_double_weight(self):
+        """恢复后再挂起：重置后新一轮首败同样享受双权重。"""
+        b = LLMBreaker("test")
+        b.record_failure()
+        b.record_success()
+        b.record_failure()
+        with b._lock:
+            assert b._consecutive_failures == 2, "成功复位后首败仍计 2"
+
     def test_half_open_single_probe(self):
         """half-open 仅放行一个探测请求（ENG E-3 原子标志防惊群）。"""
         b = LLMBreaker("test")
@@ -120,7 +141,8 @@ class TestLLMBreaker:
         [t.start() for t in threads]
         [t.join() for t in threads]
         with b._lock:
-            assert b._consecutive_failures == BREAKER_FAILURE_THRESHOLD * 2, "Lock 下计数无丢失"
+            # 首败双权重：恰一个线程从 0 出发计 2，其余各计 1
+            assert b._consecutive_failures == BREAKER_FAILURE_THRESHOLD * 2 + 1, "Lock 下计数无丢失"
 
 
 # ---------- Fastrag_LLM（A1/DX CAP6-1/2/3） ----------

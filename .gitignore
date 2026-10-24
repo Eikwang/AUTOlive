@@ -381,3 +381,6 @@ config.json
 
 # 测试视频素材存档（2026-10-21 批次裁决 uc1a：已移出仓库至 D:/AI/AUTOlive-assets-archive/tests-vodeo/，防同名目录误入库）
 tests/vodeo/
+
+# CodeGraph 本地索引（工具产物，不入库）
+.codegraph/

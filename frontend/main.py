@@ -82,6 +82,18 @@ from frontend.styles.themes import init_theme_manager, get_theme_manager
 from utils.my_log import logger
 from utils.autolive_paths import ensure_config_backup
 
+# D-15（基础功能 2026-10-22 节 #9）：退役配置键面清单（键路径→说明）。
+# 首启扫描存量命中→notify+log 一次性告知，防旧配置静默失效无感知；
+# 迁移/清理职责归 settings._ensure_defaults 各迁移点（此处只做可见面，
+# 不改配置）。visual_body=metahuman_stream 的自动迁移在 _ensure_defaults
+# 有独立 log 告知，不在本清单（迁移后键已不存在）。
+_RETIRED_CONFIG_KEYS: list = [
+    (("metahuman_stream",), "metahuman_stream 配置节已退役（2026-10-22 批次），整节不再读取，可删除"),
+    (("game",), "game 配置节已退役（游戏控制实现已移除，chat_type=game 不可用），可删除"),
+    (("audio_player", "priority_mapping"), "audio_player.priority_mapping 已收敛至 filter.priority_mapping（运行时自动合并迁移），可删除"),
+    (("filter", "lang_filter"), "filter.lang_filter 已退役（语言过滤由顶层 need_lang 键驱动），可删除"),
+]
+
 
 class AutoliveApp:
     """AUTOlive 应用程序类"""
@@ -853,6 +865,37 @@ class AutoliveApp:
 
         # 创建回到顶部按钮
         self._create_scroll_top_button()
+
+        # D-15 首启退役键面告知（延迟至客户端连接后 notify 可达；once=True）
+        ui.timer(2.5, self._notify_retired_config_keys, once=True)
+
+    def _notify_retired_config_keys(self):
+        """D-15 首启退役键面告知（基础功能 2026-10-22 节 #9）：扫描存量退役
+        键→notify+log 一次性告知（标志 retired_keys_notice_shown 防重复）。
+        只做可见面不改配置；notify 失败（无客户端连接）不设标志，下轮启动再试。
+        """
+        try:
+            if get_nested_value(self.config._config, "webui", "retired_keys_notice_shown"):
+                return
+            hits = []
+            for keys, note in _RETIRED_CONFIG_KEYS:
+                node = self.config._config
+                for k in keys:
+                    if not isinstance(node, dict) or k not in node:
+                        node = None
+                        break
+                    node = node[k]
+                if node is not None:
+                    hits.append(f"{'.'.join(keys)}：{note}")
+            if not hits:
+                return
+            msg = "检测到已退役配置键面（不影响运行，可删除）：\n" + "\n".join(hits)
+            logger.warning(msg)
+            ui.notify(position="top", type="warning", message=msg, timeout=10)
+            self.config.set("webui", "retired_keys_notice_shown", True)
+            self.config.save()
+        except Exception as e:
+            logger.debug(f"退役键面告知跳过（下轮启动再试）：{e}")
 
     def _monitor_subprocesses(self):
         """子进程存活监控：main 死亡→running_flag 复位+告警（auto_run 时自动重拉）。

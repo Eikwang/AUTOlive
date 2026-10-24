@@ -126,6 +126,10 @@ class CommentHandler:
             # 遍历语义下对 list 再 .get 会 AttributeError（/send reread 二次断点），
             # 改安全形式。
             keywords = self.my_handle.config.get("reread", "keywords") or []
+            # str/list 双形态（G7 先例；split_lines 归一化前存量可为 str/逗号串）
+            if isinstance(keywords, str):
+                keywords = ([k.strip() for k in keywords.split("\n") if k.strip()]
+                            or [k.strip() for k in keywords.split(",") if k.strip()])
             for keyword in keywords:
                 if keyword in content:
                     logger.info(f"[{username}]触发复读：{content}")
@@ -292,6 +296,26 @@ class CommentHandler:
                     _choreo.on_keyword(content)
             except Exception as _choreo_err:
                 logger.debug(f"动作编排 on_keyword 异常（忽略）：{_choreo_err}")
+
+            # 复读触发（TODOS 2026-10-22 音频批次节 #1 生产端接线：弹幕高优词表命中
+            # → reread_top_priority（999 权重·暂停续播链路）；普通词表命中 → reread。
+            # reread.enable/keywords/top_priority_keywords 配置见 filter_config 复读
+            # 触发卡；reread_handle 内 str/list 双形态兼容。命中即 return（复读内容
+            # 直接进 TTS，不再走 LLM——复读语义=原文重读非二次回答）。
+            _top_kws = self.my_handle.config.get("reread", "top_priority_keywords") or []
+            if isinstance(_top_kws, str):
+                _top_kws = [k.strip() for k in _top_kws.split(",") if k.strip()]
+            for _kw in _top_kws:
+                if _kw and _kw in content:
+                    logger.info(f"[{username}] 触发最高优先级复读（词：{_kw}）：{content}")
+                    return self.reread_handle(data, type="reread_top_priority")
+            _rd_kws = self.my_handle.config.get("reread", "keywords") or []
+            if isinstance(_rd_kws, str):
+                _rd_kws = [k.strip() for k in _rd_kws.split(",") if k.strip()]
+            for _kw in _rd_kws:
+                if _kw and _kw in content:
+                    logger.info(f"[{username}] 触发复读（词：{_kw}）：{content}")
+                    return self.reread_handle(data, type="reread")
 
             # 判断按键映射触发类型
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":

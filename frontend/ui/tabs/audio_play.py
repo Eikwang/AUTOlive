@@ -34,6 +34,15 @@ def _main_api_base(config: Dict[str, Any]) -> str:
     return f"http://{api_ip}:{api_port}"
 
 
+def _interval_number(value, default):
+    """播放间隔 UI 初始值归一化（2026-10-24 实测修复）：存量配置可能为字符串
+    （文本框时代落盘），ui.number 需要 float 初始值；非法值回退默认。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def create_audio_play_tab(
     config: Dict[str, Any],
     theme_config: Dict[str, str],
@@ -63,8 +72,12 @@ def create_audio_play_tab(
             # 单次随机取值；节奏变化（默认值域 0.3~1.0s → 0.3~0.5s）已入发布说明。
             # A4（设计项4）：参数名改为「播放间隔min/max」，新键 play_interval_min/max，
             # 旧键 normal_interval_min/max 读侧一次性兼容（值不丢，旧键保留）。
-            _auto_save(ui.input(label='播放间隔min', value=get_nested_value(config, "play_audio", "play_interval_min", default=get_nested_value(config, "play_audio", "normal_interval_min")), placeholder='每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒').style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_min"))
-            _auto_save(ui.input(label='播放间隔max', value=get_nested_value(config, "play_audio", "play_interval_max", default=get_nested_value(config, "play_audio", "normal_interval_max")), placeholder='每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒').style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_max"))
+            # 数字控件（2026-10-24 实测修复）：ui.input 文本框 e.value 恒为字符串，
+            # 落盘污染数字键（实测 play_interval_max='0.8' → 读侧 TypeError 丢全部
+            # 待播音频）。改 ui.number（e.value 为 float）+ 初始值归一化，重存即把
+            # 存量 str 键修复回数字。
+            _auto_save(ui.number(label='播放间隔min', value=_interval_number(get_nested_value(config, "play_audio", "play_interval_min", default=get_nested_value(config, "play_audio", "normal_interval_min")), 0.3), min=0, step=0.1).style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_min"))
+            _auto_save(ui.number(label='播放间隔max', value=_interval_number(get_nested_value(config, "play_audio", "play_interval_max", default=get_nested_value(config, "play_audio", "normal_interval_max")), 0.5), min=0, step=0.1).style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_max"))
             # UC2a（2026-10-22 终门裁决）：「音频输出路径」用户可配置性移除——out_path
             # 保留为系统内部透明临时目录（TTS 产物落盘必需），不再暴露给用户配置。
             player_select = _auto_save(ui.select(

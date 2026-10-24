@@ -20,8 +20,10 @@ import types
 import pytest
 
 from utils.audio.queue_manager import QueueMixin
+from utils.audio.playback_manager import _resolve_play_interval
 from utils.audio.synthesis_manager import SynthesisMixin
 from utils.audio_handle.tts_params import clamp_speed_factor, speed_to_edge_pitch, speed_to_edge_rate
+from utils.common.time_mixin import TimeMixin
 
 
 # ---------------------------------------------------------------------------
@@ -660,3 +662,58 @@ class TestPrioritySingleSource:
         assert fm["comment"] == 30   # 冲突 → audio_player 值胜
         assert fm["thanks"] == 20    # 独有键迁入
         assert fm["gift"] == 20      # 原有不动
+
+
+# ---------------------------------------------------------------------------
+# 播放间隔读侧归一化（2026-10-24 实测修复）
+# ---------------------------------------------------------------------------
+
+class TestPlayIntervalResolve:
+    """播放间隔新旧键回退 + 读侧类型归一化。
+
+    背景：前端 ui.input 文本框把 play_audio.play_interval_max 落盘为字符串
+    '0.8'，原实现直传 get_random_value 抛 TypeError（float 与 str 比较），
+    出队后的待播条目被 only_play_audio 的 except 吞掉丢弃——合成成功但
+    EDTalk 无推送、本地无声（无口型无声音根因）。
+    """
+
+    def test_wild_corruption_shape_coerced(self):
+        """实测损坏形态：min 新键缺失回退旧键，max 为 UI 文本框字符串"""
+        cfg = _FakeConfig(extra={
+            ("play_audio", "normal_interval_min"): 0.3,
+            ("play_audio", "normal_interval_max"): 0.5,
+            ("play_audio", "play_interval_max"): "0.8",
+        })
+        lo, hi = _resolve_play_interval(cfg)
+        assert lo == 0.3 and hi == 0.8
+        assert isinstance(lo, float) and isinstance(hi, float)
+        # 回归断言：归一化后原崩溃调用可正常取值（修复前此处 TypeError）
+        assert 0.3 <= TimeMixin().get_random_value(lo, hi) <= 0.8
+
+    def test_string_keys_coerced(self):
+        """两个键均为字符串时归一化为 float"""
+        cfg = _FakeConfig(extra={
+            ("play_audio", "play_interval_min"): "0.2",
+            ("play_audio", "play_interval_max"): "1.5",
+        })
+        assert _resolve_play_interval(cfg) == (0.2, 1.5)
+
+    def test_garbage_falls_back_to_defaults(self):
+        """非法值（不可转换）回退默认域 0.3/0.5"""
+        cfg = _FakeConfig(extra={
+            ("play_audio", "play_interval_min"): "abc",
+            ("play_audio", "play_interval_max"): object(),
+        })
+        assert _resolve_play_interval(cfg) == (0.3, 0.5)
+
+    def test_missing_keys_fall_back_to_defaults(self):
+        """新旧键全缺失回退默认域（None 经归一化兜底）"""
+        assert _resolve_play_interval(_FakeConfig()) == (0.3, 0.5)
+
+    def test_non_finite_falls_back(self):
+        """'nan'/'inf' 可 float 转换但非有限值——同样回退默认，防 uniform/sleep 炸"""
+        cfg = _FakeConfig(extra={
+            ("play_audio", "play_interval_min"): "nan",
+            ("play_audio", "play_interval_max"): "inf",
+        })
+        assert _resolve_play_interval(cfg) == (0.3, 0.5)

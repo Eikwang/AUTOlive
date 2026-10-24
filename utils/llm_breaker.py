@@ -59,9 +59,16 @@ class LLMBreaker:
                 f"BREAKER_OPEN 闭合：LLM 通道 {self.channel} 探测成功，恢复正常直连")
 
     def record_failure(self):
-        """请求失败：计数累加，达阈值开路。"""
+        """请求失败：计数累加，达阈值开路。
+
+        首败双权重（TODOS 2026-10-22 基础功能节 #2 停顿窗口降档）：服务挂起
+        场景首条弹幕等满完整超时（60s 级）已是强失败信号——首败计 2 使第 2 条
+        失败即开路，最长停顿从 3×超时 降至 2×超时；偶发抖动误开路的代价由
+        half-open 探测兜底（120s 后自动试连，成功即闭合）。
+        """
         with self._lock:
-            self._consecutive_failures += 1
+            # 首败双权重（锁内读改原子——并发下恰有一个线程从 0 出发，无丢失）
+            self._consecutive_failures += 2 if self._consecutive_failures == 0 else 1
             if self._opened_at != 0.0:
                 # half-open 探测失败：重置开路计时，继续开一个周期（ENG E-3/DX CAP6-7）
                 logger.warning(

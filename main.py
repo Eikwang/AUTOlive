@@ -164,6 +164,32 @@ class MainApplication:
         except Exception:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     
+    def send_chat_message(self, msg_type: str, content: str) -> bool:
+        """聊天页按钮统一发送（T10 同期：复读生产端接线——前端按钮此前无 on_click）。
+
+        POST core /send（webui /send 同构 payload）——reread/reread_top_priority
+        走 reread_handle（999 链路），comment 走弹幕链（chat_source=chatbox）。
+        Returns: 是否成功（失败 notify 由调用方承接）。
+        """
+        import json as _json
+        import urllib.request as _urllib
+        cfg = self.config._config
+        main_api_ip = "127.0.0.1" if cfg.get("api_ip") == "0.0.0.0" else cfg.get("api_ip", "127.0.0.1")
+        main_api_port = cfg.get("api_port", 8000)
+        url = f'http://{main_api_ip}:{main_api_port}/send'
+        payload = {"type": msg_type, "data": {
+            "username": cfg.get("talk", {}).get("username", "主人"),
+            "content": content, "chat_source": "chatbox"}}
+        try:
+            req = _urllib.Request(url, data=_json.dumps(payload).encode('utf-8'),
+                                  headers={'Content-Type': 'application/json'})
+            with _urllib.urlopen(req, timeout=10) as resp:
+                _ = _json.loads(resp.read().decode('utf-8'))
+            return True
+        except Exception as e:
+            logger.error(f"[t10] 发送失败（{msg_type}）：{e}")
+            return False
+
     def _on_start_recording(self):
         """开始录音的回调函数"""
         logger.info("开始录音回调触发")

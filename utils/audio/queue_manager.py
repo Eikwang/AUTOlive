@@ -7,6 +7,19 @@ import traceback
 from ..my_log import logger
 
 
+def _split_group_note(data_json):
+    """切分段组上下文附注（任务 12 根修，TODOS 2026-10-22 音频批次节）：长回复
+    切分段带 split_group 组绑定（synthesis_manager 切分循环注入、put_to_queue
+    透传）——队列取代/丢弃点的 log 附组上下文（第几段/共几段），失效模式恢复
+    可定位可见面；非切分段返回空串。"""
+    sg = data_json.get("split_group") if isinstance(data_json, dict) else None
+    if not isinstance(sg, dict):
+        return ""
+    seq = sg.get("seq")
+    return (f"〔长回复切分段：第 {seq + 1 if isinstance(seq, int) else '?'}/"
+            f"{sg.get('total', '?')} 段〕")
+
+
 class QueueMixin:
     """队列管理Mixin类"""
     
@@ -211,7 +224,8 @@ class QueueMixin:
 
             # 数据队列数据量超长判断，插入位置索引大于最大数，则说明优先级低与队列中已存在数据，丢弃数据
             if insert_position >= int(self.config.get("filter", "message_queue_max_len")):
-                logger.info(f"message_queue 已满，数据丢弃：【{data_json['content']}】")
+                # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
+                logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
                 return {"code": 1, "msg": f"message_queue 已满，数据丢弃：【{data_json['content']}】"}
 
             # 获取线程锁，避免同时操作
@@ -268,7 +282,7 @@ class QueueMixin:
             # 未识别类型：维持既有语义——插队尾，满则丢弃
             if new_data_priority is None:
                 if len(queue) >= max_len:
-                    logger.info(f"voice_tmp_path_queue 已满，音频丢弃（未识别类型）：【{data_json['voice_path']}】")
+                    logger.warning(f"voice_tmp_path_queue 已满，音频丢弃（未识别类型）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                     return {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}
                 with self.voice_tmp_path_queue_lock:
                     _insert_and_notify(len(queue), data_json)
@@ -301,7 +315,7 @@ class QueueMixin:
                     self.voice_tmp_path_queue.insert(last_idx, data_json)  # pop 后组尾左移1，插回原组尾位
                     if self.voice_tmp_path_queue_not_empty_flag:
                         self.voice_tmp_path_queue_not_empty.notify()
-                logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】")
+                logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                 self._maybe_interrupt_999_for(data_json)
                 return {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
 
@@ -326,5 +340,5 @@ class QueueMixin:
                 return {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
 
             # 规则4：满且新权重更低 → 舍弃
-            logger.info(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】")
+            logger.warning(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】{_split_group_note(data_json)}")
             return {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}

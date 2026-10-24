@@ -541,3 +541,133 @@ class TestT10VoiceTalkChain:
         src = _src("frontend/ui/tabs/train_streamer.py")
         assert "stage-btn-selected text-white" in src  # 双保险
         assert "remove='stage-btn-selected stage-btn-unselected text-white'" in src
+
+
+class TestRereadProductionChain:
+    """reread 生产端接线守卫（TODOS 2026-10-22 音频批次节 #1）：弹幕词表→
+    reread/reread_top_priority 生产→999 暂停-续播链路真实触发。"""
+
+    def test_comment_handler_keyword_trigger(self):
+        """comment_handle 弹幕链复读触发段：高优词表→reread_top_priority，
+        普通词表→reread，str/list 双形态（G7 先例）。"""
+        src = _src("utils/handlers/comment_handler.py")
+        assert '_top_kws = self.my_handle.config.get("reread", "top_priority_keywords") or []' in src
+        assert 'return self.reread_handle(data, type="reread_top_priority")' in src
+        assert 'return self.reread_handle(data, type="reread")' in src
+        assert "isinstance(_top_kws, str)" in src
+
+    def test_reread_section_defaults(self):
+        """settings _ensure_defaults：reread 节 defaults（此前 config 无此节，
+        reread_handle 的 enable 恒 None→复读整体死链）。"""
+        from frontend.config.settings import _ensure_defaults
+        src = _src("frontend/config/settings.py")
+        assert 'if "reread" not in cfg:' in src
+        assert '"top_priority_keywords": []' in src
+        # 生产消费语义：reread_handle enable 三参 get 安全形式（A6）
+        ch_src = _src("utils/handlers/comment_handler.py")
+        assert 'self.my_handle.config.get("reread", "enable")' in ch_src
+
+    def test_filter_config_reread_card(self):
+        """filter_config 复读触发卡：enable 开关+两词表 textarea（split_lines）。"""
+        src = _src("frontend/ui/tabs/filter_config.py")
+        assert "复读触发" in src
+        assert 'keys=("reread", "enable")' in src
+        assert 'keys=("reread", "keywords"), split_lines=True' in src
+        assert 'keys=("reread", "top_priority_keywords"), split_lines=True' in src
+
+    def test_talk_three_buttons_wired(self):
+        """talk 页三按钮 on_click 接线（发送/直接复读/直接复读-插队首）。"""
+        src = _src("frontend/ui/tabs/talk.py")
+        assert 'ui.button(\'发送\', on_click=lambda: _send_chat("comment")' in src
+        assert 'ui.button(\'直接复读\', on_click=lambda: _send_chat("reread")' in src
+        assert 'ui.button(\'直接复读-插队首\', on_click=lambda: _send_chat("reread_top_priority")' in src
+
+    def test_main_send_chat_message(self):
+        """main.py send_chat_message：POST core /send（chatbox 打标 payload）。"""
+        src = _src("main.py")
+        assert "def send_chat_message(self, msg_type: str, content: str) -> bool:" in src
+        assert "{main_api_port}/send" in src
+        assert '"chat_source": "chatbox"' in src
+        # layout 透传（app 存在性守卫）
+        layout_src = _src("frontend/ui/layout.py")
+        assert "chat_send_callback=" in layout_src
+        assert "hasattr(self.app, \"send_chat_message\")" in layout_src
+
+
+class TestD15RetiredKeysNotice:
+    """D-15 首启退役键面告知守卫（基础功能 2026-10-22 节 #9）。"""
+
+    def test_retired_keys_listed(self):
+        """退役键面清单：四键面全覆盖（metahuman_stream/game/priority_mapping/lang_filter）。"""
+        src = _src("frontend/main.py")
+        assert "_RETIRED_CONFIG_KEYS" in src
+        assert '("metahuman_stream",)' in src
+        assert '("game",)' in src
+        assert '("audio_player", "priority_mapping")' in src
+        assert '("filter", "lang_filter")' in src
+
+    def test_notice_once_flag(self):
+        """一次性告知：标志键防重复+notify 失败不设标志。"""
+        src = _src("frontend/main.py")
+        assert "retired_keys_notice_shown" in src
+        assert "def _notify_retired_config_keys(self):" in src
+        assert "self.config.set(\"webui\", \"retired_keys_notice_shown\", True)" in src
+        assert "ui.timer(2.5, self._notify_retired_config_keys, once=True)" in src
+
+
+class TestV2FallbackSingleChannel:
+    """backend=api 兜底数据链收敛守卫（TODOS 基础功能节 #10 评估落地）。"""
+
+    def test_dead_branches_removed(self):
+        """六死分支退役：gradio_0322/api/api_0322/api_0706/v2_api_0821/webtts。"""
+        src = _src("utils/audio_handle/my_tts.py")
+        api_src = src[src.find("async def gpt_sovits_api"):]
+        for dead in ('gradio_0322', '"api_0322"', '"api_0706"', '"v2_api_0821"', '"webtts"',
+                     'file_to_data_url', 'import websockets'):
+            assert dead not in api_src, f"死分支残留：{dead}"
+
+    def test_fallback_single_channel_params_sourced(self):
+        """兜底单通道：v2 请求体从 params 白名单+运行时值装配（与 inproc 同源）。"""
+        src = _src("utils/audio_handle/my_tts.py")
+        api_src = src[src.find("async def gpt_sovits_api"):]
+        assert 'urljoin(data.get("api_ip_port", ""), \'/tts\')' in api_src
+        assert '_params.get("text_lang") or data.get("language")' in api_src
+        assert '"speed_factor": _speed' in api_src
+        # 测试链 config 直读兜底（data 无 params 键时）
+        assert 'self.config.get("gpt_sovits") or {}' in api_src
+
+    def test_synthesis_manager_dead_keys_removed(self):
+        """弹幕链 data 构造死键清理（透传键无消费端）。"""
+        src = _src("utils/audio/synthesis_manager.py")
+        assert '"api_0322": _gdata.get("api_0322", {})' not in src
+        assert '"api_0706": _gdata.get("api_0706", {})' not in src
+        assert '"v2_api_0821": _gdata.get("v2_api_0821", {})' not in src
+        assert '"webtts": _gdata.get("webtts", {})' not in src
+        assert '"gradio_ip_port": _gdata.get("gradio_ip_port", "")' not in src
+        # 活键保留
+        assert '"api_ip_port": _gdata.get("api_ip_port", "")' in src
+        assert '"params": _params' in src
+
+
+class TestTask12SplitGroupTrace:
+    """任务 12 根修守卫（TODOS 2026-10-22 音频批次节）：长回复切分段组绑定+
+    丢段可见面恢复（UI-16 R7 免责段删除后失效模式失去用户可见面的欠账）。"""
+
+    def test_split_group_injected(self):
+        """切分循环注入组绑定（id/seq/total）+容量预检。"""
+        src = _src("utils/audio/synthesis_manager.py")
+        assert 'message_copy["split_group"] = {"id": _group_id, "seq": _seq, "total": _total}' in src
+        assert "[长回复切分]" in src  # 容量预检 warning
+        assert "message_queue_max_len" in src
+        # 音频条目组绑定透传（put_to_queue）
+        assert 'data_json["split_group"] = message["split_group"]' in src
+
+    def test_drop_points_annotated(self):
+        """队列取代/丢弃点组附注+丢段 warning 升级。"""
+        src = _src("utils/audio/queue_manager.py")
+        assert "def _split_group_note(data_json):" in src
+        assert '_split_group_note(data_json)' in src
+        # message_queue 丢段：info → warning
+        assert 'logger.warning(f"message_queue 已满，数据丢弃' in src
+        # 音频规则 4 舍弃：info → warning
+        assert 'logger.warning(f"voice_tmp_path_queue 已满，音频丢弃' in src

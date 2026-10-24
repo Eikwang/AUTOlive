@@ -4,7 +4,7 @@
 
 1. **~~F-1a 硬编码色值扫描 lint 守卫~~**（P2, S）— 【2026-10-24 已完成（提交 34fcf86c，已推）：tests/features/test_frontend_style_guards.py ——ast 精确提取样式串（跨行/tooltip 误报消除）+裸色值清零断言+Tailwind 调色类禁用；实测抓到 login.py:56 跨行裸色值并修复（var(--text-title)）。】原记录：本批 3 处暗色适配同病根（serial.py:83 bg-blue-100 硬编码 Tailwind 调色类）。
 2. **~~F-1b 配置参数唯一渲染断言守卫~~**（P2, S）— 【2026-10-24 已完成（提交 34fcf86c，已推）：同文件 TestF1bUniqueBindings——ast 提取 _auto_save 字面量 keys 跨 tab 重复检测+SHARED_BINDING_WHITELIST（edtalk_realtime 三键有意共享）+白名单腐化自检+历史三修复点防回退。摸底修正两误判（var 回退合法/button 默认值非键）。】原记录：本批三个同类 bug（字幕打印双开关/答谢双最低价/动态模板重复条目）=同一参数多处渲染。
-3. **任务 12 丢数据风险根修欠账**（P3, M）— Design 3.3：消息队列长回复文本切分丢数据是真实缺陷（原提示的免责段按用户明令删除后失效模式失去用户可见面）；根修方向=文本切分长度计算改为实际合成时长或分片回执。依赖：无（用户提出队列丢数据问题时优先）。
+3. **~~任务 12 丢数据风险根修欠账~~（已完成 2026-10-24，实施"组绑定+丢段可见面"根修）**— 缺陷机制实锤：play_audio.text_split_enable 切分的长回复 N 段逐条入队，与其它源竞争下队满丢弃（message_queue:213/音频规则 2 取代组首/规则 4 舍弃/未识别丢弃）——UI-16 R7 免责段按用户明令删除后该失效模式失去用户可见面。落地（Design 3.3 原文不可得，按 TODOS 根修方向的可见面分支实施）：①synthesis_manager 切分循环注入 split_group 组绑定（id=type+time_ns/seq/total）+入队前容量预检 warning（段数>余量即告警，fix 指引调大上限或关闭切分）②put_to_queue 组绑定透传音频条目 ③queue_manager 四丢弃/取代点统一 `_split_group_note` 组上下文附注+丢段 log info→warning（第几段/共几段，长回复缺句可定位）。"实际合成时长切分"候选（段长上限强制切分）暂不实施——split_sentences 短句合并已控段长下限，上限场景（无标点超长句）由 TTS 侧 text_split_method 兜底；若实播仍见单段过长再评估。守卫 2 项入 test_ui16_batch.py（TestTask12SplitGroupTrace）。
 
 ## Deferred Items from /autoplan (2026-10-23) — 点歌模式重构批次（R0-R13 义务块，用户预授权直接实施）
 
@@ -39,9 +39,9 @@
 ## Deferred Items from /autoplan (2026-10-22) — 基础功能版块审查与修复批次
 
 1. **WebUI LLM 通道"测试连接"按钮**【2026-10-23 已落地：llm 页 fastrag 卡「测试问答」按钮——POST /query 真实契约试连（四态反馈），health 探测旁】（P3, S）— 配置 fastrag 后故障首见于真实弹幕且只能翻日志（DX native medium）；一次性手动试连（POST /query 或 local_qa_match 试匹配）与 R2-2 方案 a（不轮询）裁决不冲突。依赖：无。
-2. **熔断首连败停顿窗口降档**（P3, S）— 首次 3 连败期间每条弹幕最长阻塞 60s 才降级托底（服务挂起场景直播感知差）；候选=首超时计双次或对已判失败通道降档超时。依赖：T1 熔断落地后评估。
+2. **~~熔断首连败停顿窗口降档~~（已完成 2026-10-24）**— 落地"首超时计双次"候选：LLMBreaker.record_failure 首败双权重（锁内原子，恰一线程从 0 出发）——2 次失败即开路，最长停顿从 3×超时降至 2×超时；偶发抖动误开路由 half-open 120s 探测兜底。测试+2（首败双权重/成功复位后再挂起），并发计数断言同步（THRESHOLD×2+1）。"对已判失败通道降档超时"候选弃置（需跨层透传 timeout 至模型类，S 变 M，收益边际）。
 3. **TTHW 正式度量**（P3, M）— 配置改动→生效验证的自动化度量；与 2026-10-11 O2 DX 埋点项（TODOS DanmakuListener v0.7.0 节）合并推进。依赖：O2。
-4. **gpt_sovits 引擎懒启动评估**（P3, M）— 引擎现为共享资源无条件 inproc 启动（G8 拒绝条件启动的裁决：合成测试页/翻唱/字幕依赖）；懒启动=首次调用拉起/空闲回收，评估显存收益与链路风险。依赖：无。
+4. **~~gpt_sovits 引擎懒启动评估~~（已完成 2026-10-24，评估结论=维持无条件启动，不实施）**— 三条理由：①显存诉求已有更彻底的正解=backend=api 外置模式（AUTOlive 进程零占用+显存天然隔离，懒启动只是"不用时不占"，api 模式全程不占）②首调延迟不可接受——模型加载 10~60s 级，懒启动下直播首条弹幕 TTS 卡死等待或静默失败，与 G8 拒绝条件启动同一逻辑（合成测试页/翻唱/字幕均为无弹幕场景的调用面）③空闲回收引入直播中途 TTS 断供窗口+引擎状态机（loading/ready/red/胶囊区）复杂化，收益不抵风险。若未来显存压力实测成为主要矛盾，优先演进方向=api 外置引导文案（backend=api 一键迁移）而非懒启动。
 5. **fastrag /query 集成冒烟**（P3, S）— Fastrag_LLM 契约经 mock HTTP 单测（no_claim=provider acceptance），真实服务契约漂移靠注释锚定人工核对；补 enable=true 且端口可达时跑一例真实 /query 的可选冒烟。依赖：fastrag 服务实跑环境。
 6. **动态文案页存量 chatgpt llm_type 值展示不生效**【2026-10-23 已处置：存量非 custom_llm 值加载时 ui.notify 警告提示（展示保留+语义明示）】（P3, S）— trends_copywriting.py:33 存量值 'chatgpt' 入 options 展示，但 task_scheduler.py:374 强制回退 custom_llm（ENG 既有债）；前端选项收敛或后端提示。依赖：无。
 
@@ -94,8 +94,8 @@
 ### C 组：批次遗留小项
 
 8. **~~utils/*.backup 文件处置**（P3, S）— 【2026-10-21 已由清理批次 1b 接管（diff 验证通过，删除待用户实测确认，见 2026-10-21 节第 1 条）】删除批后遗留的备份文件清点与删除。 【已删（1b 批次执行完成，git 现状核对）——2026-10-24 台账清洗闭环】
-9. **D-15 首启"更新移除项"告知 UI**（P3, S）— 首次启动告知用户本批移除的模块/键面，避免旧配置静默失效无感知。
-10. **v2 backend=api 兜底数据链退役评估**（P3, S）— inproc 为主后，api 兜底路径的数据链是否随键迁移一并退役评估。
+9. **~~D-15 首启"更新移除项"告知 UI~~（已完成 2026-10-24）**— frontend/main.py 落地 `_RETIRED_CONFIG_KEYS` 退役键面清单（metahuman_stream 节/game 节/audio_player.priority_mapping/filter.lang_filter 四键面）+`_notify_retired_config_keys`（首启 timer 2.5s 扫描存量命中→notify warning+log 一次性告知，标志 webui.retired_keys_notice_shown 防重复；notify 失败不设标志下轮再试）。迁移/清理职责仍归 _ensure_defaults 各迁移点（本项只做可见面）。守卫 2 项入 test_ui16_batch.py（TestD15RetiredKeysNotice）。
+10. **~~v2 backend=api 兜底数据链退役评估~~（已完成 2026-10-24，评估+实施）**— 评估结论：①兜底开关语义保留（inproc 异常逃逸口+回滚通道，my_tts inproc 异常文案已引用）②兜底数据链为死功能实锤——UI 参数卡（v2_api_0821/WebTTS 等）已随切片 3 退役且 config gpt_sovits 节（example+实盘）无任何旧 API 子节存量，backend=api 时 `data[data["type"]]` 必 KeyError 静默失败。随键迁移实施：my_tts.gpt_sovits_api 旧六分支（gradio_0322/api/api_0322/api_0706/v2_api_0821/webtts+file_to_data_url 死函数）退役为 v2 兜底单通道——请求体从 gpt_sovits.params 白名单（UI 唯一存活参数面）+data 运行时值装配（与 _gpt_sovits_inproc 同源，测试链 config 直读兜底）；synthesis_manager 弹幕链 data 构造同步清理死透传键。test_async_refactor gradio executor 断言随语义平移（run_in_executor 退役→to_thread）。守卫 3 项入 test_ui16_batch.py（TestV2FallbackSingleChannel）。
 
 ## Deferred Items from /autoplan (2026-10-15) — EDTalk 全面整合（正式接入批次）
 
@@ -235,5 +235,5 @@
 
 ## Deferred Items from /autoplan (2026-10-22) — 音频播放功能审查批次（CEO/Eng 两阶段收官，待 Phase 4 终门）
 
-1. **reread_top_priority 生产端接线**（P2, M）— 本审查证实 999 权重唯一生产入口 /send 当前 TypeError 500（A6 修复后签名通但 type 语义仍按普通复读处理）；完整接线=弹幕高优词表→reread_top_priority 消息生产→999 暂停-续播链路真实触发（A7 的 E2E 浸泡依赖此）。属复读模块非播放模块，故 Deferred。依赖：A6（T2）+A7（T4）落地后。
+1. **~~reread_top_priority 生产端接线~~（已完成 2026-10-24）**— 三层接线全落：①弹幕链生产（comment_handle 弹幕链加复读触发段：top_priority_keywords 命中→reread_handle(type="reread_top_priority")→999 权重映射→暂停-续播；普通 keywords→type="reread"，命中即 return 不走 LLM；词表 str/list 双形态）②前端 UI（filter_config 新增"复读触发"卡：enable 开关+两词表 textarea split_lines；settings._ensure_defaults 补 reread 节 defaults——此前 config 无此节 enable 恒 None→复读整体死链）③聊天页按钮接线（talk.py 三按钮 on_click→main.py send_chat_message POST core /send，payload chat_source=chatbox；layout 透传 chat_send_callback）。守卫 5 项入 test_ui16_batch.py（TestRereadProductionChain）。999 暂停-续播真实触发待实播浸泡（A7 E2E 依赖项解除）。
 2. **闲时任务清零功能重建评估**【2026-10-23 收口：评估结论=死链确认（/callback 仅日志、wait_play_audio_num 恒 0），移除零损失；未来需要闲时清零语义走进程内直查 get_audio_info，不恢复 HTTP 回调】（P3, S）— info_to_callback 参数移除（A3）后其声称用途"闲时清零"核实为已死链（/callback 端点仅日志、wait_play_audio_num 恒 0 从未写入），移除零功能损失；若未来需要闲时清零语义，应走进程内直查（get_audio_info）而非 HTTP 回调。依赖：无。

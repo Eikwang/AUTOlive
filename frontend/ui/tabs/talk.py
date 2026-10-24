@@ -146,14 +146,27 @@ def create_talk_tab(
         _auto_save(ui.input(label='RATE', value=get_nested_value(config, "talk", "RATE"), placeholder='录音参数').style("width:100%;"), ("talk", "RATE"))
         _auto_save(ui.switch('聊天记录', value=get_nested_value(config, "talk", "show_chat_log")).style(switch_internal_css), ("talk", "show_chat_log"))
 
-    # 聊天框
+    # 聊天框（T10 同期：三按钮接线——此前无 on_click 装饰性按钮，复读/插队链断）
     with ui.grid(columns=1):
         with ui.row():
-            ui.textarea(label='聊天框-和AI对话', value="", placeholder='此处填写对话内容可以直接进行对话').style("width:100%;")
-            ui.button('发送', on_click=chat_send_callback if chat_send_callback else lambda: None, color=button_internal_color).style(button_internal_css).tooltip("发送文本给LLM，模拟弹幕触发操作")
-            ui.button('直接复读', color=button_internal_color).style(button_internal_css).tooltip("发送文本给内部机制，触发TTS 复读类型的消息")
+            chat_input = ui.textarea(label='聊天框-和AI对话', value="", placeholder='此处填写对话内容可以直接进行对话').style("width:100%;")
+
+            def _send_chat(msg_type: str):
+                text = (chat_input.value or "").strip()
+                if not text:
+                    ui.notify('请先在聊天框输入内容', type='warning')
+                    return
+                sent = chat_send_callback(msg_type, text) if chat_send_callback else False
+                if sent:
+                    ui.notify('已发送', type='positive')
+                    chat_input.value = ""
+                else:
+                    ui.notify('发送失败——请确认系统已启动', type='negative')
+
+            ui.button('发送', on_click=lambda: _send_chat("comment"), color=button_internal_color).style(button_internal_css).tooltip("发送文本给LLM，模拟弹幕触发操作")
+            ui.button('直接复读', on_click=lambda: _send_chat("reread"), color=button_internal_color).style(button_internal_css).tooltip("发送文本给内部机制，触发TTS 复读类型的消息")
             ui.button('调教', color=button_internal_color).style(button_internal_css).tooltip("发送文本给LLM，但不会进行TTS等操作")
-            ui.button('直接复读-插队首', color=button_internal_color).style(button_internal_css).tooltip("最高优先级 发送文本给内部机制，触发TTS 直接复读类型的消息")
+            ui.button('直接复读-插队首', on_click=lambda: _send_chat("reread_top_priority"), color=button_internal_color).style(button_internal_css).tooltip("最高优先级 发送文本给内部机制，触发TTS 直接复读类型的消息（999 暂停当前播放，复读完续播）")
 
     # 对话打断
     with ui.expansion('对话打断', icon="settings", value=True).classes('w-2/3'):

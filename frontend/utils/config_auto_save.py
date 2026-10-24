@@ -6,6 +6,26 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from nicegui import ui
 
 
+def _coerce_like(old_value, new_value):
+    """数字保型归一化（2026-10-24 实测修复）：ui.input 的 e.value 恒为字符串，
+    直存 config 会把数字键污染成 str（实测 play_audio.play_interval_max 落盘
+    '0.8'，后端读侧 float/str 比较抛 TypeError，出队待播音频被异常吞掉丢弃
+    ——合成成功但数字人无推送、本地无声）。旧值为 int/float（bool 除外）时
+    把新值转回同型；转换失败保留原值（消费侧归一化兜底）。旧值缺失或为
+    str/list 等非数字形态时不猜类型，原样落盘。
+    """
+    if (
+        isinstance(new_value, str)
+        and isinstance(old_value, (int, float))
+        and not isinstance(old_value, bool)
+    ):
+        try:
+            return type(old_value)(new_value)
+        except (TypeError, ValueError):
+            return new_value
+    return new_value
+
+
 def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_config_callback: Callable = None, tab_key: str = "", split_lines: bool = False):
     """
     为任意UI组件添加自动保存配置的功能
@@ -59,6 +79,16 @@ def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_conf
         # 同样按字符换行——用户实测「每个字符都换行」。
         if split_lines and isinstance(value, str):
             value = [line for line in value.split("\n") if line.strip()]
+        # 数字保型归一化（2026-10-24 实测修复，见 _coerce_like）：以旧值类型为
+        # schema 代理，把文本框字符串新值转回数字同型；旧值缺失/路径异常时
+        # 原样落盘（消费侧归一化兜底），不阻塞保存。
+        try:
+            _node = config
+            for _key in keys[:-1]:
+                _node = _node[_key]
+            value = _coerce_like(_node.get(keys[-1]), value)
+        except (KeyError, TypeError, AttributeError):
+            pass
         cfg = config
         for key in keys[:-1]:
             if key not in cfg:

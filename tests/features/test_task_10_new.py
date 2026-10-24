@@ -123,3 +123,55 @@ class TestConfigAutoSave:
         component.trigger("new_value")
         # Then: 配置中的值更新
         assert config["test_function"]["test_input"] == "new_value"
+
+    def test_auto_save_numeric_coerces_like_old_type(self):
+        """数字保型（2026-10-24 实测修复）：旧值 float 时文本框新值转回 float
+
+        背景：ui.input 的 e.value 恒为字符串，直存 config 把数字键污染成 str
+        （实测 play_audio.play_interval_max 落盘 '0.8'，后端读侧 float/str 比较
+        抛 TypeError 丢弃全部待播音频）。
+        """
+        # Given: 旧值为 float 的配置
+        config = {"test_function": {"test_input": 0.5}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "test_input"))
+        # When: 文本框提交字符串
+        component.trigger("0.8")
+        # Then: 落盘转回 float
+        assert config["test_function"]["test_input"] == 0.8
+        assert isinstance(config["test_function"]["test_input"], float)
+
+    def test_auto_save_int_key_coerces_to_int(self):
+        """旧值 int 时新值转回 int（保型不含 bool——switch 场景另行断言）"""
+        config = {"test_function": {"test_input": 20}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "test_input"))
+        component.trigger("30")
+        assert config["test_function"]["test_input"] == 30
+        assert isinstance(config["test_function"]["test_input"], int)
+
+    def test_auto_save_bool_value_not_coerced(self):
+        """旧值 bool（int 子类）不触发保型——switch 语义保持"""
+        config = {"test_function": {"test_switch": False}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "test_switch"))
+        component.trigger(True)
+        assert config["test_function"]["test_switch"] is True
+
+    def test_auto_save_str_key_kept_as_is(self):
+        """旧值为 str 时不猜类型（数字串可能是合法文本，如编号/口令）"""
+        config = {"test_function": {"test_input": "old"}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "test_input"))
+        component.trigger("123")
+        assert config["test_function"]["test_input"] == "123"
+
+    def test_auto_save_invalid_numeric_kept_raw(self):
+        """转换失败保留原值不阻塞保存（消费侧归一化兜底）"""
+        config = {"test_function": {"test_input": 0.5}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "test_input"))
+        component.trigger("abc")
+        assert config["test_function"]["test_input"] == "abc"
+
+    def test_auto_save_missing_old_key_kept_raw(self):
+        """末级键缺失（首次保存）无旧值定型——原样落盘"""
+        config = {"test_function": {}}
+        component = auto_bind(_FakeComponent(), config, ("test_function", "new_key"))
+        component.trigger("0.8")
+        assert config["test_function"]["new_key"] == "0.8"

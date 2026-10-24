@@ -4,6 +4,7 @@
 
 import asyncio
 import copy
+import math
 import random
 import threading
 import traceback
@@ -15,6 +16,39 @@ from utils.web_captions import get_captions_manager
 # 在役播放器分派值集合（义务 C2/Eng A2：模块级单一事实源——playback_manager
 # 两处分派判断与测试矩阵枚举共用，防字面量共同漂移；audio_player_v2 为活值）
 PLAYER_KEYS = ["audio_player", "audio_player_v2", "builtin"]
+
+
+def _coerce_interval(value, default):
+    """播放间隔读侧类型归一化（2026-10-24 实测修复）。
+
+    前端 ui.input 文本框把数字落盘为字符串（实测 play_audio.play_interval_max
+    ='0.8'），原始值直传 get_random_value 抛 TypeError（float 与 str 比较）——
+    出队后的待播条目被 only_play_audio 的 except 吞掉丢弃：合成成功但 EDTalk
+    无推送、本地无声。str/None/非有限值一律归一化，非法回退 default（对齐
+    builtin _post_play_interval 的 float() 读侧归一化既定模式）。
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(result):
+        return default
+    return result
+
+
+def _resolve_play_interval(config):
+    """A4 新旧键回退 + 读侧类型归一化（2026-10-24 实测修复，见 _coerce_interval）。
+
+    回退链：play_interval_min/max（新键）→ normal_interval_min/max（旧键，
+    A4 一次性兼容）→ 默认 0.3/0.5（config.example.json 默认域）。
+    """
+    interval_min = config.get("play_audio", "play_interval_min")
+    if interval_min is None:
+        interval_min = config.get("play_audio", "normal_interval_min")
+    interval_max = config.get("play_audio", "play_interval_max")
+    if interval_max is None:
+        interval_max = config.get("play_audio", "normal_interval_max")
+    return _coerce_interval(interval_min, 0.3), _coerce_interval(interval_max, 0.5)
 
 
 def _play_backing_local(backing_path: str, volume: float):
@@ -141,12 +175,11 @@ class PlaybackMixin:
                     # A3（设计项3+义务 R2-A3/E5）：interval_num 重复次数参数退役——
                     # 间隔=单次随机取值；默认值域下节奏由 0.3~1.0s 变为 0.3~0.5s
                     # （F-10，已入发布说明与回归声明）。
-                    interval_min = self.config.get("play_audio", "play_interval_min")
-                    if interval_min is None:
-                        interval_min = self.config.get("play_audio", "normal_interval_min")
-                    interval_max = self.config.get("play_audio", "play_interval_max")
-                    if interval_max is None:
-                        interval_max = self.config.get("play_audio", "normal_interval_max")
+                    # 2026-10-24 实测修复：回退后做读侧类型归一化（_resolve_play_interval）
+                    # ——前端文本框落盘字符串（实测 play_interval_max='0.8'）直传比较
+                    # 抛 TypeError，出队条目被下方 except 吞掉丢弃：合成成功但 EDTalk
+                    # 无推送、本地无声（口型与声音全无的根因）。
+                    interval_min, interval_max = _resolve_play_interval(self.config)
                     normal_interval = self.common.get_random_value(interval_min, interval_max)
 
                     # 不仅仅是说话间隔，还是等待文本捕获刷新数据

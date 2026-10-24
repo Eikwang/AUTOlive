@@ -360,6 +360,19 @@ def _ensure_defaults(config: "Settings") -> None:
                 del _read_pt[_old_key]
                 changed = True
 
+    # reread 节默认（T10 同期：复读生产端接线——此前 config 无此节，
+    # reread_handle 的 enable 读取恒 None→复读整体死链）
+    if "reread" not in cfg:
+        cfg["reread"] = {"enable": False, "keywords": [],
+                         "top_priority_keywords": []}
+        changed = True
+    else:
+        _rr = cfg["reread"]
+        for _k, _v in (("enable", False), ("keywords", []), ("top_priority_keywords", [])):
+            if _k not in _rr:
+                _rr[_k] = _v
+                changed = True
+
     # UI-16 二轮验收（任务 10）：答谢三通道（entrance/gift/follow）周期同样
     # 合并为单键 periodic_time（max 回填+旧键退役；local_qa 不动）
     for _th_type in ("entrance", "gift", "follow"):

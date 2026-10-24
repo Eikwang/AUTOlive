@@ -1680,7 +1680,10 @@ class DrawerLayout:
             'llm': lambda: llm.create_llm_tab(self.config, theme_config, set_cb),
             'tts': lambda: tts.create_tts_tab(self.config, theme_config, set_cb),
             'svc': lambda: svc.create_svc_tab(self.config, theme_config, set_cb),
-            'talk': lambda: talk.create_talk_tab(self.config, theme_config, set_cb),
+            'talk': lambda: talk.create_talk_tab(
+                self.config, theme_config, set_cb,
+                chat_send_callback=(lambda msg_type, content: self.app.send_chat_message(msg_type, content))
+                if self.app is not None and hasattr(self.app, "send_chat_message") else None),
             'trends_copywriting': lambda: trends_copywriting.create_trends_copywriting_tab(self.config, theme_config, set_cb),
             # 互动设置
             'integral': lambda: integral.create_integral_tab(self.config, theme_config, set_cb),
