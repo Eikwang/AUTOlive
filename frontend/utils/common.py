@@ -6,6 +6,23 @@ from typing import Any, Dict, List, Optional
 import json
 
 
+def _repair_char_split_text(value: str) -> str:
+    """检测并重组「每行单字符」损坏形态的文本（三轮验收修复）。
+
+    损坏机制（修复前版本，已根治）：旧 textarea_data_change 对 str 按字符迭代
+    生成「每字符一行」的显示文本 → 旧 auto_save 把显示文本原样存回 config →
+    存量值变成「当\\n前\\n时\\n…」形态。str 原样返回修复只防新损坏，对存量
+    损坏值原样显示=依然每字符一行（用户三轮实测截图）。
+
+    判据（保守，防误伤合法文案）：非空行数 >2 且**全部**非空行都只有 1 个
+    字符 → 按序重组为连续字符串；含任一长行即视为合法多行文案原样返回。
+    """
+    lines = [line.strip() for line in value.split("\n") if line.strip()]
+    if len(lines) > 2 and all(len(line) == 1 for line in lines):
+        return "".join(lines)
+    return value
+
+
 def textarea_data_change(data: Optional[List[str]]) -> str:
     """
     字符串数组数据格式转换
@@ -18,12 +35,13 @@ def textarea_data_change(data: Optional[List[str]]) -> str:
 
     UI-16 二轮验收修复：存量配置中该键可能被存为字符串（旧数据/异常保存），
     字符串直接进 for 会按字符迭代——每个字符独占一行（用户实测「每个字符都
-    换行」的根因）。字符串原样返回，非列表非字符串返回空串。
+    换行」的根因）。字符串原样返回（含「每行单字符」损坏形态重组，见
+    _repair_char_split_text），非列表非字符串返回空串。
     """
     if data is None:
         return ""
     if isinstance(data, str):
-        return data
+        return _repair_char_split_text(data)
     if not isinstance(data, (list, tuple)):
         return ""
     tmp_str = ""

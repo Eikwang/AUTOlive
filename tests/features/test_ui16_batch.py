@@ -422,6 +422,22 @@ class TestRound2Fixes:
         _max_pos = src.find("label=" + _sq + "触发次数最大值" + _sq)
         assert -1 < _period_pos < _min_pos < _max_pos
 
+    def test_char_split_damage_repair(self):
+        """三轮验收：存量损坏形态（每行单字符）重组，合法多行文案不受影响。
+        损坏机制=修复前显示文本被 auto_save 原样存回（str 原样返回只防新损坏）。"""
+        from frontend.utils.common import textarea_data_change as tdc
+        nl = chr(10)
+        # 用户截图两例（闲时任务/回复模板）
+        assert tdc("当" + nl + "前" + nl + "时" + nl + "间" + nl + "是") == "当前时间是"
+        assert tdc("回" + nl + "复" + nl + "{" + nl + "u" + nl + "s" + nl + "e" + nl + "r" + nl + "}") == "回复{user}"
+        # 合法多行文案（含长行）原样
+        assert tdc("第一条完整文案" + nl + "第二条完整文案") == "第一条完整文案" + nl + "第二条完整文案"
+        # 单行/两行（不满足 >2 全单字符判据）原样
+        assert tdc("单独一行") == "单独一行"
+        assert tdc("a" + nl + "b") == "a" + nl + "b"
+        # None/空串
+        assert tdc(None) == "" == tdc("")
+
     def test_filter_four_switches_one_row(self):
         """任务 16：四开关同行并列。"""
         src = _src("frontend/ui/tabs/filter_config.py")
