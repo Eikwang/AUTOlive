@@ -472,6 +472,63 @@ class TestRound2Fixes:
         src = _src("frontend/ui/tabs/common_config.py")
         assert '("reply_template", "copywriting"), split_lines=True)' in src
 
+class TestT10VoiceTalkChain:
+    """T10 语音对话链接通守卫（2026-10-24）：采集→ASR→对话链中段补全。"""
+
+    def test_asr_engine_exists_and_dispatch(self):
+        """ASR 适配层：faster_whisper/sensevoice 分派+云端未接入明示。"""
+        from utils.asr_engine import transcribe, _ENGINE_SINGLETON
+        src = _src("utils/asr_engine.py")
+        assert "WhisperModel" in src and "AutoModel" in src
+        assert "本地离线链未接入" in src  # google/baidu 明示而非静默
+        # 失败语义=空串（调用方静默跳过）
+        assert transcribe("", None) == ""
+        assert transcribe("nonexistent.wav", None) == ""
+
+    def test_asr_aligns_project_models(self):
+        """四轮用户澄清：ASR 对齐项目既有实现（apps/gpt-sovits/tools/asr/）——
+        本地模型优先零下载+HF 镜像+混合语言路由（中文检测→FunASR 回退）。"""
+        from utils.asr_engine import _local_fw_model_dir, _funasr_model_paths
+        import os
+        src = _src("utils/asr_engine.py")
+        assert "HF_ENDPOINT" in src and "hf-mirror.com" in src  # 镜像（上游脚本同款）
+        # 本地模型探测：faster-whisper-large-v3-turbo-ct2（项目资产，非配置的 small）
+        fw = _local_fw_model_dir()
+        assert fw and "large-v3-turbo" in os.path.basename(fw)
+        # FunASR zh 路径：paraformer/vad/punc 全部解析到本地目录
+        zh = _funasr_model_paths("zh")
+        for k in ("model", "vad", "punc"):
+            assert os.path.isdir(zh[k]), zh[k]
+        assert "paraformer-large" in zh["model"]
+        # 混合路由：检测为中文 → FunASR 回退（fasterwhisper_asr.py:73-77 同款）
+        assert 'detected == "zh"' in src
+        assert "_transcribe_funasr(wav_path, \"zh\")" in src
+        # 粤语：UniASR 无 VAD（funasr_asr.py 注释——带 VAD 会 shape 报错）
+        yue = _funasr_model_paths("yue")
+        assert yue["vad"] is None and "UniASR" in yue["model"]
+
+    def test_record_audio_flag_mode(self):
+        """录音改标志式（is_recording 控制，input_handler 单击模型对齐）。"""
+        src = _src("utils/audio_processor.py")
+        assert "while self.is_recording:" in src
+        assert "RIGHT_SHIFT" not in src  # 上游按住 Shift 模型退役
+        assert "last_recording_path" in src
+        assert "frames_to_wav" in src  # 连续模式帧转 wav
+
+    def test_stop_recording_wires_asr_to_talk(self):
+        """main.py 停止录音 → ASR → conversation_manager.talk_handle 串接。"""
+        src = _src("main.py")
+        assert "from utils.asr_engine import transcribe" in src
+        assert "self.conversation_manager.talk_handle(text)" in src
+
+    def test_do_listen_filled(self):
+        """连续对话循环填充：VAD→ASR→唤醒→对话链（空框架退役）。"""
+        src = _src("utils/conversation_manager.py")
+        assert "这里需要集成音频处理器的功能" not in src
+        assert "ap.audio_listen(" in src
+        assert "self.check_talk_awake(text)" in src
+        assert "self.talk_handle(text)" in src
+
     def test_filter_four_switches_one_row(self):
         """任务 16：四开关同行并列。"""
         src = _src("frontend/ui/tabs/filter_config.py")

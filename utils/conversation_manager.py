@@ -227,21 +227,45 @@ class ConversationManager:
             ret = self.my_handle.stop_audio("pygame", True, True)
     
     def do_listen_and_comment(self, continuous: bool = False):
-        """
-        监听和评论功能
-        
+        """VAD 连续对话循环——T10 语音对话链接通（2026-10-24 框架填充）。
+
+        连续模式：audio_listen 能量 VAD 录一段 → ASR → 唤醒词检查 →
+        talk_handle 对话链（LLM/TTS/聊天记录 voice 全链复用）。
+        播放中不录音由 audio_listen 内守卫承接（no_recording_during_playback）。
+
         Args:
-            continuous: 是否连续对话
+            continuous: 是否连续对话（True=循环至停止事件；False=单轮后退出）
         """
-        # 这里需要集成音频处理器的功能
-        # 由于依赖复杂，这里先提供框架
         logger.info(f"开始监听和评论，连续模式: {continuous}")
-        
+        from utils.audio_processor import get_audio_processor
+        from utils.asr_engine import transcribe
+
+        volume_threshold = float(self.config.get("talk", "volume_threshold") or 800.0)
+        silence_threshold = int(self.config.get("talk", "silence_threshold") or 15)
+
         try:
+            ap = get_audio_processor(self.config, self.my_handle)
+            round_no = 0
             while not self.stop_do_listen_and_comment_thread_event.is_set():
-                # 这里应该调用音频处理器的监听功能
-                # 然后处理识别到的语音内容
-                time.sleep(0.1)  # 临时实现
+                frames = ap.audio_listen(volume_threshold, silence_threshold)
+                if self.stop_do_listen_and_comment_thread_event.is_set():
+                    break
+                if not frames:
+                    continue
+                round_no += 1
+                wav_path = ap.frames_to_wav(frames, f"out/record_vad_{round_no}.wav")
+                text = transcribe(wav_path, self.config)
+                if not text:
+                    logger.info(f"[t10] 连续对话第 {round_no} 轮：识别无文字，跳过")
+                    continue
+                logger.info(f"[t10] 连续对话第 {round_no} 轮识别：{text}")
+                awake = self.check_talk_awake(text)
+                if awake.get("ret") == -1:
+                    logger.info("[t10] 未唤醒，忽略本句")
+                    continue
+                self.talk_handle(text)
+                if not continuous:
+                    break
         except Exception as e:
             logger.error(f"监听和评论失败: {e}")
         finally:

@@ -32,6 +32,7 @@ class AudioProcessor:
         self.my_handle = my_handle
         self.is_recording = False
         self.recording_thread = None
+        self.last_recording_path = ""  # T10：最近一次录音产物（ASR 输入）
         
         # 音频参数
         self.chunk = 1024
@@ -41,59 +42,82 @@ class AudioProcessor:
         
         logger.info("音频处理器初始化完成")
     
-    def record_audio(self, output_path: str = "out/record.wav") -> bool:
-        """
-        录音功能（按右Shift键录音）
-        
-        Args:
-            output_path: 录音输出路径
-            
+    def record_audio(self, output_path: str = "out/record.wav") -> str:
+        """录音（标志式：is_recording=True 期间采集，stop_recording() 停止）。
+
+        T10 语音对话链接通（2026-10-24）重构：上游残留为「按住 Shift 键
+        死循环」模型，与 input_handler 的单击 trigger_key 开始/stop_trigger_key
+        停止交互模型（talk 配置面）错配——改由 is_recording 标志控制采集，
+        start_recording_thread 置位启动、stop_recording 复位收束，返回 wav
+        路径供 ASR 段消费。
+
         Returns:
-            bool: 录音是否成功（录音时间足够长）
+            str: 录音文件路径；录音过短/异常返回 ""（调用方跳过 ASR）。
         """
         import keyboard
-        
+
         pressdown_num = 0
         p = pyaudio.PyAudio()
-        stream = p.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.rate,
-            input=True,
-            frames_per_buffer=self.chunk,
-        )
+        try:
+            device_index = int(self.config.get("talk", "device_index"))
+        except (TypeError, ValueError):
+            device_index = None
+        try:
+            stream = p.open(
+                format=self.format,
+                channels=self.channels,
+                rate=self.rate,
+                input=True,
+                frames_per_buffer=self.chunk,
+                input_device_index=device_index,
+            )
+        except Exception as e:
+            logger.error(f"[t10] 麦克风打开失败（device_index={device_index}）：{e}")
+            p.terminate()
+            return ""
+
         frames = []
-        logger.info("Recording...")
-        flag = 0
-        
-        while True:
-            while keyboard.is_pressed("RIGHT_SHIFT"):
-                flag = 1
-                data = stream.read(self.chunk)
+        logger.info("[t10] Recording...")
+        try:
+            while self.is_recording:
+                data = stream.read(self.chunk, exception_on_overflow=False)
                 frames.append(data)
                 pressdown_num += 1
-            if flag:
-                break
-        
-        logger.info("Stopped recording.")
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        
-        # 保存录音文件
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+
+        logger.info("[t10] Stopped recording.")
+
+        # 最短录音守卫（上游 pressdown_num>=5 语义等价：约 5 帧×1024/44100≈0.12s）
+        if pressdown_num < 5:
+            logger.info("[t10] 录音时间过短，忽略本次")
+            return ""
+
         wf = wave.open(output_path, "wb")
         wf.setnchannels(self.channels)
         wf.setsampwidth(p.get_sample_size(self.format))
         wf.setframerate(self.rate)
         wf.writeframes(b"".join(frames))
         wf.close()
-        
-        if pressdown_num >= 5:  # 粗糙的处理手段
-            return True
-        else:
-            logger.info("杂鱼杂鱼，好短好短(录音时间过短,按右shift重新录制)")
-            return False
-    
+
+        self.last_recording_path = output_path
+        return output_path
+
+    def frames_to_wav(self, frames: List[bytes],
+                      output_path: str = "out/record_vad.wav") -> str:
+        """VAD 帧列表 → wav 文件（do_listen_and_comment 连续模式的 ASR 输入）。"""
+        p = pyaudio.PyAudio()
+        wf = wave.open(output_path, "wb")
+        wf.setnchannels(self.channels)
+        wf.setsampwidth(p.get_sample_size(self.format))
+        wf.setframerate(self.rate)
+        wf.writeframes(b"".join(frames))
+        wf.close()
+        p.terminate()
+        return output_path
+
     def audio_listen(self, volume_threshold: float = 800.0, 
                     silence_threshold: int = 15) -> List[bytes]:
         """
@@ -189,13 +213,13 @@ class AudioProcessor:
         def recording_task():
             self.is_recording = True
             try:
-                success = self.record_audio()
+                wav_path = self.record_audio()
                 if callback:
-                    callback(success)
+                    callback(wav_path)
             except Exception as e:
                 logger.error(f"录音失败: {e}")
                 if callback:
-                    callback(False)
+                    callback("")
             finally:
                 self.is_recording = False
         

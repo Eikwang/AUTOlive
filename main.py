@@ -171,10 +171,21 @@ class MainApplication:
             self.audio_processor.start_recording_thread()
     
     def _on_stop_recording(self):
-        """停止录音的回调函数"""
+        """停止录音的回调函数——T10 语音对话链接通（2026-10-24）：停止后串接
+        ASR→对话链（录音 wav → 文字 → conversation_manager.talk_handle →
+        LLM/TTS/聊天记录 voice 标记全链复用）。"""
         logger.info("停止录音回调触发")
         if self.audio_processor:
             self.audio_processor.stop_recording()
+        wav_path = getattr(self.audio_processor, "last_recording_path", "")
+        if self.conversation_manager and wav_path:
+            from utils.asr_engine import transcribe
+            text = transcribe(wav_path, self.config)
+            if text:
+                logger.info(f"[t10] 语音识别结果：{text}")
+                self.conversation_manager.talk_handle(text)
+            else:
+                logger.info("[t10] 语音识别无文字输出，本次忽略")
         if self.conversation_manager:
             self.conversation_manager.stop_do_listen_and_comment_thread_event.set()
     
