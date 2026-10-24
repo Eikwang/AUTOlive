@@ -98,13 +98,19 @@ class AutoliveApp:
     # 消息入缓冲前经 redact_exception 脱敏（DX 义务）。
     _shared_exception_buffer = deque(maxlen=10)
 
+    # UI-16 同期（TODOS 2026-09-23 节竞态条）：UI executor 线程与 /sys_cmd
+    # async endpoint 并发启停的 TOCTOU 窗口收口——类级锁串行化运行态写入。
+    # 读侧（状态条轮询）不加锁（bool 原子读；GIL 下无撕裂）。
+    _running_flag_lock = threading.Lock()
+
     @property
     def running_flag(self) -> bool:
         return AutoliveApp._shared_running
 
     @running_flag.setter
     def running_flag(self, value) -> None:
-        AutoliveApp._shared_running = bool(value)
+        with AutoliveApp._running_flag_lock:
+            AutoliveApp._shared_running = bool(value)
 
     @property
     def my_subprocesses(self) -> dict:

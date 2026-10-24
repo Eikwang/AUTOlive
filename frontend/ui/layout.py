@@ -1003,6 +1003,17 @@ class DrawerLayout:
         # 启停状态定时同步（C1/E5：2s 轮询 running_flag 外部变化，pending 期间跳过）
         ui.timer(2.0, self._sync_from_flag)
 
+        # T10 同期（子进程退出监控接线补全）：D1 批次实现了 _monitor_subprocesses
+        # 但零调用点（wiring 缺口）——在此 5s 挂载（app 方法，slot 内 notify 安全）；
+        # running_flag=False 时方法内静默跳过，停止流程不受影响
+        if self.app is not None and hasattr(self.app, "_monitor_subprocesses"):
+            def _monitor_safe():
+                try:
+                    self.app._monitor_subprocesses()
+                except Exception as _e:
+                    logger.warning(f"子进程监控轮询异常（下轮重试）: {_e}")
+            ui.timer(5.0, _monitor_safe)
+
     def _render_group_navigation(self, function_groups: list):
         """渲染分组导航"""
         if self.group_nav_container is None:

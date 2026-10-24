@@ -2,8 +2,8 @@
 
 ## Deferred Items from /autoplan (2026-10-23) — UI-16 批次（WebUI 功能调整与修复 16 项，终门 rec 批准实施）
 
-1. **F-1a 硬编码色值扫描 lint 守卫**（P2, S）— CEO native F-1/Eng E3：本批 3 处暗色适配同病根（serial.py:83 `bg-blue-100` 硬编码 Tailwind 调色类），逐处修复治标；守卫=测试扫描前端 tab 源码中的硬编码 Tailwind 调色类（bg-blue-100/bg-gray-*/text-gray-* 等模式）或非令牌色值，防第四处再犯。沿 T8 漂移守卫/仓库卫生门禁先例。依赖：UI-16 批次实施完成（扫描基线含本批修复后状态）。
-2. **F-1b 配置参数唯一渲染断言守卫**（P2, S）— CEO native F-1：本批三个同类 bug（字幕打印双开关/答谢双最低价/动态模板重复条目）=同一参数多处渲染；守卫=枚举 config 键→tab 渲染点映射的唯一性断言（或最小版：对本批 3 个修复点做源级断言防回退）。依赖：UI-16 批次实施完成。
+1. **~~F-1a 硬编码色值扫描 lint 守卫~~**（P2, S）— 【2026-10-24 已完成（提交 34fcf86c，已推）：tests/features/test_frontend_style_guards.py ——ast 精确提取样式串（跨行/tooltip 误报消除）+裸色值清零断言+Tailwind 调色类禁用；实测抓到 login.py:56 跨行裸色值并修复（var(--text-title)）。】原记录：本批 3 处暗色适配同病根（serial.py:83 bg-blue-100 硬编码 Tailwind 调色类）。
+2. **~~F-1b 配置参数唯一渲染断言守卫~~**（P2, S）— 【2026-10-24 已完成（提交 34fcf86c，已推）：同文件 TestF1bUniqueBindings——ast 提取 _auto_save 字面量 keys 跨 tab 重复检测+SHARED_BINDING_WHITELIST（edtalk_realtime 三键有意共享）+白名单腐化自检+历史三修复点防回退。摸底修正两误判（var 回退合法/button 默认值非键）。】原记录：本批三个同类 bug（字幕打印双开关/答谢双最低价/动态模板重复条目）=同一参数多处渲染。
 3. **任务 12 丢数据风险根修欠账**（P3, M）— Design 3.3：消息队列长回复文本切分丢数据是真实缺陷（原提示的免责段按用户明令删除后失效模式失去用户可见面）；根修方向=文本切分长度计算改为实际合成时长或分片回执。依赖：无（用户提出队列丢数据问题时优先）。
 
 ## Deferred Items from /autoplan (2026-10-23) — 点歌模式重构批次（R0-R13 义务块，用户预授权直接实施）
@@ -22,7 +22,7 @@
 ## Deferred Items from /autoplan (2026-10-22) — 字幕打印功能审查批次（main-20261022-162614，终门 rec 批准实施）
 
 1. **copywriting 变速死配置清理**【2026-10-23 核实已闭环：A3 批次已完成 UI 移除+features.json audio_random_speed.copywriting 死键清除（核实 audio_random_speed 节已空），台账过时】（P3, S）— CEO defer：`audio_random_speed.copywriting` 节仅前端 UI 有配置（audio_play.py:148-150），代码无读取点（全仓仅 playback_manager 读 normal 节，A2 批次后连 normal 也退役）——UI 开关误导用户。建议：设置页移除该节配置或后端补语义。依赖：音频播放页下次触碰。
-2. **TODOS #9 失准台账修正**（P3, S）— spec 第 2 轮 N2：#9 原文「.gitignore:286 使 42+ 测试文件不入库」已过时——实测 .gitignore:290 根锚定 `/test_*.py` 不匹配 tests/（:291 `!tests/` 反选），tests/features 86 文件在库。修正本条目措辞，防误导。依赖：无。
+2. **~~TODOS #9 失准台账修正~~**（P3, S）— 【2026-10-24 台账清洗闭环：本条即修正记录本身，措辞已按 spec N2 修正（tests/features 45 文件在库，git ls-files 核对）——修正动作完成，条目退役。】spec 第 2 轮 N2：#9 原文「.gitignore:286 使 42+ 测试文件不入库」已过时——实测 .gitignore:290 根锚定 `/test_*.py` 不匹配 tests/（:291 `!tests/` 反选），tests/features 86 文件在库。修正本条目措辞，防误导。依赖：无。
 3. **字幕差异化方向登记**（P3, M）— native 1.2+4.3+5.1 合并：字幕的 10x 价值=与弹幕/数字人/计费链路联动（弹幕问答上字幕、礼物计价信息上屏、数字人状态联动样式），而非继续追求孤立时序精度；平台自带 AI 字幕（抖音/B站直播伴侣）成熟后自建字幕差异化只剩联动能力。下次字幕相关规划先读此条。依赖：无。
 4. **builtin「无 speed 语义」假设失效条件 + :413 退役顺带项**【2026-10-23 已退役：builtin_play_center rate=speed×framerate 折算移除（恒 framerate）——A2 语义固化，防未来误透传致 keep_time 漂移；假设仍成立（playback_manager 条目重建硬编码 1 已核实）】（P3, S）— native 2.3+Eng A1：CaptionsManager keep_time 取文件时长依赖「builtin 条目 speed 恒 1」——失效条件=playback_manager 条目重建处（:152/:165 一带）speed 硬编码 1 被改为透传 synth_speed（届时 builtin_play_center.py:413 残留的采样率折算会生效，真实播放时长偏离文件时长 speed 倍）。下次触碰播放链路时：①确认该假设仍成立 ②顺带退役 :413 折算残留。依赖：播放链路触碰。
 5. **EDTalk「公共段后移=同步改善」推断收口**（P3, S）— native 2.4：对 pygame/外部模式公共段后移贴近开播成立；EDTalk 走数字人生成链路（音频→驱动→虚拟摄像头），改善幅度未证。随 R10-② 实测一并收口（见第 9 条）。依赖：第 9 条。
@@ -33,7 +33,7 @@
 
 ## Deferred Items from /autoplan (2026-10-22) — 系统流程审查批次（新版 flowchartTD 对齐，main-20261022-161815，终门 rec 全推荐批准）
 
-1. **UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 【2026-10-23 已实施：TODOS 处理批次——comment_handler+chat_handler 双链过滤链上移至写库前（违禁弹幕不入库，写库内容=过滤后弹幕），tests/test_uc2_write_order.py 7 断言双链覆盖；chat_handler 为实施中发现的第二写库点（D-20 矩阵捕获）；前置 comment_handler 在飞改动已随 354a3cff 落地；落地即闭环 2026-10-20 节 #2 写库/过滤顺序语义决策】按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。
+1. **~~UC-2 写库/过滤顺序实施（终门 uc2a 批准，唯一裁决实施的 UC）**（P2, M）— 【2026-10-23 已实施：TODOS 处理批次——comment_handler+chat_handler 双链过滤链上移至写库前（违禁弹幕不入库，写库内容=过滤后弹幕），tests/test_uc2_write_order.py 7 断言双链覆盖；chat_handler 为实施中发现的第二写库点（D-20 矩阵捕获）；前置 comment_handler 在飞改动已随 354a3cff 落地；落地即闭环 2026-10-20 节 #2 写库/过滤顺序语义决策】按新版流程图裁决：违禁词过滤链（prohibitions_handle/comment_check_and_replace/lang_filter_pass/纯符号过滤）移到 danmu 写库 INSERT 之前（utils/handlers/comment_handler.py，黑名单拦截已在写库前），违禁弹幕不入库。**模板三要素**：①双链两侧测试（弹幕链 comment_handler+测试链 processing_manager 若涉写库）②D-20 参数生效语义矩阵核对 database.comment_enable 全部读取点 ③pytest 全量绿回归（基线 776 passed）。**前置**：comment_handler.py 在飞改动（音频播放批次）落地。落地后闭环本文件 2026-10-20 节 #2（写库/过滤顺序语义决策）。注意数据分析历史口径：旧数据含违禁原文、新数据不含；DB 层敏感（2026-10-22 弹幕计价批次刚 7 表元重定基）。依赖：comment_handler 在飞改动落地。 【已实施：UC-2 批次（31708ac1）comment_handler+chat_handler 双链过滤上移写库前——2026-10-24 台账清洗闭环】
 2. **UC-1/3/4/5 图侧修正已并入本批 T2 主干图修正任务**（无独立待办）— 终门 uc1a/uc3a/uc4a/uc5a 全部为图修正（图改回独立语义/入队前翻译/订阅边/互斥两路+字幕从属），随 T2 实施闭环；主干图头部加版本行+四态图例+"改图必开批次"约定。依赖：无（本批实施）。
 
 ## Deferred Items from /autoplan (2026-10-22) — 基础功能版块审查与修复批次
@@ -61,20 +61,20 @@
 
 1. **批次 1b：utils/*.backup 退役**（P2, S）— 【2026-10-21 已执行完成：diff 验证 PASS（留痕 .gstack/tmp/autoplan/batch1-verify.md）+ 用户执行确认后删除 utils/audio.py.backup、utils/db.py.backup、utils/my_handle.py.backup 三件；删除后门4 import 探测 PASS，git 零影响（未跟踪文件）。至此 2026-10-20 第 4 条与 C 组第 8 条彻底闭环】backup diff 验证曾确认 T5 按键映射已迁 feature_handler.py、T6 答谢三通道已迁 timer_handler.py，46 个独有函数逐一核对无迁移缺失。依赖：无（已完成）。
 2. **仓库卫生门禁**（P2, M）— 【2026-10-21 已交付：tests/test_repo_hygiene.py（backup 后缀拦截进 pytest 门）+ Scripts/check_batch_gates.py（批次验证门模板：门1 pytest/门2 pyautogui 两态白名单/门4 import 探测+反向断言，--skip-pytest 快查），提交随本批】将本批 grep 门推广为批次验证模板（pyautogui 式两态白名单+git grep 全跟踪扫描+活模块 import 探测）；backup/*.bak 类后缀进 lint 拦截（CI/本地 pre-commit 均可）。来源：CEO 审查 F1"一次性清理无防再脏机制"。依赖：无。
-3. **.github/ 上游 issue 模板退役评估**（P3, S）— 【2026-10-21 已执行：config.yml 指向上游 Ikaros 仓库品牌错位，solo 仓库无协作者 issue 场景，.github/ISSUE_TEMPLATE 四件已退役删除。依赖：无。
+3. **~~.github/ 上游 issue 模板退役评估**（P3, S）— 【2026-10-21 已执行：config.yml 指向上游 Ikaros 仓库品牌错位，solo 仓库无协作者 issue 场景，.github/ISSUE_TEMPLATE 四件已退役删除。依赖：无。 【已执行删除（2026-10-21 清理批次，git 现状核对）——2026-10-24 台账清洗闭环】
 4. **log/ vs logs/ 双日志目录合并评估**（P3, M）— 【2026-10-21 评估完成，裁决不合并：两目录语义不同非重复——log/=弹幕/聊天运行日志（my_handle.py:238 comment 日志写入点），logs/=训练/服务日志体系（RVC spike filelist 硬编码 logs/mute、test_train_pipeline.py:400 断言 logs/Audio2Lip 布局契约、train_rvc_pipeline 预建目录），合并将破坏训练管线布局契约+测试断言+上游兼容。依赖：无（已闭环）。
 5. **Scripts 诊断工具归档注释统一**（P3, S）— 【2026-10-21 已执行：三工具头部核对——diagnose/smoke 已含用途+用法+前置语义达标，bench_fastrag_latency 补前置+用法行；文档路径引用零改动。依赖：无。
-6. **specs/ 历史计划档案归档标注**（P3, S）— 【2026-10-21 已执行：specs/integration/ 10 份 md 加"已归档历史档案"头部（2026-10-21 批次标注+现行事实以 docs/ 与代码为准）；install/ 为 bat/txt 可执行工件不加头（破坏执行性）。依赖：无。
+6. **~~specs/ 历史计划档案归档标注**（P3, S）— 【2026-10-21 已执行：specs/integration/ 10 份 md 加"已归档历史档案"头部（2026-10-21 批次标注+现行事实以 docs/ 与代码为准）；install/ 为 bat/txt 可执行工件不加头（破坏执行性）。依赖：无。 【已执行：specs/integration/ 10 份 md 头部标注核对在位（2026-10-21 批次）——2026-10-24 台账清洗闭环】
 7. **DX-R3 注记**（P3, S）— Scripts/半自动/ 已于 2026-10-21 清理批次删除，conda 环境名分裂问题（specs/技术栈.md autolive vs 脚本 ai_vtb）仅剩文档侧；统一方案收敛为"文档示例改 ai_vtb"或在下次动 conda 环境时一并处理。
 
 ## Deferred Items from /autoplan (2026-10-20) — 主线流程图审查（图-码对齐+断链登记）
 
-1. **T10 语音对话链接通**（P2, L）— conversation_manager.py:221-240 do_listen_and_comment 为空框架（循环体仅 sleep），audio_listen 无调用者，ASR（funasr/whisper）未接入对话链。触发条件锚定：T5-T9 断链批次落地后下一批（不无限期）。入口：conversation_manager 框架填充+ASR 接入+全链手动实测。
+1. **~~T10 语音对话链接通~~**（P2, L）— 【2026-10-24 已实施（提交 46ae0483，已推 origin/main）：ASR 引擎适配层 utils/asr_engine.py 新建（对齐 apps/gpt-sovits/tools/asr/ 既有实现——本地 faster-whisper-large-v3-turbo 零下载+HF 镜像+混合语言路由（中文检测→FunASR paraformer 回退））；record_audio 重构标志式（单击 Q 开始/S 停止交互模型对齐）；main.py 停止录音→ASR→talk_handle 串接；do_listen_and_comment 连续模式填充（VAD→ASR→唤醒→对话链）。守卫 45→50 项全绿；全量 1004 passed/0 failed。**全链手动实测待用户**（按 Q 说话→S 停止→[语音] 记录+数字人开口；direct_run_talk=true 即连续模式）】原记录：conversation_manager.py:221-240 do_listen_and_comment 为空框架（循环体仅 sleep），audio_listen 无调用者，ASR（funasr/whisper）未接入对话链。触发条件锚定：T5-T9 断链批次落地后下一批。
 2. **写库/过滤顺序语义决策**（P3, S）— 现状弹幕原文先写 danmu 表（comment_handler.py:255-260）后过违禁词过滤（:272-288），数据分析读到含违禁词原文。变更影响数据分析口径，需用户裁决：保持现状（入库原文）vs 写库前过滤 vs 入库+标记列。**与下方 A4 交叉**：badwords 文件缺失期间违禁词过滤全链失效，写库内容=未过滤原文。依赖：无。
 3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchart-detail.md Review record 0A 节〔2026-10-22 起随详图归档迁移〕）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：T1/T2 修图完成后。
-4. **my_handle.py.backup 退役清理**（P3, S）— 【2026-10-21 已由清理批次 1b 接管，diff 验证通过，见上方 2026-10-21 节第 1 条；删除仍待用户实测确认】T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。
-5. **"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。
-6. **流程图与实测发现的交叉注记**（P3, S）— 下方 A 组实测错误对流程图四态标注的影响：F8 过滤链在 badwords 缺失期间应标"实际失效"（代码在位但文件缺失）；变声通道 so_vits_svc（synthesis_manager.py:278-301）每弹幕触发 ConnectionRefused 说明播放链存在图中未画的变声分支且其配置处于残留开启态。T2 修图时一并消化。
+4. **~~my_handle.py.backup 退役清理**（P3, S）— 【2026-10-21 已由清理批次 1b 接管，diff 验证通过，见上方 2026-10-21 节第 1 条；删除仍待用户实测确认】T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。 【utils/*.backup 三件与 my_handle.py.backup 均已删（1b 批次+清理批次，git 现状核对无 .backup 文件）——2026-10-24 台账清洗闭环】
+5. **~~"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。 【已推广：docs/flowchartTD.md 头部纪律行+批次门禁实践（T5-T9 起）——2026-10-24 台账清洗闭环】
+6. **~~流程图与实测发现的交叉注记**（P3, S）— 下方 A 组实测错误对流程图四态标注的影响：F8 过滤链在 badwords 缺失期间应标"实际失效"（代码在位但文件缺失）；变声通道 so_vits_svc（synthesis_manager.py:278-301）每弹幕触发 ConnectionRefused 说明播放链存在图中未画的变声分支且其配置处于残留开启态。T2 修图时一并消化。 【已随 T2 主干图 v2 对齐批次消化（0cf3b0de，13+1 差异闭环）——2026-10-24 台账清洗闭环】
 
 ## Deferred Items from 环境实测 (2026-10-20) — 系统审查批次实测修复轮（用户指示：先记录，架构调整后统一修复）
 
@@ -93,7 +93,7 @@
 
 ### C 组：批次遗留小项
 
-8. **utils/*.backup 文件处置**（P3, S）— 【2026-10-21 已由清理批次 1b 接管（diff 验证通过，删除待用户实测确认，见 2026-10-21 节第 1 条）】删除批后遗留的备份文件清点与删除。
+8. **~~utils/*.backup 文件处置**（P3, S）— 【2026-10-21 已由清理批次 1b 接管（diff 验证通过，删除待用户实测确认，见 2026-10-21 节第 1 条）】删除批后遗留的备份文件清点与删除。 【已删（1b 批次执行完成，git 现状核对）——2026-10-24 台账清洗闭环】
 9. **D-15 首启"更新移除项"告知 UI**（P3, S）— 首次启动告知用户本批移除的模块/键面，避免旧配置静默失效无感知。
 10. **v2 backend=api 兜底数据链退役评估**（P3, S）— inproc 为主后，api 兜底路径的数据链是否随键迁移一并退役评估。
 
@@ -112,7 +112,7 @@
 
 ## Deferred Items from /autoplan (2026-10-14) — DanmakuListener v0.8.0 模块更新
 
-1. **词表分离上游化 PR**（P2, S）— AUTOlive 的 send_blocked_keywords 词表分离（8926b9fe）是通用需求而非 AUTOlive 特有，提回上游 D:\AI\DanmakuListener 收编后永久消除该补丁的每轮重放债（v0.7.0→v0.8.0 已重放两次）。依赖：v0.8.0 同步落地后执行；落点=上游 wiring.py SendGuard 构造处支持 settings.send_blocked_keywords + 上游测试；同时维护 docs/danmaku_module.md 本地补丁台账作为未上游化期间的核对清单。
+1. **~~词表分离上游化 PR**（P2, S）— AUTOlive 的 send_blocked_keywords 词表分离（8926b9fe）是通用需求而非 AUTOlive 特有，提回上游 D:\AI\DanmakuListener 收编后永久消除该补丁的每轮重放债（v0.7.0→v0.8.0 已重放两次）。依赖：v0.8.0 同步落地后执行；落点=上游 wiring.py SendGuard 构造处支持 settings.send_blocked_keywords + 上游测试；同时维护 docs/danmaku_module.md 本地补丁台账作为未上游化期间的核对清单。 【2026-10-24 随 replay 收编进上游（4f4f32a），同日台账清洗闭环】
 
 ## Deferred Items from /autoplan (2026-10-12) — 改动盘点与文档刷新
 
@@ -135,23 +135,23 @@
 ## Deferred Items from /autoplan (2026-09-23) — 前端导航栏增强 + 菜单重排
 
 1. **启停操作日志回显到前端日志区**（P3, S-M）— CEO 阶段 cherry-pick C3：ui.notify + logger 已覆盖反馈闭环，日志区回显属增强非缺口。依赖：前端日志区数据通道形态。
-2. **main.py 子进程退出监控（崩溃自动复位 running_flag）**（P2, S-M）— CEO spec 审查 R3 问题2 (b) 路线：后端无子进程退出监控，子进程崩溃后 running_flag 恒 True（启动按钮持续禁用）。当前恢复路径 = WebUI「重启」按钮（停止阶段捕获死 PID 异常并清理后重新拉起）。落地时注意与主动停止的竞态（监控复位需排除 stop 进行中）。依赖：本批启停按钮任务落地后评估。**CEO 备注（native voice 发现1，2026-09-23）**：无人值守直播场景下升级为下一阶段 P1 候选——深夜长播中 LLM/TTS 子进程静默崩溃 = 直播间黑场数小时；最小实现 = ui.timer 顺带查 PID 存活 + auto_run 式自动重拉；C6 状态灯（本批任务1）是崩溃告警的天然挂载点。
+2. **~~main.py 子进程退出监控（崩溃自动复位 running_flag）~~**（P2, S-M）— 【2026-10-24 闭环：D1 批次（2026-10-19）已实现 _monitor_subprocesses（frontend/main.py:851——main 死亡复位 running_flag+异常环形缓冲+notify+auto_run 自动重拉+训练显存互斥）但**零调用点**（wiring 缺口，本轮 grep 核实）；本轮补挂载 ui.timer(5.0)（layout.py 系统按钮段，slot 内 notify 安全+异常防护）。CEO 备注的深夜黑场防护达成。】原记录：后端无子进程退出监控，子进程崩溃后 running_flag 恒 True（启动按钮持续禁用）。恢复路径=WebUI「重启」按钮。
 3. **/sys_cmd 重启语义统一**（P3, S）— native voice 发现3：D-02 后并存两套「重启」语义（WebUI 按钮 = 系统级 stop+run；/sys_cmd restart = webui 自重启 os.execl）。本批在 /sys_cmd 处理函数补注释标注差异；语义统一/废弃旧自重启待后续裁决，防止语义分叉固化为永久债务。
 4. **重启确认记忆**（P3, S）— 设计审查发现9：auto_run 部署下重启是日用高频操作，每次过确认框有摩擦。v1 维持 C2 确认（防误触裁决不翻案）；后续可加「本次会话不再询问」记忆选项。
 5. **前端 ARIA/屏幕阅读器增强**（P3, S）— 设计审查 Pass 6：Quasar 自带基础 ARIA 兜底；确认对话框的屏幕阅读器语义、导航区 landmark 标注待增强。依赖：本批落地后随 /design-review 实测评估。
 6. **webui 网络暴露面收敛**（P2, S）— eng 审查安全附注：webui 默认绑定 0.0.0.0（main.py L874）且 /sys_cmd 的 run/stop/restart/factory 无鉴权——局域网任意主机可启停系统/覆写配置；本批新按钮使该能力显性化。建议：默认绑定改 127.0.0.1 或为 /sys_cmd 加 token。依赖：与使用场景确认（是否需要局域网访问）。
-7. **running_flag check-then-act 竞态窗口**（P3, S）— eng F10：main.py L278/L284 之间存在 TOCTOU 窗口（UI executor 线程与 /sys_cmd async endpoint 理论可并发）；单机自用风险极低。建议后续用 threading.Lock 或单一调度路径收口。
+3. **~~running_flag check-then-act 竞态窗口~~**（P3, S）— 【2026-10-24 已修复（本轮）：running_flag setter 加类级 threading.Lock（UI executor 线程与 /sys_cmd async endpoint 并发启停的 TOCTOU 收口；读侧 bool 原子读不加锁）。原 F10 行号 L278/L284 为旧快照——现代码写点已收敛至 frontend/main.py property（575/593/645/656/876/893）。】
 8. **config.json.bak 缺失致 factory 必炸**【2026-10-23 核实已闭环：ensure_config_backup 已双进程幂等接线（frontend/main.py:83/:182），台账过时】（P3, S）— eng F11：/sys_cmd factory 依赖根目录 config.json.bak，仓库当前不存在该文件，恢复出厂必失败。与「重启按钮是恢复路径」叙事相邻，修复 = 生成/维护该备份或移除 factory 入口。
-9. **测试资产入库**（P2, S）— 实施发现：.gitignore:286 的 `test_*.py` 规则使整个测试套件（42+ 文件）不进版本库——改写后的 test_task_16_new.py 也无法提交，测试改动在协作间丢失。建议：收窄该规则（如仅忽略报告文件）并把 tests/features 入库。
+9. **~~测试资产入库**（P2, S）— 实施发现：.gitignore:286 的 `test_*.py` 规则使整个测试套件（42+ 文件）不进版本库——改写后的 test_task_16_new.py 也无法提交，测试改动在协作间丢失。建议：收窄该规则（如仅忽略报告文件）并把 tests/features 入库。 【已完成：.gitignore 收窄+tests/features 45 文件在库（git ls-files 核对）——2026-10-24 台账清洗闭环】
 
 10. **functions[].enabled 僵尸数据退役**【2026-10-23 已实施：layout.py 3 处僵尸写入清理（:823 function_items/:1060 搜索结果/:1152 存储点——下游仅读 tab_key 已核实），test_task_17 迁移断言同步更新；config functions[] 已空】（P3, S）— batch2 CEO native 发现6：二级开关迁移后该字段退出消费，43 个 enabled 全 True 与实际业务状态不符，遗留误导。后续以 migrate 脚本一次性删除或注释 deprecated（确认 validate_integration 等无依赖）。
 
 ## Deferred Items from /autoplan (2026-09-22) — runtime312 启动脚本切换
 
-1. **api_old.py 与 flask_socketio 处置**（P3, S）— 旧 API 入口是否保留/归档；flask_socketio 仅其使用（runtime312 未装）。全仓库依赖审计发现，非两 webui 入口所需。
+1. **~~api_old.py 与 flask_socketio 处置**（P3, S）— 旧 API 入口是否保留/归档；flask_socketio 仅其使用（runtime312 未装）。全仓库依赖审计发现，非两 webui 入口所需。 【api_old.py/webui-bak.py 已随 2026-10-07 P3 退役批次删除（git 现状核对）——2026-10-24 台账清洗闭环】
 2. **users.pth 注入升级为整合正式议题**（P2, S）— runtime312 的 `Lib\site-packages\users.pth` 硬编码注入 6 个 GPT-SoVITS 路径进所有进程，存在模块遮蔽风险；启动脚本 sys.path 断言只是临时保险，应从源头移除或收编管理。
 3. **EDTalk 目录硬耦合的结构性解耦**（P3, M）— AUTOlive 启动命脉指向 `D:\AI\EDTalk\runtime312`，EDTalk 挪动/重装即断；环境复制/软链/搬迁方案待评估。启动预检已缓解。
-4. **UC-1 裁决联动**（P2, —）— 【已裁决 2026-09-22：B 带警告切换】1.bat 已照新模板改写并带警告头；webui-bak.py 的 nicegui 3.x 适配债保持挂起（与下方第 1 条 2026-09-02 项合并推进）。2 周退役线时复核是否升级为归档。UC-2 已裁决采纳导入守卫（zhipu.py/gemini.py 已落地），google-genai 迁移（选项②）未排期。
+4. **~~UC-1 裁决联动**（P2, —）— 【已裁决 2026-09-22：B 带警告切换】1.bat 已照新模板改写并带警告头；webui-bak.py 的 nicegui 3.x 适配债保持挂起（与下方第 1 条 2026-09-02 项合并推进）。2 周退役线时复核是否升级为归档。UC-2 已裁决采纳导入守卫（zhipu.py/gemini.py 已落地），google-genai 迁移（选项②）未排期。 【webui-bak.py 已退役（2 周退役线完成，git 现状核对）；UC-2 导入守卫已落地——2026-10-24 台账清洗闭环】
 
 5. **utils/__init__.py 惰性化（PEP 562 `__getattr__`）**（P2, M）— 当前巨石顶层导入链（web_server→my_handle→gpt→zhipu/gemini）使可选 LLM 通道包成为所有入口的硬依赖，本次两类启动阻断皆源于此。守卫只是止血，惰性化才是根因修复；否则下一个可选通道包还会复现同类阻断。（Eng A1，2026-09-22）
 
