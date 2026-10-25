@@ -131,6 +131,11 @@ def resolve_gift_points(block, proportion, total_price):
 
 class FeatureHandler:
     """功能处理器"""
+
+    # 按键映射分派触发器（2026-10-24 精简：仅剩按键+串口两路；2026-10-25 中枢批次
+    # 礼物/弹幕型自匹配与中枢命中组四处分派循环共用此常量）
+    _KEYMAP_TRIGGERS = ["key_trigger_type", "serial_trigger_type"]
+
     
     def __init__(self, my_handle):
         """
@@ -217,13 +222,18 @@ class FeatureHandler:
             logger.error(f"查找相似答案失败：{e}")
             return None
     
+    # 词库文件缓存（2026-10-25 识别中枢批次）：path -> (mtime, data)。
+    # 本地问答匹配在识别中枢高频调用（每条弹幕/语音一次），原实现每次重读
+    # 文件是延时实锤；mtime 变化即失效，热改词库无需手动刷新。
+    _qa_file_cache = {}
+
     def load_data_from_file(self, file_path):
         """
-        从文件加载数据
-        
+        从文件加载数据（mtime 缓存：文件未变直接复用，避免每条消息重读 IO）
+
         Args:
             file_path (str): 文件路径
-            
+
         Returns:
             list: 数据列表
         """
@@ -231,7 +241,12 @@ class FeatureHandler:
             if not os.path.exists(file_path):
                 logger.error(f"文件不存在：{file_path}")
                 return None
-            
+
+            mtime = os.path.getmtime(file_path)
+            cached = FeatureHandler._qa_file_cache.get(file_path)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+
             data = []
             with open(file_path, 'r', encoding='utf-8') as f:
                 for line in f:
@@ -240,7 +255,8 @@ class FeatureHandler:
                         parts = line.split('|')
                         if len(parts) >= 2:
                             data.append(parts)
-            
+
+            FeatureHandler._qa_file_cache[file_path] = (mtime, data)
             return data
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -305,13 +321,18 @@ class FeatureHandler:
             logger.error(f"本地问答渲染失败（降级原文）：{e}")
             return text
 
-    def local_qa_handle(self, data):
+    def local_qa_handle(self, data, hub_result=None):
         """
         本地问答处理（前置抢答路径——仅 chat_type=local_qa 时由调用方进入，
         spec C1：custom_llm/fastrag 模式跳过前置拦截，词库只作托底）
 
+        2026-10-25 识别中枢改造：hub_result 非 None = 关键词识别中枢已判定
+        （信任 hub_result.local_qa_answer，空串=未命中直接返回）；None=自行匹配
+        （直调/既有测试兼容）。
+
         Args:
             data (dict): 数据
+            hub_result (KeywordResult | None): 识别中枢结果
 
         Returns:
             bool: 是否触发并处理
@@ -320,30 +341,35 @@ class FeatureHandler:
             username = data["username"]
             content = data["content"]
 
-            # 检查是否启用本地问答
-            if not self.my_handle.config.get("local_qa", "enable"):
-                return False
+            if hub_result is not None:
+                # 中枢已判定：命中才回复，未命中（空串）静默交回弹幕链
+                resp_content = hub_result.local_qa_answer
+                if not resp_content:
+                    return False
+            else:
+                # 检查是否启用本地问答
+                if not self.my_handle.config.get("local_qa", "enable"):
+                    return False
 
-            # 匹配+渲染走共享函数（DRY，ENG E-2）
-            resp_content = self.local_qa_match(content, username=username)
+                # 匹配+渲染走共享函数（DRY，ENG E-2）
+                resp_content = self.local_qa_match(content, username=username)
+                if resp_content is None:
+                    return False
 
-            if resp_content is not None:
-                logger.info(f'触发本地问答库 [{username}]: {content}')
+            logger.info(f'触发本地问答库 [{username}]: {content}')
 
-                message = {
-                    "type": "local_qa_text",
-                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                    "config": self.my_handle.config.get("filter"),
-                    "username": username,
-                    "content": resp_content
-                }
+            message = {
+                "type": "local_qa_text",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": username,
+                "content": resp_content
+            }
 
-                self.my_handle.audio_synthesis_handle(message)
+            self.my_handle.audio_synthesis_handle(message)
 
-                return True
-
-            return False
+            return True
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"本地问答处理失败：{e}")
@@ -571,20 +597,26 @@ class FeatureHandler:
         except Exception:
             logger.error("[点歌] 翻唱入队异常（不阻塞播报）", exc_info=True)
 
-    def choose_song_gift_trigger(self, data):
+    def choose_song_gift_trigger(self, data, hub_result=None):
         """R2/R5 礼物触发点歌（gift_handle 前段挂钩）：归一礼物名匹配
         gift_song_map→命中=答谢照旧（调用方保证）+成功播报+播放/入队；
-        未命中=返回 False（仅答谢，语义不变）。异常不中断礼物主流程。"""
+        未命中=返回 False（仅答谢，语义不变）。异常不中断礼物主流程。
+
+        2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定
+        （信任 hub_result.gift_song，空串=未命中）；None=自行匹配。"""
         try:
-            if not self.my_handle.config.get("choose_song", "enable"):
-                return False
             gift_name = (data.get("gift_name") or "").strip()
             username = data.get("username") or ""
-            if not gift_name:
-                return False
-            from utils.common.text_mixin import match_gift_to_song_entry
-            mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
-            song_name = match_gift_to_song_entry(gift_name, mapping)
+            if hub_result is not None:
+                song_name = hub_result.gift_song or None
+            else:
+                if not self.my_handle.config.get("choose_song", "enable"):
+                    return False
+                if not gift_name:
+                    return False
+                from utils.common.text_mixin import match_gift_to_song_entry
+                mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+                song_name = match_gift_to_song_entry(gift_name, mapping)
             if song_name is None:
                 return False
             if not self._song_cooldown_check(song_name):
@@ -595,11 +627,14 @@ class FeatureHandler:
             logger.error("礼物点歌触发异常（降级仅答谢）", exc_info=True)
             return False
 
-    def choose_song_handle(self, data):
+    def choose_song_handle(self, data, hub_result=None):
         """R1/R2 弹幕点歌判断：contains 触发词命中→剥离后对歌曲列表（映射表
         song 字段）相似度匹配。命中→guide_copy 引导打赏（回应，不执行点歌播放）；
         未命中→match_fail_copy（回应，不播放）。移除 stop_cmd/random_cmd/song_path
-        （/autoplan 2026-10-23 批次 R1）。回应受 reply_cooldown_s 节流（F-S3）。"""
+        （/autoplan 2026-10-23 批次 R1）。回应受 reply_cooldown_s 节流（F-S3）。
+
+        2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定（信任
+        hub_result.song_verdict，None=未触发直接返回 False）；None=自行匹配。"""
         try:
             username = data["username"]
             content = data["content"]
@@ -607,37 +642,40 @@ class FeatureHandler:
             # 合并字符串末尾连续的*  主要针对获取不到用户名的情况
             username = self.my_handle.common.merge_consecutive_asterisks(username)
 
-            if self.my_handle.config.get("choose_song", "enable"):
+            if hub_result is not None:
+                verdict = hub_result.song_verdict
+            elif self.my_handle.config.get("choose_song", "enable"):
                 from utils.common.text_mixin import match_song_intent
                 trigger_words = self.my_handle.config.get("choose_song", "start_cmd") or []
                 similarity = self.my_handle.config.get("choose_song", "similarity")
                 song_names = self._song_song_names()
                 verdict = match_song_intent(content, trigger_words, song_names, similarity)
-                if verdict is None:
-                    return False  # 未触发：静默交回弹幕链
-                state, song_name, _ratio = verdict
-                logger.info(f"[点歌] 弹幕意图{'命中' if state == 'matched' else '触发（列表无歌）'}："
-                            f"[{username}] {content}" + (f" → {song_name}" if song_name else ""))
-                if self._song_reply_throttled():
-                    return True
-                mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
-                if state == "matched":
-                    gift_for_song = next((str(k) for k, v in mapping.items()
-                                          if str(v).strip() == song_name), "")
-                    # 场景 2：仅回应引导打赏，不执行点歌播放
-                    guide_text = self._render_song_copy(
-                        self.my_handle.config.get("choose_song", "guide_copy") or "",
-                        user=username, content=song_name, gift=gift_for_song)
-                else:
-                    # 场景 4：列表无歌→失败文案，回应不播放
-                    guide_text = self._render_song_copy(
-                        self.my_handle.config.get("choose_song", "match_fail_copy") or "",
-                        user=username, content=content, gift="")
-                self.my_handle.webui_show_chat_log_callback("点歌", data, guide_text)
-                self.my_handle.audio_synthesis_handle(self._song_copy_message(username, guide_text))
-                return True
+            else:
+                return False
 
-            return False
+            if verdict is None:
+                return False  # 未触发：静默交回弹幕链
+            state, song_name, _ratio = verdict
+            logger.info(f"[点歌] 弹幕意图{'命中' if state == 'matched' else '触发（列表无歌）'}："
+                        f"[{username}] {content}" + (f" → {song_name}" if song_name else ""))
+            if self._song_reply_throttled():
+                return True
+            mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+            if state == "matched":
+                gift_for_song = next((str(k) for k, v in mapping.items()
+                                      if str(v).strip() == song_name), "")
+                # 场景 2：仅回应引导打赏，不执行点歌播放
+                guide_text = self._render_song_copy(
+                    self.my_handle.config.get("choose_song", "guide_copy") or "",
+                    user=username, content=song_name, gift=gift_for_song)
+            else:
+                # 场景 4：列表无歌→失败文案，回应不播放
+                guide_text = self._render_song_copy(
+                    self.my_handle.config.get("choose_song", "match_fail_copy") or "",
+                    user=username, content=content, gift="")
+            self.my_handle.webui_show_chat_log_callback("点歌", data, guide_text)
+            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, guide_text))
+            return True
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"点歌处理失败：{e}")
@@ -662,27 +700,32 @@ class FeatureHandler:
         except Exception:
             logger.error("[翻唱] 自动插播异常（成品已落盘 song/covers/）", exc_info=True)
 
-    def integral_handle(self, type, data):
+    def integral_handle(self, type, data, hub_result=None):
         """
         积分处理（C1 链路补全）：签到/礼物/入场/关注四类行为计分 + 查询命令回复
+
+        2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定命令词命中
+        （comment/crud 型跳过 enable+命令词重复匹配，调用由中枢命中驱动）；
+        None=自行匹配。gift/entrance/follow 型无文本匹配，hub_result 不参与。
 
         Args:
             type (str): 行为类型（comment=签到检测 / gift / entrance / follow / crud=查询）
             data (dict): 行为数据（platform/username/uid/content/gift_name/total_price 等）
+            hub_result (KeywordResult | None): 识别中枢结果
 
         Returns:
             bool: 是否触发并处理。失败语义（CAP6）：写库失败 log 后返回 False，
                   不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）
         """
         try:
-            # 检查是否启用积分
+            # 检查是否启用积分（中枢判定通道下保留双检：热载竞态兜底，成本可忽略）
             if not self.my_handle.config.get("integral", "enable"):
                 return False
 
             if type == "crud":
-                return self._integral_query_handle(data)
+                return self._integral_query_handle(data, hub_result=hub_result)
             if type == "comment":
-                return self._integral_sign_handle(data)
+                return self._integral_sign_handle(data, hub_result=hub_result)
             if type == "gift":
                 return self._integral_gift_handle(data)
             if type == "entrance":
@@ -801,8 +844,10 @@ class FeatureHandler:
             return False
         return self._integral_format_and_reply(copy_list, data, variables)
 
-    def _integral_sign_handle(self, data):
-        """签到计分：弹幕命中签到命令词 → UPSERT 计分（sign_num 自增）+ 按签到次数档位回复。"""
+    def _integral_sign_handle(self, data, hub_result=None):
+        """签到计分：弹幕命中签到命令词 → UPSERT 计分（sign_num 自增）+ 按签到次数档位回复。
+
+        hub_result 非 None=中枢已判定签到命中（跳过 enable+命令词重复匹配）。"""
         enable = self.my_handle.config.get("integral", "sign", "enable")
         if enable is None:
             self._integral_warn_once("integral.sign.enable", "积分配置缺少 integral.sign.enable，按默认开启处理")
@@ -811,13 +856,16 @@ class FeatureHandler:
             return False
 
         content = str(data.get("content", "") or "").strip()
+        # 审查修复（发布批次）：缺键告警提到 hub 守卫外——hub_result 非 None 时
+        # 也须感知存量缺 integral.sign.cmd 配置（warn_once 自去重，每键仅一次）
         sign_cmds = self.my_handle.config.get("integral", "sign", "cmd")
         if not sign_cmds:
             sign_cmds = ["签到", "打卡"]
             self._integral_warn_once("integral.sign.cmd", "积分配置缺少 integral.sign.cmd，使用默认签到命令词：签到/打卡")
-        # 命令词精确匹配（避免「签到啦」等前缀弹幕误触发计分回复）
-        if content not in sign_cmds:
-            return False
+        if hub_result is None:
+            # 命令词精确匹配（避免「签到啦」等前缀弹幕误触发计分回复）
+            if content not in sign_cmds:
+                return False
 
         platform, username, uid = self._integral_identity(data)
         if not username:
@@ -969,8 +1017,10 @@ class FeatureHandler:
         })
         return True
 
-    def _integral_query_handle(self, data):
-        """查询回复链路：命中查询命令 → SELECT 积分 → 文案回复；无记录回复「暂无积分」（D-12）。"""
+    def _integral_query_handle(self, data, hub_result=None):
+        """查询回复链路：命中查询命令 → SELECT 积分 → 文案回复；无记录回复「暂无积分」（D-12）。
+
+        hub_result 非 None=中枢已判定查询命中（跳过 enable+命令词重复匹配）。"""
         query_cfg = self.my_handle.config.get("integral", "crud", "query") or {}
         enable = query_cfg.get("enable")
         if enable is None:
@@ -979,12 +1029,14 @@ class FeatureHandler:
             return False
 
         content = str(data.get("content", "") or "").strip()
+        # 审查修复（发布批次）：缺键告警提到 hub 守卫外（同 _integral_sign_handle）
         cmds = query_cfg.get("cmd")
         if not cmds:
             cmds = ["我的积分", "查询积分"]
             self._integral_warn_once("integral.crud.query.cmd", "积分配置缺少 integral.crud.query.cmd，使用默认查询命令词：我的积分/查询积分")
-        if content not in cmds:
-            return False
+        if hub_result is None:
+            if content not in cmds:
+                return False
 
         platform, username, uid = self._integral_identity(data)
         if not username:
@@ -1103,53 +1155,6 @@ class FeatureHandler:
             logger.error(f"串口发送失败（pyserial 缺失或设备不可达——启用串口触发需 pip install pyserial）：{e}")
             return None
 
-    def _trigger_copywriting(self, key_mapping_config: dict, data: dict):
-        """文案触发：随机文案+变量替换→播放链。"""
-        copy_list = key_mapping_config.get("copywriting") or []
-        if not copy_list:
-            return
-        tmp = random.choice(copy_list)
-        tmp = self.my_handle.common.brackets_text_randomize(tmp)
-        data_json = {
-            "username": data.get("username", ""),
-            "gift_name": data.get("gift_name", ""),
-            "gift_num": data.get("num", ""),
-            "unit_price": data.get("unit_price", ""),
-            "total_price": data.get("total_price", ""),
-            "cur_time": self.my_handle.common.get_bj_time(5),
-        }
-        tmp = self.my_handle.common.dynamic_variable_replacement(tmp, data_json)
-        message = {
-            "type": "key_mapping",
-            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-            "config": self.my_handle.config.get("filter"),
-            "username": data.get("username", ""),
-            "content": tmp,
-        }
-        logger.info(f"【触发按键映射】触发文案：{tmp}")
-        self.my_handle.audio_synthesis_handle(message)
-        return True
-
-    def _trigger_local_audio(self, key_mapping_config: dict, data: dict):
-        """本地音频触发（T-c 适配点②：config[].local_audio 键可能缺失，.get 防御）。"""
-        audio_list = key_mapping_config.get("local_audio") or []
-        if not audio_list:
-            return
-        tmp = random.choice(audio_list)
-        message = {
-            "type": "key_mapping",
-            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-            "config": self.my_handle.config.get("filter"),
-            "username": data.get("username", ""),
-            "content": tmp,
-            "file_path": tmp,
-        }
-        logger.info(f"【触发映射】播放本地音频：{tmp}")
-        self.my_handle.audio_synthesis_handle(message)
-        return True
-
     def _trigger_key_press(self, key_mapping_config: dict, data: dict):
         """按键触发（pyautogui 延迟导入——未安装时降级警告，T-c 适配点②）。"""
         try:
@@ -1164,25 +1169,19 @@ class FeatureHandler:
         logger.info(f"【触发按键映射】按键：{key_mapping_config.get('keys')}")
         return True
 
-    def _trigger_img(self, key_mapping_config: dict, data: dict):
-        """图片触发（T-c 适配点③：现行 my_handle 无 sd 属性，降级警告）。"""
-        img_list = key_mapping_config.get("img_path") or []
-        sd = getattr(self.my_handle, "sd", None)
-        if sd is None:
-            logger.warning("图片触发依赖虚拟摄像头对象（my_handle.sd 不存在），跳过本次图片推送")
-            return
-        tmp = random.choice(img_list)
-        sd.set_new_img(tmp)
-        logger.info(f"【触发按键映射】推送图片：{tmp}")
-        return True
-
-    def key_mapping_handle(self, type, data):
+    def key_mapping_handle(self, type, data, hub_result=None):
         """
         按键映射处理（T5 迁移恢复）
 
+        2026-10-25 识别中枢改造：hub_result 非 None=中枢已匹配命中组
+        （礼物分支信任 hub_result.keymap_gift_groups、文本分支信任
+        hub_result.keymap_groups，直接逐组分派执行）；None=自行匹配
+        （直调/既有测试兼容）。
+
         Args:
-            type (str): 数据来源类型（弹幕/回复）
+            type (str): 数据来源类型（弹幕/回复/礼物）
             data (dict): 平台侧传入的 data 数据
+            hub_result (KeywordResult | None): 识别中枢结果
 
         Returns:
             bool: 是否正常触发了按键映射事件
@@ -1193,16 +1192,14 @@ class FeatureHandler:
                 return False
 
             def trigger_dispatch(trigger_type: str, key_mapping_config: dict, matched_text: str) -> bool:
-                """按 trigger_type 分派（T-c 适配点①：键面 f"{prefix}_single_sentence_trigger_once"，无 _enable 后缀）。"""
+                """按 trigger_type 分派（T-c 适配点①：键面 f"{prefix}_single_sentence_trigger_once"，无 _enable 后缀）。
+
+                2026-10-24 精简：文案/本地音频/图片三路触发已移除，仅保留按键+串口。
+                """
                 handlers_map = {
                     "key_trigger_type": lambda: self._trigger_key_press(key_mapping_config, data),
-                    "copywriting_trigger_type": lambda: self._trigger_copywriting(key_mapping_config, data),
-                    "local_audio_trigger_type": lambda: self._trigger_local_audio(key_mapping_config, data),
                     "serial_trigger_type": lambda: self._serial_send(key_mapping_config, data),
-                    "img_path_trigger_type": lambda: self._trigger_img(key_mapping_config, data),
                 }
-                mode_values = ["关键词", "关键词+礼物"] if trigger_type.startswith("key") or trigger_type.startswith("copy") or trigger_type.startswith("local") or trigger_type.startswith("img") else ["礼物", "关键词+礼物"]
-                _ = mode_values  # 触发模式判定在 backup 中由 config key_mapping.<trigger_type> 值决定
                 trigger_mode = self.my_handle.config.get("key_mapping", trigger_type)
                 if trigger_mode not in ["关键词", "礼物", "关键词+礼物"]:
                     return False
@@ -1210,6 +1207,9 @@ class FeatureHandler:
                 executed = handlers_map[trigger_type]()  # 降级（依赖缺失）返回 False
                 if not executed:
                     return False  # 未实际执行 → 继续尝试下一触发器
+                # 2026-10-24 修复：flag 为外层聚合变量（原实现缺 nonlocal，赋值
+                # 落在闭包局部，外层永远读不到），语义=本句确实触发过动作
+                nonlocal flag
                 flag = True
                 # once 语义：实际命中才终止后续匹配（键面适配：config 无 _enable 后缀，双键面兼容）
                 prefix = trigger_type.split("_")[0]
@@ -1221,21 +1221,36 @@ class FeatureHandler:
             key_mapping_configs = self.my_handle.config.get("key_mapping", "config") or []
 
             if "gift_name" in data:
-                # 礼物触发：礼物名精确匹配（once=false 时继续遍历，flag 聚合）
+                # 礼物触发：礼物名精确匹配（2026-10-24 修复：原实现 flag=True
+                # 无条件置位——降级未执行也返回 True 致弹幕被静默吞掉；
+                # 现由 trigger_dispatch 按实际执行聚合）
+                if hub_result is not None:
+                    # 中枢已匹配：逐组分派（2026-10-25 中枢接线，gift_handle 生产链恢复）
+                    for key_mapping_config, matched_text in hub_result.keymap_gift_groups:
+                        for trigger in self._KEYMAP_TRIGGERS:
+                            if trigger_dispatch(trigger, key_mapping_config, matched_text):
+                                return True
+                    return flag
                 for key_mapping_config in key_mapping_configs:
                     for gift in key_mapping_config.get("gift") or []:
                         if gift == data["gift_name"]:
-                            for trigger in ["key_trigger_type", "copywriting_trigger_type",
-                                            "local_audio_trigger_type", "serial_trigger_type"]:
+                            for trigger in self._KEYMAP_TRIGGERS:
                                 if trigger_dispatch(trigger, key_mapping_config, gift):
                                     return True
-                                flag = True  # 实际执行过（executed），once=false 继续
                 return flag
 
             content = str(data.get("content", ""))
             start_cmd = self.my_handle.config.get("key_mapping", "start_cmd")
             if start_cmd and content.startswith(start_cmd):
                 content = content[len(start_cmd):]
+
+            if hub_result is not None:
+                # 中枢已匹配（弹幕型）：命中组平铺逐条分派，once 语义由 trigger_dispatch 返回值保持
+                for key_mapping_config, matched_text in hub_result.keymap_groups:
+                    for trigger in self._KEYMAP_TRIGGERS:
+                        if trigger_dispatch(trigger, key_mapping_config, matched_text):
+                            return True
+                return flag
 
             for key_mapping_config in key_mapping_configs:
                 try:
@@ -1252,9 +1267,7 @@ class FeatureHandler:
                         matched = keyword in content
 
                     if matched:
-                        for trigger in ["key_trigger_type", "copywriting_trigger_type",
-                                        "local_audio_trigger_type", "serial_trigger_type",
-                                        "img_path_trigger_type"]:
+                        for trigger in self._KEYMAP_TRIGGERS:
                             if trigger_dispatch(trigger, key_mapping_config, keyword):
                                 return True
             return flag

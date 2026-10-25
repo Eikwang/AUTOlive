@@ -428,6 +428,14 @@ class TaskScheduler:
                         "content": resp_content,
                     }
                     if self.my_handle is not None:
+                        # 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD
+                        # DynamicCopy→Keyword→Queue）：动态文案入队前统一识别
+                        # （编排关键词订阅；中枢内部全兜底，识别不影响播放链）
+                        try:
+                            self.my_handle.keyword_recognize(
+                                {"content": resp_content}, "copywriting")
+                        except Exception as _kw_err:
+                            logger.debug(f"动态文案中枢识别异常（忽略）：{_kw_err}")
                         self.my_handle.audio_synthesis_handle(message)
                         logger.info(f"动态文案已入播放链：{source_path}")
                     else:

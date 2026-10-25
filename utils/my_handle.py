@@ -38,6 +38,7 @@ from .handlers.timer_handler import TimerHandler
 from .handlers.feature_handler import FeatureHandler
 from .handlers.event_handler import EventHandler
 from .handlers.utils_handler import UtilsHandler
+from .keyword_hub import KeywordHub
 
 
 """
@@ -87,11 +88,14 @@ class My_handle(metaclass=SingletonMeta):
         }
     }
 
-    # 直播消息存储(入场、礼物、弹幕)，用于限定时间内的去重
+    # 直播消息存储(入场、礼物、弹幕、点赞、关注、房间信息)，用于限定时间内的去重
     live_data = {
         "comment": [],
         "gift": [],
         "entrance": [],
+        "follow": [],
+        "like": [],
+        "room_stats": [],
     }
 
     # 各个任务运行数据缓存 暂时用于 限定任务周期性触发
@@ -166,6 +170,10 @@ class My_handle(metaclass=SingletonMeta):
             self.feature_handler = FeatureHandler(self)
             self.event_handler = EventHandler(self)
             self.utils_handler = UtilsHandler(self)
+            # 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Keyword 节点）：
+            # 各信息源（弹幕/语音/礼物/系统任务）统一单次识别，产出 KeywordResult
+            # 分发到各模块消费，消除多模块重复关键词匹配的叠加延时
+            self.keyword_hub = KeywordHub(self)
 
             # 配置加载
             self.config_load()
@@ -490,9 +498,10 @@ class My_handle(metaclass=SingletonMeta):
     def prohibitions_handle(self, content):
         return self.comment_handler.prohibitions_handle(content)
     
-    def reread_handle(self, data, type=None):
-        # A6 修复（2026-10-22 批次）：透传 type（reread_top_priority→999 权重映射保持）
-        return self.comment_handler.reread_handle(data, type=type)
+    def reread_handle(self, data, type=None, hub_result=None):
+        # A6 修复（2026-10-22 批次）：透传 type（reread_top_priority→999 权重映射保持）；
+        # 2026-10-25 中枢批次：透传 hub_result（识别中枢已判定时跳过重复匹配）
+        return self.comment_handler.reread_handle(data, type=type, hub_result=hub_result)
     
     def tuning_handle(self, data):
         return self.comment_handler.tuning_handle(data)
@@ -512,6 +521,12 @@ class My_handle(metaclass=SingletonMeta):
     
     def process_data(self, data, timer_flag):
         return self.timer_handler.process_data(data, timer_flag)
+
+    def keyword_recognize(self, data, source):
+        """关键词识别中枢便捷入口（2026-10-25 核心架构调整，flowchartTD Keyword 节点）：
+        各信息源统一调用，单次识别产出 KeywordResult 分发到各模块消费。
+        中枢内部全兜底，永不抛异常（识别异常降级空结果，消息链继续）。"""
+        return self.keyword_hub.recognize(data, source)
     
     def process_last_data(self, timer_flag):
         return self.timer_handler.process_last_data(timer_flag)
@@ -529,20 +544,20 @@ class My_handle(metaclass=SingletonMeta):
     def load_data_from_file(self, file_path):
         return self.feature_handler.load_data_from_file(file_path)
     
-    def local_qa_handle(self, data):
-        return self.feature_handler.local_qa_handle(data)
-    
-    def choose_song_handle(self, data):
-        return self.feature_handler.choose_song_handle(data)
+    def local_qa_handle(self, data, hub_result=None):
+        return self.feature_handler.local_qa_handle(data, hub_result=hub_result)
 
-    def choose_song_gift_trigger(self, data):
-        return self.feature_handler.choose_song_gift_trigger(data)
+    def choose_song_handle(self, data, hub_result=None):
+        return self.feature_handler.choose_song_handle(data, hub_result=hub_result)
 
-    def integral_handle(self, type, data):
-        return self.feature_handler.integral_handle(type, data)
-    
-    def key_mapping_handle(self, type, data):
-        return self.feature_handler.key_mapping_handle(type, data)
+    def choose_song_gift_trigger(self, data, hub_result=None):
+        return self.feature_handler.choose_song_gift_trigger(data, hub_result=hub_result)
+
+    def integral_handle(self, type, data, hub_result=None):
+        return self.feature_handler.integral_handle(type, data, hub_result=hub_result)
+
+    def key_mapping_handle(self, type, data, hub_result=None):
+        return self.feature_handler.key_mapping_handle(type, data, hub_result=hub_result)
 
     def blacklist_handle(self, data):
         return self.feature_handler.blacklist_handle(data)
@@ -557,7 +572,13 @@ class My_handle(metaclass=SingletonMeta):
     
     def follow_handle(self, data):
         return self.event_handler.follow_handle(data)
-    
+
+    def like_handle(self, data):
+        return self.event_handler.like_handle(data)
+
+    def room_stats_handle(self, data):
+        return self.event_handler.room_stats_handle(data)
+
     def schedule_handle(self, data):
         return self.event_handler.schedule_handle(data)
     

@@ -73,6 +73,10 @@ def handler():
     mh.common = Common()
     mh.db = MagicMock()
     mh.integral_handle.return_value = False
+    # 2026-10-25 识别中枢批次：gift 链先经 keyword_recognize 产出真实空结果
+    # （MagicMock 默认返回真值 MagicMock，会被误判为编排接管/礼物命中而短路答谢）
+    from utils.keyword_hub import KeywordResult
+    mh.keyword_recognize.return_value = KeywordResult(source="gift")
     # task_data 用真实嵌套结构（周期缓存 append 需要 len 断言）
     mh.task_data = {
         "thanks": {

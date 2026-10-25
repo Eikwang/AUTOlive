@@ -98,7 +98,7 @@ class CommentHandler:
             logger.error(f"违禁处理失败：{e}")
             return content
     
-    def reread_handle(self, data, type=None):
+    def reread_handle(self, data, type=None, hub_result=None):
         """
         复读处理
 
@@ -109,6 +109,8 @@ class CommentHandler:
                 type= 调用即 TypeError。type 原样透传进消息——reread_top_priority
                 经 priority_mapping 取 999 权重（999 映射保持不变，见审查记录
                 R6(a)）；业务层复读去重逻辑不区分类型。
+            hub_result (KeywordResult | None): 识别中枢结果。非 None=中枢已判定
+                词命中（调用由 hub_result.reread_type 驱动，跳过内部词表重复匹配）。
 
         Returns:
             bool: 是否触发并处理
@@ -121,35 +123,38 @@ class CommentHandler:
             if not self.my_handle.config.get("reread", "enable"):
                 return False
 
-            # 检查是否匹配复读关键词
-            # A6（2026-10-22 审查批次）：原 3 参 get("reread","keywords",[]) 在 Config
-            # 遍历语义下对 list 再 .get 会 AttributeError（/send reread 二次断点），
-            # 改安全形式。
-            keywords = self.my_handle.config.get("reread", "keywords") or []
-            # str/list 双形态（G7 先例；split_lines 归一化前存量可为 str/逗号串）
-            if isinstance(keywords, str):
-                keywords = ([k.strip() for k in keywords.split("\n") if k.strip()]
-                            or [k.strip() for k in keywords.split(",") if k.strip()])
-            for keyword in keywords:
-                if keyword in content:
-                    logger.info(f"[{username}]触发复读：{content}")
+            if hub_result is None:
+                # 检查是否匹配复读关键词
+                # A6（2026-10-22 审查批次）：原 3 参 get("reread","keywords",[]) 在 Config
+                # 遍历语义下对 list 再 .get 会 AttributeError（/send reread 二次断点），
+                # 改安全形式。
+                keywords = self.my_handle.config.get("reread", "keywords") or []
+                # str/list 双形态（G7 先例；split_lines 归一化前存量可为 str/逗号串）
+                if isinstance(keywords, str):
+                    keywords = ([k.strip() for k in keywords.split("\n") if k.strip()]
+                                or [k.strip() for k in keywords.split(",") if k.strip()])
+                for keyword in keywords:
+                    if keyword in content:
+                        break
+                else:
+                    return False
 
-                    # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
-                    message = {
-                        "type": type if type in ("reread", "reread_top_priority") else "reread",
-                        "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                        "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                        "config": self.my_handle.config.get("filter"),
-                        "username": username,
-                        "content": content
-                    }
-                    
-                    # 音频合成
-                    self.my_handle.audio_synthesis_handle(message)
-                    
-                    return True
-            
-            return False
+            logger.info(f"[{username}]触发复读：{content}")
+
+            # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
+            message = {
+                "type": type if type in ("reread", "reread_top_priority") else "reread",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": username,
+                "content": content
+            }
+
+            # 音频合成
+            self.my_handle.audio_synthesis_handle(message)
+
+            return True
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"复读处理失败：{e}")
@@ -269,9 +274,21 @@ class CommentHandler:
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
 
-            # 记录数据库（UC-2 写库/过滤顺序，/autoplan 2026-10-22 流程图批次终门 uc2a
-            # 批准+2026-10-23 TODOS 批次实施：过滤链已上移至写库前——违禁弹幕不入库，
-            # 写库内容=过滤后弹幕；数据分析历史口径：旧数据含违禁原文、新数据不含）
+            # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Keyword 节点）=====
+            # 过滤链完成后单次识别全部功能的关键词命中，产出 rec 分发到各模块——
+            # 消费侧零重复匹配（原实现各模块独立扫描文本：积分词表/复读词表/
+            # 按键映射 difflib/本地问答全库相似度/点歌曲库 difflib/编排关键词，
+            # 开启多模块时重复开销线性叠加）。UC-2 关键性质不变：过滤链先于
+            # 写库（下方），违禁弹幕不入库、写库内容=过滤后弹幕。
+            # 审查修复（发布批次）：回写过滤后文本——流程图 Keyword 在 Filter
+            # 下游，识别输入=过滤后弹幕（WP-11/CL-3 义务）；原文留存 ori_content
+            if "ori_content" not in data:
+                data["ori_content"] = data["content"]
+            data["content"] = content
+            rec = self.my_handle.keyword_recognize(data, "comment")
+
+            # 记录数据库（Stats：流程图 Keyword→Stats{开启→DB 写入}——中枢识别
+            # 后写库，与图一致；写库内容仍为过滤后弹幕）
             if self.my_handle.config.get("database", "comment_enable"):
                 from datetime import datetime
                 insert_data_sql = '''
@@ -279,58 +296,39 @@ class CommentHandler:
                 '''
                 self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
 
-            # 0、积分机制运转
-            if self.my_handle.integral_handle("comment", data):
+            # 0、积分机制运转（中枢已判定命令词命中，消费侧跳过重复匹配）
+            if rec.integral_sign and self.my_handle.integral_handle("comment", data, hub_result=rec):
                 return
-            if self.my_handle.integral_handle("crud", data):
+            if rec.integral_query and self.my_handle.integral_handle("crud", data, hub_result=rec):
                 return
 
-            # 动作编排关键词订阅（/autoplan 2026-10-21 批次）：违禁/黑名单/格式检查
-            # 之后（:283-294 后）、按键映射之前；独立词表子串匹配（S-2 规范化），
-            # 规范化输入=comment_check_and_replace 处理后 content（义务 WP-11/CL-3）。
-            # 命中触发画面序列，弹幕本身照常走后续流程（无答谢/拦截语义）。
-            try:
-                from utils.orchestration import get_choreographer
-                _choreo = get_choreographer()
-                if _choreo is not None:
-                    _choreo.on_keyword(content)
-            except Exception as _choreo_err:
-                logger.debug(f"动作编排 on_keyword 异常（忽略）：{_choreo_err}")
+            # 动作编排关键词订阅（/autoplan 2026-10-21 批次）：中枢识别时已判定并
+            # 触发画面序列（rec.choreo_accepted 供观测），弹幕本身照常走后续流程
+            # （无答谢/拦截语义）。行为差异说明：原实现在积分之后（积分命中 return
+            # 即不触发编排），中枢化后识别先行——签到/查询弹幕同时命中编排词表
+            # 也会触发画面序列（统一识别语义，flowchartTD Keyword 先于各模块）。
 
-            # 复读触发（TODOS 2026-10-22 音频批次节 #1 生产端接线：弹幕高优词表命中
-            # → reread_top_priority（999 权重·暂停续播链路）；普通词表命中 → reread。
-            # reread.enable/keywords/top_priority_keywords 配置见 filter_config 复读
-            # 触发卡；reread_handle 内 str/list 双形态兼容。命中即 return（复读内容
-            # 直接进 TTS，不再走 LLM——复读语义=原文重读非二次回答）。
-            _top_kws = self.my_handle.config.get("reread", "top_priority_keywords") or []
-            if isinstance(_top_kws, str):
-                _top_kws = [k.strip() for k in _top_kws.split(",") if k.strip()]
-            for _kw in _top_kws:
-                if _kw and _kw in content:
-                    logger.info(f"[{username}] 触发最高优先级复读（词：{_kw}）：{content}")
-                    return self.reread_handle(data, type="reread_top_priority")
-            _rd_kws = self.my_handle.config.get("reread", "keywords") or []
-            if isinstance(_rd_kws, str):
-                _rd_kws = [k.strip() for k in _rd_kws.split(",") if k.strip()]
-            for _kw in _rd_kws:
-                if _kw and _kw in content:
-                    logger.info(f"[{username}] 触发复读（词：{_kw}）：{content}")
-                    return self.reread_handle(data, type="reread")
+            # 复读触发（TODOS 2026-10-22 音频批次节 #1 生产端接线；中枢已判定词命中
+            # 类型：top_priority→reread_top_priority（999 权重·暂停续播链路）、普通词
+            # →reread。命中即 return（复读内容直接进 TTS，不再走 LLM——复读语义=
+            # 原文重读非二次回答）。
+            if rec.reread_type:
+                return self.reread_handle(data, type=rec.reread_type, hub_result=rec)
 
-            # 判断按键映射触发类型
+            # 判断按键映射触发类型（弹幕型：中枢已匹配命中组直接分派；type 显式门卫
+            # 与原实现等价——中枢侧 ktype 路由为第一道闸，此处保留链侧显式闸）
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
-                # 按键映射 触发后不执行后面的其他功能
-                if self.my_handle.key_mapping_handle("弹幕", data):
+                if self.my_handle.key_mapping_handle("弹幕", data, hub_result=rec):
                     return
 
             # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
-            # custom_llm/fastrag 模式跳过，词库改由 llm_handle 内托底调用；ENG E-1 双路径同改）
-            if self.my_handle.config.get("chat_type") == "local_qa":
-                if self.my_handle.local_qa_handle(data):
-                    return
+            # 中枢已判定命中；chat_type≠local_qa 或未启用时 rec.local_qa_answer 恒空，
+            # custom_llm/fastrag 模式词库改由 llm_handle 内托底调用）
+            if rec.local_qa_answer and self.my_handle.local_qa_handle(data, hub_result=rec):
+                return
 
-            # 2、点歌模式
-            if self.my_handle.choose_song_handle(data):
+            # 2、点歌模式（中枢已判定意图：None=未触发静默交回弹幕链）
+            if self.my_handle.choose_song_handle(data, hub_result=rec):
                 return
 
             # 5、LLM处理

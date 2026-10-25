@@ -293,26 +293,37 @@ class ChatHandler:
                 except Exception as db_e:
                     logger.error(f"弹幕日志写库失败（不影响回复链）：{db_e}")
 
-            # 0、积分机制运转
-            if self.my_handle.integral_handle("comment", data):
+            # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Capture→Keyword）=====
+            # 语音源经过滤后单次识别全部功能的关键词命中，后续各模块凭结果分发、
+            # 零重复匹配（原实现与弹幕链各自独立扫描同一套词表）。talk 源功能集
+            # 与原链一致：积分签到/查询、按键映射弹幕型、本地问答、点歌意图
+            # （复读/编排订阅原语音链未开，保持不开——需统一时改 KeywordHub._TEXT_FEATURES）。
+            # 审查修复（发布批次）：回写过滤后文本（同 comment 链，原文留存 ori_content）
+            if "ori_content" not in data:
+                data["ori_content"] = data["content"]
+            data["content"] = content
+            rec = self.my_handle.keyword_recognize(data, "talk")
+
+            # 0、积分机制运转（中枢已判定命令词命中，消费侧跳过重复匹配）
+            if rec.integral_sign and self.my_handle.integral_handle("comment", data, hub_result=rec):
                 return
-            if self.my_handle.integral_handle("crud", data):
+            if rec.integral_query and self.my_handle.integral_handle("crud", data, hub_result=rec):
                 return
 
-            # 判断按键映射触发类型
+            # 判断按键映射触发类型（弹幕型：中枢已匹配命中组直接分派；type 显式门卫
+            # 与原实现等价——中枢侧 ktype 路由为第一道闸，此处保留链侧显式闸）
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
-                # 按键映射 触发后不执行后面的其他功能
-                if self.my_handle.key_mapping_handle("弹幕", data):
+                if self.my_handle.key_mapping_handle("弹幕", data, hub_result=rec):
                     return
 
             # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
-            # custom_llm/fastrag 模式跳过，词库改由 llm_handle 内托底调用）
-            if self.my_handle.config.get("chat_type") == "local_qa":
-                if self.my_handle.local_qa_handle(data):
-                    return
+            # 中枢已判定命中；chat_type≠local_qa 或未启用时 rec.local_qa_answer 恒空，
+            # custom_llm/fastrag 模式词库改由 llm_handle 内托底调用）
+            if rec.local_qa_answer and self.my_handle.local_qa_handle(data, hub_result=rec):
+                return
 
-            # 2、点歌模式
-            if self.my_handle.choose_song_handle(data):
+            # 2、点歌模式（中枢已判定意图：None=未触发静默交回语音链）
+            if self.my_handle.choose_song_handle(data, hub_result=rec):
                 return
 
             # 5、LLM处理

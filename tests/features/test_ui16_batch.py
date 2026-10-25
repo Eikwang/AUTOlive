@@ -548,13 +548,18 @@ class TestRereadProductionChain:
     reread/reread_top_priority 生产→999 暂停-续播链路真实触发。"""
 
     def test_comment_handler_keyword_trigger(self):
-        """comment_handle 弹幕链复读触发段：高优词表→reread_top_priority，
-        普通词表→reread，str/list 双形态（G7 先例）。"""
+        """comment_handle 弹幕链复读触发（2026-10-25 识别中枢批次上收）：
+        词表匹配（高优→reread_top_priority / 普通→reread，str/list 双形态）
+        移入识别中枢 KeywordHub._match_reread；弹幕链凭 rec.reread_type 分发，
+        内联词表扫描不得回归。"""
         src = _src("utils/handlers/comment_handler.py")
-        assert '_top_kws = self.my_handle.config.get("reread", "top_priority_keywords") or []' in src
-        assert 'return self.reread_handle(data, type="reread_top_priority")' in src
-        assert 'return self.reread_handle(data, type="reread")' in src
-        assert "isinstance(_top_kws, str)" in src
+        assert "if rec.reread_type:" in src
+        assert "return self.reread_handle(data, type=rec.reread_type, hub_result=rec)" in src
+        assert "_top_kws" not in src and "_rd_kws" not in src
+        # 高优/普通词表匹配语义在中枢内保持
+        hub_src = _src("utils/keyword_hub.py")
+        assert '"reread_top_priority"' in hub_src
+        assert 'reread_top_priority" if' in hub_src or "top_priority_keywords" in hub_src
 
     def test_reread_section_defaults(self):
         """settings _ensure_defaults：reread 节 defaults（此前 config 无此节，
@@ -607,11 +612,15 @@ class TestD15RetiredKeysNotice:
         assert '("filter", "lang_filter")' in src
 
     def test_notice_once_flag(self):
-        """一次性告知：标志键防重复+notify 失败不设标志。"""
+        """一次性告知：标志键防重复+notify 失败不设标志。
+
+        2026-10-24：set 须关键字传参（Settings.set(*keys, value) 签名）——
+        原位置传参 TypeError 被吞→标志永不落盘→每次启动重复告知。
+        """
         src = _src("frontend/main.py")
         assert "retired_keys_notice_shown" in src
         assert "def _notify_retired_config_keys(self):" in src
-        assert "self.config.set(\"webui\", \"retired_keys_notice_shown\", True)" in src
+        assert 'self.config.set("webui", "retired_keys_notice_shown", value=True)' in src
         assert "ui.timer(2.5, self._notify_retired_config_keys, once=True)" in src
 
 
