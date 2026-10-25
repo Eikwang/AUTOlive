@@ -240,15 +240,17 @@ class TestR8PageRemoval:
 
 class TestTalkPageSmoke:
     def test_password_param_fixed(self):
-        """P1：password_icon_visibility（NiceGUI 3.16 非法参数）清零，正确参数在位。"""
+        """P1：password_icon_visibility（NiceGUI 3.16 非法参数）清零。
+        2026-10-25 精简：百度区块（原 2 处密码框）已随区块移除，全页无密码框。"""
         src = _src("frontend/ui/tabs/talk.py")
         assert "password_icon_visibility" not in src
-        assert src.count("password_toggle_button=True") == 2
+        assert src.count("password_toggle_button=True") == 0
 
     def test_two_column_layout(self):
-        """R1：8 处参数网格全部两列（防回退三列挤掉聊天记录区）。"""
+        """R1：参数网格全部两列（防回退三列挤掉聊天记录区）。
+        2026-10-25 精简：谷歌/百度/faster_whisper/SenseVoice 四区块移除，8→4 处。"""
         src = _src("frontend/ui/tabs/talk.py")
-        assert src.count("with ui.grid(columns=2):") == 8
+        assert src.count("with ui.grid(columns=2):") == 4
         assert "with ui.grid(columns=3):" not in src
 
     def test_module_imports(self):
@@ -377,26 +379,35 @@ class TestRound2Fixes:
         assert 'ui.timer(2.0, _refresh_chat_log)' in talk_src
 
     def test_chat_log_semantics_chat_only(self):
-        """任务 14 语义修正：聊天记录只收聊天功能互动（voice/chatbox），
-        弹幕监听链（无 chat_source 标记）在 core 网关与 webui 白名单双层过滤。"""
+        """任务 14 + 2026-10-25 重构：聊天记录收聊天功能互动
+        （voice=语音对话/chatbox=聊天框发送/comment=弹幕监听问答），
+        点歌/积分等其余来源在 core 网关与 webui 白名单双层过滤；
+        talk.show_chat_log 开关已退役（固定记录）。"""
         ws = _src("utils/web_server.py")
         assert ws.count('data_json["chat_source"] = "chatbox"') == 1  # 聊天框发送打标
         conv = _src("utils/conversation_manager.py")
         assert '"chat_source": "voice"' in conv  # 语音对话打标
         uh = _src("utils/handlers/utils_handler.py")
-        assert 'chat_source not in ("voice", "chatbox")' in uh  # core 网关白名单
-        assert 'return  # 弹幕监听等非聊天互动来源不进聊天记录' in uh
+        assert 'chat_source not in ("voice", "chatbox", "comment")' in uh  # core 网关白名单
+        assert 'return  # 点歌/积分等非聊天互动来源不进聊天记录' in uh
+        # 开关退役：发送侧不再读 show_chat_log 配置（键已从 example 移除；
+        # 注意方法名 webui_show_chat_log_callback 含子串，断言须锚定配置门卫）
+        assert 'config.get("talk", "show_chat_log")' not in uh
+        assert 'config.get("talk", "show_chat_log")' not in _src("utils/handlers/chat_handler.py")
+        assert 'config.get("talk", "show_chat_log")' not in _src("utils/handlers/comment_handler.py")
         fm = _src("frontend/main.py")
-        assert 'payload.get("chat_source") in ("voice", "chatbox")' in fm  # webui 白名单
+        assert 'payload.get("chat_source") in ("voice", "chatbox", "comment")' in fm  # webui 白名单
         # 发送对：语音输入 question（talk_handle）+语音回复 answer（补发）
         chat = _src("utils/handlers/chat_handler.py")
-        assert '"type": "语音对话"' in chat  # 原误导性「弹幕信息」type 改正
+        assert '"type": "语音对话"' in chat
         assert chat.count('content_type="answer"') == 1  # 回复侧补发
-        # 聊天框：输入 question+回复 answer 成对（comment_handler chatbox 标记处）
+        # 弹幕：输入 question+回复 answer 成对（弹幕监听默认源 comment 打标）
         cm = _src("utils/handlers/comment_handler.py")
         assert 'content_type="question"' in cm
         assert 'content_type="answer"' in cm
-        assert cm.count('_is_chatbox') >= 3  # 标记判定复用（输入+回复）
+        assert '"弹幕信息"' in cm
+        assert cm.count('_is_chatbox') >= 2  # 标记判定复用（输入+回复）
+        assert 'dict(data, chat_source=_chat_src)' in cm  # 副本打标不污染原 data
 
     def test_trends_labels_renamed_and_chatgpt_removed(self):
         """任务 13：随机生成/生成间隔+chatgpt 选项彻底移除。"""
@@ -487,7 +498,7 @@ class TestT10VoiceTalkChain:
 
     def test_asr_aligns_project_models(self):
         """四轮用户澄清：ASR 对齐项目既有实现（apps/gpt-sovits/tools/asr/）——
-        本地模型优先零下载+HF 镜像+混合语言路由（中文检测→FunASR 回退）。"""
+        本地模型优先零下载+HF 镜像+need_lang 直选路由（zh/yue→FunASR，其余→whisper）。"""
         from utils.asr_engine import _local_fw_model_dir, _funasr_model_paths
         import os
         src = _src("utils/asr_engine.py")
@@ -500,9 +511,11 @@ class TestT10VoiceTalkChain:
         for k in ("model", "vad", "punc"):
             assert os.path.isdir(zh[k]), zh[k]
         assert "paraformer-large" in zh["model"]
-        # 混合路由：检测为中文 → FunASR 回退（fasterwhisper_asr.py:73-77 同款）
-        assert 'detected == "zh"' in src
-        assert "_transcribe_funasr(wav_path, \"zh\")" in src
+        # 语言路由（2026-10-25 重构）：need_lang 一次定模型——zh/yue→FunASR，
+        # 其余→whisper；"whisper 先转写再检测 zh 转发"的冗余双模型链已退役
+        assert 'need_lang in ("zh", "yue")' in src
+        assert '_transcribe_funasr(wav_path, need_lang)' in src
+        assert 'detected == "zh"' not in src
         # 粤语：UniASR 无 VAD（funasr_asr.py 注释——带 VAD 会 shape 报错）
         yue = _funasr_model_paths("yue")
         assert yue["vad"] is None and "UniASR" in yue["model"]
