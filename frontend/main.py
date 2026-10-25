@@ -92,6 +92,7 @@ _RETIRED_CONFIG_KEYS: list = [
     (("game",), "game 配置节已退役（游戏控制实现已移除，chat_type=game 不可用），可删除"),
     (("audio_player", "priority_mapping"), "audio_player.priority_mapping 已收敛至 filter.priority_mapping（运行时自动合并迁移），可删除"),
     (("filter", "lang_filter"), "filter.lang_filter 已退役（语言过滤由顶层 need_lang 键驱动），可删除"),
+    (("talk", "show_chat_log"), "talk.show_chat_log 已退役（2026-10-25 批次：聊天记录固定记录弹幕与聊天互动，不再需要开关），可删除"),
     (("key_mapping", "copywriting_trigger_type"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "copywriting_single_sentence_trigger_once"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "local_audio_trigger_type"), "key_mapping 本地音频触发已移除（2026-10-24 精简批次），可删除"),
@@ -180,6 +181,35 @@ class AutoliveApp:
             except Exception:
                 snap.append((name, None))
         return snap
+
+    def send_chat_message(self, msg_type: str, content: str) -> bool:
+        """聊天页按钮统一发送（修复 2026-10-25 实测批次：webui 重构自 webui-bak
+        时 AutoliveApp 丢失此方法——layout.py:1686 hasattr 判定 False 致
+        chat_send_callback=None，聊天框/直接复读恒报"发送失败——请确认系统已启动"）。
+
+        语义与主进程 main.py send_chat_message 同构：POST core /send（webui
+        /send 同构 payload）——reread/reread_top_priority 走 reread_handle（999
+        链路），comment 走弹幕链（chat_source=chatbox 进聊天记录）。
+        Returns: 是否成功（失败 notify 由调用方 talk 页承接）。
+        """
+        import json as _json
+        import urllib.request as _urllib
+        cfg = self.config._config
+        main_api_ip = "127.0.0.1" if cfg.get("api_ip") == "0.0.0.0" else cfg.get("api_ip", "127.0.0.1")
+        main_api_port = cfg.get("api_port", 8000)
+        url = f'http://{main_api_ip}:{main_api_port}/send'
+        payload = {"type": msg_type, "data": {
+            "username": (cfg.get("talk") or {}).get("username", "主人"),
+            "content": content, "chat_source": "chatbox"}}
+        try:
+            req = _urllib.Request(url, data=_json.dumps(payload).encode('utf-8'),
+                                  headers={'Content-Type': 'application/json'})
+            with _urllib.urlopen(req, timeout=10) as resp:
+                resp_data = _json.loads(resp.read().decode('utf-8'))
+            return isinstance(resp_data, dict) and resp_data.get("code") == 200
+        except Exception as e:
+            logger.error(f"聊天发送失败（{msg_type}）：{e}")
+            return False
 
     def __init__(self):
         """初始化应用程序
@@ -1080,10 +1110,10 @@ class AutoliveApp:
                 data_json = await request.json()
                 logger.info(f'WEBUI API callback接口收到数据：{data_json}')
                 payload = (data_json or {}).get("data") or {}
-                # UI-16 二轮验收（任务 14 语义修正）：白名单——聊天记录只收聊天
-                # 功能互动（voice=语音对话/chatbox=聊天框发送），弹幕链等其余
-                # 来源（无标记/点歌/积分/本地问答的弹幕触发路径）在此丢弃
-                if payload and payload.get("chat_source") in ("voice", "chatbox"):
+                # 2026-10-25 重构：白名单——聊天记录收聊天功能互动
+                # （voice=语音对话/chatbox=聊天框发送/comment=弹幕监听问答），
+                # 点歌/积分/本地问答等其余来源（无标记/其它标记）在此丢弃
+                if payload and payload.get("chat_source") in ("voice", "chatbox", "comment"):
                     from frontend.utils.chat_log_buffer import append_chat
                     append_chat(payload)
                 return {"code": 200, "message": "成功"}

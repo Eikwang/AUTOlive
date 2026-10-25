@@ -589,8 +589,11 @@ class My_handle(metaclass=SingletonMeta):
         return self.event_handler.abnormal_alarm_handle(type)
     
     # 工具相关
-    def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str):
-        return self.utils_handler.webui_show_chat_log_callback(data_type, data, resp_content)
+    def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str, content_type: str = "answer"):
+        # content_type 透传（2026-10-25 修复：answer/question 语义由调用方决定，
+        # 委托签名缺失致 talk/comment 链 answer 侧 TypeError 被外层 try 吞掉——
+        # 聊天记录只显示问不显示答的根因）
+        return self.utils_handler.webui_show_chat_log_callback(data_type, data, resp_content, content_type)
     
     def get_room_id(self):
         return self.utils_handler.get_room_id()

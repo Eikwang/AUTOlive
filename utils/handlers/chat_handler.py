@@ -254,32 +254,30 @@ class ChatHandler:
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
 
-            if self.my_handle.config.get("talk", "show_chat_log"):
-                if "ori_username" not in data:
-                    data["ori_username"] = data["username"]
-                if "ori_content" not in data:
-                    data["ori_content"] = data["content"]
-                if "user_face" not in data:
-                    data["user_face"] = 'https://robohash.org/ui'
-
-                # UI-16 二轮验收（任务 14 语义修正）：本链=语音对话（talk），输入侧
-                # 发送 type 字面改「语音对话」（原误导性「弹幕信息」），chat_source
-                # 透传（webui /callback 白名单：仅 voice/chatbox 进聊天记录）
-                return_webui_json = {
-                    "type": "llm",
-                    "data": {
-                        "type": "语音对话",
-                        "chat_source": data.get("chat_source", "voice"),
-                        "username": data["ori_username"],
-                        "user_face": data["user_face"],
-                        "content_type": "question",
-                        "content": data["ori_content"],
-                        "timestamp": self.my_handle.common.get_bj_time(0)
-                    }
+            # 聊天记录（2026-10-25 重构：talk.show_chat_log 开关退役，固定记录）
+            # 本链=语音对话（talk），输入侧发送 type 字面「语音对话」，chat_source
+            # 透传（webui /callback 白名单：voice/chatbox/comment 进聊天记录）
+            if "ori_username" not in data:
+                data["ori_username"] = data["username"]
+            if "ori_content" not in data:
+                data["ori_content"] = data["content"]
+            if "user_face" not in data:
+                data["user_face"] = 'https://robohash.org/ui'
+            return_webui_json = {
+                "type": "llm",
+                "data": {
+                    "type": "语音对话",
+                    "chat_source": data.get("chat_source", "voice"),
+                    "username": data["ori_username"],
+                    "user_face": data["user_face"],
+                    "content_type": "question",
+                    "content": data["ori_content"],
+                    "timestamp": self.my_handle.common.get_bj_time(0)
                 }
-                webui_ip = "127.0.0.1" if self.my_handle.config.get("webui", "ip") == "0.0.0.0" else self.my_handle.config.get("webui", "ip")
-                tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=10)
-            
+            }
+            webui_ip = "127.0.0.1" if self.my_handle.config.get("webui", "ip") == "0.0.0.0" else self.my_handle.config.get("webui", "ip")
+            tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=10)
+
 
             # 记录数据库（窄 try 隔离：DB 异常仅丢日志，不中断回复链——T4/ENG H-1，
             # 此前 datetime NameError 被外层 try 吞掉导致其后整条回复链静默跳过）
@@ -412,12 +410,10 @@ class ChatHandler:
 
             self.my_handle.audio_synthesis_handle(message)
 
-            # UI-16 二轮验收（任务 14 语义修正）：语音对话的回复侧补发聊天记录
-            # （上游缺失——只有输入侧 question，无 answer，记录只有半边）
-            if self.my_handle.config.get("talk", "show_chat_log"):
-                self.my_handle.webui_show_chat_log_callback(
-                    "语音对话", dict(data, chat_source=data.get("chat_source", "voice")),
-                    resp_content, content_type="answer")
+            # 聊天记录（2026-10-25）：语音对话的回复侧 answer（开关已退役，固定记录）
+            self.my_handle.webui_show_chat_log_callback(
+                "语音对话", dict(data, chat_source=data.get("chat_source", "voice")),
+                resp_content, content_type="answer")
 
             return message
         except Exception as e:

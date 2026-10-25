@@ -239,17 +239,20 @@ class CommentHandler:
             # 输出当前用户发送的弹幕消息
             logger.info(f"[{username}]: {content}")
 
-            # UI-16 二轮验收（任务 14 语义修正）：聊天框发送（chat_source=chatbox，
-            # web_server /send 打标）进聊天记录；弹幕监听源无标记不显示。
-            # 输入侧 question + 回复侧 answer 成对发送（下方回复段）
+            # 聊天记录（2026-10-25 重构）：弹幕监听与聊天框互动全程记录——输入侧
+            # question（回复侧 answer 在下方回复段）。chat_source：chatbox=聊天框
+            # 发送（web_server /send 打标），comment=弹幕监听；开关已退役固定记录
             _is_chatbox = data.get("chat_source") == "chatbox"
-            if _is_chatbox and self.my_handle.config.get("talk", "show_chat_log"):
-                if "ori_username" not in data:
-                    data["ori_username"] = data["username"]
-                if "ori_content" not in data:
-                    data["ori_content"] = data["content"]
-                self.my_handle.webui_show_chat_log_callback(
-                    "聊天发送", data, data["ori_content"], content_type="question")
+            _chat_src = data.get("chat_source") or "comment"  # 弹幕监听默认源
+            if "ori_username" not in data:
+                data["ori_username"] = data["username"]
+            if "ori_content" not in data:
+                data["ori_content"] = data["content"]
+            # dict 副本打标：不污染原 data（下游点歌/引导等发送点不受牵连）
+            self.my_handle.webui_show_chat_log_callback(
+                "聊天发送" if _is_chatbox else "弹幕信息",
+                dict(data, chat_source=_chat_src),
+                data["ori_content"], content_type="question")
 
             # 用户名以及弹幕违禁判断
             username = self.prohibitions_handle(username)
@@ -417,10 +420,11 @@ class CommentHandler:
 
             self.my_handle.audio_synthesis_handle(message)
 
-            # UI-16 二轮验收（任务 14 语义修正）：聊天框发送的回复侧 answer
-            # （输入侧 question 在本函数头部 chatbox 标记处；弹幕源不发送）
-            if _is_chatbox and self.my_handle.config.get("talk", "show_chat_log"):
-                self.my_handle.webui_show_chat_log_callback(
-                    "聊天发送", data, resp_content, content_type="answer")
+            # 聊天记录（2026-10-25 重构）：回复侧 answer（输入侧 question 在本函数
+            # 头部；弹幕与聊天框均记录，开关已退役固定记录）
+            self.my_handle.webui_show_chat_log_callback(
+                "聊天发送" if _is_chatbox else "弹幕信息",
+                dict(data, chat_source=data.get("chat_source") or "comment"),
+                resp_content, content_type="answer")
         except Exception as e:
             logger.error(traceback.format_exc())

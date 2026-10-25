@@ -33,36 +33,37 @@ class UtilsHandler:
             resp_content (str): 显示的聊天内容的文本
             content_type (str): question=用户输入 / answer=系统回复
 
-        UI-16 二轮验收（任务 14 语义修正）：聊天记录只显示聊天功能互动
-        （语音对话 chat_source=voice / 聊天框发送 chat_source=chatbox），
-        弹幕监听链（无标记）在此网关丢弃。标记由 /send（chatbox）与
-        conversation_manager（voice）入口打点，经 data 自然透传到本处。
+        UI-16 二轮验收（任务 14）+ 2026-10-25 重构：聊天记录显示聊天功能互动
+        （语音对话 voice / 聊天框发送 chatbox / 弹幕监听 comment——用户弹幕
+        与系统回答），其余来源（点歌/积分/本地问答的弹幕触发路径）在此网关
+        丢弃。talk.show_chat_log 开关已退役：固定记录，不再做配置门卫。
+        标记由 /send（chatbox）、conversation_manager（voice）与弹幕链发送点
+        （comment）打点，经 data 自然透传；本网关只做白名单校验不改写。
         """
         try:
-            if self.my_handle.config.get("talk", "show_chat_log") == True:
-                chat_source = (data or {}).get("chat_source", "")
-                if chat_source not in ("voice", "chatbox"):
-                    return  # 弹幕监听等非聊天互动来源不进聊天记录
-                if "ori_username" not in data:
-                    data["ori_username"] = data["username"]
-                if "ori_content" not in data:
-                    data["ori_content"] = data["content"]
+            chat_source = (data or {}).get("chat_source", "")
+            if chat_source not in ("voice", "chatbox", "comment"):
+                return  # 点歌/积分等非聊天互动来源不进聊天记录
+            if "ori_username" not in data:
+                data["ori_username"] = data["username"]
+            if "ori_content" not in data:
+                data["ori_content"] = data["content"]
 
-                # 返回给webui的数据
-                return_webui_json = {
-                    "type": "llm",
-                    "data": {
-                        "type": data_type,
-                        "chat_source": chat_source,
-                        "username": data["ori_username"],
-                        "content_type": content_type,
-                        "content": f"错误：{data_type}无返回，请查看日志" if resp_content is None else resp_content,
-                        "timestamp": self.my_handle.common.get_bj_time(0)
-                    }
+            # 返回给webui的数据
+            return_webui_json = {
+                "type": "llm",
+                "data": {
+                    "type": data_type,
+                    "chat_source": chat_source,
+                    "username": data["ori_username"],
+                    "content_type": content_type,
+                    "content": f"错误：{data_type}无返回，请查看日志" if resp_content is None else resp_content,
+                    "timestamp": self.my_handle.common.get_bj_time(0)
                 }
+            }
 
-                webui_ip = "127.0.0.1" if self.my_handle.config.get("webui", "ip") == "0.0.0.0" else self.my_handle.config.get("webui", "ip")
-                tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=30)
+            webui_ip = "127.0.0.1" if self.my_handle.config.get("webui", "ip") == "0.0.0.0" else self.my_handle.config.get("webui", "ip")
+            tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=30)
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
     
