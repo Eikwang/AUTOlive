@@ -92,6 +92,12 @@ _RETIRED_CONFIG_KEYS: list = [
     (("game",), "game 配置节已退役（游戏控制实现已移除，chat_type=game 不可用），可删除"),
     (("audio_player", "priority_mapping"), "audio_player.priority_mapping 已收敛至 filter.priority_mapping（运行时自动合并迁移），可删除"),
     (("filter", "lang_filter"), "filter.lang_filter 已退役（语言过滤由顶层 need_lang 键驱动），可删除"),
+    (("key_mapping", "copywriting_trigger_type"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
+    (("key_mapping", "copywriting_single_sentence_trigger_once"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
+    (("key_mapping", "local_audio_trigger_type"), "key_mapping 本地音频触发已移除（2026-10-24 精简批次），可删除"),
+    (("key_mapping", "local_audio_single_sentence_trigger_once"), "key_mapping 本地音频触发已移除（2026-10-24 精简批次），可删除"),
+    (("key_mapping", "img_path_trigger_type"), "key_mapping 图片触发已移除（2026-10-24 精简批次），可删除"),
+    (("key_mapping", "img_path_single_sentence_trigger_once"), "key_mapping 图片触发已移除（2026-10-24 精简批次），可删除"),
 ]
 
 
@@ -892,7 +898,9 @@ class AutoliveApp:
             msg = "检测到已退役配置键面（不影响运行，可删除）：\n" + "\n".join(hits)
             logger.warning(msg)
             ui.notify(position="top", type="warning", message=msg, timeout=10)
-            self.config.set("webui", "retired_keys_notice_shown", True)
+            # value 必须关键字传参（Settings.set(*keys, value) 签名，2026-10-24
+            # 修复：原位置传参 TypeError 被吞→标志永不落盘→每次启动重复告知）
+            self.config.set("webui", "retired_keys_notice_shown", value=True)
             self.config.save()
         except Exception as e:
             logger.debug(f"退役键面告知跳过（下轮启动再试）：{e}")
