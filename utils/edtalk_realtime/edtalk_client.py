@@ -7,7 +7,8 @@ try/except + logger。所有失败均降级处理，不阻塞直播主流程。
 
 关键语义（EDTalk功能集成计划 §4.3 + Eng 义务）：
 - 推送通道：POST /audio/push_full（16kHz int16，EMBEDDING v0.4 唯一有效通道）
-- 采样率：推送前校验 wav 头，非 16kHz 自动重采样（native E3：edge-tts 默认 24kHz）
+- 采样率：推送前校验 wav 头，非 16kHz 自动重采样（native E3：edge-tts 默认 24kHz）；
+  非 RIFF 音频（edge_tts 产物是 mp3）先 pydub 转临时 wav 再推（2026-10-25 实测修复）
 - 单飞行句 + 完成判定启发式（native E1）：最短飞行时间 = duration×1.2 + buffer_depth
   回落双条件；宁可延迟不截断（过早推送会被 render_loop 的 _flush_buffer 截断上一句）
 - 背压：推送协程内阻塞等待，上游播放循环天然被背压（native A2）
@@ -17,6 +18,7 @@ try/except + logger。所有失败均降级处理，不阻塞直播主流程。
 import asyncio
 import base64
 import io
+import os
 import time
 import traceback
 import wave
@@ -83,6 +85,38 @@ def load_wav_as_16k_pcm(pcm_path: str):
     if rate != TARGET_RATE or channels > 1:
         pcm = _resample_pcm(pcm, width, channels, rate)
     return pcm, rate
+
+
+def _ensure_wav_riff(path: str):
+    """RIFF 归一：非 wav 音频（edge_tts 产物是 mp3，无 RIFF 头）→ pydub 转临时 wav。
+
+    wave.open 直读 mp3 必抛 "file does not start with RIFF id"（2026-10-25 实测
+    致数字人推送全败）；pydub 解码依赖 ffmpeg（builtin_play_center 同款既有依赖）。
+
+    Returns:
+        (wav_path, tmp_created)：RIFF 头原样返回 (path, False)；转码成功返回
+        (临时 wav 路径, True)——调用方用完负责删除。
+    Raises:
+        Exception: 解码/转码失败——由 push_full 兜底记录，不阻塞主流程。
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) == b"RIFF":
+                return path, False
+    except OSError:
+        return path, False  # 打不开交由后续 load 抛标准错误
+    from pydub import AudioSegment
+    tmp = f"{os.path.splitext(path)[0]}_edtalk.wav"
+    try:
+        AudioSegment.from_file(path).export(tmp, format="wav")
+    except Exception as e:
+        raise RuntimeError(
+            f"非 RIFF 音频转码失败（{type(e).__name__}: {e}）。"
+            f"problem=TTS 产物非 wav 且解码转码失败；"
+            f"cause=pydub/ffmpeg 缺失或源音频损坏；"
+            f"fix=安装 ffmpeg 并加入 PATH，或把 TTS 输出格式改为 wav"
+        ) from e
+    return tmp, True
 
 
 class EDTalkClient:
@@ -155,8 +189,12 @@ class EDTalkClient:
             True = 推送成功；False = 失败（已降级记录）
         """
         async with self._push_lock:
+            wav_path, tmp_created = pcm_path, False
             try:
-                pcm, src_rate = load_wav_as_16k_pcm(pcm_path)
+                # RIFF 归一（2026-10-25 实测修复）：edge_tts 产物是 mp3（无 RIFF 头），
+                # wave.open 直读必抛 "file does not start with RIFF id"——先转临时 wav 再加载
+                wav_path, tmp_created = _ensure_wav_riff(pcm_path)
+                pcm, src_rate = load_wav_as_16k_pcm(wav_path)
                 if not pcm:
                     raise ValueError("音频内容为空")
                 duration_s = len(pcm) / 2.0 / TARGET_RATE
@@ -209,6 +247,12 @@ class EDTalkClient:
                 if self.failure_count == 1:
                     logger.error("EDTalk 首次推送失败：直播将无数字人口型（音频已跳过本地播放）")
                 return False
+            finally:
+                if tmp_created:
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass
 
     # ---------- 控制面（直调 HTTP，实时生效） ----------
 

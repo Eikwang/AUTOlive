@@ -156,11 +156,10 @@ class AudioProcessor:
         while True:
             # 播放中不录音
             if self.config.get("talk", "no_recording_during_playback"):
-                # 存在待合成音频 或 已合成音频还未播放 或 播放中 或 在数据处理中
-                if (
-                    self.my_handle.is_audio_queue_empty() != 7
-                    or self.my_handle.is_handle_empty() == 1
-                ):
+                # 存在待合成音频 或 已合成音频还未播放 或 播放中
+                # （位掩码 7=全空闲；旧链 is_handle_empty「数据处理中」旗标在重构版
+                # 已不存在，队列位掩码已覆盖全部忙态——2026-10-25 修复 AttributeError）
+                if self.my_handle.is_audio_queue_empty() != 7:
                     time.sleep(
                         float(
                             self.config.get(
