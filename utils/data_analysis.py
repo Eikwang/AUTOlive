@@ -1,5 +1,4 @@
 import traceback
-import jieba
 from collections import Counter
 import os
 
@@ -7,6 +6,10 @@ from .common import Common
 from .my_log import logger
 from .config import Config
 from .db import SQLiteDB
+
+# 弹幕词云扫描上限（近 5 万条：rowid 索引顺序取，防数据量增长后 jieba 全表
+# 分词线性变卡；词云语义上"近期弹幕"也更贴合直播间实时氛围）
+DANMU_WORDCLOUD_SCAN_LIMIT = 50000
 
 
 class Data_Analysis:
@@ -54,13 +57,13 @@ class Data_Analysis:
         Returns:
             dict: 关键词json
         """
-
-        # 假设这是您的字符串数组
-        # text_list = [
-        #     "Python是一种广泛使用的高级编程语言",
-        #     "它结合了解释型、编译型、互动性和面向对象的脚本语言的特点",
-        #     # ...更多字符串
-        # ]
+        # jieba 延迟导入（2026-10-24 进页卡顿优化：首次调用才加载词典库，
+        # 模块顶层导入会让数据分析页每次首渲都卡 ~1s； ImportError 降级返回空）
+        try:
+            import jieba
+        except ImportError as e:
+            logger.warning(f"jieba 未安装，弹幕关键词统计不可用: {e}")
+            return []
 
         # 使用jieba进行中文分词
         words = []
@@ -81,7 +84,7 @@ class Data_Analysis:
         # 使用列表推导式和字典推导式进行转换
         dict_list = [{'name': name, 'value': value} for name, value in most_common_words]
 
-        logger.debug(dict_list)
+        logger.debug(f"关键词统计 top{top_num}={dict_list}")
 
         return dict_list
     
@@ -105,12 +108,14 @@ class Data_Analysis:
                 logger.error("数据库连接未初始化")
                 return None
 
-            # 查询数据
-            select_data_sql = '''
-            SELECT content FROM danmu
+            # 查询数据（近 N 条：防数据量增长后 jieba 全表分词线性变卡，
+            # rowid 顺序取，索引扫描开销 O(N)）
+            select_data_sql = f'''
+            SELECT content FROM danmu ORDER BY rowid DESC LIMIT {int(DANMU_WORDCLOUD_SCAN_LIMIT)}
             '''
             data_list = self.db.fetch_all(select_data_sql)
             text_list = [data[0] for data in data_list]
+            logger.debug(f"弹幕关键词统计扫描弹幕条数={len(text_list)}")
 
             data_json = self.get_most_common_words(text_list, top_num)
 
@@ -222,7 +227,7 @@ class Data_Analysis:
             list_list = [list(t) for t in data_list]
             username_list = [t[1] for t in data_list]
 
-            logger.debug(f"list_list={list_list}")
+            logger.debug(f"积分表查询行数={len(list_list)}")
 
             option = {
                 'title': {
@@ -388,8 +393,7 @@ class Data_Analysis:
             username_list = [t[0] for t in data_list]
             total_price_list = [t[4] for t in data_list]
 
-            logger.debug(f"username_list={username_list}")
-            logger.debug(f"total_price_list={total_price_list}")
+            logger.debug(f"礼物榜查询行数={len(data_list)}")
 
             option = {
                 'title': {
