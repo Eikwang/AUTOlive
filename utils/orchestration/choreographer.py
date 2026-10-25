@@ -478,6 +478,35 @@ class ChoreoEngine:
             return self.seq["current_deadline"]
         return None
 
+    def mute_window(self) -> bool:
+        """纯画面窗口（2026-10-25 口型推理联动）：序列执行中且当前步无音频
+        （audio_mode=none，如跳舞/转场片段）——此窗口内数字人只播画面不出声
+        不做口型，音频链推送应延迟（playback_manager 守卫消费本判定）。
+
+        含步间隙延续：当前步 none 播完、下一步（同为 none）切换命令已发出
+        尚未被 EDTalk 接受的瞬间窗口不关闭——否则音频会在间隙插入，待跳舞
+        段切过来时口型叠加在画面上（步进推进同步进行，间隙通常毫秒级）。
+
+        False 情形：默认轮播（口型正常）/ 当前步带语音（tts/file——该音频
+        本身就是口型驱动源，切换接受后由编排入队）。
+        """
+        if self.state != "sequence" or self.seq is None:
+            return False
+        steps = self.seq["steps"]
+        idx = self.seq["idx"]
+        if idx >= len(steps):
+            return False
+        return steps[idx]["audio_mode"] == "none"
+
+    def mute_window_remaining_s(self) -> Optional[float]:
+        """纯画面窗口剩余秒数（None=不在窗口）；看门狗 F1 保证窗口必然结束。"""
+        if not self.mute_window():
+            return None
+        deadline = self.seq.get("current_deadline")
+        if deadline is None:
+            return None
+        return max(0.0, round(deadline - self.clock(), 1))
+
     def on_edtalk_ready(self, available_segments: set) -> dict:
         """EDTalk 就绪：第二段校验（段名存在性+资产缺口报告 F2）+ DEFAULT 初始化（CP-5）。"""
         self.ready = True
@@ -522,6 +551,7 @@ class ChoreoEngine:
             "pending_requeue": bool(seq.get("pending_requeue")) if seq else False,
             "step_remaining_s": (round(seq["current_deadline"] - self.clock(), 1)
                                  if seq and seq.get("current_deadline") is not None else None),
+            "mute_window": self.mute_window(),
         }
 
 
@@ -632,6 +662,25 @@ class ActionChoreographer:
             state["worker_alive"] = self.worker_alive()
             state["queue_depth"] = self._events.qsize()
             return state
+
+    # ---------- 口型推理联动（2026-10-25 goal：playback_manager 推送守卫消费） ----------
+
+    def in_mute_window(self) -> bool:
+        """纯画面窗口判定（线程安全）：audio_mode=none 步骤播放期间 True——
+        音频链此刻不应推 /audio/push_full（跳舞/转场片段无需口型推理）。"""
+        try:
+            with self._lock:
+                return self.engine.mute_window()
+        except Exception:
+            return False  # 判定异常不阻塞音频链（降级为正常推送）
+
+    def mute_window_remaining_s(self) -> Optional[float]:
+        """纯画面窗口剩余秒数（None=不在窗口），供日志与等待上限估算。"""
+        try:
+            with self._lock:
+                return self.engine.mute_window_remaining_s()
+        except Exception:
+            return None
 
     # ---------- 模拟触发（GAP-3：管理页验证通道，与真实事件同链路） ----------
 

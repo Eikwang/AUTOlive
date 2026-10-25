@@ -17,6 +17,11 @@ from utils.web_captions import get_captions_manager
 # 两处分派判断与测试矩阵枚举共用，防字面量共同漂移；audio_player_v2 为活值）
 PLAYER_KEYS = ["audio_player", "audio_player_v2", "builtin"]
 
+# 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
+# （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
+# 超上限按异常降级照推（宁可口型出现不丢语音）。
+_CHOREO_MUTE_MAX_WAIT = 300.0
+
 
 def _coerce_interval(value, default):
     """播放间隔读侧类型归一化（2026-10-24 实测修复）。
@@ -214,6 +219,32 @@ class PlaybackMixin:
                                 name="song-backing", daemon=True).start()
                         elif data_json.get("backing_path"):
                             logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
+                        # 口型推理联动（2026-10-25 goal）：编排纯画面窗口
+                        # （audio_mode=none 的跳舞/转场片段）内延迟推送——数字人
+                        # 只播画面不出声不做口型；音频在此等待（队列背压天然保序
+                        # 不丢失），窗口由编排看门狗（F1 duration 上限）保证必然
+                        # 结束。带语音步骤（tts/file）不构成窗口，正常驱动口型。
+                        _choreo_guard = None
+                        try:
+                            from utils.orchestration import get_choreographer
+                            _choreo_guard = get_choreographer()
+                        except Exception:
+                            _choreo_guard = None
+                        if _choreo_guard is not None and _choreo_guard.in_mute_window():
+                            _mute_remaining = _choreo_guard.mute_window_remaining_s()
+                            logger.info(
+                                f"[EDTalk] 编排纯画面窗口内，音频延迟推送"
+                                f"（剩余约 {_mute_remaining if _mute_remaining is not None else '?'}s）："
+                                f"{data_json.get('content', '')[:20]}")
+                            _waited = 0.0
+                            while _choreo_guard.in_mute_window() and _waited < _CHOREO_MUTE_MAX_WAIT:
+                                await asyncio.sleep(0.2)
+                                _waited += 0.2
+                            if _choreo_guard.in_mute_window():
+                                # 防呆上限兜底：仍处窗口也照推（宁可口型出现不丢语音）
+                                logger.warning(
+                                    f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
+                                    f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
