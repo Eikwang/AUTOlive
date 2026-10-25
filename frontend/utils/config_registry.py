@@ -23,7 +23,8 @@ class ConfigRegistry:
 
     def register(self, tab_key: str, label: str, tooltip: str = "", placeholder: str = "", config_keys: tuple = ()):
         """
-        注册一个配置项
+        注册一个配置项（审查修复·发布批次：按 (tab_key, config_keys) 幂等——
+        配置组增删触发整表重渲染时重复 register 不再累积重复项）
 
         Args:
             tab_key: 所属标签页的tab_key
@@ -32,6 +33,16 @@ class ConfigRegistry:
             placeholder: 占位符文本
             config_keys: 配置键路径
         """
+        for i, item in enumerate(self._items):
+            if item["tab_key"] == tab_key and item["config_keys"] == config_keys:
+                self._items[i] = {
+                    "tab_key": tab_key,
+                    "label": label,
+                    "tooltip": tooltip,
+                    "placeholder": placeholder,
+                    "config_keys": config_keys,
+                }
+                return
         self._items.append({
             "tab_key": tab_key,
             "label": label,

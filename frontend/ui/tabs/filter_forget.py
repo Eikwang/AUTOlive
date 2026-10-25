@@ -10,19 +10,25 @@ D5 参数页重组（2026-10-19 切片 3）：
 - 7 类消息的 遗忘间隔/保留数 由 7×2 平铺输入改为 7 行表格（行=消息类型，
   列=遗忘间隔/保留数），键名与 _auto_save 绑定不变
 - 移除图像识别行（uc3 裁决随模块退役；config 残留键归收尾迁移清单）
+
+2026-10-24 审查批次：
+- 行扩至 9 类（新增 点赞 like / 房间信息 room_stats）；"定时"→"定时任务"
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
 from frontend.ui.components.config_helper import get_nested_value
 
-# 7 类消息（键前缀 → 行名）；顺序=表格行序
+# 9 类消息（键前缀 → 行名）；顺序=表格行序（2026-10-24 审查批次：新增点赞/
+# 房间信息；"定时"更名"定时任务"与优先级页命名对齐）
 FORGET_ROWS = [
     ("comment", "弹幕"),
     ("gift", "礼物"),
     ("entrance", "入场"),
     ("follow", "关注"),
+    ("like", "点赞"),
+    ("room_stats", "房间信息"),
     ("talk", "聊天"),
-    ("schedule", "定时"),
+    ("schedule", "定时任务"),
     ("idle_time_task", "闲时任务"),
 ]
 

@@ -6,6 +6,39 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from nicegui import ui
 
 
+def descend_container(node, keys):
+    """按 keys 逐层下钻，返回末级容器。
+
+    支持 dict 字符串键与 list 数字下标键（"0"/"1"/...，重构 2026-10-24：
+    key_mapping/serial 配置组为 list 结构，字段级自动保存需按下标写入）。
+    dict 路径缺失时自动补 {}（与原 auto_bind 行为一致）。
+    """
+    for key in keys:
+        if isinstance(node, list):
+            node = node[int(key)]
+        else:
+            if key not in node:
+                node[key] = {}
+            node = node[key]
+    return node
+
+
+def _container_write(container, key, value):
+    """向末级容器写入键值（list 走下标，dict 走键）。"""
+    if isinstance(container, list):
+        container[int(key)] = value
+    else:
+        container[key] = value
+
+
+def _container_get(container, key):
+    """从末级容器读取键值（list 走下标越界返回 None，dict 走 get）。"""
+    if isinstance(container, list):
+        idx = int(key)
+        return container[idx] if 0 <= idx < len(container) else None
+    return container.get(key)
+
+
 def _coerce_like(old_value, new_value):
     """数字保型归一化（2026-10-24 实测修复）：ui.input 的 e.value 恒为字符串，
     直存 config 会把数字键污染成 str（实测 play_audio.play_interval_max 落盘
@@ -83,18 +116,16 @@ def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_conf
         # schema 代理，把文本框字符串新值转回数字同型；旧值缺失/路径异常时
         # 原样落盘（消费侧归一化兜底），不阻塞保存。
         try:
-            _node = config
-            for _key in keys[:-1]:
-                _node = _node[_key]
-            value = _coerce_like(_node.get(keys[-1]), value)
-        except (KeyError, TypeError, AttributeError):
+            _node = descend_container(config, keys[:-1])
+            value = _coerce_like(_container_get(_node, keys[-1]), value)
+            # 审查修复（发布批次）：write 复用同一次 descend 且并入同一 try——
+            # 原实现 try 外重复 descend_container，组删除后滞留的 change 事件
+            # 会触发未捕获越界异常，或把编辑写入错位的组并落盘
+            _container_write(_node, keys[-1], value)
+        except (KeyError, TypeError, AttributeError, IndexError, ValueError):
+            # 路径失效（组已删除等）：跳过本次本地写；下方 set_config_callback
+            # 自行校验同一路径，失效时其内部异常已被捕获打印，不会落脏数据
             pass
-        cfg = config
-        for key in keys[:-1]:
-            if key not in cfg:
-                cfg[key] = {}
-            cfg = cfg[key]
-        cfg[keys[-1]] = value
 
         # 调用回调函数保存配置
         if set_config_callback:
@@ -118,13 +149,9 @@ def auto_bind(component, config: Dict[str, Any], keys: Tuple[str, ...], set_conf
             return
         if current is None:
             return
-        cfg = config
         try:
-            for key in keys[:-1]:
-                if key not in cfg:
-                    cfg[key] = {}
-                cfg = cfg[key]
-            if cfg.get(keys[-1]) != current:
+            cfg = descend_container(config, keys[:-1])
+            if _container_get(cfg, keys[-1]) != current:
                 on_change(type("V", (), {"value": current})())
         except Exception:
             pass

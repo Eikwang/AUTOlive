@@ -6,12 +6,15 @@ T5 按键映射迁移回归测试（/autoplan 断链批次，源=my_handle.py.ba
 1. 弹幕相似度匹配触发（difflib ratio ≥ similarity）
 2. 回复包含匹配
 3. 礼物名精确匹配
-4. 文案触发：变量替换+播放链
-5. S-1 串口限速：全局每分钟上限+每用户上限
-6. S-1 同句去重
-7. once 语义：single_sentence_trigger_once 命中即终止（T-c 适配点①键面）
-8. pyautogui/pyserial 缺失降级（不崩，警告跳过）
-9. start_cmd 命令头剥离
+4. S-1 串口限速：全局每分钟上限+每用户上限
+5. S-1 同句去重
+6. once 语义：single_sentence_trigger_once 命中即终止（T-c 适配点①键面）
+7. pyautogui/pyserial 缺失降级（不崩，警告跳过）
+8. start_cmd 命令头剥离
+9. 2026-10-24 精简：文案/本地音频/图片三路触发已移除，残留键面安全忽略
+
+注：匹配类测试以 monkeypatch 替身注入 _trigger_key_press（隔离 pyautogui
+环境依赖，被测对象是匹配+分派链；key 分支降级由 TestDegradation 专测）。
 """
 
 import random
@@ -31,11 +34,7 @@ def make_config():
             "start_cmd": "",
             "key_trigger_type": "关键词",
             "key_single_sentence_trigger_once": True,
-            "copywriting_trigger_type": "关键词",
-            "copywriting_single_sentence_trigger_once": False,
-            "local_audio_trigger_type": "关键词",
             "serial_trigger_type": "关键词",
-            "img_path_trigger_type": "关键词",
             "serial_rate_limit_per_min": 6,
             "serial_per_user_limit_per_min": 2,
             "config": [
@@ -44,11 +43,8 @@ def make_config():
                     "gift": ["小花火"],
                     "keys": ["ctrlleft", "1"],
                     "similarity": "0.5",
-                    "copywriting": ["哇！{username} 放烟花了！"],
                     "serial_name": "COM1",
                     "serial_send_data": ["FIRE {username}"],
-                    "local_audio": ["data/音效/烟花.wav"],
-                    "img_path": [],
                 }
             ],
         },
@@ -75,9 +71,6 @@ def feature():
     mh = MagicMock()
     mh.config = make_config()
     mh.common = MagicMock()
-    mh.common.brackets_text_randomize = lambda x: x
-    mh.common.dynamic_variable_replacement = lambda t, d: t.replace("{username}", str(d.get("username", ""))).replace("{gift_name}", str(d.get("gift_name", "")))
-    mh.common.get_bj_time.return_value = "12:00:00"
     FeatureHandler._serial_rate_window = None
     FeatureHandler._serial_user_windows = None
     FeatureHandler._serial_last_content = None
@@ -86,45 +79,43 @@ def feature():
 
 
 class TestMatching:
-    def test_danmu_similarity_trigger_copywriting(self, feature):
-        """弹幕相似度匹配 → 文案触发（once=False 继续遍历但触发已发生）。
-
-        key_trigger_type 置"无"隔离 pyautogui 环境依赖（已装时 key 模式真按键，
-        2026-10-21 门1 既有失败修复：被测对象是匹配+文案链，key 分支由
-        TestDegradation 专测）。
-        """
+    def test_danmu_similarity_trigger(self, feature, monkeypatch):
+        """弹幕相似度匹配 → 分派执行（替身触发器，隔离 pyautogui 环境依赖）。"""
         fh, mh = feature
-        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
-        triggered = fh.key_mapping_handle("弹幕", {"username": "小明", "content": "放烟花呀"})
-        assert triggered in (True, False)  # once=False 时继续遍历返回 False，但播放已发生
-        mh.audio_synthesis_handle.assert_called()
-        # once=false 时链上 copywriting+local_audio 都触发——检查任一调用含用户名
-        contents = [c[0][0]["content"] for c in mh.audio_synthesis_handle.call_args_list]
-        assert any("小明" in c for c in contents), contents
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
+        result = fh.key_mapping_handle("弹幕", {"username": "小明", "content": "放烟花呀"})
+        assert result is True  # once=True → 命中即终止
+        sentinel.assert_called_once()
 
-    def test_reply_contains_trigger(self, feature):
-        """回复模式：关键词包含匹配（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
+    def test_reply_contains_trigger(self, feature, monkeypatch):
+        """回复模式：关键词包含匹配。"""
         fh, mh = feature
-        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
-        fh.key_mapping_handle("回复", {"username": "小明", "content": "来一个放烟花"})
-        mh.audio_synthesis_handle.assert_called()
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
+        result = fh.key_mapping_handle("回复", {"username": "小明", "content": "来一个放烟花"})
+        assert result is True
+        sentinel.assert_called_once()
 
-    def test_gift_exact_match(self, feature):
-        """礼物名精确匹配 → copywriting 实际执行（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
+    def test_gift_exact_match(self, feature, monkeypatch):
+        """礼物名精确匹配 → 实际执行（executed）→ flag 聚合 True。"""
         fh, mh = feature
-        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
         result = fh.key_mapping_handle("礼物", {"username": "小明", "gift_name": "小花火",
-                                                 "num": 1, "unit_price": 1, "total_price": 1})
-        assert result is True  # copywriting 实际执行（executed）→ flag 聚合 True
-        mh.audio_synthesis_handle.assert_called()  # 文案播报发生
+                                                "num": 1, "unit_price": 1, "total_price": 1})
+        assert result is True
+        sentinel.assert_called_once()
 
-    def test_start_cmd_stripped(self, feature):
-        """命令头剥离：#烟花 → 烟花（key_trigger_type 置"无"隔离 pyautogui 环境依赖）。"""
+    def test_start_cmd_stripped(self, feature, monkeypatch):
+        """命令头剥离：#烟花 → 烟花。"""
         fh, mh = feature
-        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
         mh.config._cfg["key_mapping"]["start_cmd"] = "#"
-        fh.key_mapping_handle("回复", {"username": "小明", "content": "#放烟花"})
-        mh.audio_synthesis_handle.assert_called()
+        result = fh.key_mapping_handle("回复", {"username": "小明", "content": "#放烟花"})
+        assert result is True
+        sentinel.assert_called_once()
 
     def test_disabled_returns_false(self, feature):
         fh, mh = feature
@@ -154,12 +145,15 @@ class TestSerialSafety:
         """串口连接不可用（pyserial 缺失/设备不可达）：失败但不崩（日志降级）。
 
         2026-10-21 门1 既有失败修复：原测试依赖"pyserial 未安装"环境前提；
-        现环境 pyserial 已装且 serial_manager 对未连接端口走 WARNING 返回路径
-        （send_data 返回 msg dict，_serial_send 正常返回 tmp）——与断言 None 冲突。
         改为 mock get_serial_manager 抛 ImportError，精确模拟缺依赖路径。
+        2026-10-24：环境本就无 pyserial 时（serial_manager_instance 顶层 import
+        serial 即失败）直接 skip——环境本身就是缺依赖场景。
         """
         fh, mh = feature
-        import utils.serial_manager_instance as smi
+        try:
+            import utils.serial_manager_instance as smi
+        except ModuleNotFoundError:
+            pytest.skip("pyserial 未安装（环境即缺依赖场景，无需模拟）")
 
         class _BrokenManager:
             async def connect(self, *a, **k):
@@ -183,13 +177,15 @@ class TestSerialSafety:
 
 
 class TestOnceSemantics:
-    def test_once_true_stops_chain(self, feature):
+    def test_once_true_stops_chain(self, feature, monkeypatch):
         """once=True（key 触发）：命中即 return True 终止后续触发器。"""
         fh, mh = feature
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
         result = fh.key_mapping_handle("礼物", {"username": "u", "gift_name": "小花火",
-                                                 "num": 1, "unit_price": 1, "total_price": 1})
+                                                "num": 1, "unit_price": 1, "total_price": 1})
         assert result is True
-        # key 降级（依赖缺失）→ 不终止链：copywriting 实际执行（行为=用户启用的触发类型尽量生效）
+        sentinel.assert_called_once()
 
     def test_once_key_name_adaptation(self, feature):
         """T-c 适配点①：config 键无 _enable 后缀时仍正确读取。"""
@@ -200,26 +196,38 @@ class TestOnceSemantics:
 
 class TestDegradation:
     def test_pyautogui_missing_no_crash(self, feature):
-        """pyautogui 缺失：key 触发警告跳过不崩。"""
+        """pyautogui 缺失：key 触发警告跳过不崩（serial_trigger_type 置"无"隔离串口）。"""
         fh, mh = feature
         try:
             import pyautogui  # noqa
             pytest.skip("pyautogui 已安装，无法测缺依赖路径")
         except ImportError:
             pass
+        mh.config._cfg["key_mapping"]["serial_trigger_type"] = "无"  # 隔离：只测 key 降级
         result = fh.key_mapping_handle("礼物", {"username": "u", "gift_name": "小花火",
-                                                 "num": 1, "unit_price": 1, "total_price": 1})
-        assert result is True  # key 降级→链继续→copywriting 实际执行 flag=True
+                                                "num": 1, "unit_price": 1, "total_price": 1})
+        assert result is False  # key 降级 → 未实际执行；串口已隔离 → 无触发
 
-    def test_local_audio_key_missing_safe(self, feature):
-        """T-c 适配点②：config 缺 local_audio 键 → .get 防御不崩。"""
+    def test_stale_trigger_keys_ignored(self, feature, monkeypatch):
+        """2026-10-24 精简回归：已移除的 文案/本地音频/图片 触发键残留时安全忽略。"""
         fh, mh = feature
-        km = dict(mh.config._cfg["key_mapping"]["config"][0])
-        del km["local_audio"]
-        mh.config._cfg["key_mapping"]["config"] = [km]
-        mh.config._cfg["key_mapping"]["key_trigger_type"] = "无"  # 跳过 key
-        mh.config._cfg["key_mapping"]["copywriting_trigger_type"] = "无"
-        mh.config._cfg["key_mapping"]["serial_trigger_type"] = "无"
-        mh.config._cfg["key_mapping"]["img_path_trigger_type"] = "无"
-        result = fh.key_mapping_handle("回复", {"username": "u", "content": "放烟花"})
-        assert result is False  # 无可触发项，安全返回
+        km = mh.config._cfg["key_mapping"]
+        km.update({
+            "copywriting_trigger_type": "关键词",
+            "local_audio_trigger_type": "关键词",
+            "img_path_trigger_type": "关键词",
+        })
+        km["config"][0].update({
+            "copywriting": ["残留文案"],
+            "local_audio": ["残留音频.wav"],
+            "img_path": ["残留图片.png"],
+        })
+        sentinel = MagicMock(return_value=True)
+        monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
+        result = fh.key_mapping_handle("弹幕", {"username": "u", "content": "放烟花"})
+        assert result is True  # 仅 key 触发执行；残留键不产生额外动作
+        sentinel.assert_called_once()  # 残留三路不触发（once=True 首个执行即终止）
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-q"])

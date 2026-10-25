@@ -1745,20 +1745,19 @@ class DrawerLayout:
 
             E-F1/F6：save 失败时回滚内存字典旧值并返回 False（异常不再吞掉）；
             成功时默认弹「配置已保存」，开关类调用方传 _notify=False 自定义文案。
+            支持 list 下标键（"0"/"1"/...，2026-10-24 按键映射/串口配置组字段级
+            落盘依赖）。
             """
-            config = self.config
-            for key in keys[:-1]:
-                if key not in config:
-                    config[key] = {}
-                config = config[key]
+            from frontend.utils.config_auto_save import descend_container, _container_get, _container_write
 
-            old_value = config.get(keys[-1])
-            config[keys[-1]] = value
+            config = descend_container(self.config, keys[:-1])
+            old_value = _container_get(config, keys[-1])
+            _container_write(config, keys[-1], value)
             try:
                 self.save_config()
             except Exception as e:
                 # 双回滚之一：内存字典恢复旧值（UI 回滚由调用方负责）
-                config[keys[-1]] = old_value
+                _container_write(config, keys[-1], old_value)
                 logger.error(f"配置保存失败 ({'->'.join(keys)}): {e}")
                 ui.notify(position="top", type="negative", message="配置保存失败，请查看日志")
                 return False
