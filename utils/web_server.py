@@ -38,7 +38,7 @@ class WebServer:
     def __init__(self, config: Config, my_handle: Optional[My_handle] = None):
         """
         初始化Web服务器
-        
+
         Args:
             config: 配置对象
             my_handle: 处理器对象
@@ -49,6 +49,7 @@ class WebServer:
         self.http_server = None
         self.api_thread = None
         self.web_thread = None
+        self._captions_desktop_proc = None  # 桌面字幕窗口子进程句柄（存活则不重复开）
         
         if HAS_FASTAPI:
             self._init_fastapi_app()
@@ -75,6 +76,39 @@ class WebServer:
 
         logger.info("FastAPI应用初始化完成")
 
+    def _captions_desktop_window_enabled(self):
+        """桌面字幕窗口自动打开门控：enable=true 且 desktop_window≠False（缺省开启）"""
+        try:
+            if not self.config.get("web_captions_printer", "enable"):
+                return False
+            return self.config.get("web_captions_printer", "desktop_window") is not False
+        except Exception:
+            return False
+
+    def _spawn_desktop_captions_window(self):
+        """打开桌面字幕窗口（子进程；已有存活实例不重复开，UI 手动打开同入口）"""
+        proc = self._captions_desktop_proc
+        if proc is not None and proc.poll() is None:
+            return {"code": 200, "message": "桌面字幕窗口已打开"}
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "utils", "web_captions", "desktop_caption_window.py")
+        if not os.path.isfile(script):
+            return {"code": -1, "message": "桌面字幕窗口脚本不存在"}
+        try:
+            import subprocess
+            import sys
+            kwargs = {"cwd": os.path.dirname(os.path.dirname(os.path.dirname(script))),
+                      "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            self._captions_desktop_proc = subprocess.Popen([sys.executable, script], **kwargs)
+            logger.info(f"桌面字幕窗口已启动（pid={self._captions_desktop_proc.pid}）")
+            return {"code": 200, "message": "桌面字幕窗口启动成功"}
+        except Exception as e:
+            logger.error(f"启动桌面字幕窗口失败：{e}\n" + traceback.format_exc())
+            return {"code": -1, "message": f"启动桌面窗口失败: {e}"}
+
     def _setup_web_captions(self):
         """挂载字幕页路由、socket.io 与 FastAPI startup 的 loop 捕获（D1/E-5/E-6）"""
         try:
@@ -87,10 +121,39 @@ class WebServer:
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 "frontend", "web_captions")
 
+            class _MountTolerantSocketIOASGI(socketio.ASGIApp):
+                """兼容新旧 Starlette Mount 语义的 socket.io ASGI 子应用。
+
+                runtime312 实测（starlette 1.3.1 + engineio 4.13.5）：挂载后子应用
+                收到的 scope['path'] 是全路径 /captions_ws/socket.io/（root_path=
+                /captions_ws），而 engineio 判定 startswith('/socket.io/') 恒不成立
+                → 握手 404，网页 OBS 源与桌面窗口全部连接失败（字幕打印从未生效的
+                服务端根因，2026-10-25 诊断）。
+                新语义：engineio_path 直接按全路径判定；
+                旧语义（子应用收到剥离前缀的 /socket.io/）：入口回写全路径再交原判定。
+                """
+                def __init__(self, sio, mount_prefix="/captions_ws"):
+                    super().__init__(sio, socketio_path=f"{mount_prefix}/socket.io")
+                    self._mount = mount_prefix
+                    self._stripped = "/socket.io"
+                    self._full = f"{mount_prefix}/socket.io"
+
+                def _normalize_scope_path(self, scope):
+                    """旧 Starlette（剥离前缀）→ 回写全路径；新 Starlette 原样放行"""
+                    if scope.get("type") in ("http", "websocket"):
+                        path = scope.get("path") or ""
+                        if path.startswith(self._stripped) and not path.startswith(self._full):
+                            return dict(scope, path=f"{self._mount}{path}")
+                    return scope
+
+                async def __call__(self, scope, receive, send):
+                    await super().__call__(self._normalize_scope_path(scope),
+                                           receive, send)
+
             # 独立 socket.io ASGI 挂载（path /captions_ws/socket.io）；
             # 不复用框架内部 sio，防版本升级耦合
             sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
-            self.app.mount("/captions_ws", socketio.ASGIApp(sio))
+            self.app.mount("/captions_ws", _MountTolerantSocketIOASGI(sio, "/captions_ws"))
 
             @self.app.get("/captions")
             async def captions_page():
@@ -146,6 +209,11 @@ class WebServer:
                     logger.error(f"builtin_control 处理失败: {e}")
                     return {"code": -1, "message": f"控制失败：{e}"}
 
+            @self.app.post("/captions_desktop_window/open")
+            async def captions_desktop_window_open():
+                """打开桌面字幕窗口（字幕打印页按钮入口；幂等——已开不重复）"""
+                return self._spawn_desktop_captions_window()
+
             # FastAPI startup：捕获 uvicorn event loop（eng E-5 提交器用）并桥接字幕管理器
             @self.app.on_event("startup")
             async def _captions_startup():
@@ -157,6 +225,10 @@ class WebServer:
                     manager.attach(sio)
                     manager.set_loop(asyncio.get_running_loop())
                 logger.info("字幕 socket.io 挂载完成（/captions_ws + startup loop 捕获）")
+                # 桌面字幕窗口自动打开（enable && desktop_window；听障用户开箱即用）
+                if self._captions_desktop_window_enabled():
+                    result = self._spawn_desktop_captions_window()
+                    logger.info(f"桌面字幕窗口自动打开：{result.get('message')}")
         except Exception:
             logger.error("字幕模块挂载失败（不影响其余功能）\n" + traceback.format_exc())
 

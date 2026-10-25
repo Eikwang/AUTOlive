@@ -45,6 +45,16 @@ def create_web_captions_printer_tab(
 
     captions_url = f"{_webui_base()}/captions"
 
+    def _open_desktop_window():
+        """打开桌面字幕窗口（经主系统 API 在主系统所在机器弹出；幂等）"""
+        try:
+            import requests
+            resp = requests.post(f"{_webui_base()}/captions_desktop_window/open", timeout=3)
+            message = (resp.json() or {}).get("message", "已请求")
+        except Exception:
+            message = '请求失败（主系统未运行？）'
+        ui.notify(f'桌面字幕窗口：{message}', type='positive' if '成功' in message or '已打开' in message else 'warning')
+
     with ui.card().style(card_css):
         ui.label('字幕打印')
         with ui.grid(columns=3):
@@ -55,12 +65,21 @@ def create_web_captions_printer_tab(
                 _auto_save(ui.switch('字幕时长对齐音频', value=get_nested_value(config, "web_captions_printer", "keep_time_align_audio", default=True)).style(switch_internal_css).tooltip(
                     '开启：字幕保持至音频播完（起点与语音起点对齐）。\n'
                     '关闭：按文本长度自动计算显示时长（旧行为）。'), ("web_captions_printer", "keep_time_align_audio"))
+                # 桌面字幕窗口（2026-10-25 批次：补齐整合计划本期丢弃的 desktop_caption_window）
+                _auto_save(ui.switch('启动时打开桌面字幕窗口', value=get_nested_value(config, "web_captions_printer", "desktop_window", default=True) is not False).style(switch_internal_css).tooltip(
+                    '开启：主系统启动且字幕打印启用时，自动弹出桌面字幕窗口\n'
+                    '（可拖拽/置顶/调透明度，直接被 OBS 窗口捕捉）。\n'
+                    '关闭：仅使用下方网页地址（OBS 浏览器源场景）。'), ("web_captions_printer", "desktop_window"))
             with ui.column().style("width:100%;"):
-                ui.label('使用三步：① 开启并保存 → ② 重启主系统（首次） → ③ 复制下方地址到 OBS 浏览器源').style(
+                ui.label('使用三步：① 开启并保存 → ② 重启主系统（首次，桌面窗口自动弹出） → ③ 或复制下方地址到 OBS 浏览器源').style(
                     'font-size: var(--font-size-assist, 12px);')
                 with ui.row().style("align-items:center; gap:4px;"):
                     url_input = ui.input(label='字幕页地址', value=captions_url).style("width:100%; min-width:260px;").props('readonly')
                     ui.button(icon='content_copy', on_click=lambda: _copy(url_input.value)).props('dense flat').tooltip('复制字幕页地址')
+                with ui.row().style("align-items:center; gap:4px;"):
+                    ui.button('打开桌面字幕窗口', on_click=_open_desktop_window, icon='desktop_windows').props('dense outline')
+                    ui.label('窗口被误关时点此重开').style(
+                        'font-size: var(--font-size-assist, 12px);')
                 ui.label('在 OBS 中添加"浏览器"源并粘贴此地址。双机直播：请将 127.0.0.1 替换为本机局域网 IP（dx8）。').style(
                     'font-size: var(--font-size-assist, 12px);')
 

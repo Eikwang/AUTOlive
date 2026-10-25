@@ -512,6 +512,7 @@
   },
   "web_captions_printer": {
     "enable": true,
+    "desktop_window": true,
     "keep_time_align_audio": true,
     "queue_max": 100,
     "show_mode": "1",
