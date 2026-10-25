@@ -243,6 +243,22 @@ class TimerHandler:
             self.my_handle.entrance_check_timer = threading.Timer(int(self.my_handle.config.get("filter", "limited_time_deduplication", "entrance")), partial(self.clear_live_data, "entrance"))
             self.my_handle.entrance_check_timer.start()
 
+            # 新增类型去重清空定时器（2026-10-24 审查批次：like/follow/room_stats）
+            _like_dedup = self.my_handle.config.get("filter", "limited_time_deduplication", "like")
+            if _like_dedup is not None:
+                self.my_handle.like_check_timer = threading.Timer(int(_like_dedup), partial(self.clear_live_data, "like"))
+                self.my_handle.like_check_timer.start()
+
+            _follow_dedup = self.my_handle.config.get("filter", "limited_time_deduplication", "follow")
+            if _follow_dedup is not None:
+                self.my_handle.follow_check_timer = threading.Timer(int(_follow_dedup), partial(self.clear_live_data, "follow"))
+                self.my_handle.follow_check_timer.start()
+
+            _room_stats_dedup = self.my_handle.config.get("filter", "limited_time_deduplication", "room_stats")
+            if _room_stats_dedup is not None:
+                self.my_handle.room_stats_check_timer = threading.Timer(int(_room_stats_dedup), partial(self.clear_live_data, "room_stats"))
+                self.my_handle.room_stats_check_timer.start()
+
             logger.info("启动 限定时间直播数据去重 定时器")
 
         self.my_handle.periodic_trigger_timer = threading.Timer(1, partial(self.periodic_trigger_data_handle))
@@ -252,6 +268,12 @@ class TimerHandler:
     # 数据丢弃部分
     def process_data(self, data, timer_flag):
         with self.my_handle.data_lock:
+            # 限定时间段内重复丢弃（入口统一接线，2026-10-24 审查批次）：重复数据
+            # 不进入遗忘窗口（原实现遗漏调用点——live_data 只清空不写入，去重空转）
+            if self.my_handle.is_data_repeat_in_limited_time(data, timer_flag):
+                logger.debug(f"[{timer_flag}] 限定时间内重复数据丢弃：{data.get('username')}/{str(data.get('content'))[:30]}")
+                return
+
             if timer_flag not in self.my_handle.timers or not self.my_handle.timers[timer_flag].is_alive():
                 self.my_handle.timers[timer_flag] = threading.Timer(self.get_interval(timer_flag), self.process_last_data, args=(timer_flag,))
                 self.my_handle.timers[timer_flag].start()
@@ -260,8 +282,12 @@ class TimerHandler:
             if hasattr(self.my_handle.timers[timer_flag], 'last_data'):
                 self.my_handle.timers[timer_flag].last_data.append(data)
                 # 这里需要注意配置命名!!!
-                # 保留数据数量
-                if len(self.my_handle.timers[timer_flag].last_data) > int(self.my_handle.config.get("filter", timer_flag + "_forget_reserve_num")):
+                # 保留数据数量（缺键/非法值容错默认 1——存量用户 config 可能缺新键）
+                try:
+                    reserve_num = int(self.my_handle.config.get("filter", timer_flag + "_forget_reserve_num"))
+                except (TypeError, ValueError):
+                    reserve_num = 1
+                if len(self.my_handle.timers[timer_flag].last_data) > reserve_num:
                     self.my_handle.timers[timer_flag].last_data.pop(0)
             else:
                 self.my_handle.timers[timer_flag].last_data = [data]
@@ -303,6 +329,14 @@ class TimerHandler:
                     for data in timer.last_data:
                         self.my_handle.idle_time_task_handle(data)
                     #self.my_handle.idle_time_task_handle(timer.last_data)
+                elif timer_flag == "like":
+                    # 点赞处理（仅计数不播报，2026-10-24 审查批次）
+                    for data in timer.last_data:
+                        self.my_handle.like_handle(data)
+                elif timer_flag == "room_stats":
+                    # 房间信息处理（更新内部人气数据，不播报）
+                    for data in timer.last_data:
+                        self.my_handle.room_stats_handle(data)
 
                 self.my_handle.is_handleing = 0
 
@@ -316,11 +350,17 @@ class TimerHandler:
             "gift": self.my_handle.config.get("filter", "gift_forget_duration"),
             "entrance": self.my_handle.config.get("filter", "entrance_forget_duration"),
             "follow": self.my_handle.config.get("filter", "follow_forget_duration"),
+            "like": self.my_handle.config.get("filter", "like_forget_duration"),
+            "room_stats": self.my_handle.config.get("filter", "room_stats_forget_duration"),
             "talk": self.my_handle.config.get("filter", "talk_forget_duration"),
             "schedule": self.my_handle.config.get("filter", "schedule_forget_duration"),
             "idle_time_task": self.my_handle.config.get("filter", "idle_time_task_forget_duration")
             # 根据需要添加更多计时器及其间隔，记得添加config.json中的配置项
         }
 
-        # 默认间隔为0.1秒
-        return intervals.get(timer_flag, 0.1)
+        # 默认间隔为0.1秒（缺键/非法值容错——threading.Timer 不接受 None）
+        interval = intervals.get(timer_flag, 0.1)
+        try:
+            return float(interval)
+        except (TypeError, ValueError):
+            return 0.1

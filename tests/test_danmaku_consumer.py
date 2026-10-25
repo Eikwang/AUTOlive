@@ -141,10 +141,67 @@ class TestGiftIncrement(unittest.TestCase):
         self.assertEqual(dc._gift_increment("room0", payload, self.lru), 1)  # 首见语义重触发
 
 
-class TestFastpathRouting(unittest.TestCase):
-    def test_fastpath_set_matches_contract(self):
-        # B-2 修订（2026-10-03）：LIKE 走对话链聚合；ENTER_ROOM/ROOM_STATS 计数快路径
-        self.assertEqual(dc._FASTPATH_BUSINESS, {"ENTER_ROOM", "ROOM_STATS"})
+class TestDispatchRouting(unittest.TestCase):
+    """2026-10-24 审查批次：ENTER_ROOM/ROOM_STATS 计数快路径撤销——三类改经
+    my_handle.process_data 走遗忘&保留+去重前置（入场答谢恢复、点赞独立类别、
+    关注不再绕过 follow 遗忘定时器）。"""
+
+    class _RecHandle:
+        def __init__(self):
+            self.calls = []
+
+        def process_data(self, data, type_):
+            self.calls.append((type_, data))
+
+    def _make_svc_and_stub(self):
+        from utils import my_global
+        svc = dc.DanmakuListenerService(lambda: {})
+        h = self._RecHandle()
+        old = getattr(my_global, "my_handle", None)
+        my_global.my_handle = h
+        return svc, h, old, my_global
+
+    def test_enter_room_dispatched_as_entrance(self):
+        svc, h, old, mg = self._make_svc_and_stub()
+        try:
+            svc._dispatch("ENTER_ROOM", {"envelope": {"platform": "bilibili", "room_id": "1"},
+                                         "payload": {"user_name": "u1"}})
+            self.assertIn("entrance", [t for t, _ in h.calls])
+        finally:
+            mg.my_handle = old
+
+    def test_room_stats_dispatched_with_value_key(self):
+        svc, h, old, mg = self._make_svc_and_stub()
+        try:
+            svc._dispatch("ROOM_STATS", {"envelope": {"platform": "bilibili", "room_id": "1"},
+                                         "payload": {"type": "ROOM_STATS", "viewer_count": 10}})
+            types = [t for t, _ in h.calls]
+            self.assertIn("room_stats", types)
+            data = next(d for t, d in h.calls if t == "room_stats")
+            self.assertEqual(data["stats"], {"viewer_count": 10})
+            self.assertEqual(data["content"], "viewer_count=10")
+        finally:
+            mg.my_handle = old
+
+    def test_social_follow_goes_through_process_data(self):
+        svc, h, old, mg = self._make_svc_and_stub()
+        try:
+            svc._dispatch("SOCIAL", {"envelope": {"platform": "bilibili", "room_id": "1"},
+                                     "payload": {"user_name": "u1", "action": "关注"}})
+            self.assertIn("follow", [t for t, _ in h.calls])
+        finally:
+            mg.my_handle = old
+
+    def test_like_agg_dispatches_to_like_flag(self):
+        svc, h, old, mg = self._make_svc_and_stub()
+        try:
+            svc._dispatch_like_agg({"envelope": {"platform": "bilibili"},
+                                    "like_user_summary": "u1", "like_count": 3})
+            types = [t for t, _ in h.calls]
+            self.assertIn("like", types)
+            self.assertNotIn("comment", types)
+        finally:
+            mg.my_handle = old
 
 
 class TestConsumerDefaults(unittest.TestCase):

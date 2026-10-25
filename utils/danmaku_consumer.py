@@ -57,7 +57,6 @@ SELF_SEND_WINDOW_S = 10            # R39：收到时刻与 sent_at 差 ≤10s �
 
 # 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性）
 _DROP_ORDER = {"LIKE": 0, "ENTER_ROOM": 1, "DANMU": 2, "SOCIAL": 3, "ROOM_STATS": 4, "GIFT": 5, "SUPER_CHAT": 6}
-_FASTPATH_BUSINESS = {"ENTER_ROOM", "ROOM_STATS"}  # 计数快路径（LIKE 走对话链聚合——用户需求）
 
 _SERVICE_INSTANCE: Optional["DanmakuListenerService"] = None
 _CONFIG_LOCK = threading.Lock()    # config.json danmaku_listener 节 RMW 锁（main.py 进程内）
@@ -390,9 +389,9 @@ class DanmakuListenerService:
         if norm["category"] != "business":
             self._unknown_type_count += 1
             return
-        if mtype in _FASTPATH_BUSINESS:
-            self.push_event("count", {"type": mtype, "room": room})
-            return
+        # 2026-10-24 审查批次：撤销 ENTER_ROOM/ROOM_STATS 计数快路径拦截——
+        # 原快路径使入场答谢断流、房间信息永不下发（last_liveroom_data 恒空）；
+        # 两类改经 _dispatch 正常下发，限流由 my_handle 遗忘&保留+去重承担。
         if mtype == "DANMU" and self._is_self_echo(str(norm["payload"].get("content", ""))):
             # R39：命中已登记发送且 ≤10s 窗口 → 自联回环，不派发（窗口外/异常均放行）
             self._self_echo_dropped += 1
@@ -488,12 +487,11 @@ class DanmakuListenerService:
             env = merged.get("envelope") or {}
             data = {"platform": str(env.get("platform", "")),
                     "username": merged.get("like_user_summary") or "有人",
-                    "count": merged.get("like_count", 1)}
-            if hasattr(handle, "like_handle"):
-                handle.like_handle(data)
-            else:
-                data["content"] = f"点赞了直播 x{data['count']}"
-                handle.process_data(data, "comment")
+                    "count": merged.get("like_count", 1),
+                    "content": f"点赞了直播 x{merged.get('like_count', 1)}"}
+            # 2026-10-24 审查批次：点赞独立 like 类别——经 like 遗忘定时器限流后
+            # 仅计数不播报（原实现 fallback 冒充 comment 走 LLM 对话链）
+            handle.process_data(data, "like")
         except Exception:
             logger.error("[danmaku_listener] like 派发失败", exc_info=True)
 
@@ -529,14 +527,27 @@ class DanmakuListenerService:
                         "price": payload.get("price") or 0}
                 handle.process_data(data, "comment")
             elif mtype == "ENTER_ROOM":
+                self.push_event("count", {"type": mtype, "room": room})
                 handle.process_data({"platform": platform, "username": payload.get("user_name") or "匿名"},
                                     "entrance")
             elif mtype == "SOCIAL":
                 action = str(payload.get("action") or "")
                 if "关注" in action or "follow" in action.lower():
-                    handle.follow_handle({"platform": platform, "username": payload.get("user_name") or "匿名"})
+                    # 2026-10-24 审查批次：关注改经 follow 遗忘定时器（原直调
+                    # follow_handle 绕过遗忘&保留，follow 配置空转）
+                    handle.process_data({"platform": platform,
+                                         "username": payload.get("user_name") or "匿名"}, "follow")
                 else:
                     self.push_event("count", {"type": "SOCIAL", "action": action})
+            elif mtype == "ROOM_STATS":
+                # 2026-10-24 审查批次：房间信息下发——经 room_stats 遗忘定时器限流后
+                # 仅更新内部人气数据不播报；content=值键串（供限定时间去重按值丢弃）
+                self.push_event("count", {"type": mtype, "room": room})
+                stats = {k: v for k, v in payload.items() if k != "type"}
+                handle.process_data({"platform": platform, "room_id": room,
+                                     "username": "房间信息",
+                                     "content": _room_stats_value_key(stats),
+                                     "stats": stats}, "room_stats")
             elif mtype == "LIVE_STATUS_CHANGE":
                 live = bool(payload.get("live"))
                 if not live:
@@ -1099,6 +1110,15 @@ def _sanitize_danmu_text(text: str) -> str:
     """S-1 最低防线（保留）：长度钳制 + 控制字符/零宽字符剥离。"""
     text = "".join(ch for ch in text if ch.isprintable() and ch not in "​‌‍﻿")
     return text[:200]
+
+
+def _room_stats_value_key(stats: dict) -> str:
+    """ROOM_STATS 值键串（2026-10-24 审查批次）：稳定排序拼接统计值——
+    供限定时间去重按值丢弃（同值重复上报在窗口内只保留首次）。"""
+    try:
+        return ";".join(f"{k}={stats[k]}" for k in sorted(stats))[:200]
+    except Exception:
+        return ""
 
 
 def build_danmaku_listener_service(config) -> Optional[DanmakuListenerService]:

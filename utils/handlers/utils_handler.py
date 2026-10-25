@@ -229,48 +229,63 @@ class UtilsHandler:
     
     def is_data_repeat_in_limited_time(self, data, type):
         """
-        限定时间内数据是否重复
-        
+        限定时间内数据是否重复（去重接线：由 timer_handler.process_data 入口统一调用）
+
+        去重键=用户名+内容键：content 缺失时回退 gift_name（礼物按礼物名去重）、
+        再回退空串（关注等仅按用户名去重；房间信息由调用方预合成 content 值键）。
+
         Args:
             data (dict): 数据
-            type (str): 类型
-            
+            type (str): 类型（comment/gift/entrance/follow/like/room_stats...）
+
         Returns:
             bool: 是否重复
         """
         try:
-            # 获取配置
-            filter_config = self.my_handle.config.get("filter")
-            
+            # 获取配置（filter 节为普通 dict——嵌套键须先取节再取键；
+            # 原实现 filter_config.get(a, b, c) 三参调用在 dict 上 TypeError
+            # 被兜底吞掉返回 False，是去重空转的根因之一）
+            filter_config = self.my_handle.config.get("filter") or {}
+            dedup_cfg = filter_config.get("limited_time_deduplication") or {}
+
             # 检查是否启用去重
-            if not filter_config.get("limited_time_deduplication", "enable"):
+            if not dedup_cfg.get("enable"):
                 return False
-            
-            # 获取去重时间
-            deduplication_time = filter_config.get("limited_time_deduplication", type, 60)
-            
+
+            # 获取去重时间（未配置的类型不参与去重——schedule/idle_time_task 等
+            # 系统任务同内容重发属正常语义，不得被静默丢弃）
+            period = dedup_cfg.get(type)
+            if period is None:
+                return False
+            deduplication_time = float(period)
+
+            # 内容键（类型容错：礼物无 content）
+            content = data.get("content")
+            if content is None:
+                content = data.get("gift_name", "")
+
             # 获取当前时间
             import time
             current_time = time.time()
-            
-            # 检查是否重复
-            if type in self.my_handle.live_data:
-                for item in self.my_handle.live_data[type]:
-                    if current_time - item.get("time", 0) < deduplication_time:
-                        if item.get("username") == data.get("username") and item.get("content") == data.get("content"):
-                            return True
-                
-                # 添加到去重列表
-                self.my_handle.live_data[type].append({
-                    "username": data.get("username"),
-                    "content": data.get("content"),
-                    "time": current_time
-                })
-                
-                # 限制列表大小
-                if len(self.my_handle.live_data[type]) > 100:
-                    self.my_handle.live_data[type].pop(0)
-            
+
+            # 检查是否重复（live_data 键缺失时补建——新类型 like/room_stats 等容错）
+            bucket = self.my_handle.live_data.setdefault(type, [])
+            for item in bucket:
+                if current_time - item.get("time", 0) < deduplication_time:
+                    if item.get("username") == data.get("username") and item.get("content") == content:
+                        return True
+
+            # 添加到去重列表
+            bucket.append({
+                "username": data.get("username"),
+                "content": content,
+                "time": current_time
+            })
+
+            # 限制列表大小
+            if len(bucket) > 100:
+                bucket.pop(0)
+
             return False
         except Exception as e:
             logger.error(traceback.format_exc())
