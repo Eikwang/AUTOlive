@@ -1,7 +1,7 @@
 [project]
-name = "luna-ai"
+name = "autolive"
 version = "1.0.0"
-description = "Luna AI - 一站式 AI 虚拟主播解决方案"
+description = "AUTOlive - 一站式 AI 虚拟主播解决方案"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

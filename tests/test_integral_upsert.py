@@ -222,7 +222,7 @@ class TestUpsertSemantics:
         row = handler.my_handle.db.fetch_one("SELECT integral, sign_num, view_num FROM integral")
         assert row[0] == 2 and row[1] == 0 and row[2] == 0
 
-        with caplog.at_level("WARNING", logger="luna_ai"):
+        with caplog.at_level("WARNING", logger="autolive"):
             follow_warns = [r for r in caplog.records if "integral.follow" in r.getMessage()]
         # 每个缺键（enable/get_integral/copywriting）仅告警一次，第二次关注不再新增
         assert len(follow_warns) == 3

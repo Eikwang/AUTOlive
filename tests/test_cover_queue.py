@@ -83,6 +83,15 @@ def test_local_song_lookup():
 
 
 def test_gpu_policy_returns_tuple():
-    """E-2：准入返回 (bool, reason) 元组。"""
-    ok, reason = is_background_task_allowed(9999)  # 阈值 9999 → 必拒（显存不够）
+    """E-2：准入返回 (bool, reason) 元组。
+
+    探测信号全部 mock（封闭式）：本机若正运行 EDTalk 服务（8000 端口探活）
+    或真实显存充足，未 mock 会被其它拒绝分支抢先，测不到显存分支。
+    """
+    from unittest.mock import patch
+    with patch("utils.gpu_policy._live_running", return_value=False), \
+         patch("utils.gpu_policy._edtalk_busy", return_value=False), \
+         patch("utils.gpu_policy._vram_free_gb", return_value=0.5), \
+         patch("utils.gpu_policy._inproc_engine_ready", return_value=False):
+        ok, reason = is_background_task_allowed(9999)  # 阈值 9999 → 必拒（显存不够）
     assert ok is False and "显存" in reason

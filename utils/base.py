@@ -8,7 +8,7 @@
 import logging
 
 # 创建 logger
-logger = logging.getLogger("luna_ai")
+logger = logging.getLogger("autolive")
 
 # 设置默认日志级别
 logger.setLevel(logging.DEBUG)

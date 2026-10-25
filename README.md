@@ -6,7 +6,7 @@
 
 </div>
 
-**AUTOlive** 是一款 AI 直播数字人整合中枢：直播弹幕实时驱动对话与互动，数字人形象实时开口回应。本项目 fork 自 [Ikaros-521/AI-Vtuber](https://github.com/Ikaros-521/AI-Vtuber)（Luna AI），已更名为 **AUTOlive** 独立演进（hard fork），整合了弹幕监听、对话生成、语音合成、数字人驱动与训练的完整直播链路。感谢原作者 [Ikaros-521](https://github.com/Ikaros-521) 与上游社区贡献者的杰出工作。
+**AUTOlive** 是一款 AI 直播数字人整合中枢：直播弹幕实时驱动对话与互动，数字人形象实时开口回应。本项目 fork 自 [Ikaros-521/AI-Vtuber](https://github.com/Ikaros-521/AI-Vtuber)，已更名为 **AUTOlive** 独立演进（hard fork，已全面重构，与上游无运行时关联），整合了弹幕监听、对话生成、语音合成、数字人驱动与训练的完整直播链路。感谢原作者 [Ikaros-521](https://github.com/Ikaros-521) 与上游社区贡献者的杰出工作。
 
 ## 🧩 核心能力
 

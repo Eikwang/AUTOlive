@@ -121,7 +121,7 @@ class TestFileManager:
         if base_dir:
             self.base_dir = Path(base_dir)
         else:
-            self.base_dir = Path(tempfile.mkdtemp(prefix="luna_test_"))
+            self.base_dir = Path(tempfile.mkdtemp(prefix="autolive_test_"))
         
         self.base_dir.mkdir(parents=True, exist_ok=True)
     
@@ -284,7 +284,7 @@ class PerformanceTimer:
 
 def create_test_environment():
     """创建测试环境"""
-    test_dir = Path(tempfile.mkdtemp(prefix="luna_test_env_"))
+    test_dir = Path(tempfile.mkdtemp(prefix="autolive_test_env_"))
     
     # 创建测试目录结构
     dirs = [

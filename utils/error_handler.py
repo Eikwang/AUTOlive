@@ -65,8 +65,8 @@ class ErrorCode(Enum):
     PLATFORM_MESSAGE_ERROR = 7003
 
 
-class LunaError(Exception):
-    """Luna AI 基础异常类"""
+class AutoliveError(Exception):
+    """AUTOlive 基础异常类"""
     
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.UNKNOWN_ERROR, 
                  details: Optional[Dict[str, Any]] = None, cause: Optional[Exception] = None):
@@ -100,37 +100,37 @@ class LunaError(Exception):
         return f"[{self.error_code.name}] {self.message}"
 
 
-class ConfigError(LunaError):
+class ConfigError(AutoliveError):
     """配置相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.CONFIG_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
 
 
-class DatabaseError(LunaError):
+class DatabaseError(AutoliveError):
     """数据库相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.DATABASE_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
 
 
-class NetworkError(LunaError):
+class NetworkError(AutoliveError):
     """网络相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.NETWORK_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
 
 
-class AudioError(LunaError):
+class AudioError(AutoliveError):
     """音频相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.AUDIO_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
 
 
-class LLMError(LunaError):
+class LLMError(AutoliveError):
     """LLM相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.LLM_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
 
 
-class PlatformError(LunaError):
+class PlatformError(AutoliveError):
     """平台相关错误"""
     def __init__(self, message: str, error_code: ErrorCode = ErrorCode.PLATFORM_ERROR, **kwargs):
         super().__init__(message, error_code, **kwargs)
@@ -205,8 +205,8 @@ class ErrorHandler:
             'context': context or {}
         }
         
-        # 如果是 LunaError，提取更多信息
-        if isinstance(error, LunaError):
+        # 如果是 AutoliveError，提取更多信息
+        if isinstance(error, AutoliveError):
             error_info.update({
                 'error_code': error.error_code,
                 'details': error.details,
@@ -335,7 +335,7 @@ def retry_on_error(max_retries: int = 3, delay: float = 1.0,
 # 导出
 __all__ = [
     'ErrorCode',
-    'LunaError',
+    'AutoliveError',
     'ConfigError',
     'DatabaseError',
     'NetworkError',
