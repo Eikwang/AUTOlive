@@ -233,28 +233,45 @@ class ConversationManager:
         talk_handle 对话链（LLM/TTS/聊天记录 voice 全链复用）。
         播放中不录音由 audio_listen 内守卫承接（no_recording_during_playback）。
 
+        流式识别（2026-10-25 方案A）：need_lang=zh 且 talk.asr_streaming
+        未关闭时创建流式会话，audio_listen 边录边喂（on_chunk=session.feed），
+        说完 session.final() 立即出文本——整段「写盘+整段推理」延时消除；
+        会话不可用（非中文/模型缺失/开关关闭）回退原整段链。
+
         Args:
             continuous: 是否连续对话（True=循环至停止事件；False=单轮后退出）
         """
         logger.info(f"开始监听和评论，连续模式: {continuous}")
         from utils.audio_processor import get_audio_processor
-        from utils.asr_engine import transcribe
+        from utils.asr_engine import create_streaming_session, transcribe
 
         volume_threshold = float(self.config.get("talk", "volume_threshold") or 800.0)
         silence_threshold = int(self.config.get("talk", "silence_threshold") or 15)
 
         try:
             ap = get_audio_processor(self.config, self.my_handle)
+            rate = self.config.get("talk", "RATE")
             round_no = 0
             while not self.stop_do_listen_and_comment_thread_event.is_set():
-                frames = ap.audio_listen(volume_threshold, silence_threshold)
+                # 每轮新建会话（模型单例缓存，创建仅是空 cache/buffer——final 后
+                # 会话已闭合，不能跨轮复用）
+                session = create_streaming_session(self.config)
+                if session:
+                    logger.info("[t10] 流式识别已启用（边说边转写）")
+                frames = ap.audio_listen(
+                    volume_threshold, silence_threshold,
+                    on_chunk=(session.feed if session else None))
                 if self.stop_do_listen_and_comment_thread_event.is_set():
                     break
                 if not frames:
                     continue
                 round_no += 1
-                wav_path = ap.frames_to_wav(frames, f"out/record_vad_{round_no}.wav")
-                text = transcribe(wav_path, self.config)
+                if session:
+                    text = session.final()
+                else:
+                    wav_path = ap.frames_to_wav(
+                        frames, f"out/record_vad_{round_no}.wav", rate=rate)
+                    text = transcribe(wav_path, self.config)
                 if not text:
                     logger.info(f"[t10] 连续对话第 {round_no} 轮：识别无文字，跳过")
                     continue

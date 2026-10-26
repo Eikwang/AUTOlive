@@ -351,6 +351,7 @@
     "silence_threshold": "5",
     "CHANNELS": 1,
     "RATE": 16000,
+    "asr_streaming": true,
     "interrupt_talk": {
       "enable": false,
       "keywords": [

@@ -191,27 +191,53 @@ class MainApplication:
             return False
 
     def _on_start_recording(self):
-        """开始录音的回调函数"""
+        """开始录音的回调函数
+
+        流式识别（2026-10-25 方案A）：need_lang=zh 且开关未关闭时创建
+        流式会话，录音线程边录边喂（on_chunk=session.feed）；会话不可用
+        则置 None，停止回调回退整段转写。
+        """
         logger.info("开始录音回调触发")
+        self._stream_session = None
         if self.audio_processor:
-            self.audio_processor.start_recording_thread()
-    
+            from utils.asr_engine import create_streaming_session
+            self._stream_session = create_streaming_session(self.config)
+            if self._stream_session:
+                logger.info("[t10] 流式识别已启用（边说边转写）")
+            self.audio_processor.start_recording_thread(
+                on_chunk=self._stream_session.feed if self._stream_session else None)
+
     def _on_stop_recording(self):
         """停止录音的回调函数——T10 语音对话链接通（2026-10-24）：停止后串接
         ASR→对话链（录音 wav → 文字 → conversation_manager.talk_handle →
-        LLM/TTS/聊天记录 voice 标记全链复用）。"""
+        LLM/TTS/聊天记录 voice 标记全链复用）。
+
+        流式识别（2026-10-25 方案A）：存在流式会话时直接 final() 取文本
+        （说话期间已增量转写，无需写盘+整段推理）；无会话回退整段链。
+        """
         logger.info("停止录音回调触发")
         if self.audio_processor:
             self.audio_processor.stop_recording()
-        wav_path = getattr(self.audio_processor, "last_recording_path", "")
-        if self.conversation_manager and wav_path:
-            from utils.asr_engine import transcribe
-            text = transcribe(wav_path, self.config)
-            if text:
-                logger.info(f"[t10] 语音识别结果：{text}")
-                self.conversation_manager.talk_handle(text)
+        session = getattr(self, "_stream_session", None)
+        self._stream_session = None
+        if self.conversation_manager:
+            if session is not None:
+                text = session.final()
+                if text:
+                    logger.info(f"[t10] 流式语音识别结果：{text}")
+                    self.conversation_manager.talk_handle(text)
+                else:
+                    logger.info("[t10] 流式语音识别无文字输出，本次忽略")
             else:
-                logger.info("[t10] 语音识别无文字输出，本次忽略")
+                wav_path = getattr(self.audio_processor, "last_recording_path", "")
+                if wav_path:
+                    from utils.asr_engine import transcribe
+                    text = transcribe(wav_path, self.config)
+                    if text:
+                        logger.info(f"[t10] 语音识别结果：{text}")
+                        self.conversation_manager.talk_handle(text)
+                    else:
+                        logger.info("[t10] 语音识别无文字输出，本次忽略")
         if self.conversation_manager:
             self.conversation_manager.stop_do_listen_and_comment_thread_event.set()
     

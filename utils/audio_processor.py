@@ -42,7 +42,8 @@ class AudioProcessor:
         
         logger.info("音频处理器初始化完成")
     
-    def record_audio(self, output_path: str = "out/record.wav") -> str:
+    def record_audio(self, output_path: str = "out/record.wav",
+                     on_chunk=None) -> str:
         """录音（标志式：is_recording=True 期间采集，stop_recording() 停止）。
 
         T10 语音对话链接通（2026-10-24）重构：上游残留为「按住 Shift 键
@@ -50,6 +51,14 @@ class AudioProcessor:
         停止交互模型（talk 配置面）错配——改由 is_recording 标志控制采集，
         start_recording_thread 置位启动、stop_recording 复位收束，返回 wav
         路径供 ASR 段消费。
+
+        流式识别（2026-10-25 方案A）：on_chunk 回调在采集循环内逐 chunk
+        回传 PCM（int16 LE），供 StreamingAsrSession.feed 边说边转写；
+        采样率对齐 talk.RATE（16k——FunASR 流式要求，免重采样）。
+
+        Args:
+            output_path: 录音产物路径
+            on_chunk: 可选回调 on_chunk(bytes)，每读一帧调用（流式喂入）
 
         Returns:
             str: 录音文件路径；录音过短/异常返回 ""（调用方跳过 ASR）。
@@ -63,10 +72,14 @@ class AudioProcessor:
         except (TypeError, ValueError):
             device_index = None
         try:
+            rate = int(self.config.get("talk", "RATE"))
+        except (TypeError, ValueError):
+            rate = self.rate
+        try:
             stream = p.open(
                 format=self.format,
                 channels=self.channels,
-                rate=self.rate,
+                rate=rate,
                 input=True,
                 frames_per_buffer=self.chunk,
                 input_device_index=device_index,
@@ -82,6 +95,8 @@ class AudioProcessor:
             while self.is_recording:
                 data = stream.read(self.chunk, exception_on_overflow=False)
                 frames.append(data)
+                if on_chunk:
+                    on_chunk(data)
                 pressdown_num += 1
         finally:
             stream.stop_stream()
@@ -98,7 +113,7 @@ class AudioProcessor:
         wf = wave.open(output_path, "wb")
         wf.setnchannels(self.channels)
         wf.setsampwidth(p.get_sample_size(self.format))
-        wf.setframerate(self.rate)
+        wf.setframerate(rate)
         wf.writeframes(b"".join(frames))
         wf.close()
 
@@ -106,27 +121,37 @@ class AudioProcessor:
         return output_path
 
     def frames_to_wav(self, frames: List[bytes],
-                      output_path: str = "out/record_vad.wav") -> str:
-        """VAD 帧列表 → wav 文件（do_listen_and_comment 连续模式的 ASR 输入）。"""
+                      output_path: str = "out/record_vad.wav",
+                      rate: Optional[int] = None) -> str:
+        """VAD 帧列表 → wav 文件（do_listen_and_comment 连续模式的 ASR 输入）。
+
+        rate 须与采集流实际采样率一致（audio_listen 按 talk.RATE 开流）——
+        2026-10-25 修复：此前恒写 self.rate=44100 头，16k 数据配 44.1k 头
+        导致连续模式 wav 变速失真。
+        """
+        if rate is None:
+            rate = self.rate
         p = pyaudio.PyAudio()
         wf = wave.open(output_path, "wb")
         wf.setnchannels(self.channels)
         wf.setsampwidth(p.get_sample_size(self.format))
-        wf.setframerate(self.rate)
+        wf.setframerate(int(rate))
         wf.writeframes(b"".join(frames))
         wf.close()
         p.terminate()
         return output_path
 
-    def audio_listen(self, volume_threshold: float = 800.0, 
-                    silence_threshold: int = 15) -> List[bytes]:
+    def audio_listen(self, volume_threshold: float = 800.0,
+                    silence_threshold: int = 15, on_chunk=None) -> List[bytes]:
         """
         音频监听功能（自动检测语音活动）
-        
+
         Args:
             volume_threshold: 音量阈值
             silence_threshold: 沉默阈值
-            
+            on_chunk: 可选回调 on_chunk(bytes)，采集到语音帧时逐帧调用
+                （流式识别喂入——边说边转写，2026-10-25 方案A）
+
         Returns:
             List[bytes]: 录制的音频帧
         """
@@ -182,6 +207,8 @@ class AudioProcessor:
             
             if is_speaking is True:
                 frames.append(data)
+                if on_chunk:
+                    on_chunk(data)
                 if speaking_flag is False:
                     logger.info("[录入中……]")
                     speaking_flag = True
@@ -198,21 +225,22 @@ class AudioProcessor:
         
         return frames
     
-    def start_recording_thread(self, callback=None):
+    def start_recording_thread(self, callback=None, on_chunk=None):
         """
         启动录音线程
-        
+
         Args:
             callback: 录音完成后的回调函数
+            on_chunk: 采集循环逐帧回调（流式识别喂入，透传 record_audio）
         """
         if self.is_recording:
             logger.warning("录音已在进行中")
             return
-        
+
         def recording_task():
             self.is_recording = True
             try:
-                wav_path = self.record_audio()
+                wav_path = self.record_audio(on_chunk=on_chunk)
                 if callback:
                     callback(wav_path)
             except Exception as e:

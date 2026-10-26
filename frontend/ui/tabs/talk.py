@@ -119,6 +119,7 @@ def create_talk_tab(
                 _auto_save(ui.input(label='停录计数', value=get_nested_value(config, "talk", "silence_threshold"), placeholder='音量低于起始值的计数').style("width:100%;").tooltip('沉默阈值，请根据自己的麦克风进行微调'), ("talk", "silence_threshold"))
                 _auto_save(ui.input(label='CHANNELS', value=get_nested_value(config, "talk", "CHANNELS"), placeholder='录音参数').style("width:100%;"), ("talk", "CHANNELS"))
                 _auto_save(ui.input(label='RATE', value=get_nested_value(config, "talk", "RATE"), placeholder='录音参数').style("width:100%;"), ("talk", "RATE"))
+                _auto_save(ui.switch('流式识别（边说边转）', value=get_nested_value(config, "talk", "asr_streaming")).style(switch_internal_css).tooltip('开启后中文边说边转写，说完立即发给大模型（省去整段识别等待）；关闭回退整段识别。仅中文生效，首次使用需下载流式模型'), ("talk", "asr_streaming"))
 
             # 聊天框（T10 同期：三按钮接线——此前无 on_click 装饰性按钮，复读/插队链断）
             with ui.grid(columns=1):

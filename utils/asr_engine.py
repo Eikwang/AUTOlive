@@ -22,6 +22,8 @@ import os
 import threading
 from typing import Optional
 
+import numpy as np
+
 from utils.my_log import logger
 
 # HF 镜像（fasterwhisper_asr.py:5 同款——国内下载可达性）
@@ -177,3 +179,145 @@ def transcribe(wav_path: str, config) -> str:
     except Exception as e:
         logger.error(f"[asr] 语音识别失败（need_lang={need_lang}）：{e}")
         return ""
+
+
+# ==================== 流式 ASR（2026-10-25 方案A：仅中文 FunASR online）====================
+#
+# 目标：把「说完才开始整段推理」的 ASR 延时（0.4~1s+ GPU）与说话时间重叠——
+# 录音循环边说边喂增量 chunk（600ms 窗），说完 is_final=True 尾字 ≈0.2~0.4s，
+# 说完→发大模型 从 ≈0.7~1.5s 压到 ≈0.3~0.6s。
+#
+# 与 _transcribe_funasr 的「不传 cache」不冲突：1.4.12 对 cache 参数做 len()
+# 检查，传 bool 才崩；流式的 cache 是 dict（流式状态载体，每会话独立），合法。
+
+_STREAM_MODEL_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+_PUNC_MODEL_ID = "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
+_STREAM_CHUNK_SIZE = [0, 10, 5]     # 600ms 增量窗（0 左上下文 / 10 当前 / 5 回看）
+_STREAM_ENCODER_LOOK_BACK = 4       # funasr 官方流式示例参数
+_STREAM_DECODER_LOOK_BACK = 1
+_STREAM_FEED_SAMPLES = 9600         # 0.6s @ 16k——与 chunk_size 窗口对齐
+
+_STREAM_LOCK = threading.Lock()  # 串行化 generate（多会话/多线程共享模型实例）
+
+
+def _local_or_hf(hf_id: str) -> str:
+    """模型本地优先（apps/.../models/<尾名>），缺失返回 HF id（镜像已设）。"""
+    local = os.path.join(_APP_ASR_MODELS, hf_id.split("/")[-1])
+    return local if os.path.isdir(local) else hf_id
+
+
+def _get_funasr_streaming(config):
+    """FunASR online 流式模型懒加载单例（本地优先，缺失走 HF 镜像下载）。"""
+    key = "funasr_streaming_zh"
+    with _ENGINE_LOCK:
+        if key in _ENGINE_SINGLETON:
+            return _ENGINE_SINGLETON[key]
+        from funasr import AutoModel
+        model_path = _local_or_hf(_STREAM_MODEL_ID)
+        logger.info(f"[asr] 加载 FunASR 流式模型：{model_path}")
+        model = AutoModel(model=model_path, disable_update=True)
+        _ENGINE_SINGLETON[key] = model
+        return model
+
+
+def _get_funasr_punc(config):
+    """标点模型单例（复用 zh 离线链同款 ct-transformer——online 流式模型无标点）。"""
+    key = "funasr_punc"
+    with _ENGINE_LOCK:
+        if key in _ENGINE_SINGLETON:
+            return _ENGINE_SINGLETON[key]
+        from funasr import AutoModel
+        model = AutoModel(model=_local_or_hf(_PUNC_MODEL_ID), disable_update=True)
+        _ENGINE_SINGLETON[key] = model
+        return model
+
+
+class StreamingAsrSession:
+    """单次录音的流式识别会话（zh online paraformer）。
+
+    用法：录音线程循环 feed(chunk_bytes)（int16 LE PCM，16k 单声道——
+    audio_processor 采集产物），说完调 final() 取最终文本。内部攒够
+    600ms 才调一次 generate（增量窗口对齐），最终文本自动过标点模型。
+    """
+
+    def __init__(self, config):
+        self._config = config
+        self._model = _get_funasr_streaming(config)
+        self._cache = {}                                   # 流式状态（每会话独立）
+        self._buffer = np.zeros(0, dtype=np.int16)         # 不足 600ms 的尾部暂存
+        self._parts: list = []
+        self._closed = False
+        self._lock = threading.Lock()                      # feed/final 与停止回调竞态互斥
+
+    def feed(self, pcm_bytes: bytes) -> None:
+        """喂入一段录音 chunk（int16 LE PCM 16k 单声道）。"""
+        if self._closed or not pcm_bytes:
+            return
+        with self._lock:
+            self._buffer = np.concatenate(
+                (self._buffer, np.frombuffer(pcm_bytes, dtype=np.int16)))
+            while len(self._buffer) >= _STREAM_FEED_SAMPLES:
+                self._emit(is_final=False)
+
+    def final(self) -> str:
+        """说完冲刷尾部，返回最终文本（含标点回补；异常降级已识别部分）。"""
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                try:
+                    self._emit(is_final=True)
+                except Exception as e:
+                    logger.warning(f"[asr] 流式尾部冲刷失败：{e}")
+            text = "".join(self._parts).strip()
+        if not text:
+            return ""
+        return self._apply_punc(text)
+
+    def _emit(self, is_final: bool) -> None:
+        """消费 600ms 窗（final 时全量）→ generate 增量识别。"""
+        if is_final:
+            chunk = self._buffer.astype(np.float32) / 32768.0
+            self._buffer = np.zeros(0, dtype=np.int16)
+        else:
+            chunk = self._buffer[:_STREAM_FEED_SAMPLES].astype(np.float32) / 32768.0
+            self._buffer = self._buffer[_STREAM_FEED_SAMPLES:]
+        res = self._model.generate(
+            input=chunk, cache=self._cache, is_final=is_final,
+            chunk_size=_STREAM_CHUNK_SIZE,
+            encoder_chunk_look_back=_STREAM_ENCODER_LOOK_BACK,
+            decoder_chunk_look_back=_STREAM_DECODER_LOOK_BACK)
+        if res and isinstance(res, list):
+            part = str((res[0] or {}).get("text", "") or "")
+            if part:
+                self._parts.append(part)
+
+    def _apply_punc(self, text: str) -> str:
+        """online 模型无标点——最终文本过一遍 ct-transformer（失败降级原文本）。"""
+        try:
+            punc = _get_funasr_punc(self._config)
+            res = punc.generate(input=text)
+            if res and isinstance(res, list) and (res[0] or {}).get("text"):
+                return str(res[0]["text"]).strip()
+        except Exception as e:
+            logger.warning(f"[asr] 标点回补失败，返回无标点文本：{e}")
+        return text
+
+
+def create_streaming_session(config):
+    """按配置创建流式识别会话；不可用返回 None（调用方回退整段转写）。
+
+    门控：talk.asr_streaming 缺省开启（None is not False 语义）；仅
+    need_lang=zh 启用（online paraformer 中文流式）——粤语 UniASR 与
+    en/jp/ko whisper 维持整段转写。
+    """
+    if config is None:
+        return None
+    if config.get("talk", "asr_streaming") is False:
+        return None
+    if str(config.get("need_lang") or "none").strip().lower() != "zh":
+        return None
+    try:
+        return StreamingAsrSession(config)
+    except Exception as e:
+        logger.warning(f"[asr] 流式会话不可用（{e}），回退整段转写")
+        return None
