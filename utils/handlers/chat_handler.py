@@ -11,6 +11,7 @@ from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
 from ..gpt_model.gpt import GPT_MODEL
+from .. import alarm_notifier
 
 
 class ChatHandler:
@@ -64,6 +65,13 @@ class ChatHandler:
         Returns:
             str | None: 托底命中返回渲染后回答；未命中/禁用返回 None（log 已记原因）
         """
+        # 报警重构（2026-10-26）：本函数是 LLM 通道失败四路径（熔断开路/模型未初始化/
+        # 返回空/异常）唯一汇入口——LLM服务 报警单点挂载（webhook 推送，60s 模块级
+        # 冷却防故障期每条弹幕刷屏）
+        alarm_notifier.alarm_error(
+            alarm_notifier.MODULE_LLM,
+            f"LLM 通道 {chat_type} 失败：{fail_reason}",
+            fix_hint="检查对应 LLM 服务/密钥/网络，详见主系统日志")
         username = (data_json or {}).get("username", "")
         content = (data_json or {}).get("content", "")
         if not self.my_handle.config.get("local_qa", "enable"):
@@ -183,6 +191,11 @@ class ChatHandler:
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"LLM流式处理失败：{e}")
+            # 报警重构（2026-10-26）：流式路径不经 _try_local_qa_fallback，独立挂载
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_LLM,
+                f"LLM 流式处理失败（通道 {chat_type}）：{type(e).__name__}: {e}",
+                fix_hint="检查对应 LLM 服务/密钥/网络，详见主系统日志")
     
     def split_by_chinese_punctuation(self, text):
         """

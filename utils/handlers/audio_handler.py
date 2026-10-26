@@ -84,7 +84,6 @@ class AudioHandler:
                 follow 用户关注
                 schedule 定时任务
                 idle_time_task 闲时任务
-                abnormal_alarm 异常报警
         """
         if "content" in data_json:
             if data_json['content']:

@@ -39,7 +39,6 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("schedule", "定时任务"),
         ("trends_copywriting", "动态文案"),
         ("idle_time_task", "闲时任务"),
-        ("abnormal_alarm", "异常报警"),
     ]),
     ("助播", [
         ("assistant_anchor_text", "助播-文本"),
@@ -47,7 +46,8 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
     ]),
 ]
 
-# 预设值（数值越大越优先；异常报警与最高优先级复读各预设恒高位）
+# 预设值（数值越大越优先；最高优先级复读各预设恒高位。
+# abnormal_alarm 组已随 2026-10-26 报警重构退役——本地音频报警不再产生该队列类型）
 PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
     "互动优先": {
         "comment": 80, "read_comment": 75, "gift": 70, "follow": 65,
@@ -55,7 +55,7 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
         "talk": 35, "local_qa_audio": 30, "reread": 25,
         "assistant_anchor_text": 20, "assistant_anchor_audio": 20,
         "schedule": 15, "trends_copywriting": 12, "idle_time_task": 10,
-        "abnormal_alarm": 90, "reread_top_priority": 999,
+        "reread_top_priority": 999,
     },
     "内容优先": {
         "schedule": 70, "trends_copywriting": 65, "song": 60, "idle_time_task": 55,
@@ -63,7 +63,7 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
         "entrance": 25, "integral": 20, "key_mapping": 18,
         "talk": 15, "local_qa_audio": 15, "reread": 12,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
-        "abnormal_alarm": 90, "reread_top_priority": 999,
+        "reread_top_priority": 999,
     },
     "省资源": {
         "comment": 10, "read_comment": 10, "entrance": 10, "gift": 10,
@@ -71,7 +71,7 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
         "talk": 10, "local_qa_audio": 10, "reread": 10,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
         "schedule": 10, "trends_copywriting": 10, "idle_time_task": 10,
-        "abnormal_alarm": 90, "reread_top_priority": 999,
+        "reread_top_priority": 999,
     },
 }
 

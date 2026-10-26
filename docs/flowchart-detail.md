@@ -110,7 +110,7 @@ flowchart TD
         direction TB
         MON1["前端崩溃监控〔真实〕<br>frontend/main.py:857<br>main 退出→running_flag 复位+auto_run 重拉"]
         MON2["DanmakuListener 守护〔真实〕<br>danmaku_consumer.py:836<br>重建 3 次置红"]
-        MON3["异常报警自愈〔真实〕<br>event_handler.py:175<br>TTS 失败计数→报警音频→超阈值请求重启"]
+        MON3["异常报警自愈〔2026-10-26 重构退役〕<br>错误计数/报警音频/超阈值重启已删除<br>改 alarm_notifier：六模块开关+WEBHOOK 通告"]
     end
 ```
 
@@ -249,7 +249,7 @@ HOLD 三检查：①复杂度——审查产出=图修正+任务表，不新增�
 | conversation_manager.talk_handle | :64 传 str+错误 type "comment" | 类型/契约错误 | 无 ← GAP | 语音对话无响应 |
 | chat_type=game | chat_handler.py:240/comment_handler.py:325 引用未赋值属性 | AttributeError | 无 ← GAP | 崩溃/分支失效 |
 | 弹幕入口未就绪 | my_global.my_handle 未初始化 | 丢弃+日志 | Y（丢弃不崩） | 弹幕无响应 |
-| TTS 合成失败 | 引擎异常 | 计数→报警→超阈值重启 | Y（event_handler.py:175-232） | 报警音频/重启 |
+| TTS 合成失败 | 引擎异常 | ~~计数→报警→超阈值重启~~（2026-10-26 退役）→ alarm_notifier webhook 推送 | Y（synthesis_manager.py） | 群机器人报警（模块开关+60s 冷却） |
 | DanmakuListener 崩溃 | 守护重建 3 次置红 | Y（danmaku_consumer.py:836-857） | 状态红 | 监听失效 |
 | 积分写库 | DB 锁/字段 | 退避重试 feature_handler.py:558-571 | Y | 延迟计入 |
 
@@ -286,7 +286,7 @@ GAP 处置：三处聊天链 bug 入任务表（修复 <1d，P2 boil lakes 自�
 | 聊天回复（开库） | NameError 静默失败 | N | N | 回复缺失 | 部分 |
 | game 分支 | AttributeError | N | N | 崩溃分支 | N |
 | 弹幕主链 | 各类异常 | Y（聚合/背压/守护） | 部分 | 状态条 | Y |
-| TTS/播放链 | 合成失败/设备异常 | Y（报警+重启） | 部分 | 报警 | Y |
+| TTS/播放链 | 合成失败/设备异常 | Y（2026-10-26 起：alarm_notifier webhook，旧报警+重启退役） | 部分 | 群机器人报警 | Y |
 | EDTalk 链 | 推送失败 | Y（背压+跳过本地播放防双声） | 实测通过 | 口型停止 | Y |
 | 积分链 | DB 异常 | Y（退避重试） | 门禁A后 | 延迟计入 | Y |
 

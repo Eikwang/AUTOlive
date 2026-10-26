@@ -27,10 +27,28 @@ import time
 import traceback
 
 from utils.my_log import logger
+from utils import alarm_notifier
 
 # 模块级训练状态（frontend/main.py start_programs 检测训练中标志用）
 training_running = False
 training_role: str | None = None  # 最近训练角色（D2/D20：启动拦截弹窗读进度用）
+
+
+def notify_train_result(success: bool, message: str, *, stop_requested: bool = False) -> None:
+    """训练主播结果推送（报警重构 2026-10-26）。
+
+    完成=进度通知（非错误报警）；失败/评估未过门槛=报警；用户主动停止不发
+    （有意操作，训练页已有呈现）。
+    """
+    if stop_requested:
+        return
+    if success:
+        alarm_notifier.alarm_notice(
+            alarm_notifier.MODULE_TRAIN_STREAMER, message or "训练完成")
+    else:
+        alarm_notifier.alarm_error(
+            alarm_notifier.MODULE_TRAIN_STREAMER, message or "训练未完成",
+            fix_hint="详见训练页日志定位失败步骤")
 
 
 def get_edtalk_dir() -> str:
@@ -721,6 +739,8 @@ class TrainPipeline:
                     pass
                 self._log_file = None
             training_running = False
+            # 报警重构（2026-10-26）：训练主播结果推送（完成=通知/失败=报警/主动停止不发）
+            notify_train_result(success, message, stop_requested=self._stop_requested)
             if not success:
                 self.on_complete(False, message or "训练未完成")
 

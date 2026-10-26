@@ -18,6 +18,7 @@ from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
 from utils.autolive_paths import AutolivePaths
 from utils.my_log import logger
+from utils import alarm_notifier
 from utils.train_voice_pipeline import (
     FAILED, PENDING, RUNNING, SUCCESS, TrainVoicePipeline,
 )
@@ -28,6 +29,21 @@ _pipeline: TrainVoicePipeline | None = None
 _pipeline_lock = threading.Lock()
 # P3-1 修订：串行编排的管线链（[(名称, pipeline)]，启动后由编排线程顺序消费）
 _pipes: list = []
+
+
+def pipeline_outcome(p) -> str:
+    """管线终态判定（报警重构 2026-10-26）。
+
+    Returns:
+        "stopped"=用户主动停止（不发报警/通知）；"failed"=存在失败或未执行
+        步骤（报警）；"ok"=全步骤成功（进度通知）。
+    """
+    if getattr(p, "stop_requested", False):
+        return "stopped"
+    states = set(p.stage_states().values())
+    if FAILED in states or PENDING in states or RUNNING in states:
+        return "failed"
+    return "ok"
 
 # D1 录音指引文案（一屏内讲完；深化整合后 MDXNet 分离已内置）
 _GUIDE_LINES = [
@@ -258,8 +274,19 @@ def create_train_voice_tab(
                 p.run_all()
                 while p.running_stage is not None:
                     time.sleep(0.5)
-                if FAILED in p.stage_states().values():
-                    logger.error(f"[train-voice] {name} 管线存在失败步骤（详见页面红字），继续后续管线")
+                # 报警重构（2026-10-26）：训练声音结果推送——完成=进度通知（非错误
+                # 报警）；失败/未执行完整=报警；用户主动停止不发（有意操作）
+                outcome = pipeline_outcome(p)
+                if outcome == "stopped":
+                    logger.info(f"[train-voice] {name} 用户停止，不发报警/通知")
+                elif outcome == "failed":
+                    logger.error(f"[train-voice] {name} 管线存在失败/未执行步骤（详见页面红字），继续后续管线")
+                    alarm_notifier.alarm_error(
+                        alarm_notifier.MODULE_TRAIN_VOICE,
+                        f"训练声音 {name} 未能完成（存在失败或未执行步骤，详见训练页日志）")
+                else:
+                    alarm_notifier.alarm_notice(
+                        alarm_notifier.MODULE_TRAIN_VOICE, f"训练声音 {name} 训练完成")
             logger.info("[train-voice] 全部启用管线执行完毕（失败项见页面标注）")
 
         threading.Thread(target=_worker, name="train-voice-chain", daemon=True).start()

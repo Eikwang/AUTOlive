@@ -354,9 +354,6 @@ class _SynthHarness(SynthesisMixin):
         self.captured.append((type, data_json))
         return {"code": 200, "msg": "ok"}
 
-    def abnormal_alarm_handle(self, key):
-        pass
-
     async def _fake_tts(self, message):
         message["result"] = {"code": 200, "msg": "合成成功", "audio_path": "fake.wav"}
         return message

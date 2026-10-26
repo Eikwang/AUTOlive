@@ -234,15 +234,15 @@ def test_start_programs_empty_when_ok_or_disabled(tmp_path, monkeypatch):
     assert app.start_programs() == []
 
 
-# ---------- 4. 监控报警通道开关（D1 落位） ----------
+# ---------- 4. 监控报警（报警重构 2026-10-26：弹窗常开 + 外围退出并入模块报警） ----------
 
 
-def test_monitor_notify_disabled_by_config(tmp_path):
-    """notify_enable=false：监控退出复位 flag 但不弹告警。"""
+def test_monitor_notify_unconditional(tmp_path):
+    """notify_enable 退役：弹窗告警常开，存量关闭键不再抑制。"""
     import nicegui.ui as nicegui_ui
 
     app = _fake_autolive(tmp_path)
-    app.config._config = {"abnormal_alarm": {"notify_enable": False}}
+    app.config._config = {"abnormal_alarm": {"notify_enable": False}}  # 存量退役键
     app.running_flag = True
     dead = MagicMock()
     dead.poll.return_value = 1
@@ -252,25 +252,55 @@ def test_monitor_notify_disabled_by_config(tmp_path):
 
     assert app.running_flag is False
     assert "main" not in app.my_subprocesses
-    assert nicegui_ui.NOTIFY_CALLS == []
+    assert len(nicegui_ui.NOTIFY_CALLS) == 1
+    assert nicegui_ui.NOTIFY_CALLS[0]["type"] == "negative"
     assert any(e["module"] == "main" and "退出" in e["message"]
                for e in AutoliveApp.recent_exceptions())
 
 
-def test_monitor_notify_enabled_by_default(tmp_path):
-    """缺省（无 abnormal_alarm 段）向后兼容：告警照常弹出。"""
-    import nicegui.ui as nicegui_ui
+def test_monitor_main_death_no_module_alarm(tmp_path, monkeypatch):
+    """main 退出不在六模块清单内：不触发模块报警（仅弹窗+状态条）。"""
+    calls = []
+    fake = SimpleNamespace(
+        alarm_error=lambda *a, **k: calls.append(a) or True,
+        MODULE_DIGITAL_HUMAN="digital_human", MODULE_LLM="llm")
+    monkeypatch.setattr("frontend.main.alarm_notifier", fake)
 
     app = _fake_autolive(tmp_path)
     app.running_flag = True
     dead = MagicMock()
-    dead.poll.return_value = 2
-    app.my_subprocesses = {"fastrag": dead}
+    dead.poll.return_value = 1
+    app.my_subprocesses = {"main": dead}
 
     app._monitor_subprocesses()
 
-    assert len(nicegui_ui.NOTIFY_CALLS) == 1
-    assert nicegui_ui.NOTIFY_CALLS[0]["type"] == "warning"
+    assert calls == []
+
+
+def test_monitor_peripheral_death_module_alarm(tmp_path, monkeypatch):
+    """外围退出并入模块报警：edtalk_realtime→数字人服务，fastrag→LLM服务。"""
+    calls = []
+
+    def _rec(module, message, fix_hint=""):
+        calls.append((module, message, fix_hint))
+        return True
+
+    fake = SimpleNamespace(alarm_error=_rec,
+                           MODULE_DIGITAL_HUMAN="digital_human", MODULE_LLM="llm")
+    monkeypatch.setattr("frontend.main.alarm_notifier", fake)
+
+    app = _fake_autolive(tmp_path)
+    app.running_flag = True
+    dead_et = MagicMock()
+    dead_et.poll.return_value = 3
+    dead_fr = MagicMock()
+    dead_fr.poll.return_value = 4
+    app.my_subprocesses = {"edtalk_realtime": dead_et, "fastrag": dead_fr}
+
+    app._monitor_subprocesses()
+
+    modules = [c[0] for c in calls]
+    assert modules == ["digital_human", "llm"]
 
 
 def test_monitor_auto_run_restart_success(tmp_path, monkeypatch):

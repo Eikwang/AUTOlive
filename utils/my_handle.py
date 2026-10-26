@@ -69,25 +69,6 @@ class My_handle(metaclass=SingletonMeta):
     # 是否在数据处理中
     is_handleing = 0
 
-    # 异常报警数据
-    abnormal_alarm_data = {
-        "platform": {
-            "error_count": 0
-        },
-        "llm": {
-            "error_count": 0
-        },
-        "tts": {
-            "error_count": 0
-        },
-        "visual_body": {
-            "error_count": 0
-        },
-        "other": {
-            "error_count": 0
-        }
-    }
-
     # 直播消息存储(入场、礼物、弹幕、点赞、关注、房间信息)，用于限定时间内的去重
     live_data = {
         "comment": [],
@@ -585,9 +566,6 @@ class My_handle(metaclass=SingletonMeta):
     def idle_time_task_handle(self, data):
         return self.event_handler.idle_time_task_handle(data)
 
-    def abnormal_alarm_handle(self, type):
-        return self.event_handler.abnormal_alarm_handle(type)
-    
     # 工具相关
     def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str, content_type: str = "answer"):
         # content_type 透传（2026-10-25 修复：answer/question 语义由调用方决定，

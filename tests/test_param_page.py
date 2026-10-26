@@ -68,16 +68,17 @@ def test_preset_direction_interactive_vs_content():
     presets = build_priority_presets()
     assert presets["互动优先"]["comment"] > presets["互动优先"]["schedule"]
     assert presets["内容优先"]["schedule"] > presets["内容优先"]["comment"]
-    # 异常报警与最高优先级复读各预设恒高位（安全兜底不随场景降）
+    # 最高优先级复读各预设恒高位（安全兜底不随场景降）；
+    # abnormal_alarm 组已随 2026-10-26 报警重构退役，不再入预设
     for vals in presets.values():
-        assert vals["abnormal_alarm"] >= 90
+        assert "abnormal_alarm" not in vals
         assert vals["reread_top_priority"] == 999
 
 
 def test_preset_resource_saving_flattens():
     """省资源预设：除恒高两项外全部拉平为最小档。"""
     vals = build_priority_presets()["省资源"]
-    flat = {k: v for k, v in vals.items() if k not in ("abnormal_alarm", "reread_top_priority")}
+    flat = {k: v for k, v in vals.items() if k not in ("reread_top_priority",)}
     assert set(flat.values()) == {10}
 
 

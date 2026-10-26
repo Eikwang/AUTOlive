@@ -27,6 +27,7 @@ from frontend.config.paths import get_base_path, get_config_path, get_log_dir, g
 # 导入工具模块
 from frontend.utils.helpers import SystemCommand
 from frontend.utils.common import textarea_data_change
+from utils import alarm_notifier
 
 # 导入UI模块
 from frontend.ui.components import (
@@ -99,6 +100,16 @@ _RETIRED_CONFIG_KEYS: list = [
     (("key_mapping", "local_audio_single_sentence_trigger_once"), "key_mapping 本地音频触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "img_path_trigger_type"), "key_mapping 图片触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "img_path_single_sentence_trigger_once"), "key_mapping 图片触发已移除（2026-10-24 精简批次），可删除"),
+    # 报警重构批次（2026-10-26）：旧报警配置整体退役，改为 abnormal_alarm.modules
+    # 六模块开关 + abnormal_alarm.webhook 通告（错误计数/自动重启/本地音频不再存在）
+    (("abnormal_alarm", "notify_enable"), "abnormal_alarm.notify_enable 已退役（子进程告警弹窗常开），可删除"),
+    (("abnormal_alarm", "sound_enable"), "abnormal_alarm.sound_enable 已退役（声音报警通道从未接线），可删除"),
+    (("abnormal_alarm", "platform"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    (("abnormal_alarm", "llm"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    (("abnormal_alarm", "tts"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    (("abnormal_alarm", "svc"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    (("abnormal_alarm", "visual_body"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    (("abnormal_alarm", "other"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
 ]
 
 
@@ -943,13 +954,13 @@ class AutoliveApp:
         不经 run_external_program 重拉以免双实例）；重拉前查训练显存互斥
         （与 run_external_program 同判据），训练中跳过并保持告警等人工处理。
 
-        D1（2026-10-19）：退出事件写入异常环形缓冲（状态条呈现）；告警 notify
-        受 abnormal_alarm.notify_enable 通道开关控制（默认开，缺省向后兼容）。
+        D1（2026-10-19）：退出事件写入异常环形缓冲（状态条呈现）。
+        报警重构（2026-10-26）：notify_enable 通道开关退役（弹窗告警常开）；
+        edtalk_realtime/fastrag 退出并入报警模块（数字人服务/LLM服务）经
+        WEBHOOK 推送；main 退出不在六模块清单内，维持弹窗+状态条。
         """
         if not self.running_flag:
             return
-        notify_enable = bool(get_nested_value(
-            self.config._config, "abnormal_alarm", "notify_enable", default=True))
         for name, proc in list(self.my_subprocesses.items()):
             try:
                 code = proc.poll()
@@ -963,9 +974,8 @@ class AutoliveApp:
                 self.running_flag = False
                 self.push_exception("main", f"主系统进程退出（exit={code}）",
                                     fix_hint="请查看完整日志定位原因后重新启动")
-                if notify_enable:
-                    ui.notify(position="top", type="negative",
-                              message=f"主系统进程已退出（exit={code}）——请查看日志；启动按钮已恢复")
+                ui.notify(position="top", type="negative",
+                          message=f"主系统进程已退出（exit={code}）——请查看日志；启动按钮已恢复")
                 if get_nested_value(self.config._config, "webui", "auto_run"):
                     try:
                         from utils.train_streamer import pipeline as _train_pipeline
@@ -983,9 +993,18 @@ class AutoliveApp:
                                             fix_hint=fix_hint)
             else:
                 self.push_exception(name, f"外围程序退出（exit={code}）")
-                if notify_enable:
-                    ui.notify(position="top", type="warning",
-                              message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")
+                ui.notify(position="top", type="warning",
+                          message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")
+                if name == "edtalk_realtime":
+                    alarm_notifier.alarm_error(
+                        alarm_notifier.MODULE_DIGITAL_HUMAN,
+                        f"EDTalk 实时推理进程退出（exit={code}）",
+                        fix_hint="检查 EDTalk 服务日志与显卡占用后重新启动")
+                elif name == "fastrag":
+                    alarm_notifier.alarm_error(
+                        alarm_notifier.MODULE_LLM,
+                        f"知识库服务（fastrag）进程退出（exit={code}）",
+                        fix_hint="检查 fastrag 服务日志后重新启动")
     
     def _create_control_buttons(self):
         """创建底部控制按钮 - 已移除重启和关灯按钮"""

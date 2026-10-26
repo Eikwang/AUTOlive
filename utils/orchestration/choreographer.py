@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from utils.my_log import logger
+from utils import alarm_notifier
 from utils.orchestration.config_model import (ChoreographyConfig, RuleCfg, StepCfg,
                                               load_choreography_config,
                                               validate_rule_segments)
@@ -325,6 +326,11 @@ class ChoreoEngine:
                 f"[编排] 步骤 {step_id} 切段失败已跳过：problem=EDTalk 切段未接受；"
                 f"cause=服务不可达或段名无效；fix=检查 EDTalk 服务状态（累计降级 {self.degrade_total}）"
             )
+            # 报警重构（2026-10-26）：切段失败→动作编排报警（webhook，60s 冷却合并同类降级）
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_ORCHESTRATION,
+                f"编排步骤 {step_id} 切段失败已跳过（累计降级 {self.degrade_total}）",
+                fix_hint="检查 EDTalk 服务状态（切段未接受：服务不可达或段名无效）")
             return self._complete_step(now, timeout_degrade=False)
         self.seq["step_accepted"] = True
         self.seq["accepted_at"] = now
@@ -395,9 +401,15 @@ class ChoreoEngine:
         """步完成推进：下一步 / 重排 / 回默认（条件1 + WP-9 重排 + D-4）。"""
         commands: List = []
         seq = self.seq
+        step = seq["steps"][seq["idx"]]
         if timeout_degrade:
             self.degrade_total += 1
-        step = seq["steps"][seq["idx"]]
+            # 报警重构（2026-10-26）：音频步降级（回调超时兜底/生成失败，on_tick 与
+            # on_audio_enqueued 双路径汇入口）→动作编排报警（60s 冷却合并）
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_ORCHESTRATION,
+                f"编排步骤 {step['step_id']} 音频环节降级推进（累计降级 {self.degrade_total}）",
+                fix_hint="音频完成回调超时或生成失败；频繁出现请检查 TTS 与 EDTalk 服务")
         if step["name"] == "main":
             seq["main_done"] = True
         seq["idx"] += 1
@@ -458,6 +470,11 @@ class ChoreoEngine:
             "[编排] 恢复默认轮播重试耗尽：problem=画面停留在序列末段；"
             "cause=EDTalk /segment/schedule 连续失败；fix=检查 EDTalk 服务后手动切回或重启编排"
         )
+        # 报警重构（2026-10-26）：重试耗尽（一次性事件）→动作编排报警
+        alarm_notifier.alarm_error(
+            alarm_notifier.MODULE_ORCHESTRATION,
+            "编排恢复默认轮播重试耗尽，画面停留在序列末段",
+            fix_hint="检查 EDTalk 服务后手动切回或重启编排")
         self._restore_attempts = 0
         return []
 
@@ -603,6 +620,11 @@ class ActionChoreographer:
                 f"[编排] worker 启动失败：problem=编排执行线程未运行；"
                 f"cause={type(e).__name__}: {e}；fix=检查配置与 EDTalk 启用状态后重新应用（fix and retry）"
             )
+            # 报警重构（2026-10-26）：worker 启动失败→动作编排报警
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_ORCHESTRATION,
+                f"编排 worker 启动失败：{type(e).__name__}: {e}",
+                fix_hint="检查配置与 EDTalk 启用状态后重新应用")
             return False
 
     def worker_alive(self) -> bool:

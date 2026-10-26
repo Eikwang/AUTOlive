@@ -12,6 +12,7 @@ from copy import deepcopy
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from ..audio_handle.tts_params import clamp_speed_factor
+from .. import alarm_notifier
 
 
 class SynthesisMixin:
@@ -94,21 +95,7 @@ class SynthesisMixin:
                     "backing_volume": message.get("backing_volume", 0.8),
                 }
 
-                # 是否开启了音频播放 
-                if self.config.get("play_audio", "enable"):
-                    self.data_priority_insert("等待合成消息", data_json)
-                return
-            # 异常报警
-            elif message['type'] == "abnormal_alarm":
-                # 拼接json数据，存入队列
-                data_json = {
-                    "type": message['type'],
-                    "tts_type": "none",
-                    "voice_path": message['content'],
-                    "content": message["content"]
-                }
-
-                # 是否开启了音频播放 
+                # 是否开启了音频播放
                 if self.config.get("play_audio", "enable"):
                     self.data_priority_insert("等待合成消息", data_json)
                 return
@@ -460,8 +447,13 @@ class SynthesisMixin:
         
         if voice_tmp_path is None:
             logger.error(f"{message['tts_type']}合成失败，请排查服务端是否启动、是否正常，配置、网络等问题。如果排查后都没有问题，可能是接口改动导致的兼容性问题，可以前往官方仓库提交issue，传送门：https://github.com/Ikaros-521/AI-Vtuber/issues\n如果是GSV 400错误，请确认参考音频和参考文本是否正确，或替换参考音频进行尝试")
-            self.abnormal_alarm_handle("tts")
-            
+            # 报警重构（2026-10-26）：旧 abnormal_alarm_handle("tts")（错误计数+本地音频）
+            # 退役，改走 alarm_notifier（webhook 推送，模块开关门控+60s 冷却）
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_TTS,
+                f"TTS 合成失败（{message['tts_type']}）：{str(message.get('content', ''))[:80]}",
+                fix_hint="排查 TTS 服务是否启动、配置与网络；GSV 400 请核对参考音频/文本")
+
             return False
         
         logger.info(f"[{message['tts_type']}]合成成功，合成内容：【{message['content']}】，音频存储在 {voice_tmp_path}")

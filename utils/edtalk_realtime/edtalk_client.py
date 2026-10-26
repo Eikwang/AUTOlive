@@ -26,6 +26,7 @@ import wave
 import aiohttp
 
 from utils.my_log import logger
+from utils import alarm_notifier
 
 # 16kHz int16 单声道 = 每样本 2 字节
 TARGET_RATE = 16000
@@ -235,6 +236,7 @@ class EDTalkClient:
                             self.last_error = f"HTTP {resp.status}"
                             logger.error(f"EDTalk 推送失败：HTTP {resp.status}")
                         self.failure_count += 1
+                        self._notify_push_failure()
                         return False
             except Exception as e:
                 self.failure_count += 1
@@ -244,6 +246,7 @@ class EDTalkClient:
                     f"problem=数字人服务未连接；cause={type(e).__name__}；"
                     f"fix=检查画面设置页开关与 realtime_serve 服务状态（详见 RUNBOOK §端口冲突）"
                 )
+                self._notify_push_failure()
                 if self.failure_count == 1:
                     logger.error("EDTalk 首次推送失败：直播将无数字人口型（音频已跳过本地播放）")
                 return False
@@ -253,6 +256,14 @@ class EDTalkClient:
                         os.remove(wav_path)
                     except OSError:
                         pass
+
+    def _notify_push_failure(self):
+        """报警重构（2026-10-26）：推送失败→数字人服务报警（webhook 推送，
+        60s 模块级冷却防故障期逐句刷屏）。"""
+        alarm_notifier.alarm_error(
+            alarm_notifier.MODULE_DIGITAL_HUMAN,
+            f"EDTalk 音频推送失败（第 {self.failure_count} 次）：{self.last_error}",
+            fix_hint="检查 EDTalk 实时推理服务状态（画面设置页开关与 realtime_serve，详见 RUNBOOK）")
 
     # ---------- 控制面（直调 HTTP，实时生效） ----------
 

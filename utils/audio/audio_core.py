@@ -31,10 +31,9 @@ from .queue_manager import QueueMixin
 from .playback_manager import PlaybackMixin
 from .synthesis_manager import SynthesisMixin
 from .utils_manager import UtilsMixin
-from .alarm_manager import AlarmMixin
 
 
-class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin, AlarmMixin):
+class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
     """
     音频处理主类 - 通过Mixin模式组合各个功能模块
     """
@@ -58,25 +57,6 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin, AlarmMixin):
 
     # A7/T1（2026-10-22 审查批次）：999 权重音频"在系统中"标记（播放器持有或播放中）
     active_reread_top_999 = False
-
-    # 异常报警数据
-    abnormal_alarm_data = {
-        "platform": {
-            "error_count": 0
-        },
-        "llm": {
-            "error_count": 0
-        },
-        "tts": {
-            "error_count": 0
-        },
-        "visual_body": {
-            "error_count": 0
-        },
-        "other": {
-            "error_count": 0
-        }
-    }
 
     def __init__(self, config_path, type=1):
         self.config_path = config_path  

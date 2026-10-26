@@ -112,7 +112,6 @@
     "voice_tmp_path_queue_max_len": 100,
     "voice_tmp_path_queue_min_start_play": 0,
     "priority_mapping": {
-      "abnormal_alarm": 1,
       "trends_copywriting": 10,
       "schedule": 10,
       "idle_time_task": 10,
@@ -877,47 +876,19 @@
     }
   },
   "abnormal_alarm": {
-    "platform": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警/platform"
+    "modules": {
+      "llm": true,
+      "digital_human": true,
+      "tts": true,
+      "orchestration": true,
+      "train_streamer": true,
+      "train_voice": true
     },
-    "llm": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警/llm"
-    },
-    "tts": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警/tts"
-    },
-    "svc": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警/svc"
-    },
-    "visual_body": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警"
-    },
-    "other": {
-      "enable": false,
-      "start_alarm_error_num": 5,
-      "auto_restart_error_num": 10,
-      "type": "local_audio",
-      "local_audio_path": "data/异常报警"
+    "webhook": {
+      "feishu_url": "",
+      "wecom_url": "",
+      "dingtalk_url": "",
+      "dingtalk_secret": ""
     }
   },
   "trends_config": {

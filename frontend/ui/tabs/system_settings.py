@@ -197,36 +197,71 @@ def create_trends_config_tab(config, theme_config, set_config_callback):
 def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
     """创建异常报警页面
 
-    D1/D-14（2026-10-19 批次切片 2）：新增报警通道配置（notify_enable/sound_enable），
-    控制子进程监控告警的弹出通道；最近异常明细（脱敏后）在侧边栏底部运行状态条
-    实时呈现。既有 6 类错误计数配置保留（存量行为不变）。
+    2026-10-26 报警重构批次：配置简化为六个报警模块开关（LLM服务/数字人服务/
+    TTS生成/动作编排/训练主播/训练声音，出错崩溃即报警，训练主播与训练声音
+    训练完成另有进度通知）+ WEBHOOK 通告三平台（飞书/企业微信/钉钉）。
+    旧六类本地音频报警/错误计数/自动重启配置整体退役。
     """
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
     _auto_save = _get_auto_save(config, set_config_callback, tab_key="abnormal_alarm")
 
-    with ui.card().style(card_css):
-        ui.label('报警通道')
-        ui.label('子进程崩溃/启动失败时是否弹出告警通知；最近异常明细见侧边栏底部运行状态条').classes('text-xs')
-        with ui.grid(columns=3):
-            _auto_save(
-                ui.switch('弹出告警通知', value=get_nested_value(config, "abnormal_alarm", "notify_enable", default=True)).style(switch_internal_css),
-                ("abnormal_alarm", "notify_enable"))
-            _auto_save(
-                ui.switch('报警声音', value=get_nested_value(config, "abnormal_alarm", "sound_enable", default=False)).style(switch_internal_css),
-                ("abnormal_alarm", "sound_enable"))
-        ui.label('注：声音报警通道暂未接线，开关配置先行').classes('text-xs')
+    _MODULE_SWITCHES = [
+        ("llm", "LLM服务"),
+        ("digital_human", "数字人服务"),
+        ("tts", "TTS生成"),
+        ("orchestration", "动作编排"),
+        ("train_streamer", "训练主播"),
+        ("train_voice", "训练声音"),
+    ]
 
     with ui.card().style(card_css):
-        ui.label('异常报警')
+        ui.label('报警模块')
+        ui.label('开启后各模块出错/崩溃即触发报警（训练主播/训练声音训练完成后另行推送进度通知）；报警经下方 WEBHOOK 推送到群机器人').classes('text-xs')
         with ui.grid(columns=3):
-            for alarm_type in ['platform', 'llm', 'tts', 'svc', 'visual_body', 'other']:
-                with ui.column().style("width:100%;"):
-                    _auto_save(ui.switch(f'启用{alarm_type}报警', value=get_nested_value(config, "abnormal_alarm", alarm_type, "enable")).style(switch_internal_css), ("abnormal_alarm", alarm_type, "enable"))
-                    _auto_save(ui.select(label='类型', options={'local_audio': '本地音频'}, value=get_nested_value(config, "abnormal_alarm", alarm_type, "type")).style("width:100%;"), ("abnormal_alarm", alarm_type, "type"))
-                    _auto_save(ui.input(label='开始报警错误数', value=get_nested_value(config, "abnormal_alarm", alarm_type, "start_alarm_error_num"), placeholder='错误数').style("width:100%;"), ("abnormal_alarm", alarm_type, "start_alarm_error_num"))
-                    _auto_save(ui.input(label='自动重启错误数', value=get_nested_value(config, "abnormal_alarm", alarm_type, "auto_restart_error_num"), placeholder='错误数').style("width:100%;"), ("abnormal_alarm", alarm_type, "auto_restart_error_num"))
-                    _auto_save(ui.input(label='本地音频路径', value=get_nested_value(config, "abnormal_alarm", alarm_type, "local_audio_path"), placeholder='本地音频路径').style("width:100%;"), ("abnormal_alarm", alarm_type, "local_audio_path"))
+            for module_key, module_label in _MODULE_SWITCHES:
+                _auto_save(
+                    ui.switch(module_label, value=get_nested_value(
+                        config, "abnormal_alarm", "modules", module_key, default=True)
+                    ).style(switch_internal_css),
+                    ("abnormal_alarm", "modules", module_key))
+
+    with ui.card().style(card_css):
+        ui.label('WEBHOOK 通告')
+        ui.label('报警与通知经群机器人推送（飞书/企业微信/钉钉，至少填写一个即启用）；发送失败仅记日志不影响直播').classes('text-xs')
+        with ui.grid(columns=1):
+            _auto_save(ui.input(label='飞书机器人 WEBHOOK 地址', placeholder='https://open.feishu.cn/open-apis/bot/v2/hook/****',
+                                value=get_nested_value(config, "abnormal_alarm", "webhook", "feishu_url")).style("width:100%;"),
+                       ("abnormal_alarm", "webhook", "feishu_url"))
+            _auto_save(ui.input(label='企业微信机器人 WEBHOOK 地址', placeholder='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=****',
+                                value=get_nested_value(config, "abnormal_alarm", "webhook", "wecom_url")).style("width:100%;"),
+                       ("abnormal_alarm", "webhook", "wecom_url"))
+            _auto_save(ui.input(label='钉钉机器人 WEBHOOK 地址', placeholder='https://oapi.dingtalk.com/robot/send?access_token=****',
+                                value=get_nested_value(config, "abnormal_alarm", "webhook", "dingtalk_url")).style("width:100%;"),
+                       ("abnormal_alarm", "webhook", "dingtalk_url"))
+            _auto_save(ui.input(label='钉钉加签密钥（机器人安全设置选「加签」时必填）', password=True,
+                                placeholder='SEC 开头的加签密钥',
+                                value=get_nested_value(config, "abnormal_alarm", "webhook", "dingtalk_secret")).style("width:100%;"),
+                       ("abnormal_alarm", "webhook", "dingtalk_secret"))
+
+        def _send_test():
+            """发送测试消息（同步等待结果，便于直接呈现成败）。"""
+            from utils import alarm_notifier
+            results = alarm_notifier.send_test()
+            if not results:
+                ui.notify(position="top", type="warning",
+                          message="未配置任何 WEBHOOK 地址，请先填写至少一个平台")
+                return
+            ok_channels = [c for c, (ok, _) in results.items() if ok]
+            if len(ok_channels) == len(results):
+                ui.notify(position="top", type="positive",
+                          message=f"测试消息发送成功（{'、'.join(ok_channels)}），请到群内确认")
+            else:
+                failed = "、".join(c for c, (ok, _) in results.items() if not ok)
+                ui.notify(position="top", type="negative",
+                          message=f"部分渠道失败：{failed}——详情见主程序日志")
+
+        ui.button('发送测试消息', on_click=_send_test)
 
 
 # ============================================================
