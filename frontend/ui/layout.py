@@ -1549,6 +1549,23 @@ class DrawerLayout:
                     "background: var(--color-danger); color: var(--text-on-primary);")
         dialog.open()
 
+    def _clear_config_page(self):
+        """清除配置页内容（先取消页内 Timer，防旧页定时器操作已删元素）。
+
+        2026-10-26 修复：render_config_page 每次导航 clear() 重建整页，但本环境
+        NiceGUI 的 Timer 循环仅以 _is_canceled/app 停止为退出条件（_should_stop
+        不检查元素删除）——直接 clear 的话旧页定时器全部泄漏：继续按周期打
+        main API 并操作已删元素，刷 "An element has been deleted but is still
+        being used" 警告（编排页 2s/8s/5s 三轮询首报）。导航重建前统一取消。
+        """
+        if self.config_page is None:
+            return
+        from nicegui.timer import Timer
+        for el in self.config_page.descendants():
+            if isinstance(el, Timer):
+                el.cancel()
+        self.config_page.clear()
+
     def show_config_page(self, function_name: str):
         """显示配置页面"""
 
@@ -1562,7 +1579,7 @@ class DrawerLayout:
         except Exception as e:
             # 显示错误状态
             if self.config_page is not None:
-                self.config_page.clear()
+                self._clear_config_page()
                 with self.config_page:
                     ui.icon('error', color='red').style('''
                         font-size: 48px;
@@ -1589,16 +1606,16 @@ class DrawerLayout:
 
     def render_config_page(self, function_name: str):
         """渲染配置页面 - 调用实际的tab模块函数"""
-        # 清除之前的内容
+        # 清除之前的内容（含页内 Timer 取消，见 _clear_config_page）
         if self.config_page is not None:
-            self.config_page.clear()
+            self._clear_config_page()
 
         # 获取 tab_key
         tab_key = self.function_items.get(function_name, {}).get("tab_key", function_name)
 
         # 将配置页面放置到 config_page 中
         if self.config_page is not None:
-            self.config_page.clear()
+            self._clear_config_page()
             with self.config_page:
                 # 页面标题（统一层级：页面标题）
                 with ui.row().style('''

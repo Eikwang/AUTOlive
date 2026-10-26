@@ -145,8 +145,15 @@ def create_choreography_tab(
                     requests.get, f"{_main_api_url()}/edtalk_materials", timeout=6)
                 data = (resp.json() or {}) if resp.status_code == 200 else {}
             except Exception as e:
-                mat_status_label.set_text(f"清单获取失败：{e}").style(
-                    "color: var(--color-negative)")
+                # 连接拒绝=主系统未启动（常态而非故障），友好提示不刷原始堆栈
+                import requests as _rq
+                if isinstance(e, _rq.exceptions.ConnectionError):
+                    mat_status_label.set_text(
+                        f"运行系统未启动（{_main_api_url()} 无法连接）——启动系统后自动恢复").style(
+                        "color: var(--color-warning)")
+                else:
+                    mat_status_label.set_text(f"清单获取失败：{type(e).__name__}: {e}").style(
+                        "color: var(--color-negative)")
                 return
             items = data.get("items") or []
             online = bool(data.get("service_online"))

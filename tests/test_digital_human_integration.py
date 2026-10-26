@@ -299,6 +299,32 @@ class TestFrontendIntegration:
         assert "register_material_routes" in src
         assert "edtalk_realtime.materials" in src
 
+    def test_config_page_clear_cancels_timers(self):
+        """页内 Timer 随导航 clear 泄漏修复（2026-10-26 用户实测报障）。
+
+        本环境 NiceGUI Timer._should_stop 不检查元素删除——每次导航
+        clear() 后旧页定时器继续打 API 并操作已删元素（"An element has
+        been deleted but is still being used" 警告，编排页三轮询首报）。
+        守卫：清除入口统一先 cancel 页内 Timer 再 clear，三处 clear 全收口。
+        """
+        src = _src("frontend/ui/layout.py")
+        assert "def _clear_config_page" in src
+        assert "from nicegui.timer import Timer" in src
+        assert "isinstance(el, Timer)" in src
+        assert "el.cancel()" in src
+        # 三处直接 config_page.clear() 必须全部收口到 _clear_config_page
+        body = src.split("def _clear_config_page", 1)[1]
+        assert "config_page.clear()" not in body.replace(
+            "self.config_page.clear()", "", 1), "存在绕过 _clear_config_page 的裸 clear"
+
+    def test_choreography_material_list_friendly_error(self):
+        """清单获取失败文案分类（2026-10-26 用户实测报障）：连接拒绝=系统未启动
+        常态提示（warning 色、带地址与恢复指引），非连接类异常保留简短信息。"""
+        src = _src("frontend/ui/tabs/choreography.py")
+        assert "isinstance(e, _rq.exceptions.ConnectionError)" in src
+        assert "运行系统未启动" in src
+        assert "启动系统后自动恢复" in src
+
 
 class TestEdtalkConfigPageCleanup:
     """EDTalk 实时推理配置页清理（2026-10-26）：死项退役 + 分组重组。
