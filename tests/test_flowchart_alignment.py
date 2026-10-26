@@ -33,23 +33,44 @@ def _mermaid_text() -> str:
 
 
 class TestPlaybackTopology:
-    """C1 结构断言：图必须如实表达互斥三分支播放分流（非双路并行）。"""
+    """播放分流结构断言（v2.2 语义：条目级带标签双路——系统流程/助播流程；
+    v2.1 的互斥三分支仍由 playback_manager.routes_to_edtalk 行为守卫）。"""
 
-    def test_audio_list_single_outgoing(self):
-        """AudioList 出边恰 1 条（至 AvatarAI）——歧义直连边不得回归。"""
-        edges = re.findall(r"^\s*AudioList\s*-->", _mermaid_text(), re.M)
-        assert len(edges) == 1, (
-            f"AudioList 出边应为 1 条（播放分流互斥：EDTalk/PLAYER_KEYS/pygame 三分支，"
-            f"playback_manager.only_play_audio），实际 {len(edges)} 条——歧义直连边疑似回归"
+    def test_audio_list_labeled_dual_route(self):
+        """AudioList 出边恰 2 条且均带语义标签（|系统流程|/|助播流程|）——
+        无标签歧义直连边不得回归。"""
+        # 播放分流边=指向播放节点的带标签边（字幕数据边→Subtitle 不属分流）
+        route_edges = re.findall(
+            r"^\s*AudioList\s*-->\s*\|([^|]+)\|\s*(AvatarAI|SystemPlay)",
+            _mermaid_text(), re.M)
+        assert len(route_edges) == 2, (
+            f"AudioList 播放分流出边应为 2 条（|系统流程|→AvatarAI + |助播流程|→SystemPlay），"
+            f"实际 {len(route_edges)} 条：{route_edges}——疑似歧义直连边回归"
+        )
+        labels = {label.split("<br>")[0].strip() for label, _ in route_edges}
+        assert labels == {"系统流程", "助播流程"}, (
+            f"分流边标签应为 系统流程/助播流程 两路，实际 {labels}——语义标签缺失或漂移"
         )
 
-    def test_system_play_single_incoming(self):
-        """SystemPlay 入边恰 1 条（来自 AvatarAI 关闭分支，可带边标签）。"""
+    def test_audio_list_no_unlabeled_route_edges(self):
+        """AudioList 出边中指向播放节点（AvatarAI/SystemPlay）的边必须带语义标签——
+        无标签歧义直连边（v2.1 C1 病灶）不得以任何形态回归。"""
+        all_edges = re.findall(
+            r"^\s*AudioList\s*-->\s*(?:\|([^|]*)\|)?\s*(\S+)", _mermaid_text(), re.M)
+        assert all_edges, "图中找不到 AudioList 出边"
+        for label, target in all_edges:
+            if target.startswith(("AvatarAI", "SystemPlay")):
+                assert label and label.strip(), (
+                    f"AudioList→{target} 无语义标签——歧义直连边（无标签双路）回归"
+                )
+
+    def test_system_play_incoming_sources(self):
+        """SystemPlay 入边恰 2 条：AvatarAI 关闭分支 + |助播流程| 直连。"""
         edges = re.findall(
-            r"^\s*\S+\s*-->\s*(?:\|[^|]*\|)?\s*SystemPlay", _mermaid_text(), re.M
+            r"^\s*\S+\s*-->\s*(?:\|([^|]*)\|)?\s*SystemPlay", _mermaid_text(), re.M
         )
-        assert len(edges) == 1, (
-            f"SystemPlay 入边应为 1 条（仅 AvatarAI 关闭分支），实际 {len(edges)} 条：{edges}"
+        assert len(edges) == 2, (
+            f"SystemPlay 入边应为 2 条（AvatarAI 关闭 + 助播流程直连），实际 {len(edges)} 条：{edges}"
         )
 
 
@@ -74,6 +95,10 @@ class TestGraphAnchors:
         "feature_handler.py": (
             "utils/handlers/feature_handler.py",
             ["on_song"],
+        ),
+        "choreographer.py": (
+            "utils/orchestration/choreographer.py",
+            ["_audio_enqueue"],
         ),
         "flowchart-detail.md": None,  # 文档引用，非代码锚点
     }
@@ -107,7 +132,7 @@ class TestGraphHeader:
     """C7 图头断言：元数据三行在位（restore 回滚曾静默丢失图头，native Eng F2）。"""
 
     def test_version_line_present(self):
-        assert "v2.1" in _graph_text(), "图头版本行（v2.1）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.2" in _graph_text(), "图头版本行（v2.2）缺失——疑 restore 回滚，须随批次重落盘"
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"

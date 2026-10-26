@@ -768,3 +768,48 @@ class TestUtilsMixinReloadReadsDisk:
             um.Config._config_path = None
             um.Config._is_multi_file = False
             um.Config._config_files = []
+
+
+# ---------------------------------------------------------------------------
+# v2.2 流程优化（2026-10-26 批次，flowchartTD |助播流程| 边）：助播条目绕过数字人
+# ---------------------------------------------------------------------------
+
+class TestAssistantPlaybackRouting:
+    """routes_to_edtalk 路由判定：助播条目（assistant_anchor_text/audio）在
+    EDTalk 激活时也走本地外放（无口型语义），普通条目仍按 EDTalk 激活态分流。"""
+
+    @staticmethod
+    def _config(visual_body="edtalk_realtime", enable=True):
+        class _Cfg:
+            def get(self, *keys):
+                if keys == ("visual_body",):
+                    return visual_body
+                if keys == ("edtalk_realtime", "enable"):
+                    return enable
+                return None
+        return _Cfg()
+
+    def test_assistant_entry_bypasses_edtalk_even_when_active(self):
+        from utils.audio.playback_manager import routes_to_edtalk
+        cfg = self._config(visual_body="edtalk_realtime", enable=True)
+        for t in ("assistant_anchor_text", "assistant_anchor_audio"):
+            assert routes_to_edtalk({"type": t, "content": "助播台词"}, cfg) is False
+
+    def test_normal_entry_routes_to_edtalk_when_active(self):
+        from utils.audio.playback_manager import routes_to_edtalk
+        cfg = self._config(visual_body="edtalk_realtime", enable=True)
+        assert routes_to_edtalk({"type": "comment", "content": "普通回复"}, cfg) is True
+
+    def test_normal_entry_local_when_edtalk_inactive(self):
+        from utils.audio.playback_manager import routes_to_edtalk
+        cfg = self._config(visual_body="edtalk_realtime", enable=False)
+        assert routes_to_edtalk({"type": "comment", "content": "普通回复"}, cfg) is False
+
+    def test_assistant_types_match_producer_side(self):
+        """助播类型字面量与产出/优先级映射侧同名（防两处漂移）。"""
+        import inspect
+        from utils.audio import queue_manager
+        from utils.audio.playback_manager import ASSISTANT_PLAYBACK_TYPES
+        src = inspect.getsource(queue_manager)
+        for t in ASSISTANT_PLAYBACK_TYPES:
+            assert t in src, f"playback_manager 助播类型 {t} 在 queue_manager 侧无同名产出"

@@ -22,6 +22,28 @@ PLAYER_KEYS = ["audio_player", "audio_player_v2", "builtin"]
 # 超上限按异常降级照推（宁可口型出现不丢语音）。
 _CHOREO_MUTE_MAX_WAIT = 300.0
 
+# 助播条目类型（v2.2 流程优化，flowchartTD |助播流程| 边）：助播音频无口型
+# 语义，EDTalk 激活时也绕过数字人直接本地外放（queue_manager 优先级映射
+# 同名类型，feature_handler R4 助播路由产出）。
+ASSISTANT_PLAYBACK_TYPES = frozenset({"assistant_anchor_text", "assistant_anchor_audio"})
+
+
+def routes_to_edtalk(data_json, config) -> bool:
+    """播放路由判定（v2.2 流程优化，flowchartTD 音频播放模块）：EDTalk 激活且
+    非助播条目 → 数字人帧锁定播放；助播条目（无口型语义）与其余情形 → 本地
+    播放分支（SystemPlay）。
+
+    Args:
+        data_json: 待播放队列条目（含 type）
+        config: Settings/Config 配置对象
+
+    Returns:
+        True = 推送数字人（EDTalk）；False = 本地播放（助播条目或 EDTalk 未激活）
+    """
+    if data_json.get("type") in ASSISTANT_PLAYBACK_TYPES:
+        return False
+    return is_edtalk_active(config)
+
 
 def _coerce_interval(value, default):
     """播放间隔读侧类型归一化（2026-10-24 实测修复）。
@@ -194,8 +216,8 @@ class PlaybackMixin:
                     # EDTalk 端 sounddevice 帧锁定播放（本地播放会双声），TTS 落盘
                     # （含变速）后仅推送 /audio/push_full。推送协程内阻塞等待完成
                     # 判定（背压），失败降级记录不阻塞直播主流程。
-                    # 根据播放器类型进行区分
-                    if is_edtalk_active(self.config):
+                    # v2.2 流程优化（flowchartTD |助播流程| 边）：助播条目绕过数字人。
+                    if routes_to_edtalk(data_json, self.config):
                         # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path
                         # 伴奏轨时——人声轨推 EDTalk 驱动对口型（数字人端出声），伴奏轨
                         # 本地外放并行起播（粗同步，偏差判据 <0.5s=R6 义务）；伴奏线程
