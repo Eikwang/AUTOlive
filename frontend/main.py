@@ -110,6 +110,22 @@ _RETIRED_CONFIG_KEYS: list = [
     (("abnormal_alarm", "svc"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
     (("abnormal_alarm", "visual_body"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
     (("abnormal_alarm", "other"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    # 数字人配置面清理（2026-10-26）：reaction_segment 弹幕触发切段已被
+    # choreography 编排规则全面取代（触发类型 gift/keyword/song + 序列编排），
+    # 逻辑消费方为零——UI 控件与默认值已删，存量键一次性告知后可手动删除。
+    (("edtalk_realtime", "reaction_segment"), "edtalk_realtime.reaction_segment 已退役（弹幕触发切段由『动作编排』页的编排规则驱动），可删除"),
+    # 控制面收敛为纯本机回环（2026-10-26）：全系统消费方硬编码 127.0.0.1，
+    # host 唯一作用=暴露局域网（无场景）；Token 防跨机访问（本机无意义）。
+    # 启动映射固定 --host 127.0.0.1，省略 --api-token（服务端默认无鉴权）。
+    (("edtalk_realtime", "host"), "edtalk_realtime.host 已退役（控制面固定本机回环），可删除"),
+    (("edtalk_realtime", "api_token"), "edtalk_realtime.api_token 已退役（纯本机回环无鉴权面），可删除"),
+    # 运行时量收敛（2026-10-26 第二批）：端口自动择址（占用自动切换，实际端口写
+    # data/edtalk_runtime.json）、解释器自动探测+记忆、段调度并入动作编排页
+    # （启动固定 --segments auto）。消费方经 runtime.resolve_api_base 统一解析。
+    (("edtalk_realtime", "port"), "edtalk_realtime.port 已退役（端口自动择址：被占自动切换，实际端口记录于 data/edtalk_runtime.json），可删除"),
+    (("edtalk_realtime", "api_ip_port"), "edtalk_realtime.api_ip_port 已退役（控制面基址由运行时文件自动解析），可删除"),
+    (("edtalk_realtime", "interpreter_path"), "edtalk_realtime.interpreter_path 已退役（解释器自动探测并记忆上次使用的环境），可删除"),
+    (("edtalk_realtime", "segments"), "edtalk_realtime.segments 已退役（默认全部素材轮播，画面接管走『动作编排』页），可删除"),
 ]
 
 
@@ -418,14 +434,17 @@ class AutoliveApp:
         if config_data.get("visual_body") != "edtalk_realtime" or not ed_cfg.get("enable"):
             return True, "", ""
 
-        interpreter = ed_cfg.get("interpreter_path") or "D:\\AI\\EDTalk\\runtime312\\python.exe"
-        if not os.path.exists(interpreter):
+        # 解释器自动探测+记忆（2026-10-26 配置面收敛：不再来自用户配置）
+        from utils.edtalk_realtime.runtime import (
+            find_free_port, probe_identity, resolve_interpreter, write_runtime)
+        interpreter = resolve_interpreter(config_data)  # 外层 config（内部自取 edtalk_realtime 节）
+        if not interpreter or not os.path.exists(interpreter):
             logger.error(
-                f"EDTalk 解释器不存在：{interpreter}。problem=解释器缺失；"
-                f"cause=runtime312 未安装或路径变更；"
-                f"fix=修改画面设置页『解释器路径』配置项指向可用解释器"
+                "EDTalk 解释器未找到。problem=runtime312 缺失；"
+                "cause=仓库副本与 D:\\AI\\EDTalk\\runtime312 均无 python.exe；"
+                "fix=运行 scripts/copy_edtalk.py 补齐，或安装 EDTalk 到 D:\\AI\\EDTalk"
             )
-            return False, f"EDTalk 解释器不存在：{interpreter}", "请在画面设置页修改『解释器路径』配置项"
+            return False, "EDTalk 解释器未找到（runtime312 缺失）", "请运行 scripts/copy_edtalk.py 或安装 EDTalk"
 
         # 训练进行中检测（双向显存防护，16GB 卡训练与推理不可并存）
         try:
@@ -448,31 +467,32 @@ class AutoliveApp:
             )
             return False, f"EDTalk 运行副本目录不存在：{edtalk_dir}", "请运行 scripts/copy_edtalk.py 一键复制脚本"
 
-        port = int(ed_cfg.get("port", 8000))
-        host = ed_cfg.get("host", "127.0.0.1")
+        port = int(ed_cfg.get("port", 8000)) if ed_cfg.get("port") else 8000
+        # host/API Token 已退役（2026-10-26）：控制面为纯本机回环（全系统消费方
+        # 硬编码 127.0.0.1），省略 --host/--api-token 用服务端默认（回环+无鉴权）。
 
-        # 端口幂等探测 + 身份验证（native E5）：占用者未必是 realtime_serve
-        already_running = False
-        try:
-            import requests as _requests
-            probe = _requests.get(f"http://127.0.0.1:{port}/status", timeout=2)
-            if probe.status_code == 200 and "available_segments" in probe.text:
-                already_running = True
-                logger.warning(f"EDTalk realtime_serve 已在运行（端口 {port}），跳过拉起")
-            elif probe.status_code == 200:
-                logger.error(
-                    f"端口 {port} 被其他 HTTP 服务占用（响应非 realtime_serve）。"
-                    f"problem=端口冲突；cause=端口被未知服务占用；"
-                    f"fix=修改画面设置页『端口』配置项或结束占用进程"
-                )
-                return False, f"端口 {port} 被非 EDTalk 服务占用", "请在画面设置页修改『端口』配置或结束占用进程"
-        except Exception:
-            pass  # 连接失败 = 端口空闲，正常走拉起
-
-        if already_running:
+        # 端口策略（2026-10-26 收敛为内部量）：优先 8000；被 realtime_serve 占用
+        # →复用（幂等跳过）；被其他服务占用→自动切换到可用端口（三段式告知，
+        # 实际端口写运行时文件，消费方经 resolve_api_base 统一解析）。
+        identity = probe_identity(port)
+        if identity == "realtime_serve":
+            write_runtime(port, interpreter)
+            logger.warning(f"EDTalk realtime_serve 已在运行（端口 {port}），跳过拉起")
             ui.notify(position="top", type="warning",
                       message=f"EDTalk 服务已在运行（端口 {port}），跳过重复拉起")
             return True, "", ""
+        if identity == "other":
+            switched = find_free_port(port + 1)
+            logger.warning(
+                f"端口 {port} 被其他 HTTP 服务占用（响应非 realtime_serve），"
+                f"已自动切换到 {switched}。problem=端口冲突已自动规避；"
+                f"cause={port} 被未知服务占用；fix=无需处理（运行时文件已记录新端口），"
+                f"如需固定端口可结束占用 {port} 的进程"
+            )
+            ui.notify(position="top", type="warning",
+                      message=f"端口 {port} 被占用，数字人服务自动切换到 {switched}")
+            port = switched
+        # identity == "free"（连接失败 = 端口空闲）→ 直接用 preferred
 
         # 参数映射（config.edtalk_realtime → RUNBOOK 启动参数表）
         cmd = [interpreter, "-m", "realtime_serve.main"]
@@ -487,16 +507,11 @@ class AutoliveApp:
         if gaze and gaze != "off":
             cmd += ["--gaze-correction", gaze]
         cmd += ["--gaze-convergence", str(ed_cfg.get("gaze_convergence", 0.05))]
-        segments = ed_cfg.get("segments", "auto")
-        if segments and segments != "auto":
-            cmd += ["--segments"] + str(segments).split()
-        elif segments == "auto":
-            cmd += ["--segments", "auto"]
-        cmd += ["--host", host]
+        # 段播放调度已退役（2026-10-26）：默认全部素材自然排序轮播（--segments auto），
+        # 画面接管统一走『动作编排』页（默认画面池/规则序列经 /segment/schedule 下发）
+        cmd += ["--segments", "auto"]
+        cmd += ["--host", "127.0.0.1"]
         cmd += ["--port", str(port)]
-        api_token = (ed_cfg.get("api_token") or "").strip()
-        if api_token:
-            cmd += ["--api-token", api_token]
 
         try:
             # 显式 shell=False + list 传参（native H1：路径含空格/中文不会被 cmd.exe 打碎）
@@ -512,6 +527,7 @@ class AutoliveApp:
                                        stdout=log_f, stderr=subprocess.STDOUT)
             self.my_subprocesses["edtalk_realtime"] = process
             self._edtalk_log_f = log_f  # 保引用防 GC 关闭句柄
+            write_runtime(port, interpreter)  # 实际端口/解释器入运行时文件（消费方统一解析）
             logger.info(f"运行程序: edtalk_realtime（PID {process.pid}，端口 {port}，日志 {log_path}）")
             return True, "", ""
         except Exception as e:

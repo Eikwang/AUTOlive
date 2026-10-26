@@ -74,6 +74,22 @@ class RepairParamsRequest(BaseModel):
                       description="面部修复门控；纯门控，下一帧生效")
 
 
+class LipParamsRequest(BaseModel):
+    mode: str = Field(pattern=r"^(on|off)$",
+                      description="口型推理门控；off=画外音（跳过 Audio2Lip，"
+                                  "音频照常帧锁定出声），下一帧生效")
+
+
+class SegmentAddRequest(BaseModel):
+    segment: str = Field(min_length=1, max_length=64,
+                         description="段名（=orifra/ 下目录名，需已落盘四件套）")
+
+
+class SegmentRemoveRequest(BaseModel):
+    segment: str = Field(min_length=1, max_length=64,
+                         description="段名；盘上文件删除由调用方负责")
+
+
 def _http(problem: str, cause: str, fix: str, code: int) -> HTTPException:
     return HTTPException(status_code=code,
                          detail={"problem": problem, "cause": cause, "fix": fix})
@@ -198,6 +214,43 @@ def create_app(service: RealtimeService,
         except Exception as e:
             _map_control_errors(
                 e, "先读 GET /status 的 repair_capable；mode ∈ off|on|adaptive")
+
+    @app.post("/lip/params")
+    def set_lip_params(request: LipParamsRequest):
+        """Hot-switch lip-sync inference (next-frame effective). off=画外音：
+        跳过口型推理与口型渲染，音频照常帧锁定播放。任意时刻可双向热切。"""
+        try:
+            return service.set_lip_params(request.mode)
+        except Exception as e:
+            _map_control_errors(
+                e, "mode ∈ on|off；先读 GET /status 的 lip_mode 查看当前值")
+
+    @app.post("/segment/add")
+    def add_segment(request: SegmentAddRequest):
+        """Register + lazily load an on-disk segment (idempotent; 素材热上线).
+
+        404 when the segment's four-piece set (orifra/count/metadata/facemark)
+        is missing on disk. New segments do NOT auto-join the playback
+        schedule — reinstall it via /segment/schedule if needed."""
+        try:
+            return service.add_segment(request.segment)
+        except Exception as e:
+            _map_control_errors(
+                e, "先由素材管理预处理落盘四件套（orifra/<seg>/ 等），"
+                   "再用 GET /status 的 available_segments 查看段名")
+
+    @app.post("/segment/remove")
+    def remove_segment(request: SegmentRemoveRequest):
+        """Unload a segment from memory (400=当前渲染段/调度引用保护；404=未知段).
+
+        Disk files are NOT deleted — the embedder (素材管理) owns the
+        character_dir lifecycle."""
+        try:
+            return service.remove_segment(request.segment)
+        except Exception as e:
+            _map_control_errors(
+                e, "先切换到其他段并更新 /segment/schedule（移除引用）后重试；"
+                   "盘上目录由调用方删除")
 
     # ------------------------------------------------------------------
     # Status

@@ -1363,6 +1363,11 @@
             "enabled": true
           },
           {
+            "name": "动作编排",
+            "tab_key": "choreography",
+            "enabled": true
+          },
+          {
             "name": "训练主播",
             "tab_key": "train_streamer",
             "enabled": true
@@ -1426,21 +1431,13 @@
   },
   "edtalk_realtime": {
     "enable": true,
-    "api_ip_port": "http://127.0.0.1:8000",
     "character_dir": "wy",
     "target_fps": 25,
     "buffer_frames": 16,
     "preroll_frames": 8,
     "face_repair": "adaptive",
     "gaze_correction": "adaptive",
-    "gaze_convergence": 0.05,
-    "segments": "auto",
-    "host": "127.0.0.1",
-    "api_token": "",
-    "port": 8000,
-    "interpreter_path": "D:\\AI\\EDTalk\\runtime312\\python.exe",
-    "reaction_segment": true,
-    "_deprecated_note": "reaction_segment 已由 choreography 编排规则取代（deprecated 标注保留，配置面不删除）"
+    "gaze_convergence": 0.05
   },
   "choreography": {
     "enable": false,

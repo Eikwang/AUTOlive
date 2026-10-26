@@ -174,8 +174,10 @@ _config_instance: Optional[Settings] = None
 # 加载后补写缺失键并落盘，防 get 返回 None）。
 # 注意：此处只补"缺失键"，不覆盖用户已配置的值。
 _EDTALK_REALTIME_DEFAULTS: Dict[str, Any] = {
+    # 2026-10-26 配置面收敛：api_ip_port/port/interpreter_path/segments 均为
+    # 系统内部量（utils/edtalk_realtime/runtime.py 自动解析+记忆；端口被占自动
+    # 切换；段调度并入动作编排页），不再入默认表；存量键一次性告知后可手动删除。
     "enable": False,
-    "api_ip_port": "http://127.0.0.1:8000",
     "character_dir": "wy",
     "target_fps": 25,
     "buffer_frames": 16,
@@ -183,12 +185,6 @@ _EDTALK_REALTIME_DEFAULTS: Dict[str, Any] = {
     "face_repair": "adaptive",
     "gaze_correction": "adaptive",
     "gaze_convergence": 0.05,
-    "segments": "auto",
-    "host": "127.0.0.1",
-    "api_token": "",
-    "port": 8000,
-    "interpreter_path": "D:\\AI\\EDTalk\\runtime312\\python.exe",
-    "reaction_segment": True,
 }
 
 _FASTRAG_DEFAULTS: Dict[str, Any] = {

@@ -129,6 +129,9 @@ class RenderLoop:
         self.face_repair_mode: str = 'off'  # 'off' | 'on' | 'adaptive'
         self.gaze_corrector = None
         self.gaze_mode: str = 'off'  # 'off' | 'on' | 'adaptive'
+        # 口型推理门控（'on' | 'off'）：off=画外音——跳过 Audio2Lip GPU 推理与
+        # 画面口型渲染，音频 chunk 照常帧锁定出声（/lip/params 运行中热切）。
+        self.lip_mode: str = 'on'
         self.audio_player = None
         # Optional callback(width, height) fired after a successful segment
         # switch: re-opens the virtual camera at the new segment's native
@@ -504,23 +507,32 @@ class RenderLoop:
                 self._audio_arm_start = True
 
             chunk = self.LIP_CHUNK_FRAMES
-            for s in range(0, T, chunk):
-                e = min(s + chunk, T)
-                hs, he = max(0, s - 1), min(T, e + 1)
-                mel_chunk = mel_input[0, hs:he]
-                mel_chunk = self._pad_mel_chunk(mel_chunk)
-                lip = self.model_manager.infer_lip(
-                    mel_chunk.reshape(-1, 1, 80, 16), 1, mel_chunk.shape[0])
-                keep = lip[s - hs: s - hs + (e - s)]
-                lip_all[s:e] = keep.detach().to(torch.float32)
-
+            if self.lip_mode != 'on':
+                # 口型推理关闭（画外音）：跳过 Audio2Lip GPU 推理，系数置零
+                # （闭嘴）；音频 chunk 已按帧切好，帧锁定出声不受影响。
+                print("[RenderLoop] 口型推理关闭（画外音）——跳过 Audio2Lip，"
+                      "音频照常帧锁定播放")
                 with self._audio_lock:
-                    self._lip_coeffs = lip_all
-                    self._lip_filled = e
+                    self._lip_coeffs = lip_all  # 全零系数
+                    self._lip_filled = T
+            else:
+                for s in range(0, T, chunk):
+                    e = min(s + chunk, T)
+                    hs, he = max(0, s - 1), min(T, e + 1)
+                    mel_chunk = mel_input[0, hs:he]
+                    mel_chunk = self._pad_mel_chunk(mel_chunk)
+                    lip = self.model_manager.infer_lip(
+                        mel_chunk.reshape(-1, 1, 80, 16), 1, mel_chunk.shape[0])
+                    keep = lip[s - hs: s - hs + (e - s)]
+                    lip_all[s:e] = keep.detach().to(torch.float32)
 
-                # Yield to the render thread between chunks
-                if e < T:
-                    time.sleep(0.004)
+                    with self._audio_lock:
+                        self._lip_coeffs = lip_all
+                        self._lip_filled = e
+
+                    # Yield to the render thread between chunks
+                    if e < T:
+                        time.sleep(0.004)
 
             duration_s = T / self.target_fps
             print(f"[RenderLoop] Ready: {T} lip coefficients, "
@@ -722,6 +734,22 @@ class RenderLoop:
         # Load frame data (never blocks on batch I/O)
         character_data.ensure_loaded(video_idx)
         orifra, cropped, meta, facemark, pre_mask = character_data.get_frame(video_idx)
+
+        # 画外音直通（无人脸帧 / 口型推理关闭）：跳过生成器/视线/修复/合成全套
+        # GPU 推理，原帧直出。音频 chunk 已挂 frame_meta（帧锁定出声不受影响）
+        # ——切到无人脸素材时不再报错，也不再空烧 GPU（口型系数无处可贴）。
+        # 判定口径：预处理对未检出人脸的帧写全 NaN 关键点，任一 NaN 即视为
+        # 本帧无脸（与 compositor 的 NaN 拒绝口径一致）。
+        if (self.lip_mode == 'off' or facemark is None
+                or bool(np.isnan(facemark).any())):
+            t_put_0 = time.perf_counter()
+            if self.frame_buffer is not None:
+                self.frame_buffer.put(orifra, meta=audio_meta)
+            timings['put'] = (time.perf_counter() - t_put_0) * 1000.0
+            timings['total'] = (time.perf_counter() - t_total_0) * 1000.0
+            self._record_timings(timings)
+            self._frame_index += 1
+            return
 
         # Generator inference — output stays ON GPU (CHW BGR uint8) so face
         # repair can run GPU-inline (IOBinding, zero copy). Single GPU->CPU

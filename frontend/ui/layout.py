@@ -1659,7 +1659,7 @@ class DrawerLayout:
             trends_copywriting, local_qa,
             choose_song, key_mapping, database_config,
             system_settings, platform_config, train_streamer,
-            train_voice
+            train_voice, choreography
         )
 
         # 获取主题配置 - 使用简化的浅色/深色模式
@@ -1701,6 +1701,7 @@ class DrawerLayout:
             'idle_time_task': lambda: idle_time_task.create_idle_time_task_tab(self.config, theme_config, set_cb),
             # 高级功能
             'visual_body': lambda: visual_body.create_visual_body_tab(self.config, theme_config, set_cb),
+            'choreography': lambda: choreography.create_choreography_tab(self.config, theme_config, set_cb),
             'train_streamer': lambda: train_streamer.create_train_streamer_tab(self.config, theme_config, set_cb),
             'train_voice': lambda: train_voice.create_train_voice_tab(self.config, theme_config, set_cb),
             'data_analysis': lambda: data_analysis.create_data_analysis_tab(self.config, theme_config, set_cb),

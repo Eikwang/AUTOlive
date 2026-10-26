@@ -62,6 +62,9 @@ svc.stop()                         # 幂等，join 渲染线程
 | `POST /segment/schedule` | `{sequence: [段名...], align: bool=false}` | `{ok, sequence, switched}`（align=True 且当前段不在新序列时 switched=true 表示发生即时对齐切换） | 400 缺段/空/超长（≤64） |
 | `POST /gaze/params` | `{convergence?, mode?, smooth_alpha?}`（均可选） | `{ok, effective:"next_frame"}` | 400 越界/NaN；409 gaze 未构造 |
 | `POST /repair/params` | `{mode: "off"\|"on"\|"adaptive"}` | `{ok, effective:"next_frame"}` | 400 非法值；409 未构造 |
+| `POST /lip/params` | `{mode: "on"\|"off"}` | `{ok, effective:"next_frame"}` | 400 非法值。off=画外音：跳过 Audio2Lip 与口型渲染，音频照常帧锁定出声；无人脸帧同样直通（跳过生成器/视线/修复全链）。无 capable 概念，任意时刻双向热切 |
+| `POST /segment/add` | `{segment}`（=orifra/ 目录名） | `{ok, segment, total_frames, resolution, face_ratio, face_frames, is_current}` | 404 四件套缺失/不完整；503 加载损坏。幂等；**新段不自动入播放调度**（需 /segment/schedule 重装） |
+| `POST /segment/remove` | `{segment}` | `{ok, cleared_pending_switch, segment, ...}`（仅内存卸载，盘上文件由嵌入方删除） | 400 当前渲染段/播放调度引用（附修复动作）；404 未知段。若有指向该段的 pending 切换一并清除 |
 | `GET /status` | — | 见下 | — |
 
 > ⚠ **死路径警示（v0.4，P1）**：`/audio/push` 流式路径当前**无消费者**（render_loop 无 audio_buffer 消费调用；PIPELINE_MAP §5 自标遗留死路径）——推送返回 200 但**不产生口型**，数据滞留 AudioBuffer 无上限。**嵌入方整句驱动一律用 `/audio/push_full`**；恢复流式消费须走 breaking-change 评审。
@@ -71,6 +74,9 @@ svc.stop()                         # 幂等，join 渲染线程
 `repair_mode`、`gaze_capable`、`repair_capable`、`camera_resolution`、
 `pending_switch`、`prefetch(idle|loading|ready|discarded)`、
 `segment_sequence{mode,position,sequence}`（已有）。
+v0.5 additive：`lip_mode`（on|off）、`segment_details{seg:{total_frames,
+resolution,face_ratio,face_frames,is_current}}`（逐段元信息；素材管理与
+画外音标注数据源，单段加载失败时该项为 `{segment, error}` 降级形态）。
 **条件性字段（v0.4 注记）**：`pending_switch` 与 `prefetch` 仅在存在挂起切换/
 预取活动时出现，缺席=无该状态，前端按缺省处理。
 
@@ -135,3 +141,11 @@ gaze/repair off→on 懒初始化、CHANGELOG。详见仓库 `TODOS.md`。
   （main.py:362-367 未传入 sender，多摄像头选设备暂不可用）；
   `Config.face_repair_enabled` 与 mode 双轨，装配只看
   `face_repair_mode`（main.py:313）——进程内直调只设 mode。
+- v0.5（2026-10-26，数字人功能优化批次）：口型热切 + 段热增删。
+  新增 `/lip/params`（画外音总开关，双向热切）、`/segment/add`（四件套
+  落盘后热注册，幂等）、`/segment/remove`（内存卸载，当前段/调度引用
+  保护）；/status additive：`lip_mode`、`segment_details`（含 face_ratio
+  人脸比例——预处理对无人脸帧写全 NaN 关键点，渲染层任一 NaN 即该帧
+  直通（跳过口型/视线/修复推理），音频照常帧锁定=画外音，不再因无人脸
+  画面报错）。嵌入方（AUTOlive 素材管理）为 character_dir 段目录唯一
+  写者；add 不自动入调度。

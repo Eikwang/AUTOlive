@@ -966,6 +966,14 @@ class CharacterDataPack:
                 f"metadata={num_meta}, facemark={num_facemark}"
             )
 
+        # 无脸帧统计（画外音直通依据）：预处理对未检出人脸的帧写全 NaN 关键点
+        # （crop_head_video.py 主循环）。face_ratio 供 /status 与素材管理页展示；
+        # 逐帧直通判定在 RenderLoop（facemark 任一 NaN → 该帧跳过口型/视线/修复）。
+        if facemark.ndim == 3:
+            face_valid = ~np.isnan(facemark).all(axis=(1, 2))
+        else:
+            face_valid = np.zeros(num_orifra, dtype=bool)
+
         self._segment_cache[segment] = {
             'orifra_files': orifra_files,   # list of file paths (lazy)
             'crop_files': crop_files,       # list of file paths (lazy)
@@ -973,9 +981,12 @@ class CharacterDataPack:
             'facemark': facemark,           # numpy array (loaded)
             'gaze_data': gaze_data,         # dict of arrays or None
             'total_frames': num_orifra,
+            'face_frames': int(face_valid.sum()),
+            'face_ratio': float(face_valid.mean()) if face_valid.size else 0.0,
         }
 
         print(f'  -> Segment "{segment}": {num_orifra} frames (lazy), '
+              f'face_ratio={self._segment_cache[segment]["face_ratio"]:.2f}, '
               f'resolution from metadata')
 
     def _build_file_list(self, directory: str) -> List[str]:
@@ -1077,6 +1088,75 @@ class CharacterDataPack:
     def prefetch_status(self) -> dict:
         """Snapshot for /status: {'state': idle|loading|ready|discarded, 'segment': ...}."""
         return self._prefetch.status
+
+    # ------------------------------------------------------------------
+    # Segment hot add/remove（素材管理：四件套落盘后热注册/热卸载）
+    # ------------------------------------------------------------------
+
+    def segment_info(self, segment: str) -> dict:
+        """单段元信息快照（帧数/分辨率/人脸比例；素材管理与 /status 共用）。
+
+        Raises ValueError for unknown segments（调用方映射 404）。
+        """
+        if segment not in self.segments:
+            raise ValueError(
+                f"Segment '{segment}' not found. Available: {self.segments}")
+        data = self._segment_cache.get(segment)
+        if data is None:
+            self._load_segment(segment)  # may raise → caller surfaces 503
+            data = self._segment_cache[segment]
+        return {
+            'segment': segment,
+            'total_frames': int(data['total_frames']),
+            'resolution': list(self.segment_resolution(segment)),
+            'face_ratio': float(data.get('face_ratio', 0.0)),
+            'face_frames': int(data.get('face_frames', 0)),
+            'is_current': segment == self.current_segment,
+        }
+
+    def add_segment(self, segment: str) -> dict:
+        """注册并（惰性）加载一个已落盘的段（素材热上线；幂等）。
+
+        四件套必须已存在于 character_dir（orifra/<seg>/ + count/<seg>/ +
+        metadata/<seg>.npy + facemark/<seg>.npy）——落盘由嵌入方（AUTOlive
+        素材管理预处理）负责，本方法只做校验+注册，不复制不转换。
+
+        注意：新段不自动进入播放调度（auto 序列在启动时解析）；需要参与
+        默认轮播时由调用方 /segment/schedule 重装序列。
+        """
+        if not segment or '/' in segment or '\\' in segment or segment in ('.', '..'):
+            raise ValueError(f"非法段名: {segment!r}")
+        if segment not in self.segments:
+            if not self._validate_segment(segment):
+                raise FileNotFoundError(
+                    f"段 '{segment}' 四件套不完整（需 orifra/<seg>/、count/<seg>/、"
+                    f"metadata/<seg>.npy、facemark/<seg>.npy）：{self.character_dir}")
+            # 重建排序列表（整体换绑：渲染线程读旧引用安全，GIL 下原子）
+            self.segments = sorted(self.segments + [segment])
+        self._load_segment(segment)  # 幂等；损坏数据在此抛出
+        return self.segment_info(segment)
+
+    def remove_segment(self, segment: str) -> dict:
+        """热卸载一个段（内存移除；盘上文件由嵌入方负责删除）。
+
+        保护：当前渲染段拒绝（渲染线程正从其缓存取帧）。与 switch_segment
+        共用 _switch_lock 串行化，避免与切换事务交叠。若有针对该段的在途
+        prefetch 一并取消。
+        """
+        info = self.segment_info(segment)  # unknown → ValueError（调用方 404）
+        refuse = ValueError(
+            f"段 '{segment}' 正在渲染中，不能删除；先切换到其他段")
+        if segment == self.current_segment:
+            raise refuse
+        with self._switch_lock:  # 与 switch 事务串行（ENG E1 同源）
+            if segment == self.current_segment:  # 锁内复检（竞态关闭）
+                raise refuse
+            self.segments = [s for s in self.segments if s != segment]
+            self._segment_cache.pop(segment, None)
+            self._resolution_cache.pop(segment, None)
+            if self._prefetch.status.get('segment') == segment:
+                self._prefetch.cancel()  # 在途 prefetch 已无意义
+        return info
 
     def get_frame(self, idx: int) -> Tuple:
         """Get frame at index from current segment (batch-preloaded).

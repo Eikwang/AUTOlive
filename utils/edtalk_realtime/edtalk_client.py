@@ -125,7 +125,10 @@ class EDTalkClient:
 
     def __init__(self, config_data: dict):
         self.config_data = config_data or {}
-        self.api_ip_port = self.config_data.get("api_ip_port", "http://127.0.0.1:8000")
+        # 端口解析统一走运行时文件（webui 拉起后写入，支持占用自动切换）；
+        # config api_ip_port 仅作存量/测试回退（2026-10-26 配置面收敛）
+        from utils.edtalk_realtime.runtime import resolve_api_base
+        self.api_ip_port = resolve_api_base(self.config_data)
         # 推送健康度（运营可见：webui 经 main.py /edtalk_status 轮询）
         self.failure_count = 0
         self.last_error = ""

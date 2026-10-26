@@ -18,7 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def test_ensure_defaults_fills_missing_sections(tmp_path):
-    """空配置加载后自动补齐 edtalk_realtime/fastrag 全部默认键（§4.1.4）。"""
+    """空配置加载后自动补齐 edtalk_realtime/fastrag 默认键（§4.1.4）。
+
+    2026-10-26 配置面收敛：端口/解释器/段调度为系统内部量（runtime.py
+    自动解析+记忆），不再入默认表——确保-default 不再注入这些键。
+    """
     from frontend.config.settings import Settings, init_config
 
     cfg_path = tmp_path / "config.json"
@@ -26,9 +30,13 @@ def test_ensure_defaults_fills_missing_sections(tmp_path):
     settings = init_config(str(cfg_path))
     # 默认键已补齐
     assert settings.get("edtalk_realtime", "enable") is False
-    assert settings.get("edtalk_realtime", "port") == 8000
-    assert "interpreter_path" in settings.get("edtalk_realtime")
+    assert settings.get("edtalk_realtime", "character_dir") == "wy"
     assert settings.get("fastrag", "port") == 11420
+    # 内部量键不再注入
+    ed = settings.get("edtalk_realtime")
+    for internal in ("port", "api_ip_port", "interpreter_path", "segments",
+                     "host", "api_token"):
+        assert internal not in ed, internal
     # 且已落盘
     on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "edtalk_realtime" in on_disk and "fastrag" in on_disk
@@ -133,14 +141,15 @@ def test_coordination_program_multi_params_passthrough(tmp_path, monkeypatch):
 
 
 def _ed_config(**overrides):
+    """最小 EDTalk 配置（2026-10-26 收敛后：无 port/segments 内部量键；
+    interpreter_path 仅作存量兼容键传入——resolve_interpreter 对存在文件优先采纳）。"""
     base = {
         "visual_body": "edtalk_realtime",
         "edtalk_realtime": {
-            "enable": True, "port": 8000, "host": "127.0.0.1",
+            "enable": True,
             "character_dir": "wy", "target_fps": 25, "buffer_frames": 16,
             "preroll_frames": 8, "face_repair": "adaptive",
             "gaze_correction": "adaptive", "gaze_convergence": 0.05,
-            "segments": "auto", "api_token": "",
             "interpreter_path": "fake-python.exe",
         },
         "fastrag": {"enable": False},
@@ -176,7 +185,9 @@ def test_edtalk_not_started_when_disabled(tmp_path, monkeypatch):
 def test_edtalk_cmd_mapping_and_shell_false(tmp_path, monkeypatch):
     """拉起命令映射 RUNBOOK 参数表 + shell=False（native H1）。"""
     app = _fake_autolive(tmp_path)
-    monkeypatch.setattr("frontend.main.get_base_path", lambda: str(tmp_path))
+    # get_base_path 返回 Path（config.paths 内部用 Path 除法拼 log 目录）
+    monkeypatch.setattr("frontend.main.get_base_path", lambda: tmp_path)
+    monkeypatch.setattr("frontend.config.paths.get_base_path", lambda: tmp_path)  # runtime.py 用
     captured = {}
 
     class FakeProc:
@@ -213,10 +224,11 @@ def test_edtalk_cmd_mapping_and_shell_false(tmp_path, monkeypatch):
     assert captured["shell"] is False
 
 
-def test_edtalk_port_conflict_identity_check(tmp_path, monkeypatch):
-    """8000 被占用但 /status 响应非 realtime_serve → 拒绝拉起（native E5）。"""
+def test_edtalk_port_conflict_auto_switch(tmp_path, monkeypatch):
+    """8000 被其他 HTTP 服务占用 → 自动切换到可用端口并拉起（不再拒绝）。"""
     app = _fake_autolive(tmp_path)
-    monkeypatch.setattr("frontend.main.get_base_path", lambda: str(tmp_path))
+    monkeypatch.setattr("frontend.main.get_base_path", lambda: tmp_path)
+    monkeypatch.setattr("frontend.config.paths.get_base_path", lambda: tmp_path)  # runtime.py 用
     (tmp_path / "edtalk").mkdir()
     (tmp_path / "fake-python.exe").write_text("", encoding="utf-8")
     launched = {}
@@ -233,13 +245,20 @@ def test_edtalk_port_conflict_identity_check(tmp_path, monkeypatch):
     cfg = _ed_config(interpreter_path=str(tmp_path / "fake-python.exe"))
     app.config._config = cfg
     app._start_edtalk_realtime(app.config._config)
-    assert launched == {}  # 身份不符 → 不拉起
+    assert "--port" in launched["cmd"]
+    port_val = launched["cmd"][launched["cmd"].index("--port") + 1]
+    assert port_val != "8000"  # 自动切换
+    # 实际端口已入运行时文件（消费方统一解析依据）
+    runtime_data = json.loads(
+        (tmp_path / "data" / "edtalk_runtime.json").read_text(encoding="utf-8"))
+    assert runtime_data["port"] == int(port_val)
 
 
 def test_edtalk_already_running_skip(tmp_path, monkeypatch):
-    """已在运行（/status 响应含 available_segments）→ 跳过拉起（幂等）。"""
+    """已在运行（/status 响应含 available_segments）→ 跳过拉起 + 运行时文件回写。"""
     app = _fake_autolive(tmp_path)
-    monkeypatch.setattr("frontend.main.get_base_path", lambda: str(tmp_path))
+    monkeypatch.setattr("frontend.main.get_base_path", lambda: tmp_path)
+    monkeypatch.setattr("frontend.config.paths.get_base_path", lambda: tmp_path)  # runtime.py 用
     (tmp_path / "edtalk").mkdir()
     (tmp_path / "fake-python.exe").write_text("", encoding="utf-8")
     launched = {}
@@ -258,3 +277,6 @@ def test_edtalk_already_running_skip(tmp_path, monkeypatch):
     app._start_edtalk_realtime(app.config._config)
     assert launched == {}  # 幂等跳过
     assert "edtalk_realtime" not in app.my_subprocesses
+    runtime_data = json.loads(
+        (tmp_path / "data" / "edtalk_runtime.json").read_text(encoding="utf-8"))
+    assert runtime_data["port"] == 8000  # 复用已有服务也回写（客户端可解析）

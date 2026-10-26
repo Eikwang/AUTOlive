@@ -29,6 +29,7 @@ from realtime_serve.config import Config
 
 _VALID_GAZE_MODES = ('off', 'on', 'adaptive')
 _VALID_REPAIR_MODES = ('off', 'on', 'adaptive')
+_VALID_LIP_MODES = ('on', 'off')
 _MAX_SCHEDULE_LEN = 64
 
 _COMPONENT_KEYS = ('model_manager', 'render_loop', 'output_streamer',
@@ -301,6 +302,67 @@ class RealtimeService:
         self.render_loop.face_repair_mode = mode
         return {'ok': True, 'effective': 'next_frame'}
 
+    def set_lip_params(self, mode: str) -> dict:
+        """Hot-switch lip-sync inference gate（画外音总开关）。
+
+        'off': 跳过 Audio2Lip GPU 推理与画面口型渲染（无人脸帧同样直通），
+        音频 chunk 照常帧锁定出声——纯逐帧门控，无 GPU 状态，下一帧生效。
+        与 gaze/repair 不同，lip 门控不依赖启动参数，任意时刻可双向热切。
+        """
+        if mode not in _VALID_LIP_MODES:
+            raise ValidationError(
+                f"mode 必须为 {_VALID_LIP_MODES} 之一，got '{mode}'"
+                f"（当前值 {self.render_loop.lip_mode}）")
+        self.render_loop.lip_mode = mode
+        return {'ok': True, 'effective': 'next_frame'}
+
+    # ------------------------------------------------------------------
+    # Segment hot add/remove（素材管理：嵌入方落盘四件套后热注册/卸载）
+    # ------------------------------------------------------------------
+
+    def add_segment(self, segment: str) -> dict:
+        """Register + lazily load an on-disk segment (idempotent).
+
+        FileNotFoundError（四件套缺失）映射 404；数据损坏映射 503。
+        新段不自动进入播放调度——需要参与默认轮播时由嵌入方调用
+        set_schedule 重装序列。
+        """
+        cd = self._require_character_data()
+        try:
+            info = cd.add_segment(segment)
+        except FileNotFoundError as e:
+            raise NotFoundError(str(e))
+        return {'ok': True, **info}
+
+    def remove_segment(self, segment: str) -> dict:
+        """Unload a segment from memory (disk deletion is the embedder's job).
+
+        拒绝语义（HTTP 409/400 由 _map_control_errors 按异常类型映射）：
+        - 当前渲染段 / 播放调度引用 → ValidationError（400，附修复动作）；
+        - 未知段 → NotFoundError（404）。
+        若存在指向该段的 segment_end 待执行切换则一并清除（避免边界触发
+        必败切换进入日志风暴重锚路径）。
+        """
+        cd = self._require_character_data()
+        sched = getattr(self.render_loop, '_scheduler', None)
+        if sched is not None and segment in sched.sequence:
+            raise ValidationError(
+                f"段 '{segment}' 在当前播放调度中，不能删除；先用 set_schedule"
+                f"（/segment/schedule）装一个不含该段的序列")
+        pending = getattr(self.render_loop, 'pending_switch', None)
+        cleared = False
+        if pending == segment:
+            self.render_loop.clear_pending_switch()
+            cleared = True
+        try:
+            info = cd.remove_segment(segment)
+        except ValueError as e:
+            # 当前渲染段保护（pack 层）→ 语义冲突；未知段 → 404
+            if 'not found' in str(e) or 'not found.' in str(e):
+                raise NotFoundError(str(e))
+            raise ValidationError(str(e))
+        return {'ok': True, 'cleared_pending_switch': cleared, **info}
+
     # ------------------------------------------------------------------
     # Audio（嵌入方主动态数据面——facade 必须收编，CEO F4/DX-2）
     # ------------------------------------------------------------------
@@ -398,6 +460,7 @@ class RealtimeService:
 
         status['repair_mode'] = rl.face_repair_mode if rl is not None else 'off'
         status['repair_capable'] = self.face_repair is not None
+        status['lip_mode'] = rl.lip_mode if rl is not None else 'on'
 
         fb = self.frame_buffer
         if fb is not None:
@@ -411,6 +474,18 @@ class RealtimeService:
             status['current_segment'] = cd.current_segment
             status['resolution'] = list(cd.resolution)
             status['available_segments'] = cd.segments
+            # 逐段元信息（帧数/人脸比例/分辨率；素材管理页与编排画外音提示共用）。
+            # dict-guard：测试替身可能只暴露 segments 属性——失败降级为名字表。
+            try:
+                details = {}
+                for seg in list(cd.segments or []):
+                    try:
+                        details[seg] = cd.segment_info(seg)
+                    except Exception as e:
+                        details[seg] = {'segment': seg, 'error': str(e)}
+                status['segment_details'] = details
+            except Exception:
+                pass
             # dict-guard: test doubles expose the attr as a MagicMock
             if hasattr(cd, 'prefetch_status') and \
                     isinstance(cd.prefetch_status, dict):
