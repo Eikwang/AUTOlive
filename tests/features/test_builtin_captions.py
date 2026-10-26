@@ -267,59 +267,73 @@ def test_ensure_defaults_migration():
     assert "api_ip_port" not in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
 
 
-# ---------- C2：门控组合矩阵（义务 native C2/DX H1/Eng A2，2026-10-22） ----------
+# ---------- 字幕推送时序对齐（2026-10-25 用户实测批次） ----------
 
-def _make_gate_mixin(config_get):
-    m = types.SimpleNamespace()
-    m.config = types.SimpleNamespace(get=config_get)
-    return m
+def test_captions_push_helper_contract():
+    """_captions_push 契约：经 get_captions_manager 转发；无 manager 空操作；
+    manager 异常隔离不炸播放循环（S4）。"""
+    import asyncio
+    from utils.audio import playback_manager as pm
+
+    class _Mixin(pm.PlaybackMixin):
+        pass
+
+    captured = []
+
+    class _Mgr:
+        async def push(self, data):
+            captured.append(data)
+
+    orig = pm.get_captions_manager
+    try:
+        pm.get_captions_manager = lambda: _Mgr()
+        asyncio.run(_Mixin()._captions_push({"type": "comment", "content": "你好"}))
+        assert captured == [{"type": "comment", "content": "你好"}]
+
+        pm.get_captions_manager = lambda: None
+        asyncio.run(_Mixin()._captions_push({"type": "comment", "content": "x"}))  # 无 manager 不抛
+        assert captured == [{"type": "comment", "content": "你好"}]
+
+        class _Boom:
+            async def push(self, data):
+                raise RuntimeError("boom")
+
+        pm.get_captions_manager = lambda: _Boom()
+        asyncio.run(_Mixin()._captions_push({"type": "comment", "content": "x"}))  # 异常被隔离
+    finally:
+        pm.get_captions_manager = orig
 
 
-def _gate_stub(edtalk, player):
-    """is_edtalk_active 兼容 stub：visual_body + edtalk_realtime.enable 双键
-    （helpers.py 判定键）+ play_audio.player。"""
-    class Cfg:
-        def get(self, *keys):
-            if keys == ("visual_body",):
-                return "edtalk_realtime"
-            if keys == ("edtalk_realtime", "enable"):
-                return edtalk
-            if keys == ("play_audio", "player"):
-                return player
-            return None
-    m = types.SimpleNamespace()
-    m.config = Cfg()
-    return m
-
-
-def test_captions_gate_keys_cover_dispatch():
-    """Eng A2/H1：矩阵枚举集合==分派分支集合（PLAYER_KEYS 单一事实源）——
-    未来新增播放器未入常量时本测试先红，防枚举门控失配静默丢字幕。"""
-    from utils.audio.playback_manager import PLAYER_KEYS
-    assert set(PLAYER_KEYS) == {"audio_player", "audio_player_v2", "builtin"}, \
-        "PLAYER_KEYS 必须覆盖全部在役播放器分派值（audio_player_v2 为活值）"
-    # pygame 走 else 分支（分派结果全集=PLAYER_KEYS+pygame，T2 注记）
-    assert set(PLAYER_KEYS) | {"pygame"} == \
-        {"audio_player", "audio_player_v2", "builtin", "pygame"}
-
-
-def test_captions_gate_matrix_all_combinations():
-    """C2 门控矩阵（义务 native C2/DX H1）：is_edtalk_active × player 全组合——
-    仅（非 EDTalk 且 builtin）跳过公共段（F3 开播回调推送）；其余全部推送。
-    EDTalk+builtin 必须推送（N1 回归门：否则字幕零输出）。"""
-    from utils.audio.playback_manager import PlaybackMixin, PLAYER_KEYS
-
-    for player in PLAYER_KEYS:
-        assert PlaybackMixin._captions_builtin_skip(_gate_stub(True, player)) is False, \
-            f"EDTalk 激活 × {player}：公共段必须推送（N1）"
-        if player == "builtin":
-            assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, player)) is True, \
-                "非 EDTalk × builtin：公共段跳过（F3 开播回调推送）"
-        else:
-            assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, player)) is False, \
-                f"非 EDTalk × {player}：公共段推送（同步播放/外部模式）"
-    assert PlaybackMixin._captions_builtin_skip(_gate_stub(False, "pygame")) is False, \
-        "非 EDTalk × pygame（else 分支）：公共段推送"
+def test_captions_push_exact_points_source():
+    """推送点位源级守卫：出队公共段推送已退役，仅存三个开播精确位——
+    ① EDTalk：push_full 前（历经播放间隔+编排静默窗口等待后）；
+    ② 外部播放器：audio_player.play 前（builtin 除外，F3 开播回调接管）；
+    ③ pygame：music.load 成功后、music.play 前。
+    防回归：任何"图省事"挪回公共段都会让字幕重新系统性超前。"""
+    src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "utils", "audio", "playback_manager.py")
+    with open(src_path, "r", encoding="utf-8") as f:
+        src = f.read()
+    # 公共段推送与旧门控谓词退役
+    assert "await _captions_manager.push(" not in src
+    assert "_captions_builtin_skip" not in src
+    # 恰好三个推送点
+    assert src.count("await self._captions_push(data_json)") == 3
+    # ① EDTalk 点：紧邻 push_full 之前（等待结束→出字→进数字人服务器）
+    edtalk_pos = src.index("await self._captions_push(data_json)")
+    push_full_pos = src.index("await self.edtalk_client.push_full(")
+    assert edtalk_pos < push_full_pos
+    assert "编排静默窗口" in src[edtalk_pos - 200:edtalk_pos], \
+        "EDTalk 推送点必须位于静默窗口等待之后（注释锚定）"
+    # ② 外部播放器点：play 前 + builtin 跳过门卫
+    assert 'if self.config.get("play_audio", "player") != "builtin":' in src
+    assert src.index("self.audio_player.play(data_json)") > \
+        src.index('if self.config.get("play_audio", "player") != "builtin":')
+    # ③ pygame 点：load 之后、play 之前
+    load_pos = src.index("self.mixer_normal.music.load(voice_tmp_path)")
+    pygame_push_pos = src.rindex("await self._captions_push(data_json)")
+    play_pos = src.index("self.mixer_normal.music.play()")
+    assert load_pos < pygame_push_pos < play_pos
 
 
 # ---------- F3：开播回调（义务 Eng T1 通道隔离+载荷三键，2026-10-22） ----------

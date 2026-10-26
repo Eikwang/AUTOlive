@@ -157,22 +157,12 @@ class PlaybackMixin:
                     if _was_999:
                         self.active_reread_top_999 = True
 
-                    # 判断是否发送字幕打印（web 字幕，前端名"字幕打印"）
-                    # 内置字幕模块进程内直调（修复原断链：send_to_web_captions_printer
-                    # 方法不存在，enable=true 即 AttributeError）；enable/样式由
-                    # CaptionsManager 热读，push 内部全捕获（S4 隔离，不阻塞播放）。
-                    # F2 门控（义务 X1+DX M4，X1 基线：A2 批次已退役 pydub 随机变速，
-                    # 本段即变速后公共位）：builtin 模式字幕改由 F3 播放开播回调推送
-                    # （builtin play()=入队非同步播放，公共段推送随队列积压系统性超前）；
-                    # EDTalk 激活时 builtin 播放器被创建但不播放、F3 回调永不触发——
-                    # 必须无条件保留公共段 push（spec 第 2 轮 N1 回归缺口）。
-                    _captions_manager = get_captions_manager()
-                    if _captions_manager is not None:
-                        if self._captions_builtin_skip():
-                            logger.debug(
-                                f"字幕推送走 builtin 开播回调（公共段跳过）：player=builtin")
-                        else:
-                            await _captions_manager.push(data_json)
+                    # 字幕推送时序对齐（2026-10-25 用户实测批次）：原出队公共段 push
+                    # 已退役——EDTalk 音频尚需播放间隔 + 编排静默窗口等待（可达分钟级）
+                    # 才进数字人服务器，字幕系统性超前。现推送点=三个开播精确位：
+                    # EDTalk→push_full 前（_captions_push）；外部播放器→play 前
+                    # （builtin 除外）；pygame→music.play 前。builtin 仍由 F3 开播
+                    # 回调在真实起播时刻推送（audio_core 接线，最精确）。
 
                     # A4（2026-10-22 审查批次，义务 R2-A4/R7）：播放间隔改名——新键
                     # play_interval_min/max，旧键 normal_interval_min/max 读侧一次性
@@ -245,6 +235,9 @@ class PlaybackMixin:
                                 logger.warning(
                                     f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
                                     f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
+                        # 字幕时序对齐：推送点=音频进入数字人服务器前一刻
+                        # （历经播放间隔与编排静默窗口等待后）——数字人开口即出字。
+                        await self._captions_push(data_json)
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
@@ -291,6 +284,11 @@ class PlaybackMixin:
                                 },
                                 "speed": 1
                             }
+                        # 外部播放器：play() 即近似开播点；builtin 的字幕由 F3 开播
+                        # 回调在真实起播时刻推送（play()=入队非同步播放，此处推会
+                        # 随队列积压超前），跳过。
+                        if self.config.get("play_audio", "player") != "builtin":
+                            await self._captions_push(data_json)
                         self.audio_player.play(data_json)
                     else:
                         logger.debug(f"voice_tmp_path={voice_tmp_path}")
@@ -299,6 +297,8 @@ class PlaybackMixin:
                         try:
                             # 使用pygame播放音频
                             self.mixer_normal.music.load(voice_tmp_path)
+                            # 字幕时序对齐：本地播放起点（load 成功后、开播前一刻）
+                            await self._captions_push(data_json)
                             self.mixer_normal.music.play()
                             while self.mixer_normal.music.get_busy():
                                 pygame.time.Clock().tick(10)
@@ -321,21 +321,17 @@ class PlaybackMixin:
             logger.error(traceback.format_exc())
 
 
-    def _captions_builtin_skip(self):
-        """F2 门控谓词（义务 C2 矩阵锁定）：仅当非 EDTalk 激活且
-        player == "builtin" 时公共段 push 跳过（builtin 字幕由 F3 播放开播
-        回调推送）；is_edtalk_active 为真时无条件保留公共段 push——EDTalk
-        激活时 builtin 播放器被创建但不播放、F3 回调永不触发（spec 第 2 轮
-        N1 回归缺口）。判定异常按推送处理（fail-open，宁重复不丢字幕）。"""
+    async def _captions_push(self, data_json):
+        """字幕推送（时序对齐版，2026-10-25 用户实测批次）：调用点=音频进
+        数字人服务器/系统开播前一刻。原出队公共段推送随队列积压与编排静默
+        窗口系统性超前（EDTalk 场景可达分钟级），已退役。全捕获（S4：字幕
+        错误不得传播进播放循环）。"""
         try:
-            if is_edtalk_active(self.config):
-                return False
+            manager = get_captions_manager()
+            if manager is not None:
+                await manager.push(data_json)
         except Exception:
-            return False
-        try:
-            return self.config.get("play_audio", "player") == "builtin"
-        except Exception:
-            return False
+            logger.error("字幕推送异常（已隔离，不影响播放）\n" + traceback.format_exc())
 
     def stop_current_audio(self):
         """停止当前播放的音频
