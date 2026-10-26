@@ -1,5 +1,11 @@
 # TODOS.md
 
+## Deferred Items from /autoplan (2026-10-26) — 主干流程图（v2 调整版）对齐批次（main-20261026-153911，终门 rec 批准实施）
+
+1. **详图 flowchart-detail.md:105 字幕"出队时推送"过时注记**（P3, S）— spec R1 I-1 登记：91fb82cd 已把字幕推送点迁至三个开播精确位（playback_manager.py:160-165 注释块为权威），详图 Subtitle 节点仍注"captions_manager.py:164 出队时推送"。本批单文件纪律（只修 flowchartTD.md）不修详图。依赖：详图触碰时处置（注意详图头部自我声明"只读历史归档、不回写"——届时在失真声明处补记或修注记，二选一裁决）。
+2. **编排静默窗口等待观测**（P3, S）— native Eng F6a：playback_manager.py:229-237 busy-wait 发生在单音频消费循环内，纯画面窗口异常滞留时最长 300s 背压（答谢/点歌等后续音频级联延迟）；已有 300s 上限（_CHOREO_MUTE_MAX_WAIT）+降级照推+warning 兜底，缺量化观测。实施：等待 >60s 打点日志/并入 alarm_notifier 模块开关。依赖：无。
+3. **伴奏线程失败观测**（P3, S）— native Eng F6b：R6 双轨伴奏本地线程（playback_manager.py:204-209）失败仅 logger.warning，与 push_full 失败已有 alarm_notifier webhook 报警不对等，直播中伴奏无声无告警。实施：复用 alarm_notifier 既有开关加伴奏项。依赖：无。
+
 ## Deferred Items from /autoplan (2026-10-23) — UI-16 批次（WebUI 功能调整与修复 16 项，终门 rec 批准实施）
 
 1. **~~F-1a 硬编码色值扫描 lint 守卫~~**（P2, S）— 【2026-10-24 已完成（提交 34fcf86c，已推）：tests/features/test_frontend_style_guards.py ——ast 精确提取样式串（跨行/tooltip 误报消除）+裸色值清零断言+Tailwind 调色类禁用；实测抓到 login.py:56 跨行裸色值并修复（var(--text-title)）。】原记录：本批 3 处暗色适配同病根（serial.py:83 bg-blue-100 硬编码 Tailwind 调色类）。
@@ -71,9 +77,9 @@
 
 1. **~~T10 语音对话链接通~~**（P2, L）— 【2026-10-24 已实施（提交 46ae0483，已推 origin/main）：ASR 引擎适配层 utils/asr_engine.py 新建（对齐 apps/gpt-sovits/tools/asr/ 既有实现——本地 faster-whisper-large-v3-turbo 零下载+HF 镜像+混合语言路由（中文检测→FunASR paraformer 回退））；record_audio 重构标志式（单击 Q 开始/S 停止交互模型对齐）；main.py 停止录音→ASR→talk_handle 串接；do_listen_and_comment 连续模式填充（VAD→ASR→唤醒→对话链）。守卫 45→50 项全绿；全量 1004 passed/0 failed。**全链手动实测待用户**（按 Q 说话→S 停止→[语音] 记录+数字人开口；direct_run_talk=true 即连续模式）】原记录：conversation_manager.py:221-240 do_listen_and_comment 为空框架（循环体仅 sleep），audio_listen 无调用者，ASR（funasr/whisper）未接入对话链。触发条件锚定：T5-T9 断链批次落地后下一批。
 2. **写库/过滤顺序语义决策**（P3, S）— 现状弹幕原文先写 danmu 表（comment_handler.py:255-260）后过违禁词过滤（:272-288），数据分析读到含违禁词原文。变更影响数据分析口径，需用户裁决：保持现状（入库原文）vs 写库前过滤 vs 入库+标记列。**与下方 A4 交叉**：badwords 文件缺失期间违禁词过滤全链失效，写库内容=未过滤原文。依赖：无。
-3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchart-detail.md Review record 0A 节〔2026-10-22 起随详图归档迁移〕）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：T1/T2 修图完成后。
+3. **前提表→运行时冒烟断言**（P2, M）— 26 条 F 前提（流程图-代码对照表，docs/flowchart-detail.md Review record 0A 节〔2026-10-22 起随详图归档迁移〕）转化为运行期可验证检查（开关存在/路径可达/出边有消费端），把流程审计投入复利化；含 ENG E-1 队列深度/丢弃计数可观测。**A1-A4 实测错误即"冒烟断言"价值的直接例证**（代码在位≠实际生效：违禁词文件缺失过滤静默失效、变声链配置残留每弹幕刷错）。依赖：图 v2 调整版对齐完成后。【2026-10-26 进展（/autoplan main-20261026-153911 终门批准）：最小断言切片已随图侧修正批次实施——tests/test_flowchart_alignment.py（播放分流结构断言×2+图锚点符号 lint+图头守卫，防假绿抽查通过）；本条目的完整前提表转断言仍待实施，**下一改链/图对齐批次必须含本条实施**（可检查到期承诺，native CEO F1/F3/F5——不留开放式 defer）】
 4. **~~my_handle.py.backup 退役清理**（P3, S）— 【2026-10-21 已由清理批次 1b 接管，diff 验证通过，见上方 2026-10-21 节第 1 条；删除仍待用户实测确认】T5-T9 断链迁移完成后，backup 文件（含 key_mapping_handle:2225/答谢:3077-3137 等唯一实现副本）使命结束；确认迁移完整后删除或归档。依赖：T5-T9 批次验收。 【utils/*.backup 三件与 my_handle.py.backup 均已删（1b 批次+清理批次，git 现状核对无 .backup 文件）——2026-10-24 台账清洗闭环】
-5. **~~"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。 【已推广：docs/flowchartTD.md 头部纪律行+批次门禁实践（T5-T9 起）——2026-10-24 台账清洗闭环】
+5. **~~"改链必改图"纪律全仓库推广**（P3, S）— 已作为 T5-T9 批次门禁（每任务 Verify 含图更新）；推广为全仓库轻量流程：改消息链/播放链代码的提交须同步检查 docs/flowchartTD.md 对应节点/边。依赖：T1/T2 修图完成后生效。 【已推广：docs/flowchartTD.md 头部纪律行+批次门禁实践（T5-T9 起）——2026-10-24 台账清洗闭环】【2026-10-26 订正：发现 docs/flowchartTD.md 头部纪律行丢失（疑 autoplan restore 整文件回滚所致），随图头元数据 C7 重落盘（v2.1 图头三行）并加 tests/test_flowchart_alignment.py 图头断言防复发——/autoplan main-20261026-153911 native Eng F2；restore 恢复后须核对图头三行在位】
 6. **~~流程图与实测发现的交叉注记**（P3, S）— 下方 A 组实测错误对流程图四态标注的影响：F8 过滤链在 badwords 缺失期间应标"实际失效"（代码在位但文件缺失）；变声通道 so_vits_svc（synthesis_manager.py:278-301）每弹幕触发 ConnectionRefused 说明播放链存在图中未画的变声分支且其配置处于残留开启态。T2 修图时一并消化。 【已随 T2 主干图 v2 对齐批次消化（0cf3b0de，13+1 差异闭环）——2026-10-24 台账清洗闭环】
 
 ## Deferred Items from 环境实测 (2026-10-20) — 系统审查批次实测修复轮（用户指示：先记录，架构调整后统一修复）
