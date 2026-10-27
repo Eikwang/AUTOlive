@@ -250,9 +250,9 @@
     },
     "text": {
       "enable": true,
-      "type": "json",
-      "file_path": "data/本地问答库.json",
-      "similarity": 0.8,
+      "type": "text",
+      "file_path": "data/本地问答库.txt",
+      "similarity": 0.6,
       "username_max_len": 10
     },
     "audio": {
@@ -527,6 +527,7 @@
     "subtitle_font_size": 24,
     "subtitle_font_weight": "bold",
     "subtitle_webkit_text_stroke": 0,
+    "subtitle_stroke_color": "#000000",
     "subtitle_bg_width": 400,
     "subtitle_bg_height": 60
   },
@@ -907,22 +908,25 @@
   "assistant_anchor": {
     "enable": false,
     "username": "助播",
-    "audio_synthesis_type": "edge-tts",
+    "audio_synthesis_type": "edge_tts",
     "type": [
-      "comment",
-      "local_qa_audio",
-      "reread",
+      "ai_chat",
+      "chat",
+      "read_comment",
       "gift",
       "entrance",
       "follow",
-      "idle_time_task"
+      "schedule",
+      "idle_time_task",
+      "integral",
+      "song"
     ],
     "local_qa": {
       "text": {
         "enable": false,
-        "format": "json",
-        "file_path": "data/本地问答库-助播.json",
-        "similarity": 0.8
+        "format": "text",
+        "file_path": "data/本地问答库-助播.txt",
+        "similarity": 0.6
       },
       "audio": {
         "enable": true,

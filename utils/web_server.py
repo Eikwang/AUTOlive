@@ -288,6 +288,17 @@ class WebServer:
             except Exception as e:
                 logger.error("/cover/status 异常", exc_info=True)
                 return {"available": False, "reason": str(e)}
+
+        @self.app.get("/assistant_anchor/route-stats")
+        async def assistant_anchor_route_stats():
+            """助播路由观测取数（D11/E-S2：只读快照，无鉴权新增——与本机内网
+            API 其它只读端点同暴露面，复用既有 WebUI 访问边界）。"""
+            try:
+                from .handlers.assistant_router import get_route_stats
+                return get_route_stats()
+            except Exception as e:
+                logger.error("/assistant_anchor/route-stats 异常", exc_info=True)
+                return {"counters": {}, "last": {}, "error": str(e)}
             
         @self.app.post("/send")
         async def send(msg: SendMessage):

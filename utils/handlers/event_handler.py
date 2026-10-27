@@ -98,14 +98,23 @@ class EventHandler:
             resp_content = self.my_handle.common.brackets_text_randomize(resp_content)
             resp_content = self.my_handle.common.dynamic_variable_replacement(resp_content, variables)
 
-            message = {
-                "type": type2,
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": resp_content,
-            }
+            # 答谢助播路由（十生产端接线之答谢三件 gift/entrance/follow）：勾选对应
+            # 类型→助播消息（即时与周期双通道一并覆盖——消息 type 在生成时定死，
+            # 周期缓存回放的即助播消息）；未勾选维持原路。
+            from .assistant_router import assistant_route, assistant_copy_message
+            if assistant_route(self.my_handle.config, type2):
+                message = assistant_copy_message(
+                    self.my_handle.config, resp_content,
+                    username=username, producer_type=type2, hit_layer="direct")
+            else:
+                message = {
+                    "type": type2,
+                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                    "config": self.my_handle.config.get("filter"),
+                    "username": username,
+                    "content": resp_content,
+                }
             self._thanks_dispatch(type2, message, username)
             return message
         except Exception as e:
@@ -284,16 +293,23 @@ class EventHandler:
             # 入队前统一识别（编排关键词订阅，中枢内部全兜底）
             self.my_handle.keyword_recognize(data, "schedule")
 
-            # 构建消息
-            message = {
-                "type": "schedule",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": content
-            }
-            
+            # 定时任务助播路由（十生产端接线之定时任务）：勾选 schedule→助播消息
+            from .assistant_router import assistant_route, assistant_copy_message
+            if assistant_route(self.my_handle.config, "schedule"):
+                message = assistant_copy_message(
+                    self.my_handle.config, content,
+                    username=username, producer_type="schedule", hit_layer="direct")
+            else:
+                # 构建消息
+                message = {
+                    "type": "schedule",
+                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                    "config": self.my_handle.config.get("filter"),
+                    "username": username,
+                    "content": content
+                }
+
             # 音频合成
             self.my_handle.audio_synthesis_handle(message)
         except Exception as e:
@@ -319,16 +335,25 @@ class EventHandler:
             self.my_handle.keyword_recognize(data, "idle_time_task")
 
             if type == "text":
-                # 构建消息
-                message = {
-                    "type": "idle_time_task",
-                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                    "config": self.my_handle.config.get("filter"),
-                    "username": username,
-                    "content": content
-                }
-                
+                # 闲时任务助播路由（十生产端接线之闲时任务 text 类；local_audio 类
+                # 维持原路——走 synthesis_manager 本地音频分支）
+                from .assistant_router import assistant_route, assistant_copy_message
+                if assistant_route(self.my_handle.config, "idle_time_task"):
+                    message = assistant_copy_message(
+                        self.my_handle.config, content,
+                        username=username, producer_type="idle_time_task",
+                        hit_layer="direct")
+                else:
+                    # 构建消息
+                    message = {
+                        "type": "idle_time_task",
+                        "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                        "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                        "config": self.my_handle.config.get("filter"),
+                        "username": username,
+                        "content": content
+                    }
+
                 # 音频合成
                 self.my_handle.audio_synthesis_handle(message)
             elif type == "local_audio":

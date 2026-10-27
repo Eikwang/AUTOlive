@@ -168,18 +168,30 @@ class FeatureHandler:
             data = self.load_data_from_file(file_path)
             if not data:
                 return None
-            from ..common.text_mixin import normalize_for_match
+            from ..common.text_mixin import normalize_for_match, tokenize_for_match
             q_norm = normalize_for_match(question)
+            q_tokens = tokenize_for_match(question)
+            # D4：词条预分词随 mtime 缓存（load_data_from_file 已缓存 data+mtime，
+            # 词元缓存对齐同一 mtime 键；运行时仅对查询分词一次）
+            _cached = FeatureHandler._qa_file_cache.get(file_path)
+            _mtime = _cached[0] if _cached else None
+            _tok_cached = FeatureHandler._qa_token_cache.get(file_path)
+            if _tok_cached is None or _tok_cached[0] != _mtime:
+                _tok_cached = (_mtime, [tokenize_for_match(it[0]) if len(it) >= 2 else None
+                                        for it in data])
+                FeatureHandler._qa_token_cache[file_path] = _tok_cached
+            _entry_tokens = _tok_cached[1]
             best_answer = None
             best_similarity = 0.0
-            for item in data:
+            for _i, item in enumerate(data):
                 if len(item) < 2:
                     continue
                 q, a = item[0], item[1]
                 # 精确短路：归一化全等直接返回（不依赖阈值）
                 if q_norm and normalize_for_match(q) == q_norm:
                     return a
-                sim = self.my_handle.common.calculate_similarity(question, q)
+                sim = self.my_handle.common.calculate_similarity(
+                    question, q, b_tokens=_entry_tokens[_i])
                 if sim > best_similarity and sim >= similarity:
                     best_similarity = sim
                     best_answer = a
@@ -219,6 +231,9 @@ class FeatureHandler:
     # 本地问答匹配在识别中枢高频调用（每条弹幕/语音一次），原实现每次重读
     # 文件是延时实锤；mtime 变化即失效，热改词库无需手动刷新。
     _qa_file_cache = {}
+    # 词条预分词缓存（D4/E-T5）：path -> (mtime, [tokens|None per entry])——
+    # 与 _qa_file_cache 同 mtime 键对齐，运行时仅对查询分词一次。
+    _qa_token_cache = {}
 
     def load_data_from_file(self, file_path):
         """
@@ -299,17 +314,11 @@ class FeatureHandler:
         try:
             # 将问答库中设定的参数替换为指定内容，开发者可以自定义替换内容
             # 假设有多个未知变量，用户可以在此处定义动态变量
-            variables = {
-                'cur_time': self.my_handle.common.get_bj_time(5),
-                'username': content_username or ''
-            }
-
-            # 使用字典进行字符串替换
-            if any(var in text for var in variables):
-                text = text.format(**{var: value for var, value in variables.items() if var in text})
-
-            # [1|2]括号语法随机获取一个值，返回取值完成后的字符串
-            return self.my_handle.common.random_bracket_value(text)
+            # F11 修复（2026-10-27）：渲染逻辑委托 assistant_router.render_answer
+            # 单一实现——原实现调用不存在的 random_bracket_value（实际方法为
+            # brackets_text_randomize），[1|2] 随机语法自始静默失效。
+            from .assistant_router import render_answer
+            return render_answer(text, username=content_username)
         except Exception as e:
             logger.error(f"本地问答渲染失败（降级原文）：{e}")
             return text
@@ -351,14 +360,26 @@ class FeatureHandler:
 
             logger.info(f'触发本地问答库 [{username}]: {content}')
 
-            message = {
-                "type": "local_qa_text",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": resp_content
-            }
+            # 主 KB 命中改判门控（D6/E-H1，十生产端接线之主KB命中产线）：
+            # 消息来源勾选对应选项（comment 源→AI对话、chatbox 源→聊天）时改判
+            # 助播路由——主 KB 命中响应"均使用助播TTS"的"均"字；voice 源/未勾选
+            # 维持原路（uc2a）。来源取 data.chat_source（comment_handle 侧标记）。
+            from .assistant_router import assistant_route, assistant_copy_message, ASSISTANT_TEXT_TYPE
+            _src = (data or {}).get("chat_source") or "comment"
+            if assistant_route(self.my_handle.config, "main_kb_hit", _src):
+                message = assistant_copy_message(
+                    self.my_handle.config, resp_content,
+                    username=username, producer_type="main_kb_hit", source=_src,
+                    hit_layer="main_kb")
+            else:
+                message = {
+                    "type": "local_qa_text",
+                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                    "config": self.my_handle.config.get("filter"),
+                    "username": username,
+                    "content": resp_content
+                }
 
             self.my_handle.audio_synthesis_handle(message)
 
@@ -377,28 +398,14 @@ class FeatureHandler:
     _SONG_PLAY_COOLDOWN_DEFAULT_S = 300
 
     def _song_copy_message(self, username, copy_text):
-        """R4 助播路由：assistant_anchor.type 含 "song" → 文案走助播通道
-        （type=assistant_anchor_text + 助播名，享受助播优先级）；未开启走默认
-        TTS（type=comment 原路）。返回可直接 audio_synthesis_handle 的消息。"""
-        anchor_types = []
-        try:
-            anchor_types = self.my_handle.config.get("assistant_anchor", "type") or []
-        except Exception:
-            pass
-        if "song" in anchor_types:
-            anchor_name = ""
-            try:
-                anchor_name = self.my_handle.config.get("assistant_anchor", "username") or ""
-            except Exception:
-                pass
-            return {
-                "type": "assistant_anchor_text",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": anchor_name or "助播",
-                "content": copy_text,
-            }
+        """R4 助播路由（T1 收编为中央助手调用方）：assistant_anchor.type 含 "song"
+        → 文案走助播通道（type=assistant_anchor_text + 助播名，享受助播优先级）；
+        未开启走默认 TTS（type=comment 原路）。返回可直接 audio_synthesis_handle 的消息。"""
+        from .assistant_router import assistant_route, assistant_copy_message
+        if assistant_route(self.my_handle.config, "song"):
+            return assistant_copy_message(
+                self.my_handle.config, copy_text,
+                username=username, producer_type="song", hit_layer="direct")
         return {
             "type": "comment",
             "tts_type": self.my_handle.config.get("audio_synthesis_type"),
@@ -790,15 +797,26 @@ class FeatureHandler:
         return blocks
 
     def _integral_reply(self, data, resp_content):
-        """积分回复（复用弹幕回复通道：TTS 播报 + webui 聊天日志）。"""
-        message = {
-            "type": "comment",
-            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-            "config": self.my_handle.config.get("filter"),
-            "username": data.get("username", ""),
-            "content": resp_content,
-        }
+        """积分回复（复用弹幕回复通道：TTS 播报 + webui 聊天日志）。
+
+        积分先行判定（十生产端接线，架构#2）：本方法产出 type=comment——若"积分"
+        勾选则改判助播路由；判定在积分产线内先行完成，type=comment 产出不得被
+        AI对话（llm_reply）语义误捕获。"""
+        from .assistant_router import assistant_route, assistant_copy_message
+        if assistant_route(self.my_handle.config, "integral"):
+            message = assistant_copy_message(
+                self.my_handle.config, resp_content,
+                username=data.get("username", ""), producer_type="integral",
+                hit_layer="direct")
+        else:
+            message = {
+                "type": "comment",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": data.get("username", ""),
+                "content": resp_content,
+            }
         self.my_handle.audio_synthesis_handle(message)
         self.my_handle.webui_show_chat_log_callback("积分", data, resp_content)
 

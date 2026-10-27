@@ -59,8 +59,17 @@ class TimerHandler:
 
                 if data_list != []:
                     # 遍历数据 进行webui数据回传 和 音频合成播放
+                    # 念弹幕路由（十生产端接线之念弹幕回放，D5：念原文直 TTS 不过
+                    # 知识库；勾选 read_comment→助播消息，未勾选原路）
+                    from .assistant_router import assistant_route, assistant_copy_message
+                    _rc_routed = assistant_route(self.my_handle.config, "read_comment")
                     for data in data_list:
-                        self.my_handle.audio_synthesis_handle(data)
+                        if _rc_routed:
+                            self.my_handle.audio_synthesis_handle(assistant_copy_message(
+                                self.my_handle.config, data.get("content", ""),
+                                producer_type="read_comment", hit_layer="direct"))
+                        else:
+                            self.my_handle.audio_synthesis_handle(data)
 
                 # 数据清空
                 self.my_handle.task_data[type]["data"] = []

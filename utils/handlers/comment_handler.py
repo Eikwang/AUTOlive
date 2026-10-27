@@ -141,15 +141,26 @@ class CommentHandler:
 
             logger.info(f"[{username}]触发复读：{content}")
 
-            # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
-            message = {
-                "type": type if type in ("reread", "reread_top_priority") else "reread",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": content
-            }
+            # 复读归拢"聊天"（D2 终门 uc1a，十生产端接线之复读）：聊天 勾选→助播
+            # 消息（外放绕行，不再抢占数字人——E-A4 声明的语义变更）；未勾选→原
+            # reread/reread_top_priority 消息（999 暂停-续播链路语义保持）。
+            from .assistant_router import assistant_route, assistant_copy_message
+            _reread_src = (data or {}).get("chat_source") or "comment"
+            if assistant_route(self.my_handle.config, "reread", _reread_src):
+                message = assistant_copy_message(
+                    self.my_handle.config, content,
+                    username=username, producer_type="reread", source=_reread_src,
+                    hit_layer="direct")
+            else:
+                # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
+                message = {
+                    "type": type if type in ("reread", "reread_top_priority") else "reread",
+                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                    "config": self.my_handle.config.get("filter"),
+                    "username": username,
+                    "content": content
+                }
 
             # 音频合成
             self.my_handle.audio_synthesis_handle(message)
@@ -277,6 +288,18 @@ class CommentHandler:
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
 
+            # 念弹幕缓冲生产者（断链修复——/autoplan main-20261026-214845 实施
+            # 发现：task_data["read_comment"] 缓冲此前零生产者，timer 回放永远
+            # 空转；恢复=过滤链完成的弹幕入缓冲，由 periodic_trigger 定时回放，
+            # 路由判定在 timer_handler 回放点）。仅弹幕源入缓冲（聊天页消息不入）；
+            # 上限 500 防未消费堆积。
+            if _chat_src == "comment" and self.my_handle.config.get("read_comment", "enable"):
+                _rc_buf = (self.my_handle.task_data.get("read_comment") or {}).get("data")
+                if _rc_buf is not None:
+                    _rc_buf.append({"type": "read_comment", "username": username, "content": content})
+                    if len(_rc_buf) > 500:
+                        del _rc_buf[:-500]
+
             # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Keyword 节点）=====
             # 过滤链完成后单次识别全部功能的关键词命中，产出 rec 分发到各模块——
             # 消费侧零重复匹配（原实现各模块独立扫描文本：积分词表/复读词表/
@@ -323,6 +346,39 @@ class CommentHandler:
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
                 if self.my_handle.key_mapping_handle("弹幕", data, hub_result=rec):
                     return
+
+            # 助播知识库前置匹配（E-A3 唯一插入点，D6 权威链序：助播KB→主KB→LLM；
+            # 十生产端接线之 comment LLM 回复的前置段）：
+            # 门控=来源勾选对应选项（comment 源→AI对话、chatbox 源→聊天；D6）；
+            # 命中音频→assistant_anchor_audio 直接播放；命中文本→assistant_anchor_text
+            # 助播 TTS；未命中→继续主 KB/LLM 原链（下方既有流程零改动）。
+            from .assistant_router import assistant_match_chain, ASSISTANT_AUDIO_TYPE
+            _hit_layer, _payload = assistant_match_chain(
+                self.my_handle.config, _chat_src, content, username=username)
+            if _hit_layer == "assistant_audio":
+                self.my_handle.audio_synthesis_handle({
+                    "type": ASSISTANT_AUDIO_TYPE,
+                    "tts_type": "none",
+                    "voice_path": _payload,
+                    "file_path": _payload,
+                    "content": content,
+                })
+                self.my_handle.webui_show_chat_log_callback(
+                    "聊天发送" if _is_chatbox else "弹幕信息",
+                    dict(data, chat_source=_chat_src),
+                    f"[助播音频] {_payload}", content_type="answer")
+                return
+            if _hit_layer == "assistant_text":
+                from .assistant_router import assistant_copy_message
+                self.my_handle.audio_synthesis_handle(assistant_copy_message(
+                    self.my_handle.config, _payload,
+                    username=username, producer_type="kb_chain", source=_chat_src,
+                    hit_layer="assistant_text"))
+                self.my_handle.webui_show_chat_log_callback(
+                    "聊天发送" if _is_chatbox else "弹幕信息",
+                    dict(data, chat_source=_chat_src),
+                    _payload, content_type="answer")
+                return
 
             # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
             # 中枢已判定命中；chat_type≠local_qa 或未启用时 rec.local_qa_answer 恒空，
@@ -408,15 +464,24 @@ class CommentHandler:
                 if self.my_handle.key_mapping_handle("回复", data):
                     pass
 
-            # 音频合成时需要用到的重要数据
-            message = {
-                "type": "comment",
-                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                "config": self.my_handle.config.get("filter"),
-                "username": username,
-                "content": resp_content
-            }
+            # 音频合成时需要用到的重要数据（十生产端接线之 comment LLM 回复：
+            # AI对话(comment 源)/聊天(chatbox 源) 勾选→助播消息；voice 源不经过
+            # 本链路（talk 走 chat_handler）；未勾选维持原路）
+            from .assistant_router import assistant_route, assistant_copy_message
+            if assistant_route(self.my_handle.config, "llm_reply", _chat_src):
+                message = assistant_copy_message(
+                    self.my_handle.config, resp_content,
+                    username=username, producer_type="llm_reply", source=_chat_src,
+                    hit_layer="llm")
+            else:
+                message = {
+                    "type": "comment",
+                    "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                    "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                    "config": self.my_handle.config.get("filter"),
+                    "username": username,
+                    "content": resp_content
+                }
 
             self.my_handle.audio_synthesis_handle(message)
 

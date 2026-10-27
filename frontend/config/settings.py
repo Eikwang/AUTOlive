@@ -248,6 +248,7 @@ _WEB_CAPTIONS_PRINTER_DEFAULTS: Dict[str, Any] = {
     "subtitle_font_size": 24,
     "subtitle_font_weight": "bold",
     "subtitle_webkit_text_stroke": 0,
+    "subtitle_stroke_color": "#000000",
     "subtitle_bg_width": 400,
     "subtitle_bg_height": 60,
 }
@@ -368,6 +369,48 @@ def _ensure_defaults(config: "Settings") -> None:
             if _k not in _rr:
                 _rr[_k] = _v
                 changed = True
+
+    # 助播触发类型 v2 迁移（/autoplan main-20261026-214845 D3/E-E6，终门 uc1a）：
+    # comment→ai_chat（改名）；reread/reread_top_priority→chat（归拢"聊天"，
+    # 勾过复读的用户自动获得聊天勾选，功能不丢失）；local_qa_audio/
+    # image_recognition_schedule/key_mapping→删除（用户原文"移除"）。
+    # 幂等：含 v2 值或无旧键时零改动；未配置 type 的用户=空集（行为零变化，
+    # 不注入默认勾选）。助播文本匹配格式 json→text 一并收敛（F6 实证同一
+    # 管道行加载器，行为等价）。
+    _aa = cfg.get("assistant_anchor") if isinstance(cfg.get("assistant_anchor"), dict) else None
+    if isinstance(_aa, dict) and isinstance(_aa.get("type"), list):
+        _old_type_set = set(str(v) for v in _aa["type"])
+        if _old_type_set & {"comment", "reread", "reread_top_priority",
+                            "local_qa_audio", "image_recognition_schedule", "key_mapping"}:
+            _new_type = []
+            for _t in _aa["type"]:
+                _ts = str(_t)
+                if _ts == "comment":
+                    _mapped = "ai_chat"
+                elif _ts in ("reread", "reread_top_priority"):
+                    _mapped = "chat"
+                elif _ts in ("local_qa_audio", "image_recognition_schedule", "key_mapping"):
+                    continue  # 用户原文"移除"
+                else:
+                    _mapped = _ts
+                if _mapped not in _new_type:
+                    _new_type.append(_mapped)
+            _aa["type"] = _new_type
+            changed = True
+            try:
+                from utils.base import logger
+                logger.warning(
+                    "assistant_anchor.type 已迁移为 v2 枚举（comment→ai_chat、"
+                    "reread/reread_top_priority→chat、local_qa_audio/"
+                    "image_recognition_schedule/key_mapping 移除）——详见发布说明")
+            except Exception:
+                pass
+    if isinstance(_aa, dict):
+        _aa_text = _aa.get("local_qa") if isinstance(_aa.get("local_qa"), dict) else None
+        _aa_fmt = _aa_text.get("text") if isinstance(_aa_text, dict) else None
+        if isinstance(_aa_fmt, dict) and _aa_fmt.get("format") == "json":
+            _aa_fmt["format"] = "text"
+            changed = True
 
     # UI-16 二轮验收（任务 10）：答谢三通道（entrance/gift/follow）周期同样
     # 合并为单键 periodic_time（max 回填+旧键退役；local_qa 不动）
