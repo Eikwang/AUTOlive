@@ -216,6 +216,10 @@ data/data.db-shm
 data/data.db-wal
 tests/_tmp_test_*.wav
 
+# EDTalk 运行时本机数据（端口/解释器记忆、素材元数据迁移记录——与 config.json 同性质，不入库）
+data/edtalk_runtime.json
+data/edtalk_materials_meta.json
+
 webui2.py
 
 data/本地问答库-ikaros.json

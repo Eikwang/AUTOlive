@@ -80,8 +80,14 @@ class EnqueueFile:
 
 @dataclass
 class RestoreDefault:
-    """回默认轮播（条件1 exit 完成；rotate 原序 / random 每次打乱）。"""
+    """回默认轮播（条件1 exit 完成；rotate 原序 / random 每次打乱）。
+
+    loop（2026-10-27 动作编排完善批次）：默认画面一律「立刻切换」（align=True
+    由执行点保证）；循环方式 forward=轮播/随机顺序循环、pingpong=单段首尾循环
+    （用户裁决：默认画面无需设切换方式，减少系统逻辑复杂性）。
+    """
     sequence: list
+    loop: str = "forward"
 
 
 @dataclass
@@ -97,23 +103,34 @@ def _normalize_text(text: str) -> str:
 
 
 def select_tier(rule: RuleCfg, count: int) -> Optional[object]:
-    """情绪档选择：最后一个 max_count >= count 的档；超档用最高档（CP-4）。"""
+    """触发档选择（2026-10-27 用户裁决：计次进档「从第 N 次起」下界语义）。
+
+    升序遍历 min_count，取 count >= min_count 的最高档；未达任何档 → None
+    （基础三步）。示例：档位一 1次/档位二 4次/档位三 7次 → 第1~3次档一、
+    第4~6次档二、第7次起档三。
+    """
     selected = None
-    for tier in rule.tiers:
-        if count <= tier.max_count:
+    for tier in rule.tiers:  # min_count 升序（load 校验保证）
+        if count >= tier.min_count:
             selected = tier
+        else:
             break
-        selected = tier  # count 超过当前档上界 → 继续用更高档（末档兜底）
     return selected
 
 
 def build_steps(rule: RuleCfg, count: int, seq_counter: int) -> List[dict]:
-    """按当前计数档位物化三步（segment_overrides 可覆盖任一步，CL-4/WP-10）。"""
+    """按当前计数档位物化三步（segment_overrides 可覆盖任一步，CL-4/WP-10）。
+
+    2026-10-27 动作编排完善批次：enter/exit 为可选过渡片段——解析为 None 的步
+    不物化（main→exit 直连或 enter→main 直连）；主线必选恒在。
+    """
     tier = select_tier(rule, count)
     overrides = tier.segment_overrides if tier else {}
     steps = []
     for name in ("enter", "main", "exit"):
         base: StepCfg = rule.name_step(name)
+        if base is None:
+            continue  # 可选过渡片段缺省=跳过该步
         steps.append({
             "step_id": f"{rule.rule_id}:{name}#{seq_counter}",
             "name": name,
@@ -144,6 +161,7 @@ class ChoreoEngine:
         self.enabled_rules: List[RuleCfg] = list(cfg.rules)
         self.counters: dict = {}          # rule_id -> consecutive_count
         self.key_last: dict = {}          # rule_id -> 上次触发尝试时刻（节流窗口）
+        self.pending_queue = None         # queue 模式待播单槽（2026-10-27 批次：排序联动）
         self.degrade_total = 0
         self._seq_counter = 0
         self._restore_attempts = 0
@@ -206,6 +224,19 @@ class ChoreoEngine:
                 return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands,
                         "reason": "requeued", "retry_after_s": None}
             # 条件3（他键触发，beyond hold）
+            # queue 模式（2026-10-27 批次：优先级排序联动）：低权重触发不打断
+            # 当前序列——入单槽待播队列（后到覆盖先到+日志），当前序列播完
+            # （exit 完成）后自动出队重放。消息/音频侧照常入链（Sort 排序消费），
+            # 本排队仅作用于画面序列。
+            if rule.interrupt == "queue":
+                self.pending_queue = {
+                    "trigger_type": trigger_type, "match_value": match_value,
+                    "data": dict(data or {}), "rule_id": rule.rule_id}
+                commands.append(LogCmd(
+                    "info", f"[编排] 规则 {rule.rule_id} 排队等待（interrupt=queue，"
+                    f"当前序列 {seq['rule_id']} 播完后执行）"))
+                return {"accepted": False, "takeover": False, "rule": rule,
+                        "commands": commands, "reason": "queued", "retry_after_s": None}
             result = self._interrupt_sequence(rule, data, now, commands)
             result["reason"] = "interrupted"
             result["retry_after_s"] = None
@@ -508,21 +539,34 @@ class ChoreoEngine:
             commands.append(LogCmd("info", f"[编排] {seq['rule_id']} 重排执行（enter→main→exit）"))
             commands.extend(self._start_current_step(now))
             return commands
-        # 条件1：exit 完成 → 回默认轮播（rotate 原序 / random 每次打乱 / single 池首）
+        # 条件1：exit 完成 → 回默认轮播（rotate 原序 / random 每次打乱 / single 单段 pingpong）
         self.state = "default"
         self._restore_attempts = 0
-        pool = self._default_pool()
+        pool, loop = self._default_pool()
         mood = seq.get("tier_mood") or "base"
         commands.append(LogCmd("info",
                                f"[编排] {seq['rule_id']} 序列播完（mood={mood}），回默认轮播"
                                f"（计数保留 {self.counters.get(seq['rule_id'], 0)}）"))
         if pool:
-            commands.append(RestoreDefault(pool))
+            commands.append(RestoreDefault(pool, loop=loop))
         else:
             commands.append(LogCmd("warning",
                                    "[编排] 默认段池为空，无法恢复轮播；problem=default_segments 校验后为空；"
                                    "cause=段名不在 EDTalk available_segments；fix=修正 default_segments"))
         self.seq = None
+        # queue 模式出队（2026-10-27 批次）：当前序列播完 → 待播触发自动重放
+        # （state 已回 default，走正常 _start_sequence；出队失败不回滚——日志留痕）
+        pending = self.pending_queue
+        self.pending_queue = None
+        if pending:
+            commands.append(LogCmd("info",
+                                   f"[编排] 出队执行排队的规则 {pending['rule_id']}"))
+            try:
+                replay = self.decide_trigger(pending["trigger_type"],
+                                             pending["match_value"], pending["data"])
+                commands.extend(replay.get("commands") or [])
+            except Exception as e:
+                logger.error(f"[编排] 出队重放异常（丢弃）：{type(e).__name__}: {e}")
         return commands
 
     def on_restore_result(self, ok: bool, now: float) -> List:
@@ -541,10 +585,10 @@ class ChoreoEngine:
             self._restore_attempts = 0
             return []
         if self._restore_attempts <= RESTORE_RETRY_MAX:
-            pool = self._default_pool()
+            pool, loop = self._default_pool()
             if pool:
                 logger.warning(f"[编排] 恢复默认失败，第 {self._restore_attempts}/{RESTORE_RETRY_MAX} 次重试")
-                return [RestoreDefault(pool)]
+                return [RestoreDefault(pool, loop=loop)]
         logger.error(
             "[编排] 恢复默认轮播重试耗尽：problem=画面停留在序列末段；"
             "cause=EDTalk /segment/schedule 连续失败；fix=检查 EDTalk 服务后手动切回或重启编排"
@@ -558,15 +602,24 @@ class ChoreoEngine:
         return []
 
     def _default_pool(self) -> list:
-        """按 default_mode 物化恢复序列（C2-3：random=每次打乱后下发 /segment/schedule）。"""
+        """按 default_mode 物化恢复序列（C2-3：random=每次打乱后下发 /segment/schedule）。
+
+        Returns:
+            (pool, loop)：rotate/random→forward 顺序循环；single→[循环段] +
+            pingpong 首尾循环（用户裁决 2026-10-27：单段=默认循环列表第一个
+            片段，可选指定循环段；一律立刻切换）。
+        """
         pool = list(self.cfg.default_segments)
         if not pool:
-            return []
+            return [], "forward"
         if self.cfg.default_mode == "single":
-            return [pool[0]]
+            loop_seg = self.cfg.default_single_segment or pool[0]
+            if loop_seg not in pool:
+                loop_seg = pool[0]
+            return [loop_seg], "pingpong"
         if self.cfg.default_mode == "random":
             random.shuffle(pool)
-        return pool  # rotate：原序（上游 SegmentScheduler 顺序循环承载）
+        return pool, "forward"  # rotate：原序（上游 SegmentScheduler 顺序循环承载）
 
     def next_deadline(self, now: float) -> Optional[float]:
         """worker 等待队列的超时基准（None=无近期 deadline）。"""
@@ -631,8 +684,9 @@ class ChoreoEngine:
         """DEFAULT 初始化指令（就绪后调用；enable=false 或池空=零动作，权属线 CP-5）。"""
         if not self.cfg.enable or not self.cfg.default_segments:
             return []
-        return [LogCmd("info", f"[编排] DEFAULT 初始化：mode={self.cfg.default_mode}，池={self.cfg.default_segments}"),
-                RestoreDefault(self._default_pool())]
+        pool, loop = self._default_pool()
+        return [LogCmd("info", f"[编排] DEFAULT 初始化：mode={self.cfg.default_mode}，池={pool}，loop={loop}"),
+                RestoreDefault(pool, loop=loop)]
 
     def get_state(self) -> dict:
         """状态快照（P2 状态条/测试断言用：当前模式/活动序列/各键计数/降级计数）。
@@ -666,6 +720,7 @@ class ActionChoreographer:
     def __init__(self, config, edtalk_client, audio_enqueue: Callable,
                  thanks_generate: Callable, clock: Callable[[], float] = time.monotonic):
         self.cfg: ChoreographyConfig = load_choreography_config(config)
+        self._config = config                    # 原始配置引用（avatar 联动读初值用）
         self.edtalk_client = edtalk_client
         self._audio_enqueue = audio_enqueue      # my_handle.audio_synthesis_handle
         self._thanks_generate = thanks_generate  # event_handler._thanks_generate
@@ -676,6 +731,8 @@ class ActionChoreographer:
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._lip_mode_cache = None  # T6/R-eng5：lip 联动去抖缓存（None=未知不下发判断失效）
+        self._repair_mode_cache = None  # 2026-10-27 批次：面部修复/眼神修正联动去抖
+        self._gaze_mode_cache = None
         self._muted_audio_pending: list = []  # R-eng10：静默窗口内被延迟推送的音频摘要（观测）
         # enable=false 或 EDTalk 客户端缺失：不启动 worker（订阅点短路直通，
         # 关闭=全链零行为变化——义务"总开关"）。_ensure_worker 幂等（GAP-1：
@@ -916,13 +973,15 @@ class ActionChoreographer:
                 step.duration_s = meta.get("duration_s")
                 if rule.trigger_type == "song" and step.name == "main":
                     step.hold_for_song = True
+
+            def _fmt(step: Optional[StepCfg]) -> str:
+                if step is None:
+                    return "（未设）"
+                return (f"{step.segment}({step.duration_s}s/lip={step.lip_flag}"
+                        f"{'/hold_for_song' if step.hold_for_song else ''})")
             logger.info(
                 f"[编排] new 规则 {rule.rule_id} 素材属性已解析："
-                f"enter={rule.enter.segment}({rule.enter.duration_s}s/"
-                f"lip={rule.enter.lip_flag}) main={rule.main.segment}"
-                f"({rule.main.duration_s}s/lip={rule.main.lip_flag}"
-                f"{'/hold_for_song' if rule.main.hold_for_song else ''}) "
-                f"exit={rule.exit.segment}({rule.exit.duration_s}s/lip={rule.exit.lip_flag})")
+                f"enter={_fmt(rule.enter)} main={_fmt(rule.main)} exit={_fmt(rule.exit)}")
 
     def apply_config(self, cfg_node: dict) -> dict:
         """运行时热换装（P2 管理页「应用」按钮；写者=orchestration.api 持久化）。
@@ -1110,6 +1169,53 @@ class ActionChoreographer:
                 else:
                     self._lip_linkage_fail("on", step_id, retry, retried=True)
         logger.debug(f"[编排] lip 联动：{want}（step={step_id}）")
+        self._apply_avatar_aux_flags(need_on, step_id)
+
+    # ---------- 面部修复/眼神修正常开关联动（2026-10-27 动作编排完善批次） ----------
+
+    def _avatar_config_mode(self, key: str) -> str:
+        """webui 数字人配置初值（edtalk_realtime.face_repair/gaze_correction，
+        值域 on|adaptive|off；异常降级 off=不主动开启）。"""
+        try:
+            get = getattr(self._config, "get", None)
+            if get is None and isinstance(self._config, dict):
+                node = self._config.get("edtalk_realtime") or {}
+                return str(node.get(key, "off") or "off")
+            v = get("edtalk_realtime", key)
+            return str(v or "off")
+        except Exception:
+            return "off"
+
+    def _apply_avatar_aux_flags(self, need_on: bool, step_id: str) -> None:
+        """面部修复/眼神修正热开关（用户裁决 2026-10-27）。
+
+        不需口型的素材（跳舞/画外音直通）→ 口型推理、视线修正、面部修复全关，
+        相关音频作画外音由系统播放流程消费；需口型素材（唱歌/带货/主线口型）
+        → 恢复 webui 配置初值。409（启动未构造 capable=false）= 降级 debug，
+        性能层不阻塞切换、不告警（功能未装配属常态非故障）。
+        """
+        for kind, client_fn, cache_attr in (
+                ("repair", "set_repair_params", "_repair_mode_cache"),
+                ("gaze", "set_gaze_params", "_gaze_mode_cache")):
+            want = self._avatar_config_mode(
+                "face_repair" if kind == "repair" else "gaze_correction") \
+                if need_on else "off"
+            fn = getattr(self.edtalk_client, client_fn, None)
+            if fn is None:
+                continue
+            if getattr(self, cache_attr, None) == want:
+                continue  # 去抖：值不变不下发
+            try:
+                result = fn(want) or {}
+            except Exception as e:
+                logger.debug(f"[编排] {kind} 联动异常（step={step_id}）：{e}")
+                continue
+            if result.get("ok"):
+                setattr(self, cache_attr, want)
+                logger.debug(f"[编排] {kind} 联动：{want}（step={step_id}）")
+            else:
+                # 409=启动未构造（常态）；其它失败=debug（性能层，方向 off 无害）
+                logger.debug(f"[编排] {kind} 联动失败（step={step_id} want={want}）：{result}")
 
     def _lip_linkage_fail(self, want: str, step_id: str, result: dict,
                           retried: bool) -> None:
@@ -1188,7 +1294,8 @@ class ActionChoreographer:
                     # 关联键=(type,content)：song 直通 data_json 的 content=路径（synthesis_manager :153 同构）
                     self._events.put(("audio_enqueued", cmd.step_id, "song", cmd.audio_path, ok))
                 elif isinstance(cmd, RestoreDefault):
-                    result = self.edtalk_client.schedule(cmd.sequence, align=True)
+                    result = self.edtalk_client.schedule(cmd.sequence, align=True,
+                                                         loop=cmd.loop)
                     ok = bool(result.get("ok", True)) if isinstance(result, dict) else False
                     self._events.put(("restore_result", ok))
             except Exception as e:

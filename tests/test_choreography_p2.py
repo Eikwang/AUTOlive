@@ -119,7 +119,7 @@ class TestApplyConfig:
 
     def test_mood_in_state(self):
         # P2 状态条 mood 显示（义务：状态条=当前模式/活动序列/计数/mood/降级）
-        tiers = [{"max_count": 6, "mood": "angry"}]
+        tiers = [{"min_count": 1, "mood": "angry"}]  # 从第 1 次起=首次触发即进档
         node = _cfg_node(rules=[make_rule(emotion_tiers=tiers)])
         ch, _ = _facade(node=node)
         ch.engine.on_edtalk_ready(AVAILABLE)

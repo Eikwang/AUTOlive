@@ -306,17 +306,63 @@ class EDTalkClient:
             logger.error(f"EDTalk 口型门控失败（降级跳过）：{e}")
             return {"ok": False, "error": str(e)}
 
-    def schedule(self, sequence: list, align: bool = True) -> dict:
+    def set_repair_params(self, mode: str) -> dict:
+        """面部修复热开关（2026-10-27 动作编排完善批次：编排动态设定）。
+
+        mode ∈ on|adaptive|off；409=启动未构造（repair_capable=false）。
+        失败降级 {"ok": False}（联动为性能层，不阻塞切换）。
+        """
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/repair/params",
+                json={"mode": mode},
+                headers=self._auth_headers(),
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                return {"ok": True, **(resp.json() or {})}
+            return {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.error(f"EDTalk 面部修复门控失败（降级跳过）：{e}")
+            return {"ok": False, "error": str(e)}
+
+    def set_gaze_params(self, mode: str) -> dict:
+        """眼神修正热开关（2026-10-27 动作编排完善批次：编排动态设定）。
+
+        mode ∈ on|adaptive|off；on→off 恢复原生眼（mask epoch 联动）；
+        409=启动未构造（gaze_capable=false）。失败降级 {"ok": False}。
+        """
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/gaze/params",
+                json={"mode": mode},
+                headers=self._auth_headers(),
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                return {"ok": True, **(resp.json() or {})}
+            return {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.error(f"EDTalk 眼神修正门控失败（降级跳过）：{e}")
+            return {"ok": False, "error": str(e)}
+
+    def schedule(self, sequence: list, align: bool = True,
+                 loop: str = "forward") -> dict:
         """下发段播放序列（/segment/schedule）。
 
         align=True 立即对齐 sequence[0]（编排回默认用）；False 仅装表下一边界生效。
+        loop（2026-10-27 动作编排完善批次）：forward=顺序循环 |
+        pingpong=首尾往返（默认画面单段模式）。
         失败降级返回 {"ok": False}，不抛异常（调用方负责重试）。
         """
         try:
             import requests
             resp = requests.post(
                 f"{self.api_ip_port}/segment/schedule",
-                json={"sequence": list(sequence), "align": bool(align)},
+                json={"sequence": list(sequence), "align": bool(align),
+                      "loop": loop if loop in ("forward", "pingpong") else "forward"},
                 headers=self._auth_headers(),
                 timeout=5,
             )

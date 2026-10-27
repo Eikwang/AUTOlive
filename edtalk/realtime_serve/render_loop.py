@@ -31,13 +31,18 @@ class SegmentScheduler:
     threads.
     """
 
-    def __init__(self, sequence: list, mode: str = 'list'):
+    def __init__(self, sequence: list, mode: str = 'list', loop: str = 'forward'):
         if not sequence:
             raise ValueError("SegmentScheduler requires a non-empty sequence")
         self._lock = threading.Lock()
         self._sequence = list(sequence)
         self.mode = mode  # 'list' | 'auto'
+        # 循环方式（2026-10-27 动作编排完善批次）：'forward'=顺序循环（首→尾→首）；
+        # 'pingpong'=首尾往返（…2→1→0→1→2…，端点不重复播放）——单段默认画面
+        # "pingpong 首尾循环"语义由编排器下发（单元素序列 pingpong 退化为顺序循环）。
+        self.loop = loop if loop in ('forward', 'pingpong') else 'forward'
         self._index = 0
+        self._dir = 1  # pingpong 游走方向（+1 正放 / -1 回放游标）
         self.paused = False  # True while the current segment is outside the sequence
 
     @property
@@ -53,7 +58,15 @@ class SegmentScheduler:
 
     def advance(self) -> str:
         with self._lock:
-            self._index = (self._index + 1) % len(self._sequence)
+            if self.loop == 'pingpong' and len(self._sequence) > 1:
+                nxt = self._index + self._dir
+                if nxt >= len(self._sequence):
+                    nxt, self._dir = len(self._sequence) - 2, -1
+                elif nxt < 0:
+                    nxt, self._dir = 1, 1
+                self._index = nxt
+            else:
+                self._index = (self._index + 1) % len(self._sequence)
             self.paused = False
             return self._sequence[self._index]
 
@@ -290,7 +303,7 @@ class RenderLoop:
             return None
 
     def set_segment_sequence(self, sequence: list, mode: str = 'list',
-                             align: bool = True) -> None:
+                             align: bool = True, loop: str = 'forward') -> None:
         """Install/replace a segment playback schedule (list/auto mode).
 
         Scheduler replacement happens ENTIRELY under _segment_lock (M10/E6:
@@ -304,7 +317,7 @@ class RenderLoop:
         supersedes pending intent.
         """
         with self._segment_lock:
-            self._scheduler = SegmentScheduler(sequence, mode=mode)
+            self._scheduler = SegmentScheduler(sequence, mode=mode, loop=loop)
             self._pending_switch = None
             cd = self._character_data
             if align and cd is not None and sequence[0] != cd.current_segment:

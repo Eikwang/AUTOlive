@@ -1,3 +1,15 @@
+## Deferred Items from /goal (2026-10-27) — 动作编排完善批次（用户四部分需求全量落地，图 v2.6）
+
+1. **Sort 侧显式消费回执 API**（P3, M）— v2.6 回传子图（Frame→lineout→|回传|Sort）代码侧现状=编排队列出队重放（choreographer.py pending_queue）+音频队列消费即出清（playback_manager pop/999 释放）；场景2（点歌排队等动态文案播完）行为已闭环。Sort 侧若需显式回执（排序模块维护已消费集/去重窗），需在 playback_manager 完成点加回执接口+Sort 侧消费。依赖：实播中出现队列状态失真再评估。
+2. **编排 queue 单槽→多槽队列**（P3, S）— 排队模式现为单槽（后到覆盖先到，最新触发优先）；多规则密集触发且都需保留时升级为 FIFO 多槽。依赖：实播反馈。
+3. **avatar 联动 adaptive 值域 UI 归一**（P3, S）— webui 数字人页面部修复/眼神修正当前只有开/关两档，编排侧 _apply_avatar_aux_flags 已透传 on|adaptive|off 三值；webui 补 adaptive 档后联动即全量生效。依赖：数字人页触碰。
+
+## Deferred Items from /autoplan (2026-10-27) — 流程图终版（v2.5）架构对齐批次（用户定稿手改图，代码审查收口）
+
+1. **图注记 .py 锚点体系失效**（P3, S）— 用户 v2.5 终版移除全部图内 .py:行号 锚点注记，TestGraphAnchors 转空集空转（代码符号追责能力失效）；仅图头版本行+纪律行随批次重落盘，编排拓扑改由 TestChoreoTopology 结构断言承担。若需恢复锚点追责，须用户确认后随下一次链路批次在终图重新登记。依赖：用户图注意愿。
+2. **闲时真实弹幕发送回执观测**（P3, S）— send_danmu_idle 回执仅 _on_send_done 记日志（danmaku_consumer.py），与 push_full 失败的 alarm_notifier webhook 告警不对等（同 native Eng F6b 同型问题）：直播中闲时发送静默失败无告警。实施：复用 alarm_notifier 既有开关加闲时发送项。依赖：无。
+3. **助播本地音频/伴奏节点未入 v2.5 终图**（P3, S）— v2.4 曾有 Backing（R6 双轨伴奏）与助播本地音频节点，用户终版以极简原则裁撤；代码功能保留不受影响。若后续读者需理解伴奏链，以 flowchart-detail.md 历史归档为准。依赖：用户增补意愿。
+
 ## Deferred Items from /autoplan (2026-10-26/27) — 助播并行消费线完整化批次（main-20261026-214845，终门 rec 全推荐批准）
 
 1. **助播/数字人播放避让机制**（P3, M）— native CEO 2.1/D9：助播外放与数字人播报同刻重叠=接受的设计属性，本批不实现；若实播重叠投诉成立（D9 验收项）再评估间隙探测/延迟插入。依赖：D9 实播验收结果。
@@ -6,6 +18,7 @@
 4. **RapidFuzz 备选**（P3, S）— native CEO 4.1：音频侧手搓包含匹配若实现超出预期，RapidFuzz partial_ratio 为已论证备选（否决理由=规模论证非供应链）。依赖：E-T2 实施反馈。
 5. **助播独立合成队列**（P3, L）— 触发条件=实播 D9 门槛成立（≥20 条/分钟时助播合成排队 >10s）；届时评估独立通道。归属=下一音频相关批次。依赖：D9 实测。
 6. **"两周后回看路由计数"复查动作**（P3, S）— native CEO 3.3：助播上线两周后回看 D11 观测面板计数（每类型播报条数/KB 命中率），验证产品级成功度量；若多数 checkbox 回到未勾选态=特性弃用预警。依赖：本批上线+两周。
+
 # TODOS.md
 
 ## Deferred Items from /autoplan (2026-10-26) — 主干流程图（v2 调整版）对齐批次（main-20261026-153911，终门 rec 批准实施）

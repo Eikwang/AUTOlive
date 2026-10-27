@@ -1222,6 +1222,17 @@ class AutoliveApp:
                 logger.error(f"get_sys_info处理失败: {e}")
                 return {"code": -1, "message": f"get_sys_info处理失败！{e}"}
 
+        # 数字人素材管理控制面（2026-10-27 动作编排完善批次：素材管理&创建
+        # 迁本进程独立线程——进 webui 即可添加/删除/改类型素材，无需启动主
+        # 系统；config 传原始 dict（materials 侧按 dict.get 消费）。
+        # 原 main 进程挂载已退役，写者矩阵=本进程单写者，防双写任务状态分裂）
+        try:
+            from utils.edtalk_realtime.materials import register_material_routes
+            register_material_routes(app, self.config._config)
+            logger.info("素材管理路由已挂载至 webui（/edtalk_materials/*）")
+        except Exception:
+            logger.error("素材管理路由挂载失败（动作编排页素材区不可用）", exc_info=True)
+
     def _check_expiration(self):
         """检查账号过期（与原文件 webui-bak.py L284-333 一致）"""
         try:

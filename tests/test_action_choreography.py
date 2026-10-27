@@ -22,7 +22,8 @@ from utils.orchestration.choreographer import (ActionChoreographer,
                                                ChoreoEngine, EnqueueFile,
                                                LogCmd, RestoreDefault,
                                                SwitchSegment, TtsThanks,
-                                               _normalize_text)
+                                               _DottedNode, _normalize_text,
+                                               build_steps, select_tier)
 from utils.orchestration.config_model import (load_choreography_config,
                                               validate_rule_segments)
 
@@ -150,6 +151,39 @@ class TestConfigModel:
                                      "exit": {"segment": "C", "duration_s": 1}})]
         assert load_choreography_config(make_cfg(rules=rules)).rules == []
 
+    def test_optional_steps_skipped_when_absent(self):
+        """可选过渡片段（2026-10-27 动作编排完善批次）：enter/exit 未配置=合法跳过，
+        物化仅主线；配置了但非法仍拒整规则（fail-fast 防静默降级）。"""
+        # 未配置 enter/exit → 规则生效，物化仅 main
+        rules = [make_rule(sequence={"main": {"segment": "B", "duration_s": 5}})]
+        cfg = load_choreography_config(make_cfg(rules=rules))
+        assert len(cfg.rules) == 1 and cfg.rules[0].enter is None and cfg.rules[0].exit is None
+        steps = build_steps(cfg.rules[0], count=1, seq_counter=0)
+        assert [s["name"] for s in steps] == ["main"]
+
+    def test_optional_step_invalid_still_rejects(self):
+        """enter 配置了但 switch_at 非法 → 整规则拒绝（不允许静默丢步）。"""
+        rules = [make_rule(sequence={"enter": {"segment": "A", "switch_at": "fade", "duration_s": 1},
+                                     "main": {"segment": "B", "duration_s": 5}})]
+        assert load_choreography_config(make_cfg(rules=rules)).rules == []
+
+    def test_main_required_rejects(self):
+        """主线必选：main 未配置 → 规则拒绝。"""
+        rules = [make_rule(sequence={"enter": {"segment": "A", "duration_s": 1},
+                                     "exit": {"segment": "C", "duration_s": 1}})]
+        assert load_choreography_config(make_cfg(rules=rules)).rules == []
+
+    def test_enter_exit_switch_at_forced_segment_end(self):
+        """过渡片段不设切换方式：enter/exit 配置 immediate → 忽略并强制 segment_end。"""
+        rules = [make_rule(sequence={"enter": {"segment": "A", "duration_s": 1, "switch_at": "immediate"},
+                                     "main": {"segment": "B", "duration_s": 5},
+                                     "exit": {"segment": "C", "duration_s": 1, "switch_at": "immediate"}})]
+        cfg = load_choreography_config(make_cfg(rules=rules))
+        assert len(cfg.rules) == 1
+        assert cfg.rules[0].enter.switch_at == "segment_end"
+        assert cfg.rules[0].exit.switch_at == "segment_end"
+        assert cfg.rules[0].main.switch_at == "segment_end"
+
     def test_reject_bad_audio_mode(self):
         rules = [make_rule(sequence={"enter": {"segment": "A", "duration_s": 1},
                                      "main": {"segment": "B", "duration_s": 5,
@@ -175,7 +209,7 @@ class TestConfigModel:
         assert load_choreography_config(make_cfg(rules=[make_rule(interrupt="aggressive")])).rules == []
 
     def test_reject_tiers_not_ascending(self):
-        tiers = [{"max_count": 6, "mood": "angry"}, {"max_count": 3, "mood": "happy"}]
+        tiers = [{"min_count": 6, "mood": "angry"}, {"min_count": 3, "mood": "happy"}]
         assert load_choreography_config(make_cfg(rules=[make_rule(emotion_tiers=tiers)])).rules == []
 
     def test_min_retrigger_invalid_falls_back(self):
@@ -405,8 +439,20 @@ class TestCompletionPredicate:
 
     def test_random_mode_pool_valid(self):
         h = EngineHarness(default_mode="random")
-        p1, p2 = h.engine._default_pool(), h.engine._default_pool()
+        p1, l1 = h.engine._default_pool()
+        p2, l2 = h.engine._default_pool()
         assert sorted(p1) == ["1", "55"] and sorted(p2) == ["1", "55"]
+        assert l1 == "forward" and l2 == "forward"  # random=顺序循环（每次打乱）
+
+    def test_single_mode_pingpong_pool(self):
+        """单段模式（2026-10-27 动作编排完善批次）：循环段=指定片段（空=列表首），
+        loop=pingpong 首尾循环。"""
+        h = EngineHarness(default_mode="single")
+        pool, loop = h.engine._default_pool()
+        assert pool == ["1"] and loop == "pingpong"
+        h2 = EngineHarness(default_mode="single", default_single_segment="55")
+        pool2, loop2 = h2.engine._default_pool()
+        assert pool2 == ["55"] and loop2 == "pingpong"
 
     def test_restore_retry_then_exhaust(self):
         h = EngineHarness()
@@ -418,13 +464,18 @@ class TestCompletionPredicate:
         assert h.engine._restore_attempts == 0
 
     def test_tier_selection_and_overflow(self):
-        tiers = [{"max_count": 3, "mood": "happy"},
-                 {"max_count": 6, "mood": "angry", "segment_overrides": {"enter": "A_生气入场"}},
-                 {"max_count": 9, "mood": "breakdown", "segment_overrides": {"main": "A_崩溃跳舞"}}]
+        """计次进档（2026-10-27 用户裁决：「从第 N 次起」下界语义）。
+
+        档位一 3 次/档位二 6 次/档位三 9 次 → 第 1~2 次基础档、第 3~5 次档一
+        （happy 无覆盖=基础素材）、第 6~8 次档二、第 9 次起档三。
+        """
+        tiers = [{"min_count": 3, "mood": "happy"},
+                 {"min_count": 6, "mood": "angry", "segment_overrides": {"enter": "A_生气入场"}},
+                 {"min_count": 9, "mood": "breakdown", "segment_overrides": {"main": "A_崩溃跳舞"}}]
         h = EngineHarness(rules=[make_rule(emotion_tiers=tiers)])
         h.trigger_gift()
-        assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 第1次：基础素材（happy 无覆盖）
-        # 跨档触发：置计数 5 → 本次第 6 次 → angry 档
+        assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 第1次：未达档一（3）→ 基础素材
+        # 跨档触发：置计数 5 → 本次第 6 次 → angry 档（从第 6 次起）
         # （key_last 置 now-1：绕过节流且不触发 GAP-2 衰减——该测试测档位选择，
         #   窗口衰减行为由 tests/test_choreography_completion.py::TestCounterDecay 专测）
         h.engine.state = "default"
@@ -433,7 +484,7 @@ class TestCompletionPredicate:
         h.engine.counters["girl_A"] = 5
         h.engine.decide_trigger("gift", "小心心", gift_data())
         assert h.engine.seq["steps"][0]["segment"] == "A_生气入场"
-        # 超档（count=99 → 第 100 次）：末档兜底（CP-4）
+        # 超档（count=99 → 第 100 次）：末档兜底（从第 9 次起恒档三）
         h.engine.state = "default"
         h.engine.seq = None
         h.engine.key_last["girl_A"] = h.now - 10
@@ -442,17 +493,82 @@ class TestCompletionPredicate:
         assert h.engine.seq["steps"][1]["segment"] == "A_崩溃跳舞"
         assert h.engine.seq["tier_mood"] == "breakdown"
 
+    def test_tier_user_example_bounds(self):
+        """用户示例（2026-10-27）：档位 1次/4次/7次 → 第 1~3 次档一、第 4~6 次
+        档二、第 7 次起档三（select_tier 纯函数直测）。"""
+        rule = make_rule(emotion_tiers=[{"min_count": 1, "mood": "t1"},
+                                        {"min_count": 4, "mood": "t2"},
+                                        {"min_count": 7, "mood": "t3"}])
+        cfg = load_choreography_config(make_cfg(rules=[rule]))
+        r = cfg.rules[0]
+        assert [select_tier(r, c).mood for c in (1, 2, 3)] == ["t1", "t1", "t1"]
+        assert [select_tier(r, c).mood for c in (4, 5, 6)] == ["t2", "t2", "t2"]
+        assert all(select_tier(r, c).mood == "t3" for c in (7, 8, 99))
+
+    def test_legacy_max_count_migration(self):
+        """存量 max_count（上界）load 迁移：首档 min=1、后续档 min=前档 max+1
+        （上界 [3,6] → 下界 [1,4]，覆盖次数语义等价）。"""
+        rule = make_rule(emotion_tiers=[{"max_count": 3, "mood": "happy"},
+                                        {"max_count": 6, "mood": "angry"}])
+        cfg = load_choreography_config(make_cfg(rules=[rule]))
+        t1, t2 = cfg.rules[0].tiers
+        assert (t1.min_count, t2.min_count) == (1, 4)
+
     def test_overrides_cover_main(self):
-        tiers = [{"max_count": 9, "mood": "breakdown", "segment_overrides": {"main": "A_崩溃跳舞"}}]
+        tiers = [{"min_count": 1, "mood": "breakdown", "segment_overrides": {"main": "A_崩溃跳舞"}}]
         h = EngineHarness(rules=[make_rule(emotion_tiers=tiers)])
         h.trigger_gift()
         assert h.engine.seq["steps"][1]["segment"] == "A_崩溃跳舞"
-        assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 未覆盖步不变
+        assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 未覆盖步不变（min_count=1 首次即进档）
 
     def test_no_tiers_default_single_tier(self):
         h = EngineHarness()  # emotion_tiers 缺省=单档恒用基础素材（WP-10）
         h.trigger_gift()
         assert h.engine.seq["tier_mood"] == ""
+
+    def test_queue_interrupt_defers_then_dequeues(self):
+        """queue 打断模式（2026-10-27 批次：优先级排序联动）——低权重触发排队：
+        序列执行中触发 queue 规则 → 不打断、入单槽；当前序列 exit 完成 → 自动
+        出队重放（decide_trigger 正常路径启动新序列）。"""
+        queued_rule = make_rule(rule_id="song_q", match="", trigger_type="song",
+                                sequence={"main": {"segment": "B_跳舞", "duration_s": 8}})
+        queued_rule["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), queued_rule])
+        h.trigger_gift()  # girl_A 序列执行中
+        res = h.engine.decide_trigger("song", "", {"user": "u1"})
+        assert res["reason"] == "queued" and res["accepted"] is False
+        assert h.engine.pending_queue["rule_id"] == "song_q"
+        assert h.engine.state == "sequence"  # 未打断
+        # 走完 enter→main→exit 完成链（deadline 完成路径）→ 回默认 + 出队重放
+        h.engine.seq["current_deadline"] = h.now - 1  # enter 超时降级推进
+        h.engine.on_tick(h.now)
+        h.engine.seq["current_deadline"] = h.now - 1  # main
+        h.engine.on_tick(h.now)
+        h.engine.seq["current_deadline"] = h.now - 1  # exit → 回默认+出队
+        h.engine.on_tick(h.now)
+        assert h.engine.state == "sequence"
+        assert h.engine.seq["rule_id"] == "song_q"
+        assert h.engine.pending_queue is None
+
+    def test_queue_interrupt_overwrite_single_slot(self):
+        """单槽待播队列：后到覆盖先到（最新触发优先）+ 原值丢弃。"""
+        q1 = make_rule(rule_id="q1", match="", trigger_type="song",
+                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        q1["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), q1])
+        h.trigger_gift()
+        h.engine.decide_trigger("song", "", {"user": "u1"})
+        h.engine.decide_trigger("song", "", {"user": "u2"})
+        assert h.engine.pending_queue["data"] == {"user": "u2"}
+
+    def test_queue_mode_default_state_starts_directly(self):
+        """DEFAULT 态 queue 规则照常直接启动（排队仅作用于序列执行中）。"""
+        q = make_rule(rule_id="q", match="", trigger_type="song",
+                      sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        q["interrupt"] = "queue"
+        h = EngineHarness(rules=[q])
+        res = h.engine.decide_trigger("song", "", {"user": "u1"})
+        assert res["reason"] == "accepted" and h.engine.seq["rule_id"] == "q"
 
 
 # ---------- 就绪校验与初始化 ----------
@@ -538,6 +654,40 @@ class TestChoreographerFacade:
         assert ch.on_gift(gift_data()) is False
         assert ch.engine.decide_trigger("gift", "小心心", gift_data())["accepted"] is False
         assert client.switch_segment.call_count == 0  # 关闭=全链零行为（总开关义务）
+
+    def test_avatar_aux_flags_three_way_linkage(self):
+        """数字人三路热开关联动（2026-10-27 动作编排完善批次，用户裁决）。
+
+        不需口型（画外音步）→ lip/repair/gaze 全 off；需口型（lip_flag=True
+        步）→ lip=on + repair/gaze 恢复 webui 配置初值。409（capable=false）
+        降级 debug 不阻塞。
+        """
+        ch, client = self._facade()
+        # 画外音方向（need_on=False）：三开关全 off
+        ch._apply_lip_linkage(False, "t1")
+        client.set_lip_params.assert_called_with("off")
+        client.set_repair_params.assert_called_with("off")
+        client.set_gaze_params.assert_called_with("off")
+        # 需口型方向（need_on=True）：lip=on，repair/gaze 恢复配置初值
+        client.set_lip_params.return_value = {"ok": True}
+        client.set_repair_params.return_value = {"ok": True}
+        client.set_gaze_params.return_value = {"ok": True}
+        client.get_status.return_value = {"lip_mode": "on"}
+        ch._config = _DottedNode({"edtalk_realtime": {"face_repair": "adaptive",
+                                                      "gaze_correction": "on"}})
+        ch._apply_lip_linkage(True, "t2")
+        client.set_lip_params.assert_called_with("on")
+        client.set_repair_params.assert_called_with("adaptive")
+        client.set_gaze_params.assert_called_with("on")
+        # 去抖：同值重复调用不再下发
+        calls_before = client.set_repair_params.call_count
+        ch._apply_lip_linkage(True, "t3")
+        assert client.set_repair_params.call_count == calls_before
+        # 409（未构造）降级：不抛异常、缓存不置位
+        client.set_gaze_params.return_value = {"ok": False, "status": 409}
+        ch._gaze_mode_cache = None
+        ch._apply_lip_linkage(False, "t4")  # off 方向 409 → debug，无异常
+        assert ch._gaze_mode_cache is None
 
     def test_on_gift_full_loop_switch_called(self):
         ch, client = self._facade()
@@ -626,7 +776,22 @@ class TestClientSchedule:
             post.return_value = resp
             assert client.schedule(["1", "55"], align=True) == {"ok": True}
             _, kwargs = post.call_args
-            assert kwargs["json"] == {"sequence": ["1", "55"], "align": True}
+            assert kwargs["json"] == {"sequence": ["1", "55"], "align": True,
+                                      "loop": "forward"}
+
+    def test_schedule_pingpong_loop(self):
+        """单段默认画面（2026-10-27 动作编排完善批次）：loop=pingpong 透传 /segment/schedule。"""
+        from utils.edtalk_realtime.edtalk_client import EDTalkClient
+        client = EDTalkClient({"api_ip_port": "http://127.0.0.1:8000"})
+        with patch("requests.post") as post:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"ok": True}
+            post.return_value = resp
+            client.schedule(["1"], align=True, loop="pingpong")
+            _, kwargs = post.call_args
+            assert kwargs["json"] == {"sequence": ["1"], "align": True,
+                                      "loop": "pingpong"}
 
     def test_schedule_degrades_on_error(self):
         from utils.edtalk_realtime.edtalk_client import EDTalkClient

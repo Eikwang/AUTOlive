@@ -128,11 +128,64 @@ class TestGraphAnchors:
             )
 
 
+class TestChoreoTopology:
+    """v2.6 终版拓扑断言（2026-10-27 动作编排完善批次，用户终版手改图定稿）。
+
+    图语义：所有信息源（Capture/Idle/Timed/DynamicCopy/Filter）→ Keyword 中枢；
+    Keyword → |关键词| Compile{动作编排}（识别即触发，与消息处理并行）；
+    Sort → |权重&队列信息| Compile（优先级排序联动：多规则触发按权重定序，
+    低权重触发经 queue 打断模式排队等待当前序列播完）；Compile 双出边——
+    |需要口型|→AvatarAI（数字人服务，口型/面部修复/眼神修正热开关联动）、
+    |不需口型|→Frame（纯画面序列直出，音频作画外音由系统播放流程消费）；
+    已消费信息回传：Frame→lineout→|回传|Sort（消费完成信息回传排序模块，
+    代码侧=编排队列出队重放+音频队列消费出清）。"""
+
+    EDGES = (
+        ("Keyword --> |关键词|Compile", "编排触发上级必须为关键词触发中枢"),
+        ("Sort --> |权重&队列信息|Compile", "优先级排序必须向编排提供权重&队列信息（v2.6 用户终版边）"),
+        ("Compile --> |需要口型|AvatarAI", "编排口型音频必须直达数字人服务（AvatarAI）"),
+        ("Compile --> |不需口型|Frame", "编排纯画面必须直出画面帧（Frame，不经口型）"),
+        ("lineout --> |回传|Sort", "已消费信息必须回传排序模块（v2.6 回传子图）"),
+    )
+
+    # Compile 不允许的歧义形态：旧 Sort→Compile 裸边 / 标签漂移
+    FORBIDDEN = (
+        (r"^\s*Sort\s*-->\s*Compile\b", "Sort→Compile 无标签直连边——权重联动必须带 |权重&队列信息| 标签"),
+        (r"^\s*Sort\s*-->\s*\|(?!权重&队列信息)[^|]+\|\s*Compile", "Sort→Compile 语义标签漂移（应为 权重&队列信息）"),
+    )
+
+    def test_choreo_edges(self):
+        text = _graph_text()
+        for needle, why in self.EDGES:
+            assert needle in text, f"流程图缺失编排拓扑边「{needle}」——{why}"
+
+    def test_choreo_no_ambiguous_edges(self):
+        for pattern, why in self.FORBIDDEN:
+            assert not re.search(pattern, _graph_text(), re.M), f"编排拓扑歧义边回归——{why}"
+
+    def test_keyword_hub_trigger_chain(self):
+        """代码侧镜像断言：中枢识别即触发编排，talk 源纳入编排订阅。"""
+        hub = (REPO / "utils" / "keyword_hub.py").read_text(encoding="utf-8")
+        assert "_match_choreo_keyword" in hub, "关键词中枢缺少编排匹配器"
+        assert '"talk": (False, True)' in hub, (
+            "talk 源功能集编排订阅被关闭——违背 v2.5 终版 Capture→Keyword→Compile 统一识别语义")
+
+    def test_choreo_queue_mode_implemented(self):
+        """代码侧镜像断言（v2.6）：queue 打断模式（低权重触发排队，序列播完出队）。"""
+        engine_src = (REPO / "utils" / "orchestration" / "choreographer.py").read_text(
+            encoding="utf-8")
+        assert "pending_queue" in engine_src, "编排引擎缺少排队单槽（Sort 权重联动落点）"
+        cfg_src = (REPO / "utils" / "orchestration" / "config_model.py").read_text(
+            encoding="utf-8")
+        assert '"standard", "queue"' in cfg_src, "打断模式值域缺少 queue（排序联动语义）"
+
+
 class TestGraphHeader:
-    """C7 图头断言：元数据三行在位（restore 回滚曾静默丢失图头，native Eng F2）。"""
+    """C7 图头断言：元数据两行在位（restore 回滚曾静默丢失图头，native Eng F2；
+    2026-10-27 动作编排完善批次用户终版手改覆盖后随批次重落盘，版本升至 v2.6）。"""
 
     def test_version_line_present(self):
-        assert "v2.2" in _graph_text(), "图头版本行（v2.2）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.6" in _graph_text(), "图头版本行（v2.6）缺失——疑 restore 回滚，须随批次重落盘"
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"

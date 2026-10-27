@@ -207,7 +207,7 @@ class RealtimeService:
             raise RuntimeError(f"切换 '{segment}' 失败（详见服务日志）")
         return {'ok': True, 'queued': False, **snapshot}
 
-    def set_schedule(self, sequence, align: bool = False) -> dict:
+    def set_schedule(self, sequence, align: bool = False, loop: str = 'forward') -> dict:
         """Replace the playback schedule at runtime (M10).
 
         align=False (default): install the order only — the current segment
@@ -215,12 +215,15 @@ class RealtimeService:
         align=True: additionally switch to sequence[0] when it differs
         (immediate hard cut) — response `switched` reports whether that
         happened.
+        loop: 'forward'=顺序循环 | 'pingpong'=首尾往返（编排默认画面单段模式）。
         """
         cd = self._require_character_data()
         if not isinstance(sequence, (list, tuple)) or not sequence:
             raise ValidationError("sequence 必须为非空段名列表")
         if len(sequence) > _MAX_SCHEDULE_LEN:
             raise ValidationError(f"sequence 长度上限 {_MAX_SCHEDULE_LEN}")
+        if loop not in ('forward', 'pingpong'):
+            raise ValidationError(f"loop 值域外: {loop!r}（仅 forward|pingpong）")
         sequence = list(sequence)
         bad = [s for s in sequence if s not in cd.segments]
         if bad:
@@ -229,11 +232,12 @@ class RealtimeService:
                 f"（段名区分大小写，以 orifra/ 下目录实际名称为准）")
 
         before = cd.current_segment
-        self.render_loop.set_segment_sequence(sequence, mode='list', align=align)
+        self.render_loop.set_segment_sequence(sequence, mode='list', align=align,
+                                              loop=loop)
         switched = bool(align) and before != sequence[0] and \
             cd.current_segment == sequence[0]
-        return {'ok': True, 'sequence': sequence, 'switched': switched,
-                'current_segment': cd.current_segment}
+        return {'ok': True, 'sequence': sequence, 'loop': loop,
+                'switched': switched, 'current_segment': cd.current_segment}
 
     # ------------------------------------------------------------------
     # Runtime params（R1 + M23）

@@ -295,9 +295,16 @@ class TestFrontendIntegration:
         assert "visual_body" in keys
 
     def test_web_server_registers_material_routes(self):
-        src = _src("utils/web_server.py")
-        assert "register_material_routes" in src
-        assert "edtalk_realtime.materials" in src
+        """素材路由挂载点守卫（2026-10-27 动作编排完善批次迁移）：
+        素材管理&创建=独立线程——挂 webui 进程（frontend/main.py），进 webui
+        即可管理、无需启动主系统；main 进程 web_server.py 不再挂载（防双写者）。"""
+        webui_src = _src("frontend/main.py")
+        assert "register_material_routes" in webui_src
+        assert "edtalk_realtime.materials" in webui_src
+        main_src = _src("utils/web_server.py")
+        assert "register_material_routes" not in main_src.replace(
+            "素材管理路由已迁 webui 进程", ""), (
+            "main 进程不得再挂载素材路由——写者矩阵收敛 webui 单写者")
 
     def test_config_page_clear_cancels_timers(self):
         """页内 Timer 随导航 clear 泄漏修复（2026-10-26 用户实测报障）。
@@ -318,12 +325,12 @@ class TestFrontendIntegration:
             "self.config_page.clear()", "", 1), "存在绕过 _clear_config_page 的裸 clear"
 
     def test_choreography_material_list_friendly_error(self):
-        """清单获取失败文案分类（2026-10-26 用户实测报障）：连接拒绝=系统未启动
-        常态提示（warning 色、带地址与恢复指引），非连接类异常保留简短信息。"""
+        """清单获取失败文案分类（2026-10-26 用户实测报障；2026-10-27 随素材
+        路由迁 webui 同步更新：连接拒绝=webui 服务未就绪提示，非连接类异常
+        保留简短信息）。"""
         src = _src("frontend/ui/tabs/choreography.py")
         assert "isinstance(e, _rq.exceptions.ConnectionError)" in src
-        assert "运行系统未启动" in src
-        assert "启动系统后自动恢复" in src
+        assert "webui 服务未就绪" in src
 
 
 class TestEdtalkConfigPageCleanup:
@@ -419,3 +426,27 @@ class TestEdtalkConfigPageCleanup:
                     "preroll_frames", "face_repair", "gaze_correction",
                     "gaze_convergence"):
             assert f'ed_cfg.get("{key}"' in main_src or f'"{key}"' in main_src, key
+
+
+class TestChoreographyMasterSwitchMigration:
+    """动作编排总开关迁移二级菜单（2026-10-26）：与其他功能模块开关保持一致。
+
+    入口唯一化：enable_paths.py 注册 choreography → choreography.enable
+    （二级菜单直写业务路径 + layout DG-B1 关闭态状态条）；参数页旧开关移除，
+    「应用」整节提交前回读实时 config 的 enable，防进页快照把菜单开关翻转回去。
+    """
+
+    def test_enable_paths_registered(self):
+        from frontend.config.enable_paths import ENABLE_PATHS
+        assert ENABLE_PATHS.get("choreography") == ("choreography", "enable")
+
+    def test_page_switch_removed(self):
+        """源级：参数页旧开关已移除（唯一入口=二级菜单）。"""
+        src = _src("frontend/ui/tabs/choreography.py")
+        assert 'ui.switch("总开关"' not in src
+
+    def test_apply_reads_live_enable(self):
+        """「应用」提交整节前回读实时 enable（快照防回写）。"""
+        src = _src("frontend/ui/tabs/choreography.py")
+        assert ('choreo_node["enable"] = bool(get_nested_value('
+                'config, "choreography", "enable"') in src

@@ -51,6 +51,9 @@ class SegmentScheduleRequest(BaseModel):
                            description="段名列表（顺序循环）")
     align: bool = Field(default=False,
                         description="True=立即对齐 sequence[0]；False=仅装表，边界生效")
+    loop: str = Field(default="forward", pattern=r"^(forward|pingpong)$",
+                      description="forward=顺序循环；pingpong=首尾往返"
+                                  "（编排默认画面单段模式）")
 
 
 class GazeParamsRequest(BaseModel):
@@ -179,7 +182,8 @@ def create_app(service: RealtimeService,
         """Replace the playback schedule; default does NOT interrupt the
         current segment (takes effect at the next boundary)."""
         try:
-            return service.set_schedule(request.sequence, align=request.align)
+            return service.set_schedule(request.sequence, align=request.align,
+                                        loop=request.loop)
         except Exception as e:
             _map_control_errors(
                 e, "用 GET /status 的 available_segments 查看段名；"

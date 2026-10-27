@@ -14,9 +14,10 @@
    总开关在二级菜单（enable_paths.py 注册 choreography → choreography.enable；
    关闭态顶部状态条由 layout.py DG-B1 统一渲染）。
 
-后端契约：素材 /edtalk_materials*（main 进程 materials.py）；
-编排 /choreography/*（main 进程 orchestration/api.py）；段下拉来源
-EDTalk /status available_segments + segment_details。
+后端契约（2026-10-27 动作编排完善批次）：素材 /edtalk_materials* 挂 webui 进程
+（素材管理&创建=独立线程，进 webui 即可管理、无需启动主系统）；
+编排 /choreography/*（main 进程 orchestration/api.py，编排器在主进程跑）；
+段下拉来源 EDTalk /status available_segments + segment_details。
 """
 import asyncio
 import copy as _copy
@@ -27,6 +28,7 @@ from typing import Any, Callable, Dict
 
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
+from frontend.ui.components.local_file_picker import LocalFilePicker
 
 
 def create_choreography_tab(
@@ -44,6 +46,11 @@ def create_choreography_tab(
             api_ip = "127.0.0.1"
         return f"http://{api_ip}:{api_port}"
 
+    def _webui_api_url() -> str:
+        """webui 进程自身 API（素材管理端点所在进程——独立线程，不依赖主系统）。"""
+        webui_port = get_nested_value(config, "webui", "port", default=8086)
+        return f"http://127.0.0.1:{webui_port}"
+
     def _edtalk_api() -> str:
         from utils.edtalk_realtime.runtime import resolve_api_base
         return resolve_api_base(config)
@@ -60,28 +67,35 @@ def create_choreography_tab(
             ui.label("动作素材管理（画面资产库）").style("font-size: var(--font-size-title)")
             mat_status_label = ui.label("").style("color: var(--text-hint)")
         ui.label("添加：选本地视频 → 指定类型（上场/主线/离场）→ 勾选口型推理决定预处理链"
-                 "（勾选=拆帧+人脸检测；不勾选=简单处理，播放时作画外音直通）→ 上线。"
+                 "（勾选=拆帧+人脸检测；不勾选=仅拆序列帧，播放时作画外音直通）→ 上线。"
                  "删除：被编排规则/默认池/段调度引用或正在渲染的素材会被拒绝并给出去处").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
-        # 直播间级默认画布（R-dsg11 D2-5：控件清单=默认背景图+处置说明；几何字段本批不设 UI）
-        with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
-            mat_default_bg_input = FormField.create_input(
-                label='直播间默认背景画布图（可空=深色底；头部特写素材将合成到画布）',
-                value=str(_copy.deepcopy(get_nested_value(
-                    config, "edtalk_materials", "default_background", default="")) or ""),
-                on_change=lambda e: set_config_callback(
-                    "edtalk_materials", "default_background", value=(e.value or "").strip()),
-                style="width:420px;")
-            ui.label("未配背景的特写素材按素材级设置合成；「不合成」素材播默认背景"
-                     "（分辨率等几何字段本批为系统默认值，不设 UI）").style(
-                "color: var(--text-hint); font-size: var(--font-size-body); max-width:420px")
+        # 视频选择（文件选择器取代手输路径；防重入沿训练页 LocalFilePicker 模式）
+        _picked_video = [""]
+        _picker_open = [False]
 
-        # 两行布局（R-dsg12⑤）：视频/段名/类型/设备 ＋ 口型/背景/提交
-        with ui.grid(columns=4):
-            mat_video_input = FormField.create_input(
-                label='视频文件路径（mp4/avi/mov/mkv/flv/webm/wmv）',
-                value="", style="width:100%;")
+        async def _open_video_picker():
+            if _picker_open[0]:
+                return
+            _picker_open[0] = True
+            mat_pick_btn.set_enabled(False)
+            try:
+                result = await LocalFilePicker(multiple=False, title="选择素材视频")
+            finally:
+                _picker_open[0] = False
+                mat_pick_btn.set_enabled(True)
+            if result:
+                _picked_video[0] = str(result[0])
+                mat_picked_label.set_text(f"已选：{result[0].name}").tooltip(
+                    str(result[0])).style("color: var(--text-body); font-size: var(--font-size-body)")
+
+        with ui.row().style("width:100%;align-items:center;gap:10px"):
+            mat_pick_btn = ui.button("选择视频文件", icon="movie", on_click=_open_video_picker).props("outline")
+            mat_picked_label = ui.label("未选择视频").style(
+                "color: var(--text-hint); font-size: var(--font-size-body); "
+                "max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+        with ui.grid(columns=3):
             mat_seg_input = FormField.create_input(
                 label='素材段名（字母/数字/下划线/短横线；编排规则按此名引用）',
                 value="", style="width:100%;")
@@ -94,37 +108,33 @@ def create_choreography_tab(
                 label='预处理设备',
                 options={'cuda': 'cuda（推荐）', 'cpu': 'cpu（GPU 异常时排查用）'},
                 value="cuda", style="width:100%;")
-        with ui.grid(columns=3):
+        with ui.row().style("width:100%;align-items:center;gap:12px"):
             mat_lip_checkbox = ui.checkbox(
                 "口型推理预处理（勾选=完整人脸链；不勾选=画外音直通素材）", value=True)
-            mat_bg_input = FormField.create_input(
-                label='背景画布图（可空=直播间默认背景）',
-                value="", style="width:100%;")
             mat_add_btn = ui.button("添加素材", on_click=lambda: _publish_material())
 
         mat_task_label = ui.label("").style("color: var(--text-hint); white-space: pre-wrap")
         mat_list_slot = ui.column().style("width:100%")
 
         async def _publish_material():
-            video = (mat_video_input.value or "").strip()
+            video = _picked_video[0]
             seg = (mat_seg_input.value or "").strip()
             if not video or not seg:
-                ui.notify(position="top", type="warning", message="先填写视频路径与素材段名")
+                ui.notify(position="top", type="warning", message="先选择视频文件并填写素材段名")
                 return
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.post, f"{_main_api_url()}/edtalk_materials/publish",
+                    requests.post, f"{_webui_api_url()}/edtalk_materials/publish",
                     json={"video_path": video, "segment": seg,
                           "device": mat_device_select.value or "cuda",
                           "material_type": mat_type_select.value or "main",
-                          "lip_flag": bool(mat_lip_checkbox.value),
-                          "background": (mat_bg_input.value or "").strip() or None},
+                          "lip_flag": bool(mat_lip_checkbox.value)},
                     timeout=8,
                 )
             except Exception as e:
                 ui.notify(position="top", type="negative",
-                          message=f"提交失败（运行系统未启动？）：{e}")
+                          message=f"提交失败（webui 服务异常？）：{e}")
                 return
             if resp.status_code in (200, 202):
                 mat_task_label.set_text(f"任务已受理：{seg}（预处理耗时与视频长度成正比）").style(
@@ -147,7 +157,7 @@ def create_choreography_tab(
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.get, f"{_main_api_url()}/edtalk_materials/task", timeout=2)
+                    requests.get, f"{_webui_api_url()}/edtalk_materials/task", timeout=2)
                 t = (resp.json() or {}) if resp.status_code == 200 else {}
             except Exception:
                 return
@@ -165,22 +175,24 @@ def create_choreography_tab(
                     "color: " + ("var(--color-positive)" if ok else "var(--color-negative)"))
                 mat_add_btn.set_enabled(True)
                 if ok:
-                    mat_video_input.set_value("")
+                    _picked_video[0] = ""
+                    mat_picked_label.set_text("未选择视频").style(
+                        "color: var(--text-hint); font-size: var(--font-size-body)")
                 await _refresh_materials()
 
         async def _refresh_materials():
-            """清单刷新：磁盘扫描+服务在线信息（main /edtalk_materials）。"""
+            """清单刷新：磁盘扫描+服务在线信息（webui /edtalk_materials——独立线程）。"""
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.get, f"{_main_api_url()}/edtalk_materials", timeout=6)
+                    requests.get, f"{_webui_api_url()}/edtalk_materials", timeout=6)
                 data = (resp.json() or {}) if resp.status_code == 200 else {}
             except Exception as e:
-                # 连接拒绝=主系统未启动（常态而非故障），友好提示不刷原始堆栈
+                # 连接拒绝=webui 自身服务未就绪（异常态而非主系统未启动）
                 import requests as _rq
                 if isinstance(e, _rq.exceptions.ConnectionError):
                     mat_status_label.set_text(
-                        f"运行系统未启动（{_main_api_url()} 无法连接）——启动系统后自动恢复").style(
+                        f"webui 服务未就绪（{_webui_api_url()} 无法连接）").style(
                         "color: var(--color-warning)")
                 else:
                     mat_status_label.set_text(f"清单获取失败：{type(e).__name__}: {e}").style(
@@ -294,7 +306,7 @@ def create_choreography_tab(
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.post, f"{_main_api_url()}/edtalk_materials/set_meta",
+                    requests.post, f"{_webui_api_url()}/edtalk_materials/set_meta",
                     json={"segment": segment, "type": new_type}, timeout=6)
                 if resp.status_code == 200:
                     ui.notify(position="top", type="positive",
@@ -313,7 +325,7 @@ def create_choreography_tab(
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.post, f"{_main_api_url()}/edtalk_materials/reprocess",
+                    requests.post, f"{_webui_api_url()}/edtalk_materials/reprocess",
                     json={"segment": segment, "lip_flag": target}, timeout=8)
                 if resp.status_code in (200, 202):
                     ui.notify(position="top", type="positive",
@@ -339,12 +351,12 @@ def create_choreography_tab(
             try:
                 import requests
                 resp = await asyncio.to_thread(
-                    requests.post, f"{_main_api_url()}/edtalk_materials/delete",
+                    requests.post, f"{_webui_api_url()}/edtalk_materials/delete",
                     json={"segment": segment}, timeout=10,
                 )
             except Exception as e:
                 ui.notify(position="top", type="negative",
-                          message=f"删除失败（运行系统未启动？）：{e}")
+                          message=f"删除失败（webui 服务异常？）：{e}")
                 return
             if resp.status_code == 200:
                 ui.notify(position="top", type="positive", message=f"素材已删除：{segment}")
@@ -469,35 +481,52 @@ def create_choreography_tab(
                             on_change=lambda e, r=rule: r.__setitem__(
                                 "min_price", float(e.value or 0) if str(e.value or "").replace(".", "", 1).isdigit() else 0),
                             style="width:100%;")
-                        # 触发次数摘要（R-dsg4 D2-3：多档「档位 K：≤n1/≤n2/…」）
-                        tier_caps = [str(t.get("max_count")) for t in tiers]
-                        n_label = ("档位 " + str(len(tiers) + 1) + "：基础+≤" + "/≤".join(tier_caps)
-                                   if tier_caps else "基础档（无覆盖档）")
+                        # 打断模式（2026-10-27 批次：优先级排序联动——相互依赖，
+                        # 由「切换方式」+权重队列配合完成灵活动态画面控制）
+                        ui.select(
+                            options={"standard": "打断当前（触发即切）",
+                                     "queue": "排队等待（当前序列播完再切）"},
+                            value=str(rule.get("interrupt", "standard")),
+                            label="多规则触发方式",
+                            on_change=lambda e, r=rule: r.__setitem__("interrupt", e.value),
+                        ).style("width:100%;").tooltip(
+                            "打断当前=新触发立即切换画面（高权重规则用）；排队等待=低权重"
+                            "触发进入队列，等待当前片段播放完成后再切换执行（配合优先级"
+                            "排序权重使用，如点歌权重低于动态文案时排队）")
+                        # 触发次数摘要（2026-10-27 批次：计次进档「从第 N 次起」）
+                        tier_mins = [str(t.get("min_count", t.get("max_count"))) for t in tiers]
+                        n_label = ("档位：从第 " + "/从第 ".join(tier_mins) + " 次起"
+                                   if tier_mins else "基础档（无覆盖档）")
                         ui.label(n_label).style(
                             "color: var(--text-hint); align-self:center; "
                             "font-size: var(--font-size-body)").tooltip(
-                            "触发次数=档位阈值：计数 ≤ N 的档位生效，超档沿用最高档"
-                            "（select_tier 上界语义）")
-                    # 第二行：上场|切换方式|主线|切换方式|离场（R-dsg1 三下拉按类型过滤；
-                    # 基础档与档位编辑器第一行同源——R-dsg4 D2-1 数据映射唯一）
+                            "计次进档：设定时间内或主线片段播放完成前再次触发进入档位计次，"
+                            "从第 N 次起的触发使用该档片段（示例：档位一 1 次/档位二 4 次/"
+                            "档位三 7 次 → 第 1~3 次档一、第 4~6 次档二、第 7 次起档三）")
+                    # 第二行：上场|主线|离场（2026-10-27 批次：主线必选+设切换方式；
+                    # 上场/离场=可选过渡片段，固定播完接下一步，无切换方式——R-dsg1）
                     for step_name in ("enter", "main", "exit"):
                         step = rule.setdefault("sequence", {}).setdefault(step_name, {})
-                        step.setdefault("switch_at", "segment_end")
                         want_type = {"enter": "enter", "main": "main", "exit": "exit"}[step_name]
+                        is_optional = step_name != "main"
                         dur = step.get("duration_s")
                         dur_txt = (f"素材时长 {dur:.1f}s" if isinstance(dur, (int, float))
                                    else ("素材时长（重存后自动）" if is_new else "时长未知"))
                         with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
-                            ui.label({"enter": "上场", "main": "主线", "exit": "离场"}[step_name]).style(
-                                "min-width:44px;color: var(--text-hint);font-size: var(--font-size-body)")
+                            ui.label({"enter": "上场", "main": "主线", "exit": "离场"}[step_name]
+                                     + ("（可选）" if is_optional else "（必选）")).style(
+                                "min-width:74px;color: var(--text-hint);font-size: var(--font-size-body)")
                             ui.select(
                                 options=_seg_options(str(step.get("segment", "")), want_type),
-                                value=str(step.get("segment", "")),
-                                label="段名",
+                                value=str(step.get("segment", "")) or None,
+                                label=("过渡片段（可空）" if is_optional else "主线片段"),
+                                clearable=is_optional,
                                 on_change=lambda e, s=step: s.__setitem__("segment", e.value or ""),
                             ).style("min-width:180px").tooltip(
                                 "候选=该类型素材（素材管理页三列表）∪ 已引用段；"
-                                "标「画外音」的段播放时画面原样+语音照常")
+                                "标「画外音」的段播放时画面原样+语音照常；"
+                                + ("过渡片段可空=跳过该步（如默认画面→主线直连）" if is_optional
+                                   else "主线片段必选"))
                             if is_new and step_name == "main" and rule.get("trigger_type") == "song":
                                 dur_txt += "（歌曲未结束前主线素材循环播放）"  # R-dsg7/F-12
                             ui.label(dur_txt).style(
@@ -505,12 +534,21 @@ def create_choreography_tab(
                                 "font-size: var(--font-size-body)").tooltip(
                                 "播放时长=素材时长（X2 系统接管）；时长未知=允许保存+生效待就绪"
                                 "（R-eng6 两分法）" if is_new else "存量规则保留手工时长")
-                            ui.select(
-                                options={"segment_end": "segment_end（边界无缝）", "immediate": "immediate（立即硬切）"},
-                                value=str(step.get("switch_at", "segment_end")),
-                                label="切换方式",
-                                on_change=lambda e, s=step: s.__setitem__("switch_at", e.value),
-                            ).style("min-width:170px").tooltip("衔接短素材建议 segment_end；immediate 硬切≤一次边界")
+                            if is_optional:
+                                ui.label("过渡片段·播完接下一步").style(
+                                    "min-width:170px;color: var(--text-hint);"
+                                    "font-size: var(--font-size-body)").tooltip(
+                                    "上场/离场是片段间过渡片段，不设切换方式（固定 segment_end）")
+                            else:
+                                ui.select(
+                                    options={"segment_end": "无缝切换（播完后切）",
+                                             "immediate": "立刻切换（触发即切）"},
+                                    value=str(step.get("switch_at", "segment_end")),
+                                    label="切换方式",
+                                    on_change=lambda e, s=step: s.__setitem__("switch_at", e.value),
+                                ).style("min-width:170px").tooltip(
+                                    "无缝切换=等当前片段播放完成后再切换；"
+                                    "立刻切换=触发新规则后立即切换（用户裁决 2026-10-27：仅主线可设）")
                             if not is_new:
                                 # 存量规则旧编辑器（时长/音轨——R-ceo4 零静默直至重存）
                                 FormField.create_input(
@@ -546,12 +584,14 @@ def create_choreography_tab(
         """多档编辑器（R-dsg4/R-dsg12④：结构化档位行，取代 JSON textarea）。
 
         第 1 行=基础档摘要（同源展示非第二控件实例）；第 2 行起=覆盖档
-        （max_count+三下拉继承哨兵+mood）；增删档按钮。零静默扁平化。
+        （min_count「从第 N 次起」+三下拉继承哨兵+mood）；增删档按钮。
+        2026-10-27 批次：计次语义=下界（从第 N 次起），存量 max_count 上界
+        数据读取兼容（首档→1、后续→前档 max+1），保存统一写 min_count。
         """
         base = rule.setdefault("sequence", {})
         with ui.row().style("width:100%;align-items:center;gap:8px;margin-left:44px"):
             ui.label("基础档").style("min-width:64px;color: var(--text-hint)")
-            ui.label("—（基础）").style("min-width:70px;color: var(--text-hint)")
+            ui.label("第 1 次起").style("min-width:70px;color: var(--text-hint)")
             for n in ("enter", "main", "exit"):
                 seg = ((base.get(n) or {}).get("segment") or "（未选）")
                 ui.label(f"{ {'enter': '上场', 'main': '主线', 'exit': '离场'}[n] }: {seg}").style(
@@ -559,13 +599,18 @@ def create_choreography_tab(
         tiers = rule.setdefault("emotion_tiers", [])
         for ti, tier in enumerate(tiers):
             ov = tier.setdefault("segment_overrides", {})
+            # 旧上界数据读取兼容（不回写原键，保存时统一为 min_count）
+            legacy = tier.get("min_count")
+            if legacy is None and tier.get("max_count") is not None:
+                legacy = 1 if ti == 0 else int(tiers[ti - 1].get("max_count", 0)) + 1
             with ui.row().style("width:100%;align-items:flex-end;gap:8px;margin-left:44px"):
-                ui.label(f"覆盖档 {ti + 1}").style("min-width:64px;color: var(--text-hint)")
+                ui.label(f"档位 {ti + 1}").style("min-width:64px;color: var(--text-hint)")
                 FormField.create_input(
-                    label='触发次数阈值 N', value=str(tier.get("max_count", "")),
+                    label='从第 N 次起', value=str(legacy if legacy is not None else ""),
                     on_change=lambda e, tr=tier: tr.__setitem__(
-                        "max_count", int(e.value) if str(e.value or "").strip().isdigit() else 0),
-                    tooltip="计数 ≤ N 的档位生效（须 ≥2 且严格递增）；首覆盖档=1 会在首次触发即遮蔽基础档",
+                        "min_count", int(e.value) if str(e.value or "").strip().isdigit() else 0),
+                    tooltip="从第 N 次触发起使用本档片段（须严格递增；=1 则首次触发即用本档）；"
+                            "设定时间内或主线片段播放完成前再次触发进入档位计次",
                     style="width:110px;")
                 for n in ("enter", "main", "exit"):
                     cur = str(ov.get(n, "") or "")
@@ -587,8 +632,9 @@ def create_choreography_tab(
 
     def _add_tier(rule: dict):
         tiers = rule.setdefault("emotion_tiers", [])
-        prev = int(tiers[-1].get("max_count", 0)) if tiers else 1
-        tiers.append({"max_count": prev + 1, "mood": "", "segment_overrides": {}})
+        prev = tiers[-1].get("min_count") if tiers and tiers[-1].get("min_count") is not None \
+            else (int(tiers[-1].get("max_count", 0)) + 1 if tiers else 1)
+        tiers.append({"min_count": int(prev) + 1, "mood": "", "segment_overrides": {}})
         _render_rules()
 
     def _del_tier(rule: dict, idx: int):
@@ -714,12 +760,42 @@ def create_choreography_tab(
                     "reset_after_s", float(e.value or 300) if str(e.value or "").replace(".", "", 1).lstrip("-").isdigit() else 300),
                 tooltip="触发次数计数时间窗口（GAP-2）：超过该秒数未触发则计数清零重新累计；0=禁用衰减",
                 style="width:100%;")
-        ui.textarea(
-            label='默认画面段名池（一行一个；序列段结束后恢复轮播的池）',
-            value="\n".join(str(s) for s in (choreo_node.get("default_segments") or [])),
-            on_change=lambda e: choreo_node.__setitem__(
-                "default_segments", [s.strip() for s in (e.value or "").splitlines() if s.strip()]),
-        ).style("width:40%").tooltip("空池=不接管默认轮播（全部素材自然排序轮播）")
+        # 默认画面（2026-10-27 动作编排完善批次）：段名池改选择模式（多选主线段）；
+        # 一律立刻切换，无需设切换方式；单段模式=pingpong 首尾循环（可指定循环段，
+        # 空=列表第一个）
+        _def_pool_select = ui.select(
+            multiple=True, label='默认画面片段池（多选；空=不接管默认轮播）',
+            options={s: s for s in _choreo_avail["segments"]},
+            value=[s for s in (choreo_node.get("default_segments") or [])
+                   if s in _choreo_avail["segments"]],
+            on_change=lambda e: choreo_node.__setitem__("default_segments", list(e.value or [])),
+            with_input=True,
+        ).style("width:60%").tooltip("候选=EDTalk 可用段（「刷新可用段」同步）；"
+                                     "轮播=按列表顺序逐个 / 随机=随机播放 / 单段=循环指定片段")
+
+        def _sync_default_single(v):
+            choreo_node.__setitem__("default_single_segment", str(v or ""))
+
+        _def_single_select = ui.select(
+            label='单段模式循环段（空=循环列表第一个）',
+            options={s: s for s in (choreo_node.get("default_segments") or [])},
+            value=str(choreo_node.get("default_single_segment", "") or "") or None,
+            on_change=lambda e: _sync_default_single(e.value),
+            with_input=True, clearable=True,
+        ).style("width:60%").tooltip("仅「单段」模式生效：循环播放该片段（pingpong 首尾循环）；"
+                                     "候选=默认画面片段池已选片段")
+
+        def _refresh_def_single_options():
+            """默认池变化 → 循环段候选同步（已选优先保留）。"""
+            pool = [s for s in (choreo_node.get("default_segments") or [])]
+            _def_single_select.options = {s: s for s in pool}
+            cur = str(choreo_node.get("default_single_segment", "") or "")
+            if cur and cur not in pool:
+                choreo_node["default_single_segment"] = ""
+                _def_single_select.value = None
+            _def_single_select.update()
+
+        _def_pool_select.on_value_change(lambda _e: _refresh_def_single_options())
         ui.label("规则列表").style("font-size: var(--font-size-body)")
         rules_container = ui.column().style("width:100%")
         with ui.row():

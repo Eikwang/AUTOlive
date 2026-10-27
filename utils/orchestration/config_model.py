@@ -18,7 +18,9 @@ from utils.my_log import logger
 VALID_TRIGGER_TYPES = ("gift", "keyword", "song")  # entrance/follow 预留，P1 不订阅
 VALID_SWITCH_AT = ("immediate", "segment_end")
 VALID_AUDIO_MODES = ("none", "tts", "file")
-VALID_INTERRUPT = ("standard",)
+# 打断模式（2026-10-27 动作编排完善批次：优先级排序联动）：standard=触发即打断
+# 当前序列；queue=排队等待（低权重触发不打断，当前序列播完后自动出队执行）
+VALID_INTERRUPT = ("standard", "queue")
 
 
 @dataclass
@@ -37,8 +39,14 @@ class StepCfg:
 
 @dataclass
 class TierCfg:
-    """情绪分级档：连续触发次数上限 → 素材组覆盖。"""
-    max_count: int
+    """触发档（2026-10-27 用户裁决：多档触发=计次进档「从第 N 次起」下界语义）。
+
+    min_count=N：第 N 次及以后的触发使用该档 segment_overrides（示例：档位一
+    1次/档位二 4次/档位三 7次 → 第1~3次档一、第4~6次档二、第7次起档三）；
+    未达任何档的触发用规则基础三步（基础档）。存量 max_count（上界语义）在
+    load 时迁移：首档 min=1、后续档 min=前一档 max+1，语义等价无感升级。
+    """
+    min_count: int
     mood: str = ""
     segment_overrides: dict = field(default_factory=dict)  # {enter|main|exit: segment}
 
@@ -59,18 +67,20 @@ class RuleCfg:
     main: StepCfg = None
     exit: StepCfg = None
     tiers: list = field(default_factory=list)
-    interrupt: str = "standard"
+    interrupt: str = "standard"  # standard=打断当前 | queue=排队等待（排序联动）
     pred_version: str = "legacy"
 
     def has_tts_audio(self) -> bool:
         """接管判定（R-ceo4 终态）：song 触发→接管（歌曲音频走既有歌曲链路）；
         gift/keyword 新语义规则→不接管（无步级音轨，原生答谢照常）；
-        存量未重存规则→维持 has_tts_audio() 旧判定。"""
+        存量未重存规则→维持 has_tts_audio() 旧判定。可选步 None 视为无音轨。"""
         if self.pred_version == "new":
             return self.trigger_type == "song"
-        return any(self.name_step(n).audio_mode == "tts" for n in ("enter", "main", "exit"))
+        return any((self.name_step(n) is not None and self.name_step(n).audio_mode == "tts")
+                   for n in ("enter", "main", "exit"))
 
-    def name_step(self, name: str) -> StepCfg:
+    def name_step(self, name: str) -> Optional[StepCfg]:
+        """按名取步（enter/exit 可选步缺省返回 None——2026-10-27 批次）。"""
         return {"enter": self.enter, "main": self.main, "exit": self.exit}[name]
 
 
@@ -80,6 +90,9 @@ class ChoreographyConfig:
     enable: bool = False
     default_mode: str = "rotate"            # single | rotate | random
     default_segments: list = field(default_factory=list)
+    # 单段模式循环段（2026-10-27 动作编排完善批次）：空=循环列表第一个片段；
+    # pingpong 首尾循环由下发侧携带 loop=pingpong 实现（单段=首尾循环等价）。
+    default_single_segment: str = ""
     min_retrigger_s: float = 2.0
     min_sequence_hold_s: float = 5.0
     step_timeout_s: float = 60.0
@@ -102,32 +115,52 @@ def _reject(rule_id: str, reason: str, rejections: list) -> None:
     rejections.append({"rule_id": rule_id, "reason": reason})
 
 
+class _StepInvalid(Exception):
+    """步骤配置非法（已 _reject 记录）——load 捕获后整规则拒绝（fail-fast）。"""
+
+
 def _parse_step(rule_id: str, name: str, raw, rejections: list,
                 pred_version: str = "legacy") -> Optional[StepCfg]:
-    """解析单步并套用校验表（switch_at 值域 / audio.mode 值域 / duration_s）。"""
+    """解析单步并套用校验表（switch_at 值域 / audio.mode 值域 / duration_s）。
+
+    2026-10-27 动作编排完善批次：enter/exit 为可选过渡片段——**未配置**（键缺失
+    或 segment 空）=合法跳过该步（返回 None，规则照常生效）；**配置了但非法**
+    （switch_at 值域外/缺时长等）抛 _StepInvalid → 整规则拒绝（fail-fast 防
+    静默降级掩盖 typo）。main 必选恒定。切换方式仅 main 可设——enter/exit
+    配置了非 segment_end 也忽略并告警（过渡片段固定播完接下一步）。
+    """
+    optional = name in ("enter", "exit")
     if not isinstance(raw, dict) or not str(raw.get("segment", "")).strip():
-        _reject(rule_id, f"sequence.{name} 缺失或 segment 为空", rejections)
-        return None
+        if optional:
+            return None  # 过渡片段未配置=跳过该步（main→离场直连）
+        _reject(rule_id, f"sequence.{name} 缺失或 segment 为空（主线片段必选）", rejections)
+        raise _StepInvalid()
     switch_at = raw.get("switch_at", "segment_end")
     if switch_at not in VALID_SWITCH_AT:
         _reject(rule_id, f"sequence.{name}.switch_at 值域外（{switch_at!r}，仅 immediate|segment_end）", rejections)
-        return None
+        raise _StepInvalid()
+    if optional and switch_at != "segment_end":
+        logger.warning(
+            f"编排规则 [{rule_id}] {name}.switch_at={switch_at!r} 被忽略改判 segment_end："
+            "problem=过渡片段不设切换方式；cause=上场/离场是片段间过渡片段，固定播完接下一步（segment_end）；"
+            "fix=切换方式只对主线片段有效（用户裁决 2026-10-27），该键可删除")
+        switch_at = "segment_end"
     audio = raw.get("audio") or {}
     audio_mode = (audio.get("mode") or "none") if isinstance(audio, dict) else "none"
     if audio_mode not in VALID_AUDIO_MODES:
         _reject(rule_id, f"sequence.{name}.audio.mode 值域外（{audio_mode!r}，仅 none|tts|file）", rejections)
-        return None
+        raise _StepInvalid()
     audio_path = str(audio.get("path", "") or "") if isinstance(audio, dict) else ""
     if audio_mode == "file" and not audio_path.strip():
         _reject(rule_id, f"sequence.{name}.audio.path 缺失（file 模式必填）", rejections)
-        return None
+        raise _StepInvalid()
     duration_s = raw.get("duration_s")
     if duration_s is not None:
         try:
             duration_s = float(duration_s)
         except (TypeError, ValueError):
             _reject(rule_id, f"sequence.{name}.duration_s 非数值（{duration_s!r}）", rejections)
-            return None
+            raise _StepInvalid()
     if audio_mode == "none" and (duration_s is None or duration_s <= 0):
         if pred_version == "new":
             # R-ceo7：new 规则时长=素材时长（apply 二段从 sidecar 解析后回填），
@@ -136,7 +169,7 @@ def _parse_step(rule_id: str, name: str, raw, rejections: list,
         else:
             # FB-2：无 audio 步骤必须 duration_s>0（拦截单槽 pending 静默跳段）
             _reject(rule_id, f"sequence.{name} 无音轨但 duration_s 缺失或 ≤0（静默跳段防护）", rejections)
-            return None
+            raise _StepInvalid()
     return StepCfg(name=name, segment=str(raw["segment"]).strip(), switch_at=switch_at,
                    duration_s=duration_s, audio_mode=audio_mode, audio_path=audio_path,
                    pred_version=pred_version)
@@ -164,6 +197,15 @@ def load_choreography_config(config) -> ChoreographyConfig:
         )
         default_mode = "rotate"
     default_segments = [str(s).strip() for s in (node.get("default_segments") or []) if str(s).strip()]
+    default_single_segment = str(node.get("default_single_segment", "") or "").strip()
+    if default_single_segment and default_mode == "single" \
+            and default_single_segment not in default_segments:
+        logger.warning(
+            "choreography.default_single_segment 不在 default_segments 内；"
+            f"problem=配置告警；cause={default_single_segment!r}；"
+            "fix=循环段已按列表第一个片段兜底（或将该段加入默认画面列表）"
+        )
+        default_single_segment = ""
 
     # min_retrigger_s / min_sequence_hold_s 已退役（R-ceo5 终门 uc2a/P6 用户方向；
     # 2026-10-27 批次）：旧键读取兼容一轮+退役告警，值不再生效（去重机制在弹幕层；
@@ -233,33 +275,50 @@ def load_choreography_config(config) -> ChoreographyConfig:
             _reject(rule_id, f"pred_version 值域外（{pred_version!r}，仅 legacy|new）", rejections)
             continue
         seq = raw.get("sequence") or {}
-        enter = _parse_step(rule_id, "enter", seq.get("enter"), rejections, pred_version)
-        main = _parse_step(rule_id, "main", seq.get("main"), rejections, pred_version)
-        exit_step = _parse_step(rule_id, "exit", seq.get("exit"), rejections, pred_version)
-        if enter is None or main is None or exit_step is None:
-            continue  # 步骤级拒绝已记录
+        try:
+            enter = _parse_step(rule_id, "enter", seq.get("enter"), rejections, pred_version)
+            main = _parse_step(rule_id, "main", seq.get("main"), rejections, pred_version)
+            exit_step = _parse_step(rule_id, "exit", seq.get("exit"), rejections, pred_version)
+        except _StepInvalid:
+            continue  # 步骤配置非法（拒绝已记录）→ 整规则拒绝
+        if main is None:
+            continue  # 主线缺失（主线必选拒绝已记录）；enter/exit 可选步 None 照常生效
         interrupt = raw.get("interrupt", "standard")
         if interrupt not in VALID_INTERRUPT:
             _reject(rule_id, f"interrupt 值域外：{interrupt!r}（仅 standard）", rejections)
             continue
         tiers: list = []
         tier_error = None
-        prev_max = 0
+        prev_min = 0
+        prev_legacy_max = 0
         for t in raw.get("emotion_tiers") or []:
             if not isinstance(t, dict):
                 tier_error = "emotion_tiers 项非对象"
                 break
-            try:
-                max_count = int(t.get("max_count", 0))
-            except (TypeError, ValueError):
-                tier_error = f"emotion_tiers.max_count 非整数：{t.get('max_count')!r}"
+            # min_count=「从第 N 次起」下界（新口径）；存量 max_count（上界）迁移：
+            # 首档 min=1、后续档 min=前一档 max+1（上界序列语义等价改写）
+            if t.get("min_count") is not None:
+                try:
+                    min_count = int(t.get("min_count"))
+                except (TypeError, ValueError):
+                    tier_error = f"emotion_tiers.min_count 非整数：{t.get('min_count')!r}"
+                    break
+            else:
+                try:
+                    legacy_max = int(t.get("max_count", 0))
+                except (TypeError, ValueError):
+                    tier_error = f"emotion_tiers 计次字段缺失或非整数：{t!r}"
+                    break
+                # 迁移：首档从第 1 次起（旧上界语义首档覆盖 count=1..max），
+                # 后续档从「前一档上界+1」次起（旧档界 a1..a2 → 新下界 a1+1）
+                min_count = 1 if not tiers else prev_legacy_max + 1
+                prev_legacy_max = legacy_max
+            if min_count <= prev_min:
+                tier_error = f"emotion_tiers 计次需严格递增（{min_count} ≤ {prev_min}，从第 N 次起）"
                 break
-            if max_count <= prev_max:
-                tier_error = f"emotion_tiers.max_count 非严格递增（{max_count} ≤ {prev_max}）"
-                break
-            prev_max = max_count
+            prev_min = min_count
             overrides = t.get("segment_overrides") or {}
-            tiers.append(TierCfg(max_count=max_count, mood=str(t.get("mood", "") or ""),
+            tiers.append(TierCfg(min_count=min_count, mood=str(t.get("mood", "") or ""),
                                  segment_overrides={str(k): str(v).strip()
                                                     for k, v in overrides.items()
                                                     if k in ("enter", "main", "exit") and str(v).strip()}))
@@ -290,6 +349,7 @@ def load_choreography_config(config) -> ChoreographyConfig:
         )
     cfg = ChoreographyConfig(enable=enable, default_mode=default_mode,
                              default_segments=default_segments,
+                             default_single_segment=default_single_segment,
                              min_retrigger_s=0.0,       # 已退役（R-ceo5）：引擎不消费
                              min_sequence_hold_s=0.0,   # 已退役（R-ceo5/uc2a）：保护窗移除
                              step_timeout_s=step_timeout_s,
@@ -310,9 +370,11 @@ def validate_rule_segments(rules: list, available_segments: set) -> dict:
         needed = set()
         for name in ("enter", "main", "exit"):
             step = rule.name_step(name)
-            needed.add(step.segment)
+            if step is not None:            # 可选过渡片段缺省=无段可校验
+                needed.add(step.segment)
         for tier in rule.tiers:
-            needed.update(tier.segment_overrides.values())
+            needed.update(v for k, v in tier.segment_overrides.items()
+                          if rule.name_step(k) is not None)
         missing = sorted(s for s in needed if s not in available_segments)
         if missing:
             disabled.append((rule.rule_id, missing))

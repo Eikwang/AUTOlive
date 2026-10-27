@@ -262,12 +262,10 @@ class WebServer:
         except Exception:
             logger.error("choreography 控制面路由挂载失败（管理页显示未装配）", exc_info=True)
 
-        # 数字人素材管理控制面（动作编排二级页：素材增删+预处理+热上线）
-        try:
-            from utils.edtalk_realtime.materials import register_material_routes
-            register_material_routes(self.app, self.config)
-        except Exception:
-            logger.error("素材管理路由挂载失败（动作编排页素材区不可用）", exc_info=True)
+        # 数字人素材管理路由已迁 webui 进程（2026-10-27 动作编排完善批次：
+        # 素材管理&创建为独立线程，进 webui 即可管理、无需启动主系统——
+        # 挂载点=frontend/main.py _register_api_endpoints；本进程不再挂载，
+        # 避免 webui/主系统双写者与素材任务状态分裂）
 
         # 翻唱队列控制面（/autoplan 2026-10-14 C-3：点歌页队列状态卡数据源；
         # 写者矩阵=cover_worker（main 进程）唯一写者，webui 只读窄端点）
