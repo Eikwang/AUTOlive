@@ -84,11 +84,12 @@ def create_assistant_anchor_tab(
         with ui.row().style("flex-wrap:wrap; gap:8px;"):
             for _t, _label, _sub in assistant_anchor_type_list:
                 with ui.column().style("min-width:180px;"):
-                    _type_boxes[_t] = ui.checkbox(
-                        text=_label,
-                        value=_t in _current_types,
-                        on_value_change=lambda: _persist_types(),
-                    )
+                    # 值变化监听用实例方法 .on_value_change（NiceGUI 陷阱：
+                    # 构造函数无 on_value_change kwarg——ui.checkbox 仅收
+                    # text/value/on_change；实例方法才携带 ValueChangeEventArguments）
+                    _box = ui.checkbox(text=_label, value=_t in _current_types)
+                    _box.on_value_change(lambda: _persist_types())
+                    _type_boxes[_t] = _box
                     ui.label(_sub).style('font-size: var(--font-size-assist, 12px); opacity: 0.7;')
 
     # 文本匹配（唯一格式=一问一答 TXT：问题|答案；json 项已退役——F6 实证
