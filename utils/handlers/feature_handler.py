@@ -148,79 +148,72 @@ class FeatureHandler:
         # 积分缺键告警去重（每个键仅警告一次，避免直播期间刷屏）
         self._integral_warned_keys = set()
     
+    def _qa_best_match(self, question, file_path, similarity=0.6):
+        """一问一答匹配统一实现（F6 收敛：原 find_answer/find_similar_answer
+        函数体完全相同——两种格式历来共用同一管道行加载器；F5 修复：原实现调用
+        不存在的 Common.calculate_similarity→AttributeError 被吞→主知识库匹配
+        运行时 100% 失败（/autoplan main-20261026-214845，运行时探证实锤））。
+
+        匹配顺序（D4）：精确短路（归一化全等，含全半角/空白/大小写）→ 相似度最优命中。
+
+        Args:
+            question (str): 问题
+            file_path (str): 词库文件路径
+            similarity (float): 相似度阈值
+
+        Returns:
+            str | None: 答案；未命中/文件不可读返回 None
+        """
+        try:
+            data = self.load_data_from_file(file_path)
+            if not data:
+                return None
+            from ..common.text_mixin import normalize_for_match
+            q_norm = normalize_for_match(question)
+            best_answer = None
+            best_similarity = 0.0
+            for item in data:
+                if len(item) < 2:
+                    continue
+                q, a = item[0], item[1]
+                # 精确短路：归一化全等直接返回（不依赖阈值）
+                if q_norm and normalize_for_match(q) == q_norm:
+                    return a
+                sim = self.my_handle.common.calculate_similarity(question, q)
+                if sim > best_similarity and sim >= similarity:
+                    best_similarity = sim
+                    best_answer = a
+            return best_answer
+        except Exception as e:
+            handle_error(e, {'module': 'handler', 'function': '_qa_best_match'})
+            logger.error(f"词库匹配失败：{e}")
+            return None
+
     def find_answer(self, question, file_path, similarity=0.6):
-        """
-        查找答案
-        
+        """查找答案（F6 收敛别名：与 find_similar_answer 同体，见 _qa_best_match）
+
         Args:
             question (str): 问题
-            file_path (str): 文件路径
+            file_path (str): 词库文件路径
             similarity (float): 相似度阈值
-            
+
         Returns:
-            str: 答案，None表示未找到
+            str | None: 答案，None表示未找到
         """
-        try:
-            # 加载数据
-            data = self.load_data_from_file(file_path)
-            if data is None:
-                return None
-            
-            # 查找最相似的问题
-            best_match = None
-            best_similarity = 0
-            
-            for item in data:
-                if len(item) >= 2:
-                    q, a = item[0], item[1]
-                    # 计算相似度
-                    sim = self.my_handle.common.calculate_similarity(question, q)
-                    if sim > best_similarity and sim >= similarity:
-                        best_similarity = sim
-                        best_match = a
-            
-            return best_match
-        except Exception as e:
-            handle_error(e, {'module': 'handler', 'function': 'unknown'})
-            logger.error(f"查找答案失败：{e}")
-            return None
-    
+        return self._qa_best_match(question, file_path, similarity)
+
     def find_similar_answer(self, question, file_path, similarity=0.6):
-        """
-        查找相似答案
-        
+        """查找相似答案（F6 收敛别名：与 find_answer 同体，见 _qa_best_match）
+
         Args:
             question (str): 问题
-            file_path (str): 文件路径
+            file_path (str): 词库文件路径
             similarity (float): 相似度阈值
-            
+
         Returns:
-            str: 答案，None表示未找到
+            str | None: 答案，None表示未找到
         """
-        try:
-            # 加载数据
-            data = self.load_data_from_file(file_path)
-            if data is None:
-                return None
-            
-            # 查找最相似的问题
-            best_match = None
-            best_similarity = 0
-            
-            for item in data:
-                if len(item) >= 2:
-                    q, a = item[0], item[1]
-                    # 计算相似度
-                    sim = self.my_handle.common.calculate_similarity(question, q)
-                    if sim > best_similarity and sim >= similarity:
-                        best_similarity = sim
-                        best_match = a
-            
-            return best_match
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"查找相似答案失败：{e}")
-            return None
+        return self._qa_best_match(question, file_path, similarity)
     
     # 词库文件缓存（2026-10-25 识别中枢批次）：path -> (mtime, data)。
     # 本地问答匹配在识别中枢高频调用（每条弹幕/语音一次），原实现每次重读

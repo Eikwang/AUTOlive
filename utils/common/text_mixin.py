@@ -21,6 +21,24 @@ from ..base import logger
 _QUESTION_SUFFIX_RE = re.compile(r"[吗嘛么么呢吧呀啊呐?？!！。～~\s]+$")
 
 
+def normalize_for_match(text):
+    """匹配归一化（/autoplan main-20261026-214845 D4 共享口径）：
+    去除全部空白字符 + 全角→半角 + 大小写折叠。文本匹配与音频标题匹配共用。"""
+    if text is None:
+        return ""
+    text = str(text)
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if code == 0x3000:  # 全角空格
+            out.append(" ")
+        elif 0xFF01 <= code <= 0xFF5E:  # 全角可见字符→半角
+            out.append(chr(code - 0xFEE0))
+        else:
+            out.append(ch)
+    return "".join("".join(out).split()).lower()
+
+
 def match_song_intent(text: str, trigger_words, song_names, similarity: float = 0.5):
     """弹幕点歌意图匹配（R2：contains 命中——句中关键词，非前缀命令）。
 
@@ -402,6 +420,28 @@ class TextMixin:
 
         return [s for s in result if s.strip()]
 
+
+    # 字符串相似度（0-1，D4/F5 修复 2026-10-27）：归一化后 difflib 字符相似度。
+    # 修复记录：本方法此前从未存在——feature_handler.find_answer/find_similar_answer
+    # 调用恒 AttributeError 被吞→主知识库匹配运行时 100% 失败（/autoplan
+    # main-20261026-214845 F5 运行时探证实锤）。T6 将在调用侧叠加 jieba 分词项。
+    @staticmethod
+    def calculate_similarity(text_a, text_b):
+        """归一化文本相似度（0-1）：精确全等=1.0，否则 SequenceMatcher.ratio()。
+
+        Args:
+            text_a (str): 文本 A（如弹幕问题）
+            text_b (str): 文本 B（如词库问题）
+
+        Returns:
+            float: 0-1 相似度
+        """
+        a, b = normalize_for_match(text_a), normalize_for_match(text_b)
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        return difflib.SequenceMatcher(None, a, b).ratio()
 
     # 字符串匹配算法来计算字符串之间的相似度，并选择匹配度最高的字符串作为结果
     def find_best_match(self, substring, string_list, similarity=0.5):
