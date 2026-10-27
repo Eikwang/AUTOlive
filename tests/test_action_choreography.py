@@ -179,8 +179,10 @@ class TestConfigModel:
         assert load_choreography_config(make_cfg(rules=[make_rule(emotion_tiers=tiers)])).rules == []
 
     def test_min_retrigger_invalid_falls_back(self):
+        # R-ceo5 退役（2026-10-27 批次/终门 P6）：字段保留但恒 0.0（引擎不消费）；
+        # 旧键读取仅退役告警（值不再回退生效）
         cfg = load_choreography_config(make_cfg(min_retrigger_s=-1))
-        assert cfg.min_retrigger_s == 2.0
+        assert cfg.min_retrigger_s == 0.0
 
     def test_song_match_optional(self):
         rules = [make_rule(rule_id="any_song", trigger_type="song", match="")]
@@ -284,6 +286,8 @@ class TestTriggerAndState:
         assert names == ["enter", "main", "exit"]  # 旧 exit 已显示：不重插（CP-3）
 
     def test_hold_window_ignores_other_key(self):
+        # R-ceo5/终门 uc2a 退役（2026-10-27 批次）：保护窗移除=他键触发立即打断
+        # （旧断言「hold 内忽略」随参数退役；R-dsg7 文案+模拟连打验收对冲）
         rules = [make_rule(),
                  make_rule(rule_id="girl_B", match="玫瑰",
                            sequence={"enter": {"segment": "B_入场", "duration_s": 4},
@@ -291,19 +295,21 @@ class TestTriggerAndState:
                                      "exit": {"segment": "B_离场", "duration_s": 4}})]
         h = EngineHarness(rules=rules, min_sequence_hold_s=5)
         h.trigger_gift()
-        d = h.engine.decide_trigger("gift", "玫瑰", gift_data("玫瑰"))  # hold 内（F5）
-        assert d["accepted"] is False
-        assert h.engine.counters.get("girl_B", 0) == 0
-        assert h.engine.seq["rule_id"] == "girl_A"  # 旧序列未终止
+        d = h.engine.decide_trigger("gift", "玫瑰", gift_data("玫瑰"))
+        assert d["accepted"] is True  # 立即打断（无保护窗）
+        assert h.engine.counters.get("girl_B", 0) == 1
+        assert h.engine.seq["rule_id"] == "girl_B"  # 新序列接管
 
     def test_throttle_ignored_not_counted(self):
+        # R-ceo5/终门 P6 退役（2026-10-27 批次）：引擎级节流移除（弹幕层去重
+        # ac90fe60 承担）——同键重入走条件2 计数+重排（触发次数轮换语义）
         h = EngineHarness(min_retrigger_s=2)
         h.trigger_gift()
         h.engine.state = "default"
         h.engine.seq = None
-        d = h.trigger_gift()  # 2s 内再触发：节流忽略
-        assert d["accepted"] is False
-        assert h.engine.counters["girl_A"] == 1
+        d = h.trigger_gift()  # 2s 内再触发：不再节流，正常接受计数
+        assert d["accepted"] is True
+        assert h.engine.counters["girl_A"] == 2
 
     def test_min_price_gate(self):
         assert EngineHarness().trigger_gift(price=0)["accepted"] is True

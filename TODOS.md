@@ -251,3 +251,11 @@
 
 1. **~~reread_top_priority 生产端接线~~（已完成 2026-10-24）**— 三层接线全落：①弹幕链生产（comment_handle 弹幕链加复读触发段：top_priority_keywords 命中→reread_handle(type="reread_top_priority")→999 权重映射→暂停-续播；普通 keywords→type="reread"，命中即 return 不走 LLM；词表 str/list 双形态）②前端 UI（filter_config 新增"复读触发"卡：enable 开关+两词表 textarea split_lines；settings._ensure_defaults 补 reread 节 defaults——此前 config 无此节 enable 恒 None→复读整体死链）③聊天页按钮接线（talk.py 三按钮 on_click→main.py send_chat_message POST core /send，payload chat_source=chatbox；layout 透传 chat_send_callback）。守卫 5 项入 test_ui16_batch.py（TestRereadProductionChain）。999 暂停-续播真实触发待实播浸泡（A7 E2E 依赖项解除）。
 2. **闲时任务清零功能重建评估**【2026-10-23 收口：评估结论=死链确认（/callback 仅日志、wait_play_audio_num 恒 0），移除零损失；未来需要闲时清零语义走进程内直查 get_audio_info，不恢复 HTTP 回调】（P3, S）— info_to_callback 参数移除（A3）后其声称用途"闲时清零"核实为已死链（/callback 端点仅日志、wait_play_audio_num 恒 0 从未写入），移除零功能损失；若未来需要闲时清零语义，应走进程内直查（get_audio_info）而非 HTTP 回调。依赖：无。
+
+
+## Deferred Items from /autoplan (2026-10-27) — 数字人服务器与动作编排「画面输出」批次（main-20261027-120103，终门 rec 批准 gate_rev2）
+
+1. **X4 编排状态条计数档位观测**（P3, S）— CEO 0F 延后：状态条显示当前计数档位/触发次数（轮换位置可见）；lip_mode 当前值观测已由 R-eng9 纳入本批（get_state 透出）。依赖：本批实施后。
+2. **audio_mode 全量退役清理**（P2, S）— R-ceo7 锚点（CEO cycle-2 F6 期限化）：触发条件=存量规则全部重存 **或本批上线后 30 天**（以先到者为准）；届时移除旧谓词分支与 file 音轨兼容读，删除退役告警。依赖：本批实施。
+3. **编排静默窗口 busy-wait 观测**（P3, S）— 既有条目（2026-10-26 批 #2）与本批 R-eng10 交叉：R-ceo4 窗口长度改由素材时长接替后，_CHOREO_MUTE_MAX_WAIT 300s 上限随 T5 复核对齐；等待 >60s 打点并入 alarm_notifier。依赖：T5 实施。
+4. **合成层缺陷升级槽位**（条件性，P1-条件触发）— R-ceo1 探针任务（uc1b）证伪判据②：若 blend 产物含完整背景而出画仅头部=服务端/桥接缺陷成立，登记修复任务（本批不含修复，合成层 A 方案不受影响）。依赖：uc1b 探针实测。

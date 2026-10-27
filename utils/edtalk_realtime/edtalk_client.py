@@ -285,6 +285,27 @@ class EDTalkClient:
             logger.error(f"EDTalk 切段失败（降级跳过）：{e}")
             return {"ok": False, "error": str(e)}
 
+    def set_lip_params(self, mode: str) -> dict:
+        """口型推理门控（R-ceo2/R-eng5：off=画外音直通，下一帧生效）。
+
+        返回 {"ok": bool, "lip_mode": str?}；失败降级 {"ok": False}（联动为
+        性能层——R-eng5 失败处置=debug 日志+低频告警，不阻塞切换）。
+        """
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/lip/params",
+                json={"mode": mode},
+                headers=self._auth_headers(),
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                return {"ok": True, **(resp.json() or {})}
+            return {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.error(f"EDTalk 口型门控失败（降级跳过）：{e}")
+            return {"ok": False, "error": str(e)}
+
     def schedule(self, sequence: list, align: bool = True) -> dict:
         """下发段播放序列（/segment/schedule）。
 

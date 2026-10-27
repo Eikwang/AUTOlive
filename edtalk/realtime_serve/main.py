@@ -91,6 +91,20 @@ def parse_args():
         help="UnityCapture camera number (default: 0)"
     )
     parser.add_argument(
+        "--canvas-w", type=int, default=1280,
+        help="Unified composite canvas width (2026-10-27 fork, R-ceo9; "
+             "camera opens at this size for the whole session)")
+    parser.add_argument(
+        "--canvas-h", type=int, default=720,
+        help="Unified composite canvas height (2026-10-27 fork, R-ceo9)")
+    parser.add_argument(
+        "--no-composite", action="store_true",
+        help="Disable the unified canvas compositor (native per-segment "
+             "resolution passthrough — upstream behavior)")
+    parser.add_argument(
+        "--composite-default-bg", type=str, default=None,
+        help="Default canvas background image (optional; dark solid if absent)")
+    parser.add_argument(
         "--no-unitycapture",
         action="store_true",
         help="Disable UnityCapture (for testing without virtual camera). "
@@ -356,12 +370,20 @@ def setup_service(config: Config, no_unitycapture: bool = False,
     sender_fn = None
     if not no_unitycapture:
         try:
-            resolution = character_data.resolution
-            height, width = resolution
-            print(f"Character resolution: {resolution} -> Camera: {width}x{height}")
+            # 统一画布政策（2026-10-27 画面输出分叉，R-ceo9）：合成层启用时
+            # 摄像头按会话画布初始化（出帧恒画布尺寸→逐段重建退役，抖动源消灭）；
+            # 合成层禁用时保持上游原语义（按首段分辨率）。
+            if config.composite_enabled:
+                cam_w, cam_h = config.canvas_w, config.canvas_h
+                print(f"Composite canvas: {cam_w}x{cam_h} -> Camera (unified, "
+                      f"per-segment resolution rebuild retired)")
+            else:
+                resolution = character_data.resolution
+                cam_h, cam_w = resolution
+                print(f"Character resolution: {resolution} -> Camera: {cam_w}x{cam_h}")
             unity_capture = UnityCaptureSender(
-                width=width,
-                height=height,
+                width=cam_w,
+                height=cam_h,
                 fps=config.target_fps,
                 backend='unitycapture'
             )
@@ -390,6 +412,21 @@ def setup_service(config: Config, no_unitycapture: bool = False,
         preroll_frames=config.preroll_frames
     )
 
+    # 统一画布合成层（2026-10-27 画面输出分叉）：两出帧口统一改道
+    canvas_compositor = None
+    if config.composite_enabled:
+        try:
+            from realtime_serve.canvas_compositor import CanvasCompositor
+            canvas_compositor = CanvasCompositor(
+                canvas_w=config.canvas_w, canvas_h=config.canvas_h,
+                character_dir=config.character_dir,
+                default_bg_path=config.composite_default_bg)
+            print(f"Canvas compositor: {config.canvas_w}x{config.canvas_h} enabled "
+                  f"(character_dir={config.character_dir})")
+        except Exception as e:
+            print(f"Warning: Canvas compositor init failed ({e}) — 直出降级")
+            canvas_compositor = None
+
     # Inject components into render loop
     render_loop.model_manager = model_manager
     render_loop.frame_buffer = frame_buffer
@@ -397,6 +434,7 @@ def setup_service(config: Config, no_unitycapture: bool = False,
     render_loop.audio_buffer = audio_buffer
     render_loop.audio_processor = audio_processor
     render_loop.compositor = compositor
+    render_loop.canvas_compositor = canvas_compositor
     render_loop.face_repair = face_repair
     render_loop.face_repair_mode = config.face_repair_mode
     render_loop.gaze_corrector = gaze_corrector
@@ -448,7 +486,11 @@ def main():
         preroll_frames=args.preroll_frames,
         gen_fp16=args.gen_fp16,
         unitycapture_enabled=(not args.no_unitycapture),
-        api_token=args.api_token
+        api_token=args.api_token,
+        canvas_w=args.canvas_w,
+        canvas_h=args.canvas_h,
+        composite_enabled=(not args.no_composite),
+        composite_default_bg=args.composite_default_bg
     )
 
     # Set Windows timer resolution early.

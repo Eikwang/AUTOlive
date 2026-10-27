@@ -275,7 +275,9 @@ class RenderLoop:
                 # Native-resolution passthrough: the consumer side is paused
                 # (immediate) or at a natural boundary (seamless), so the
                 # camera can be re-opened at the new segment's size.
-                if self.resolution_change_cb is not None:
+                if self.resolution_change_cb is not None and                         getattr(self, 'canvas_compositor', None) is None:
+                    # 统一画布政策（R-ceo9）：合成层在场时出帧恒画布尺寸，
+                    # 逐段分辨率重建退役（摄像头重建仅会话启动——消灭实播抖动源）
                     try:
                         h, w = self._character_data.resolution
                         self.resolution_change_cb(w, h)
@@ -743,8 +745,9 @@ class RenderLoop:
         if (self.lip_mode == 'off' or facemark is None
                 or bool(np.isnan(facemark).any())):
             t_put_0 = time.perf_counter()
+            out_frame = self._composite_out(orifra)
             if self.frame_buffer is not None:
-                self.frame_buffer.put(orifra, meta=audio_meta)
+                self.frame_buffer.put(out_frame, meta=audio_meta)
             timings['put'] = (time.perf_counter() - t_put_0) * 1000.0
             timings['total'] = (time.perf_counter() - t_total_0) * 1000.0
             self._record_timings(timings)
@@ -856,6 +859,7 @@ class RenderLoop:
         frame_meta = audio_meta
 
         # Push into the output buffer (blocking when full — backpressure)
+        composited = self._composite_out(composited)
         t_put_0 = time.perf_counter()
         if self.frame_buffer is not None:
             self.frame_buffer.put(composited, meta=frame_meta)
@@ -873,6 +877,25 @@ class RenderLoop:
         if self.compositor is not None:
             return self.compositor._resolve_mask(facemark, None)
         return None
+
+    def _composite_out(self, frame):
+        """统一出帧出口（R-eng11①：直通与 blend 两口均改道——2026-10-27 画面输出批次）。
+
+        canvas_compositor 缺省缺席（上游兼容）：无合成器时原帧直出，行为与
+        分叉前逐字节一致。合成异常在 compositor 内部降级直出并计数
+        （R-eng11④），不进本循环的逐帧熔断（降级语义=直出而非停线）。
+        """
+        comp = getattr(self, 'canvas_compositor', None)
+        if comp is None or not comp.enabled:
+            return frame
+        try:
+            with self._segment_lock:
+                seg = (self._character_data.current_segment
+                       if self._character_data is not None else None)
+            return comp.apply(frame, seg)
+        except Exception as e:
+            print(f"[RenderLoop] 画布合成外层异常（直出）: {e}")
+            return frame
 
     def _repair_allowed(self) -> bool:
         """Whether face repair may run on this frame.

@@ -23,13 +23,16 @@ VALID_INTERRUPT = ("standard",)
 
 @dataclass
 class StepCfg:
-    """序列步骤：一段画面 + 音轨声明。"""
+    """序列步骤：一段画面 + 音轨声明（legacy）或素材时长/口型标志（new）。"""
     name: str                      # enter | main | exit
     segment: str
     switch_at: str = "segment_end"
     duration_s: Optional[float] = None
     audio_mode: str = "none"
     audio_path: str = ""
+    lip_flag: Optional[bool] = None   # new 谓词：素材口型标志（apply 二段从 sidecar 解析）
+    hold_for_song: bool = False       # new：song 规则主线段（保持至歌曲结束，R-eng1）
+    pred_version: str = "legacy"      # 谓词版本（R-eng3；随规则解析落步）
 
 
 @dataclass
@@ -42,7 +45,12 @@ class TierCfg:
 
 @dataclass
 class RuleCfg:
-    """触发规则：触发源 + 三步序列 + 情绪分级。"""
+    """触发规则：触发源 + 三步序列 + 情绪分级。
+
+    pred_version（R-eng3 谓词版本标记）：legacy=存量规则（旧谓词
+    audio_mode==none/file 音轨消费直至重存）；new=新语义规则（时长=素材时长、
+    音轨系统判断、mute 谓词按素材口型标志）。
+    """
     rule_id: str
     trigger_type: str
     match: str
@@ -52,9 +60,14 @@ class RuleCfg:
     exit: StepCfg = None
     tiers: list = field(default_factory=list)
     interrupt: str = "standard"
+    pred_version: str = "legacy"
 
     def has_tts_audio(self) -> bool:
-        """序列是否含 tts 音轨（接管判定：抑制原生答谢的依据）。"""
+        """接管判定（R-ceo4 终态）：song 触发→接管（歌曲音频走既有歌曲链路）；
+        gift/keyword 新语义规则→不接管（无步级音轨，原生答谢照常）；
+        存量未重存规则→维持 has_tts_audio() 旧判定。"""
+        if self.pred_version == "new":
+            return self.trigger_type == "song"
         return any(self.name_step(n).audio_mode == "tts" for n in ("enter", "main", "exit"))
 
     def name_step(self, name: str) -> StepCfg:
@@ -89,7 +102,8 @@ def _reject(rule_id: str, reason: str, rejections: list) -> None:
     rejections.append({"rule_id": rule_id, "reason": reason})
 
 
-def _parse_step(rule_id: str, name: str, raw, rejections: list) -> Optional[StepCfg]:
+def _parse_step(rule_id: str, name: str, raw, rejections: list,
+                pred_version: str = "legacy") -> Optional[StepCfg]:
     """解析单步并套用校验表（switch_at 值域 / audio.mode 值域 / duration_s）。"""
     if not isinstance(raw, dict) or not str(raw.get("segment", "")).strip():
         _reject(rule_id, f"sequence.{name} 缺失或 segment 为空", rejections)
@@ -115,11 +129,17 @@ def _parse_step(rule_id: str, name: str, raw, rejections: list) -> Optional[Step
             _reject(rule_id, f"sequence.{name}.duration_s 非数值（{duration_s!r}）", rejections)
             return None
     if audio_mode == "none" and (duration_s is None or duration_s <= 0):
-        # FB-2：无 audio 步骤必须 duration_s>0（拦截单槽 pending 静默跳段）
-        _reject(rule_id, f"sequence.{name} 无音轨但 duration_s 缺失或 ≤0（静默跳段防护）", rejections)
-        return None
+        if pred_version == "new":
+            # R-ceo7：new 规则时长=素材时长（apply 二段从 sidecar 解析后回填），
+            # FB-2 守卫由「素材时长>0」接替（apply 二段+on_edtalk_ready 双链 R-eng6③）
+            pass
+        else:
+            # FB-2：无 audio 步骤必须 duration_s>0（拦截单槽 pending 静默跳段）
+            _reject(rule_id, f"sequence.{name} 无音轨但 duration_s 缺失或 ≤0（静默跳段防护）", rejections)
+            return None
     return StepCfg(name=name, segment=str(raw["segment"]).strip(), switch_at=switch_at,
-                   duration_s=duration_s, audio_mode=audio_mode, audio_path=audio_path)
+                   duration_s=duration_s, audio_mode=audio_mode, audio_path=audio_path,
+                   pred_version=pred_version)
 
 
 def load_choreography_config(config) -> ChoreographyConfig:
@@ -145,20 +165,19 @@ def load_choreography_config(config) -> ChoreographyConfig:
         default_mode = "rotate"
     default_segments = [str(s).strip() for s in (node.get("default_segments") or []) if str(s).strip()]
 
-    try:
-        min_retrigger_s = float(node.get("min_retrigger_s", 2) or 2)
-        if min_retrigger_s <= 0:
-            logger.warning("choreography.min_retrigger_s ≤0 无效，problem=配置告警；cause=须>0；fix=已回退默认 2s")
-            min_retrigger_s = 2.0
-    except (TypeError, ValueError):
-        logger.warning("choreography.min_retrigger_s 非数值，problem=配置告警；cause=类型错误；fix=已回退默认 2s")
-        min_retrigger_s = 2.0
-    try:
-        min_sequence_hold_s = float(node.get("min_sequence_hold_s", 5) or 5)
-        if min_sequence_hold_s < 0:
-            min_sequence_hold_s = 5.0
-    except (TypeError, ValueError):
-        min_sequence_hold_s = 5.0
+    # min_retrigger_s / min_sequence_hold_s 已退役（R-ceo5 终门 uc2a/P6 用户方向；
+    # 2026-10-27 批次）：旧键读取兼容一轮+退役告警，值不再生效（去重机制在弹幕层；
+    # 打断保护窗移除=终门明示风险，R-dsg7 文案告知）。
+    if node.get("min_retrigger_s") is not None:
+        logger.warning(
+            "choreography.min_retrigger_s 已退役（2026-10-27 批次 R-ceo5）："
+            "problem=退役配置键仍存在；cause=去重机制已在弹幕层，该节流不再生效；"
+            "fix=从 config.json choreography 节删除该键（兼容读取一代后破坏性清理）")
+    if node.get("min_sequence_hold_s") is not None:
+        logger.warning(
+            "choreography.min_sequence_hold_s 已退役（2026-10-27 批次 R-ceo5/终门 uc2a）："
+            "problem=退役配置键仍存在；cause=打断保护窗移除（触发命中立即切换）；"
+            "fix=从 config.json choreography 节删除该键；恢复路径见交付 memory")
     try:
         step_timeout_s = float(node.get("step_timeout_s", 60) or 60)
         if step_timeout_s <= 0:
@@ -208,10 +227,15 @@ def load_choreography_config(config) -> ChoreographyConfig:
             min_price = float(raw.get("min_price", 0) or 0)
         except (TypeError, ValueError):
             min_price = 0.0
+        # 谓词版本（R-eng3）：显式 pred_version=new 即新语义规则；缺省=legacy
+        pred_version = str(raw.get("pred_version", "legacy") or "legacy")
+        if pred_version not in ("legacy", "new"):
+            _reject(rule_id, f"pred_version 值域外（{pred_version!r}，仅 legacy|new）", rejections)
+            continue
         seq = raw.get("sequence") or {}
-        enter = _parse_step(rule_id, "enter", seq.get("enter"), rejections)
-        main = _parse_step(rule_id, "main", seq.get("main"), rejections)
-        exit_step = _parse_step(rule_id, "exit", seq.get("exit"), rejections)
+        enter = _parse_step(rule_id, "enter", seq.get("enter"), rejections, pred_version)
+        main = _parse_step(rule_id, "main", seq.get("main"), rejections, pred_version)
+        exit_step = _parse_step(rule_id, "exit", seq.get("exit"), rejections, pred_version)
         if enter is None or main is None or exit_step is None:
             continue  # 步骤级拒绝已记录
         interrupt = raw.get("interrupt", "standard")
@@ -257,7 +281,7 @@ def load_choreography_config(config) -> ChoreographyConfig:
 
         rules.append(RuleCfg(rule_id=rule_id, trigger_type=trigger_type, match=match,
                              min_price=min_price, enter=enter, main=main, exit=exit_step,
-                             tiers=tiers, interrupt=interrupt))
+                             tiers=tiers, interrupt=interrupt, pred_version=pred_version))
 
     if rejections:
         logger.warning(
@@ -266,8 +290,8 @@ def load_choreography_config(config) -> ChoreographyConfig:
         )
     cfg = ChoreographyConfig(enable=enable, default_mode=default_mode,
                              default_segments=default_segments,
-                             min_retrigger_s=min_retrigger_s,
-                             min_sequence_hold_s=min_sequence_hold_s,
+                             min_retrigger_s=0.0,       # 已退役（R-ceo5）：引擎不消费
+                             min_sequence_hold_s=0.0,   # 已退役（R-ceo5/uc2a）：保护窗移除
                              step_timeout_s=step_timeout_s,
                              reset_after_s=reset_after_s, rules=rules)
     cfg._rejections = rejections

@@ -289,6 +289,8 @@ class TestSimulateTrigger:
         assert drain(ch) == []  # 指令不进队列（无消费者堆积）
 
     def test_throttled_reason_with_retry_after(self):
+        # R-ceo5 退役（2026-10-27 批次/终门 P6）：节流移除——同键立即重触发
+        # 走条件2 重排（accepted=true），throttled reason 不再产出
         ch, _ = _facade()
         ch._worker = None
         ch.worker_alive = lambda: True
@@ -301,8 +303,9 @@ class TestSimulateTrigger:
         r2 = ch2.simulate_trigger({"trigger_type": "keyword", "match_value": "跳舞"})
         assert r2["accepted"] is True
         r3 = ch2.simulate_trigger({"trigger_type": "keyword", "match_value": "跳舞"})
-        assert r3["accepted"] is False and r3["reason"] == "throttled"
-        assert r3["retry_after_s"] is not None and r3["retry_after_s"] > 0
+        # 节流退役后直抵状态机：主线执行中同键重入=in_progress（条件2 原有语义，
+        # 此前被节流先行拦截；exit 阶段重入才走 requeued 重排——WP-9）
+        assert r3["accepted"] is False and r3["reason"] == "in_progress"
 
     def test_three_types_hit(self):
         node = _cfg_node(rules=[
@@ -369,7 +372,9 @@ class TestSimulateTrigger:
         h3.advance(10)
         d_int = h3.engine.decide_trigger("gift", "火箭", gift_data(name="火箭"))
         reasons.add(d_int["reason"])  # interrupted
-        assert {"no_match", "below_min_price", "throttled", "hold", "in_progress",
+        # throttled/hold 已随 min_retrigger_s/min_sequence_hold_s 退役（R-ceo5/uc2a，
+        # 2026-10-27 批次）——枚举覆盖断言同步收窄
+        assert {"no_match", "below_min_price", "in_progress",
                 "disabled", "accepted", "requeued", "interrupted"} <= reasons
 
 

@@ -510,6 +510,15 @@ class AutoliveApp:
         # 段播放调度已退役（2026-10-26）：默认全部素材自然排序轮播（--segments auto），
         # 画面接管统一走『动作编排』页（默认画面池/规则序列经 /segment/schedule 下发）
         cmd += ["--segments", "auto"]
+        # 统一画布合成层（2026-10-27 画面输出批次，R-ceo9/F-M3）：几何单一来源=
+        # AUTOlive 配置键（edtalk_realtime.canvas_w/h 等），会话启动下发服务端
+        cmd += ["--canvas-w", str(ed_cfg.get("canvas_w", 1280))]
+        cmd += ["--canvas-h", str(ed_cfg.get("canvas_h", 720))]
+        if ed_cfg.get("composite_enabled", True) is False:
+            cmd += ["--no-composite"]
+        _default_bg = str(ed_cfg.get("composite_default_bg", "") or "")
+        if _default_bg:
+            cmd += ["--composite-default-bg", _default_bg]
         cmd += ["--host", "127.0.0.1"]
         cmd += ["--port", str(port)]
 

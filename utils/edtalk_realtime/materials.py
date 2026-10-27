@@ -29,9 +29,111 @@ _VIDEO_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".flv", ".webm", ".wmv")
 _PIECE_DIRS = ("orifra", "count")
 _PIECE_FILES = ("metadata", "facemark")
 
+# 素材类型三分类（R-ceo3：上场/主线/离场）
+_VALID_MATERIAL_TYPES = ("enter", "main", "exit")
+# 素材元数据 sidecar（R-eng2：主项目侧 data/，main 单写者；红线=不写 edtalk/ 四件套格式）
+_META_FILENAME = "edtalk_materials_meta.json"
+_META_LOCK = threading.Lock()
+# sidecar 字段缺省（R-ceo9 几何契约：固定默认值，UI 后置；F-M3 单一来源=本文件）
+_META_DEFAULTS = {
+    "type": "main",        # enter|main|exit（X3 迁移默认=主线）
+    "lip_flag": True,      # 口型推理（R-ceo2② 存量迁移素材视为 on）
+    "duration_s": None,    # total_frames/target_fps（X2：规则引擎播放时长来源）
+    "fps": 25.0,           # 渲染目标帧率（edtalk_realtime.target_fps，F-L2① sidecar 另存）
+    "background": None,    # 背景画布图路径（uc3a/R-dsg11；None=画布默认背景）
+    "head_position": [0.5, 0.42],  # 头部中心在画布的归一化位置（R-ceo9 几何契约）
+    "head_scale": 0.5,     # 头部占画布短边比例（R-ceo9 几何契约）
+    "composite": True,     # 是否合成背景画布（False=默认背景直出，非黑）
+    "closeup": False,      # 特写标记（X1：crop 覆盖全帧两轴，F-L1 覆盖判据）
+    "preview": None,       # 首帧+背景合成缩略图路径（R-dsg11 D2-6）
+    "conflict": False,     # 迁移跨类引用冲突标记（R-ceo3/R-dsg5）
+    "server_background": None,  # A 方案：character_dir/backgrounds/ 路径（R-eng2 F-H3）
+    "canvas_w": 1280,      # 会话画布（R-ceo9：单一来源=AUTOlive 配置键，发布时快照）
+    "canvas_h": 720,
+}
+
 
 class MaterialError(Exception):
     """素材操作语义失败（problem/cause/fix 三段式消息；API 层映射 4xx）。"""
+
+
+# ----------------------------------------------------------------------
+# 素材元数据 sidecar（T1/R-eng2：data/edtalk_materials_meta.json）
+# ----------------------------------------------------------------------
+
+def _meta_path() -> str:
+    from frontend.config.paths import get_base_path
+    return os.path.join(str(get_base_path()), "data", _META_FILENAME)
+
+
+def _load_meta() -> dict:
+    """读 sidecar（损坏降级空表+告警，不阻塞规则链——Section 2 裁决）。"""
+    path = _meta_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as e:
+        logger.error(f"[materials] 素材元数据损坏（降级空清单语义）：{e}; "
+                     "problem=素材元数据文件损坏；cause=JSON 解析失败；"
+                     "fix=删除该文件后重新添加素材（data/edtalk_materials_meta.json）")
+        return {}
+
+
+def _save_meta(meta: dict) -> None:
+    """原子写 sidecar（沿 orchestration.api 单写者先例：tmp+os.replace）。"""
+    path = _meta_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def get_material_meta(segment: str) -> dict:
+    """单素材元数据（缺省字段回填 _META_DEFAULTS；未登记素材=全默认）。"""
+    with _META_LOCK:
+        raw = (_load_meta().get(segment) or {})
+    out = dict(_META_DEFAULTS)
+    for k in _META_DEFAULTS:
+        if k in raw and raw[k] is not None:
+            out[k] = raw[k]
+    return out
+
+
+def set_material_meta(segment: str, **fields) -> dict:
+    """更新单素材元数据（改类型/口型重处理/背景换绑共用入口；R-dsg3）。
+
+    白名单字段写入；未知字段拒绝（枚举校验：type 值域）。返回更新后全量。
+    """
+    unknown = set(fields) - set(_META_DEFAULTS)
+    if unknown:
+        raise MaterialError(
+            f"problem=未知素材元数据字段；cause={sorted(unknown)}；"
+            f"fix=仅允许 {sorted(_META_DEFAULTS)}")
+    if "type" in fields and fields["type"] not in _VALID_MATERIAL_TYPES:
+        raise MaterialError(
+            f"problem=素材类型值域外；cause={fields['type']!r}；"
+            f"fix=仅允许 {'/'.join(_VALID_MATERIAL_TYPES)}")
+    with _META_LOCK:
+        meta = _load_meta()
+        entry = meta.get(segment) or {}
+        entry.update({k: v for k, v in fields.items() if v is not None or k in ("background",)})
+        meta[segment] = entry
+        _save_meta(meta)
+    return get_material_meta(segment)
+
+
+def _meta_duration_s(total_frames, fps: float):
+    """帧数→秒（X2：规则引擎播放时长来源；帧数缺失返回 None=时长未知）。"""
+    try:
+        if total_frames is None or fps <= 0:
+            return None
+        return round(float(total_frames) / float(fps), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -136,8 +238,98 @@ def _deletion_blockers(config: dict, segment: str) -> list:
 # 素材清单（管理页列表）
 # ----------------------------------------------------------------------
 
+def migrate_material_types(config: dict, cfg_override: dict = None) -> dict:
+    """X3 存量素材类型定型（R-ceo3/native F4：按既有规则步骤引用先行定型）。
+
+    cfg_override：规则引用扫描源（生产=None→读 config.json，沿
+    collect_references 单写者惯例；测试/调用方可注入）。幂等：sidecar 标记
+    _migrated=true 后跳过。规则：
+      - enter 步引用→enter、exit 步引用→exit、main 步引用→main；
+      - 跨类引用（同段被多类步骤引用）→默认 main+conflict 标记（人工裁决入口=
+        R-dsg3 改类型）；跨类引用同时计入 _deletion_blockers 提示；
+      - 未被任何规则引用→main（R-eng7：default_segments 引用不改变类型，
+        仅入删除保护）。
+    返回迁移报告 {typed, conflicts, conflict_segments}（R-dsg5 横幅数据源）。
+    """
+    with _META_LOCK:
+        meta = _load_meta()
+        char_dir = resolve_character_dir(config)
+        # 迁移标记按 character_dir 键控（隔离缺口教训：测试 tmp 角色目录与真实
+        # 目录共用 sidecar 时，全局标记会跳过真实素材的迁移）
+        migrate_key = f"_migrated:{char_dir}"
+        if meta.get(migrate_key):
+            return {"typed": 0, "conflicts": 0, "conflict_segments": [],
+                    "skipped": True}
+        orifra_base = os.path.join(char_dir, "orifra")
+        on_disk = sorted(
+            d for d in (os.listdir(orifra_base) if os.path.isdir(orifra_base) else [])
+            if os.path.isdir(os.path.join(orifra_base, d)))
+
+        # 段→引用类型集合（含 tiers 覆盖——native F4/R-eng7 全引用面）
+        ref_types: dict = {}
+        cfg = cfg_override
+        if cfg is None:
+            try:
+                with open("config.json", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = {}
+        ch = cfg.get("choreography") or {}
+        for seg in (ch.get("default_segments") or []):
+            ref_types.setdefault(str(seg), set())  # 默认池引用不入类型（R-eng7）
+        for rule in (ch.get("rules") or []):
+            rid = rule.get("rule_id") or "?"
+            seq = rule.get("sequence") or {}
+            for step_name in ("enter", "main", "exit"):
+                seg = (seq.get(step_name) or {}).get("segment")
+                if seg:
+                    ref_types.setdefault(str(seg), set()).add(step_name)
+            for tier in (rule.get("emotion_tiers") or []):
+                for s in ((tier.get("segment_overrides") or {}).values()):
+                    if s:
+                        ref_types.setdefault(str(s), set()).add(
+                            f"tier:{rid}")  # 覆盖档引用=中性（不定型不冲突）
+
+        typed = 0
+        conflicts = []
+        for seg in on_disk:
+            if seg in meta:
+                continue
+            types = ref_types.get(seg) or set()
+            step_types = types & set(_VALID_MATERIAL_TYPES)
+            if len(step_types) == 1:
+                mtype = step_types.pop()
+            else:
+                mtype = "main"
+                if len(step_types) > 1:
+                    conflicts.append(seg)
+            meta[seg] = dict(_META_DEFAULTS)
+            meta[seg]["type"] = mtype
+            meta[seg]["conflict"] = seg in conflicts
+            # F-2 存量特写回溯徽标（R-dsg2）：迁移时对完整链素材判定特写
+            # （桩素材=全 NaN facemark 天然不标记——X1 口径同源）
+            stats = _disk_stats(char_dir, seg)
+            meta[seg]["duration_s"] = _meta_duration_s(stats.get("total_frames"),
+                                                       meta[seg]["fps"])
+            if stats.get("face_ratio") is not None and stats["face_ratio"] > 0:
+                try:
+                    meta[seg]["closeup"] = _detect_closeup(
+                        os.path.join(char_dir, "orifra", seg),
+                        os.path.join(char_dir, "metadata", f"{seg}.npy"))
+                except Exception as e:
+                    logger.warning(f"[materials] 迁移特写检测失败 seg={seg}: {e}")
+            typed += 1
+        meta[migrate_key] = True
+        _save_meta(meta)
+    logger.info(f"[materials] 素材类型迁移定型完成: typed={typed} "
+                f"conflicts={len(conflicts)} {conflicts}")
+    return {"typed": typed, "conflicts": len(conflicts),
+            "conflict_segments": conflicts}
+
+
 def list_materials(config: dict) -> dict:
-    """character_dir 全段清单（磁盘扫描 + 服务在线信息合并）。"""
+    """character_dir 全段清单（磁盘扫描 + 服务在线信息合并 + X3 迁移幂等触发）。"""
+    migration = migrate_material_types(config)
     char_dir = resolve_character_dir(config)
     orifra_base = os.path.join(char_dir, "orifra")
     on_disk = sorted(
@@ -151,8 +343,10 @@ def list_materials(config: dict) -> dict:
     sched_seq = (((st or {}).get("segment_sequence") or {}).get("sequence")) or []
 
     items = []
+    meta_all = _load_meta()
     for seg in on_disk:
         info = details.get(seg) or {}
+        meta = meta_all.get(seg) or {}
         item = {
             "segment": seg,
             "total_frames": info.get("total_frames"),
@@ -169,9 +363,18 @@ def list_materials(config: dict) -> dict:
             item.update(disk)
         if item.get("face_ratio") is not None and item["face_ratio"] <= 0.0:
             item["voiceover_only"] = True  # 全段无人脸=纯画外音素材
+        # sidecar 元数据合并（T1/R-eng2：type/lip_flag/duration_s/背景/几何/标记）
+        merged = dict(_META_DEFAULTS)
+        for k in _META_DEFAULTS:
+            if k in meta and meta[k] is not None:
+                merged[k] = meta[k]
+        if merged["duration_s"] is None and item.get("total_frames") is not None:
+            merged["duration_s"] = _meta_duration_s(item["total_frames"], merged["fps"])
+        item.update(merged)
         items.append(item)
     return {"character_dir": char_dir, "service_online": bool(st),
-            "current_segment": current, "items": items}
+            "current_segment": current, "items": items,
+            "migration": {k: v for k, v in migration.items() if k != "skipped"}}
 
 
 def _piece_complete(char_dir: str, seg: str) -> bool:
@@ -224,13 +427,23 @@ def _set_task(**kw) -> None:
 
 
 def publish_material(config: dict, video_path: str, segment: str,
-                     device: str = "cuda") -> dict:
-    """发起素材添加（后台线程执行；单飞行）。返回任务快照（含排队失败原因）。"""
+                     device: str = "cuda", material_type: str = "main",
+                     lip_flag: bool = True, background: str = None) -> dict:
+    """发起素材添加（后台线程执行；单飞行）。返回任务快照（含排队失败原因）。
+
+    R-ceo3/R-ceo2：material_type∈{enter,main,exit}（D1 三分类）；
+    lip_flag=口型推理勾选（True→crop_head_video 完整人脸链；False→桩四件套，
+    T2/R-eng4①）；background=可选背景画布图（uc3a/R-dsg11，None=默认背景）。
+    """
     segment = str(segment or "").strip()
     if not _SEG_NAME_RE.match(segment):
         raise MaterialError(
             "problem=素材段名非法；cause=仅允许字母/数字/下划线/短横线（1-64 位）；"
             "fix=修改段名（将作为 orifra/ 目录名，编排里按此名引用）")
+    if material_type not in _VALID_MATERIAL_TYPES:
+        raise MaterialError(
+            f"problem=素材类型值域外；cause={material_type!r}；"
+            f"fix=仅允许 {'/'.join(_VALID_MATERIAL_TYPES)}")
     if not video_path or not os.path.isfile(str(video_path)):
         raise MaterialError(
             f"problem=视频文件不存在；cause={video_path!r}；fix=选择有效的本地视频文件")
@@ -238,6 +451,11 @@ def publish_material(config: dict, video_path: str, segment: str,
         raise MaterialError(
             "problem=不支持的文件类型；cause=仅支持 "
             f"{'/'.join(_VIDEO_EXTS)}；fix=转码后重试")
+    if background is not None and (not str(background).strip()
+                                   or not os.path.isfile(str(background))):
+        raise MaterialError(
+            f"problem=背景画布图不可读；cause={background!r}；"
+            "fix=选择有效的图片文件或留空（默认背景）")
 
     char_dir = resolve_character_dir(config)
     if not os.path.isdir(char_dir):
@@ -262,7 +480,8 @@ def publish_material(config: dict, video_path: str, segment: str,
                       "message": "", "ok": None,
                       "started_at": time.time(), "finished_at": None})
     threading.Thread(target=_publish_worker,
-                     args=(config, str(video_path), segment, device),
+                     args=(config, str(video_path), segment, device,
+                           material_type, bool(lip_flag), background),
                      daemon=True).start()
     return get_task_status()
 
@@ -276,9 +495,11 @@ def _training_running() -> bool:
 
 
 def _publish_worker(config: dict, video_path: str, segment: str,
-                    device: str) -> None:
+                    device: str, material_type: str = "main",
+                    lip_flag: bool = True, background: str = None) -> None:
     try:
-        _publish_sync(config, video_path, segment, device)
+        _publish_sync(config, video_path, segment, device,
+                      material_type, lip_flag, background)
         _set_task(state="done", stage="完成", ok=True,
                   message=f"素材 '{segment}' 已上线",
                   finished_at=time.time())
@@ -291,7 +512,8 @@ def _publish_worker(config: dict, video_path: str, segment: str,
 
 
 def _publish_sync(config: dict, video_path: str, segment: str,
-                  device: str) -> None:
+                  device: str, material_type: str = "main",
+                  lip_flag: bool = True, background: str = None) -> None:
     ed_root = edtalk_root()
     char_dir = resolve_character_dir(config)
     stage = staging_dir(segment)
@@ -305,43 +527,64 @@ def _publish_sync(config: dict, video_path: str, segment: str,
     ext = os.path.splitext(video_path)[1].lower()
     staged_video = os.path.join(ov, segment + ext)
     shutil.copy2(video_path, staged_video)
+    if background:
+        shutil.copy2(background, os.path.join(stage, "background"
+                                              + os.path.splitext(background)[1].lower()))
 
-    # 2) 预处理：步骤10 crop_head_video（拆帧+人脸检测+关键点 → 四件套）
-    _set_task(stage="预处理（拆帧+人脸检测，耗时与视频长度成正比）")
+    # 2) 预处理（R-ceo2 按需）：勾选→crop_head_video 完整人脸链；不勾选→桩四件套
     from utils.edtalk_realtime.runtime import resolve_interpreter
     interpreter = resolve_interpreter(config)
     if not interpreter:
         raise MaterialError(
             "problem=EDTalk 解释器未找到；cause=仓库副本与 D:\\AI\\EDTalk\\runtime312 "
             "均无 python.exe；fix=运行 scripts/copy_edtalk.py 补齐运行副本")
-    script = os.path.join(ed_root, "data_preprocess", "data_preprocess_for_train",
-                          "crop_head_video.py")
-    if not os.path.isfile(script):
-        raise MaterialError(
-            "problem=预处理脚本缺失；cause=" + script +
-            "；fix=运行 scripts/copy_edtalk.py 补齐 EDTalk 运行副本")
-    cmd = [interpreter, "-u", script, stage,
-           "--device", device, "--num_workers", "4",
-           "--output_size", "256", "--output_format", "jpg",
-           "--longest_edge", "1920", "--detect_interval", "3"]
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    proc = subprocess.run(cmd, cwd=ed_root, env=env,
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
-    if proc.returncode != 0:
-        tail = (proc.stdout or "")[-800:] + "\n" + (proc.stderr or "")[-800:]
-        logger.error(f"[materials] 预处理失败 seg={segment}:\n{tail}")
-        raise MaterialError(
-            "problem=预处理失败（人脸检测/拆帧）；cause=返回码 "
-            f"{proc.returncode}（详见 log/）；"
-            "fix=确认视频含清晰人脸；持续失败改用 --device cpu 排查 GPU/WDDM 问题")
 
-    # 3) 校验四件套齐全（预处理对无人脸视频仍产出全 NaN facemark——合法素材，
-    #    播放时走画外音直通；这里只要求"格式齐全"）
+    if lip_flag:
+        _set_task(stage="预处理（拆帧+人脸检测，耗时与视频长度成正比）")
+        script = os.path.join(ed_root, "data_preprocess", "data_preprocess_for_train",
+                              "crop_head_video.py")
+        if not os.path.isfile(script):
+            raise MaterialError(
+                "problem=预处理脚本缺失；cause=" + script +
+                "；fix=运行 scripts/copy_edtalk.py 补齐 EDTalk 运行副本")
+        cmd = [interpreter, "-u", script, stage,
+               "--device", device, "--num_workers", "4",
+               "--output_size", "256", "--output_format", "jpg",
+               "--longest_edge", "1920", "--detect_interval", "3"]
+        proc = subprocess.run(cmd, cwd=ed_root, env=env,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace")
+        if proc.returncode != 0:
+            tail = (proc.stdout or "")[-800:] + "\n" + (proc.stderr or "")[-800:]
+            logger.error(f"[materials] 预处理失败 seg={segment}:\n{tail}")
+            raise MaterialError(
+                "problem=预处理失败（人脸检测/拆帧）；cause=返回码 "
+                f"{proc.returncode}（详见 log/）；"
+                "fix=确认视频含清晰人脸；持续失败改用 --device cpu 排查 GPU/WDDM 问题")
+    else:
+        # 桩四件套（R-eng4①：旁路脚本，runtime 解释器执行——主环境无 cv2）
+        _set_task(stage="预处理（简单处理=桩四件套，跳过人脸链）")
+        stub_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "stub_pieces.py")
+        ffmpeg = os.path.join(ed_root, "runtime312", "ffmpeg", "bin", "ffmpeg.exe")
+        cmd = [interpreter, "-u", stub_script, stage, "--segment", segment,
+               "--ffmpeg", ffmpeg]
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            tail = (proc.stdout or "")[-800:] + "\n" + (proc.stderr or "")[-800:]
+            logger.error(f"[materials] 桩生成失败 seg={segment}:\n{tail}")
+            raise MaterialError(
+                "problem=简单处理失败（拆帧/桩四件套）；cause=返回码 "
+                f"{proc.returncode}（详见 log/）；fix=确认视频可解码后重试")
+
+    # 3) 校验四件套齐全（加载器双校验：存在性 :929 + 帧数一致性 :962-967 由
+    #    生成器保证；此处只要求"格式齐全"）
     _set_task(stage="校验产出")
     for d in _PIECE_DIRS:
         if not os.path.isdir(os.path.join(stage, d, segment)):
@@ -354,7 +597,18 @@ def _publish_sync(config: dict, video_path: str, segment: str,
                 f"problem=预处理产出缺 {f}/{segment}.npy；cause=预处理输出不完整；"
                 "fix=查看 log/ 中预处理日志定位")
 
-    # 4) 落盘 character_dir（move 而非 copy：暂存区不留双份大文件）
+    # 4) X1 特写检测（R-eng8 覆盖判据；仅挂 on 路径——桩素材跳过，native F1 防误报）
+    closeup = False
+    closeup_warn = ""
+    if lip_flag:
+        closeup = _detect_closeup(os.path.join(stage, "orifra", segment),
+                                  os.path.join(stage, "metadata", f"{segment}.npy"))
+        if closeup:
+            closeup_warn = "⚠ 源素材为头部特写：输出将只有头部区域。" \
+                           "建议更换含完整画面的源视频重训/重传。"
+            logger.warning(f"[materials] {segment}: {closeup_warn}")
+
+    # 5) 落盘 character_dir（move 而非 copy：暂存区不留双份大文件）
     _set_task(stage="落盘角色目录")
     for d in _PIECE_DIRS:
         os.makedirs(os.path.join(char_dir, d), exist_ok=True)
@@ -368,9 +622,55 @@ def _publish_sync(config: dict, video_path: str, segment: str,
     if os.path.isfile(gaze_src):
         os.makedirs(os.path.join(char_dir, "gaze_data"), exist_ok=True)
         shutil.move(gaze_src, os.path.join(char_dir, "gaze_data", f"{segment}.npy"))
-    shutil.rmtree(stage, ignore_errors=True)
+    bg_src = None
+    for fn in os.listdir(stage):
+        if fn.startswith("background"):
+            bg_src = os.path.join(stage, fn)
+    bg_char_path = None
+    if bg_src:
+        os.makedirs(staging_dir(segment), exist_ok=True)
+        kept = os.path.join(staging_dir(segment), os.path.basename(bg_src))
+        shutil.move(bg_src, kept)
+        bg_saved = kept
+        # A 方案服务端契约（R-eng2 F-H3）：character_dir/backgrounds/<seg>.jpg
+        # = 合成 opt-in 信号；<seg>.json = 几何覆盖（head_position/head_scale）
+        bg_char_path = _write_segment_background(char_dir, segment, bg_saved,
+                                                 meta_fields)
 
-    # 5) 热上线：服务运行中→/segment/add；未运行→下次启动自动扫描发现
+    # 6) 元数据 sidecar 写入（T1/R-eng2：type/lip_flag/duration/几何/标记）
+    stats = _disk_stats(char_dir, segment)
+    fps = 25.0
+    try:
+        fps = float((config or {}).get("edtalk_realtime", {}).get("target_fps", 25))
+    except (TypeError, ValueError):
+        pass
+    bg_saved = None
+    if background:
+        kept = os.path.join(staging_dir(segment),
+                            "background" + os.path.splitext(background)[1].lower())
+        bg_saved = kept if os.path.isfile(kept) else None
+    meta_fields = dict(_META_DEFAULTS)
+    try:
+        meta_fields["canvas_w"] = int((config or {}).get("edtalk_realtime", {}).get("canvas_w", 1280))
+        meta_fields["canvas_h"] = int((config or {}).get("edtalk_realtime", {}).get("canvas_h", 720))
+    except (TypeError, ValueError):
+        pass
+    meta_fields.update({
+        "type": material_type, "lip_flag": bool(lip_flag),
+        "fps": fps, "duration_s": _meta_duration_s(stats.get("total_frames"), fps),
+        "background": bg_saved, "closeup": bool(closeup),
+        "composite": True,
+        "server_background": bg_char_path,  # A 方案契约：character_dir/backgrounds/ 路径
+    })
+    set_material_meta(segment, **meta_fields)
+
+    # 7) 预览缩略（R-dsg11 D2-6：首帧+背景合成，S 级；PIL 在主环境可用）
+    try:
+        _render_preview(segment, char_dir, meta_fields)
+    except Exception as e:
+        logger.warning(f"[materials] 预览生成失败 seg={segment}: {e}")
+
+    # 8) 热上线：服务运行中→/segment/add；未运行→下次启动自动扫描发现
     _set_task(stage="热上线")
     st = service_status(config)
     if st:
@@ -386,9 +686,105 @@ def _publish_sync(config: dict, video_path: str, segment: str,
         info = resp.json() or {}
         face_ratio = info.get("face_ratio")
         hint = "" if (face_ratio or 0) > 0 else "（全段无人脸：将作画外音素材使用）"
-        _set_task(message=f"素材 '{segment}' 已热上线，共 {info.get('total_frames')} 帧{hint}")
+        _set_task(message=f"素材 '{segment}' 已热上线，共 {info.get('total_frames')} 帧{hint}"
+                          + (f"；{closeup_warn}" if closeup_warn else ""))
     else:
-        _set_task(message=f"素材 '{segment}' 已落盘；数字人服务未运行，下次启动自动生效")
+        _set_task(message=f"素材 '{segment}' 已落盘；数字人服务未运行，下次启动自动生效"
+                          + (f"；{closeup_warn}" if closeup_warn else ""))
+
+
+def _write_segment_background(char_dir: str, segment: str, bg_path: str,
+                              meta: dict) -> str:
+    """段背景+几何落 character_dir/backgrounds/（A 方案交付契约，R-eng2 F-H3）。
+
+    每项入补丁台账（edtalk/FORK_LEDGER.md——台账记录契约本身，文件随素材增删）。
+    返回服务端背景文件路径（供 meta 记账）。
+    """
+    bg_dir = os.path.join(char_dir, "backgrounds")
+    os.makedirs(bg_dir, exist_ok=True)
+    ext = os.path.splitext(bg_path)[1].lower() or ".jpg"
+    dst = os.path.join(bg_dir, segment + ext)
+    shutil.copy2(bg_path, dst)
+    geo = {
+        "head_position": list(meta.get("head_position") or [0.5, 0.42]),
+        "head_scale": float(meta.get("head_scale") or 0.5),
+        "canvas": [int(meta.get("canvas_w") or 1280), int(meta.get("canvas_h") or 720)],
+    }
+    with open(os.path.join(bg_dir, segment + ".json"), "w",
+              encoding="utf-8", newline="\n") as f:
+        json.dump(geo, f, ensure_ascii=False, indent=2)
+    return dst
+
+
+def _remove_segment_background(char_dir: str, segment: str) -> None:
+    """删除链同步清理段背景+几何文件（A 方案契约）。"""
+    bg_dir = os.path.join(char_dir, "backgrounds")
+    for suffix in (".jpg", ".png", ".json"):
+        p = os.path.join(bg_dir, segment + suffix)
+        if os.path.isfile(p):
+            os.remove(p)
+
+
+def _detect_closeup(orifra_dir: str, metadata_path: str) -> bool:
+    """X1 特写检测（R-eng8 覆盖判据 F-L1：crop ⊇ 帧两轴；不扩召回，d3b 语义）。
+
+    桩素材不调用（R-ceo2 native F1：桩按构造全帧 crop，全量误报）。
+    metadata 结构化数组 11 字段；orifra 首帧尺寸为帧尺寸基准（PIL，主环境可用）。
+    """
+    try:
+        import numpy as np
+        from PIL import Image
+        frames = sorted(f for f in os.listdir(orifra_dir) if f.endswith(".jpg"))
+        if not frames or not os.path.isfile(metadata_path):
+            return False
+        w, h = Image.open(os.path.join(orifra_dir, frames[0])).size
+        md = np.load(metadata_path)
+        if len(md) == 0:
+            return False
+        # 首帧 crop 覆盖判据：crop 框两轴均覆盖帧（允许原点越界）
+        c = md[0]
+        covers_x = float(c['crop_x']) <= 0 and float(c['crop_x']) + float(c['crop_size']) >= w
+        covers_y = float(c['crop_y']) <= 0 and float(c['crop_y']) + float(c['crop_size']) >= h
+        return bool(covers_x and covers_y)
+    except Exception as e:
+        logger.warning(f"[materials] X1 特写检测失败（默认不标记）: {e}")
+        return False
+
+
+def _render_preview(segment: str, char_dir: str, meta: dict) -> None:
+    """首帧+背景合成缩略（R-dsg11 D2-6；预览与出画同源读取 sidecar 几何——F-M3）。"""
+    import numpy as np
+    from PIL import Image
+    orifra_dir = os.path.join(char_dir, "orifra", segment)
+    frames = sorted(f for f in os.listdir(orifra_dir) if f.endswith(".jpg"))
+    if not frames:
+        return
+    canvas_w, canvas_h = 1280, 720  # R-ceo9 默认画布（几何 sidecar 缺省）
+    bg_path = meta.get("background")
+    composite = bool(meta.get("composite", True))
+    px, py = meta.get("head_position") or [0.5, 0.42]
+    scale = float(meta.get("head_scale") or 0.5)
+
+    canvas = None
+    if composite:
+        if bg_path and os.path.isfile(str(bg_path)):
+            canvas = Image.open(str(bg_path)).convert("RGB")
+        else:
+            canvas = Image.new("RGB", (canvas_w, canvas_h), (24, 24, 32))  # 深色默认背景（非黑）
+        canvas = canvas.resize((canvas_w, canvas_h))
+        head = Image.open(os.path.join(orifra_dir, frames[0])).convert("RGB")
+        side = int(min(canvas_w, canvas_h) * max(0.1, min(1.0, scale)))
+        head = head.resize((side, side))
+        cx, cy = int(canvas_w * float(px)), int(canvas_h * float(py))
+        canvas.paste(head, (max(0, cx - side // 2), max(0, cy - side // 2)))
+    else:
+        canvas = Image.open(os.path.join(orifra_dir, frames[0])).convert("RGB")
+        canvas = canvas.resize((canvas_w, canvas_h))
+    out_dir = staging_dir(segment)
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, "preview.jpg")
+    canvas.save(out, quality=85)
+    set_material_meta(segment, preview=out)
 
 
 def delete_material(config: dict, segment: str) -> dict:
@@ -439,6 +835,16 @@ def delete_material(config: dict, segment: str) -> dict:
         os.remove(g)
         removed.append(f"gaze_data/{segment}.npy")
     logger.info(f"[materials] 素材已删除：{segment}（{', '.join(removed)}）")
+    _remove_segment_background(char_dir, segment)  # A 方案契约：背景/几何同步清理
+    # sidecar 清理（T1/R-eng2：删除链同步；预览/背景随暂存目录一并清除）
+    with _META_LOCK:
+        meta = _load_meta()
+        if segment in meta:
+            meta.pop(segment, None)
+            _save_meta(meta)
+    stage_dir = staging_dir(segment)
+    if os.path.isdir(stage_dir):
+        shutil.rmtree(stage_dir, ignore_errors=True)
     return {"ok": True, "segment": segment, "removed": removed}
 
 
@@ -476,7 +882,8 @@ def register_material_routes(app, config) -> None:
     @app.post("/edtalk_materials/publish")
     async def materials_publish(payload: dict = None,
                                 _guard: None = Depends(_require_loopback)):
-        """添加素材（回环校验）：{"video_path": ..., "segment": ..., "device": "cuda"}。
+        """添加素材（回环校验）：{"video_path": ..., "segment": ..., "device": "cuda",
+        "material_type": "main", "lip_flag": true, "background": null}。
 
         4xx=同步校验失败（段名/文件/目录/训练冲突/任务占用）；202=已入后台。
         """
@@ -489,10 +896,87 @@ def register_material_routes(app, config) -> None:
             task = publish_material(
                 _cfg(), str(payload.get("video_path", "")),
                 str(payload.get("segment", "")),
-                device=str(payload.get("device", "cuda")))
+                device=str(payload.get("device", "cuda")),
+                material_type=str(payload.get("material_type", "main")),
+                lip_flag=bool(payload.get("lip_flag", True)),
+                background=payload.get("background") or None)
         except MaterialError as e:
             raise HTTPException(status_code=422, detail={"message": str(e)})
         return {"accepted": True, "task": task}
+
+    @app.post("/edtalk_materials/set_meta")
+    async def materials_set_meta(payload: dict = None,
+                                 _guard: None = Depends(_require_loopback)):
+        """素材元数据更新（回环校验；R-dsg3 改类型/R-dsg11 背景换绑共用）。
+
+        载荷 {"segment": ..., <字段>: 值}；type 值域校验走 set_material_meta。
+        """
+        if not isinstance(payload, dict) or not str(payload.get("segment", "")).strip():
+            raise HTTPException(status_code=422, detail={
+                "problem": "请求体不是对象或缺 segment",
+                "cause": "需提交 {segment, <字段>}",
+                "fix": "按素材管理页改判/背景表单结构重试"})
+        try:
+            seg = str(payload.pop("segment")).strip()
+            return {"ok": True, "segment": seg,
+                    "meta": set_material_meta(seg, **payload)}
+        except MaterialError as e:
+            raise HTTPException(status_code=422, detail={"message": str(e)})
+
+    @app.post("/edtalk_materials/reprocess")
+    async def materials_reprocess(payload: dict = None,
+                                  _guard: None = Depends(_require_loopback)):
+        """按口型推理重处理（回环校验；R-dsg3）：{"segment": ..., "lip_flag": bool}。
+
+        重跑对应预处理链（完整人脸链/桩）+/segment/add 热更新（add 幂等重载，
+        T0b 实证）。当前渲染段拒绝（remove 同源保护；R-eng4② 前置保护）。
+        """
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail={
+                "problem": "请求体不是对象", "cause": "需提交 {segment, lip_flag}",
+                "fix": "按素材行重处理动作结构重试"})
+        cfg = _cfg()
+        seg = str(payload.get("segment", "")).strip()
+        lip = bool(payload.get("lip_flag", True))
+        try:
+            meta = get_material_meta(seg)
+            char_dir = resolve_character_dir(cfg)
+            if not _piece_complete(char_dir, seg):
+                raise MaterialError(
+                    f"problem=素材不存在或不完整；cause={seg} 四件套缺失；"
+                    "fix=刷新素材列表")
+            # 非当前播放段保护（R-eng4②/T0b：add 对已缓存段不重载，
+            # remove 拒当前渲染段——重处理必须不在播）
+            st = service_status(cfg)
+            if st and st.get("current_segment") == seg:
+                raise MaterialError(
+                    f"problem=素材 '{seg}' 正在渲染中，拒绝重处理；"
+                    "cause=当前播放段重载会撕裂渲染缓存；"
+                    "fix=先切换到其他段（编排切走或 /segment/switch）再重处理")
+            # 原视频需在暂存区（original_videos）；缺失=无法重处理
+            stage_ov = os.path.join(staging_dir(seg), "original_videos")
+            src = None
+            if os.path.isdir(stage_ov):
+                for fn in os.listdir(stage_ov):
+                    if fn.lower().endswith(_VIDEO_EXTS):
+                        src = os.path.join(stage_ov, fn)
+                        break
+            if not src:
+                raise MaterialError(
+                    f"problem=素材 '{seg}' 缺原始视频（暂存区无 original_videos）；"
+                    "cause=重处理需源视频；fix=删除后重新上传")
+            # 移除旧注册（非当前段安全）→ 重跑预处理 → 重注册
+            if st:
+                import requests as rq
+                rq.post(f"{_edtalk_api(cfg)}/segment/remove", json={"segment": seg},
+                        headers=_auth_headers(cfg), timeout=10)
+            task = publish_material(cfg, src, seg, device="cuda",
+                                    material_type=meta.get("type", "main"),
+                                    lip_flag=lip,
+                                    background=meta.get("background"))
+            return {"accepted": True, "task": task}
+        except MaterialError as e:
+            raise HTTPException(status_code=422, detail={"message": str(e)})
 
     @app.post("/edtalk_materials/delete")
     async def materials_delete(payload: dict = None,

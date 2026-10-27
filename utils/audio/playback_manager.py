@@ -6,6 +6,7 @@ import asyncio
 import copy
 import math
 import random
+import shutil
 import threading
 import traceback
 import os
@@ -125,7 +126,20 @@ def _play_backing_local(backing_path: str, volume: float):
 
 class PlaybackMixin:
     """音频播放管理Mixin类"""
-    
+
+    def _cleanup_song_segment_if_last(self, data_json):
+        """② 点歌切片末段清理（2026-10-27，尽力而为）：末段播放完 rmtree 切片
+        目录；跳过/打断未触达的残留由合成侧 _purge_stale_song_segments（下次
+        切片前按 mtime 超 1h 清扫）兜底。builtin 播放器 play()=异步入队非播放
+        完成判定——其清理同样依赖清扫兜底（登记：EDTalk/pygame 路径即时清）。"""
+        seg = (data_json or {}).get("song_segment") or {}
+        if not seg or seg.get("seq") != seg.get("total", 0) - 1:
+            return
+        seg_dir = seg.get("seg_dir")
+        if seg_dir and os.path.isdir(seg_dir):
+            shutil.rmtree(seg_dir, ignore_errors=True)
+            logger.info(f"[song] 切片目录已清理：{seg_dir}")
+
     def stop_audio(self, type: str="pygame", mixer_normal: bool=True, mixer_copywriting: bool=True):
         """停止音频播放
 
@@ -260,6 +274,40 @@ class PlaybackMixin:
                         # 字幕时序对齐：推送点=音频进入数字人服务器前一刻
                         # （历经播放间隔与编排静默窗口等待后）——数字人开口即出字。
                         await self._captions_push(data_json)
+                        # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
+                        # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
+                        # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
+                        # 切片条目逐段刷新（自校正）；remaining≤0 或无 hold 段=幂等忽略。
+                        if (data_json.get("type") == "song"):
+                            try:
+                                from utils.orchestration import get_choreographer
+                                _song_choreo = get_choreographer()
+                            except Exception:
+                                _song_choreo = None
+                            if _song_choreo is not None:
+                                _remaining = None
+                                _seg = data_json.get("song_segment") or {}
+                                if _seg.get("total"):
+                                    try:
+                                        _seg_seconds = float(self.config.get(
+                                            "play_audio", "song_segment_seconds"))
+                                    except (TypeError, ValueError):
+                                        _seg_seconds = 0.0
+                                    if _seg_seconds <= 0:
+                                        _seg_seconds = 45.0
+                                    # 剩余=当前片+后续片（各片等长近似，逐段推送自校正）
+                                    _remaining = (int(_seg.get("total", 1))
+                                                  - int(_seg.get("seq", 0))) * _seg_seconds
+                                else:
+                                    try:
+                                        import soundfile as _sf
+                                        _remaining = float(
+                                            _sf.info(voice_tmp_path).duration)
+                                    except Exception:
+                                        _remaining = None
+                                if _remaining and _remaining > 0:
+                                    _song_choreo.on_song_started(
+                                        str(data_json.get("content", ""))[:40], _remaining)
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
@@ -277,6 +325,8 @@ class PlaybackMixin:
                             logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{_choreo_err}")
                         if _was_999:
                             self.active_reread_top_999 = False
+                        # ② 点歌切片末段清理（EDTalk 路径即时清）
+                        self._cleanup_song_segment_if_last(data_json)
                         # A7/F-5 短路声明：EDTalk 激活时 999 暂停-续播链路显式不可达——
                         # 本分支不进 builtin 播放器（push_full 帧锁定播放），999 按队列
                         # 优先级自然排序推送；999 单实例约束仍由 queue_manager 层保证。
@@ -335,6 +385,8 @@ class PlaybackMixin:
                             if _was_999:
                                 # A7/T1：pygame 路径 999 完成释放（builtin 走 release hook）
                                 self.active_reread_top_999 = False
+                        # ② 点歌切片末段清理（pygame 路径即时清）
+                        self._cleanup_song_segment_if_last(data_json)
 
                 except Exception as e:
                     logger.error(traceback.format_exc())

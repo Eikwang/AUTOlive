@@ -33,6 +33,12 @@ class Config:
     # TF32 enabled, Ada gets most of the fp16 throughput already, so
     # autocast only adds per-layer cast overhead.
     gen_fp16: bool = False
+    # 统一画布合成层（2026-10-27 画面输出批次，AUTOlive 画面输出分叉新增——
+    # R-ceo9：全会话单一画布，虚拟摄像头重建仅会话启动；几何单一来源=启动参数）
+    canvas_w: int = 1280
+    canvas_h: int = 720
+    composite_enabled: bool = True
+    composite_default_bg: Optional[str] = None  # 直播间默认背景图（可空=深色底）
 
     def __post_init__(self):
         """Validate paths after initialization."""

@@ -11,6 +11,8 @@
    「卡片 3.5：动作编排管理」整体搬迁），行为不变：
    打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 情绪分级 + 模拟触发。
    无人脸段（face_ratio=0）在步骤下拉标注「画外音」。
+   总开关在二级菜单（enable_paths.py 注册 choreography → choreography.enable；
+   关闭态顶部状态条由 layout.py DG-B1 统一渲染）。
 
 后端契约：素材 /edtalk_materials*（main 进程 materials.py）；
 编排 /choreography/*（main 进程 orchestration/api.py）；段下拉来源
@@ -55,13 +57,27 @@ def create_choreography_tab(
     # ==================================================================
     with ui.card().style(card_css):
         with ui.row().style("width:100%;align-items:center;gap:12px"):
-            ui.label("动作素材管理（数字人可用画面片段）").style("font-size: var(--font-size-title)")
+            ui.label("动作素材管理（画面资产库）").style("font-size: var(--font-size-title)")
             mat_status_label = ui.label("").style("color: var(--text-hint)")
-        ui.label("添加：选本地视频 → 自动预处理（拆帧+人脸检测）→ 上线；"
-                 "全段无人脸的视频会作为「画外音」素材（画面原样+语音照常）。"
+        ui.label("添加：选本地视频 → 指定类型（上场/主线/离场）→ 勾选口型推理决定预处理链"
+                 "（勾选=拆帧+人脸检测；不勾选=简单处理，播放时作画外音直通）→ 上线。"
                  "删除：被编排规则/默认池/段调度引用或正在渲染的素材会被拒绝并给出去处").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
+        # 直播间级默认画布（R-dsg11 D2-5：控件清单=默认背景图+处置说明；几何字段本批不设 UI）
+        with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
+            mat_default_bg_input = FormField.create_input(
+                label='直播间默认背景画布图（可空=深色底；头部特写素材将合成到画布）',
+                value=str(_copy.deepcopy(get_nested_value(
+                    config, "edtalk_materials", "default_background", default="")) or ""),
+                on_change=lambda e: set_config_callback(
+                    "edtalk_materials", "default_background", value=(e.value or "").strip()),
+                style="width:420px;")
+            ui.label("未配背景的特写素材按素材级设置合成；「不合成」素材播默认背景"
+                     "（分辨率等几何字段本批为系统默认值，不设 UI）").style(
+                "color: var(--text-hint); font-size: var(--font-size-body); max-width:420px")
+
+        # 两行布局（R-dsg12⑤）：视频/段名/类型/设备 ＋ 口型/背景/提交
         with ui.grid(columns=4):
             mat_video_input = FormField.create_input(
                 label='视频文件路径（mp4/avi/mov/mkv/flv/webm/wmv）',
@@ -69,10 +85,21 @@ def create_choreography_tab(
             mat_seg_input = FormField.create_input(
                 label='素材段名（字母/数字/下划线/短横线；编排规则按此名引用）',
                 value="", style="width:100%;")
+            mat_type_select = FormField.create_select(
+                label='素材类型（规则步骤按此过滤候选）',
+                options={'main': '主线（常规画面）', 'enter': '上场（规则入场段）',
+                         'exit': '离场（规则收尾段）'},
+                value="main", style="width:100%;")
             mat_device_select = FormField.create_select(
                 label='预处理设备',
                 options={'cuda': 'cuda（推荐）', 'cpu': 'cpu（GPU 异常时排查用）'},
                 value="cuda", style="width:100%;")
+        with ui.grid(columns=3):
+            mat_lip_checkbox = ui.checkbox(
+                "口型推理预处理（勾选=完整人脸链；不勾选=画外音直通素材）", value=True)
+            mat_bg_input = FormField.create_input(
+                label='背景画布图（可空=直播间默认背景）',
+                value="", style="width:100%;")
             mat_add_btn = ui.button("添加素材", on_click=lambda: _publish_material())
 
         mat_task_label = ui.label("").style("color: var(--text-hint); white-space: pre-wrap")
@@ -89,7 +116,10 @@ def create_choreography_tab(
                 resp = await asyncio.to_thread(
                     requests.post, f"{_main_api_url()}/edtalk_materials/publish",
                     json={"video_path": video, "segment": seg,
-                          "device": mat_device_select.value or "cuda"},
+                          "device": mat_device_select.value or "cuda",
+                          "material_type": mat_type_select.value or "main",
+                          "lip_flag": bool(mat_lip_checkbox.value),
+                          "background": (mat_bg_input.value or "").strip() or None},
                     timeout=8,
                 )
             except Exception as e:
@@ -99,7 +129,7 @@ def create_choreography_tab(
             if resp.status_code in (200, 202):
                 mat_task_label.set_text(f"任务已受理：{seg}（预处理耗时与视频长度成正比）").style(
                     "color: var(--color-warning)")
-                mat_add_btn.set_enabled(False)  # 单飞行：处理中禁用防叠发
+                mat_add_btn.set_enabled(False)  # 单飞行：处理中禁用防叠发（R-dsg6 忙碌指示）
             else:
                 detail = ""
                 try:
@@ -108,6 +138,7 @@ def create_choreography_tab(
                         detail = detail.get("message") or str(detail)
                 except Exception:
                     pass
+                # 人脸检测失败导流（R-dsg6：可行动文案指引不勾选口型推理）
                 ui.notify(position="top", type="warning",
                           message=f"未受理（HTTP {resp.status_code}）：{detail}")
 
@@ -157,11 +188,35 @@ def create_choreography_tab(
                 return
             items = data.get("items") or []
             online = bool(data.get("service_online"))
+            # 素材类型化清单 → 规则卡下拉候选源（R-dsg12③：sidecar 主源按类型过滤）
+            try:
+                _choreo_avail["typed"] = {"items": items}
+            except NameError:
+                pass
             mat_status_label.set_text(
                 f"共 {len(items)} 个素材 · 数字人服务{'运行中' if online else '未运行（磁盘清单）'}"
                 + (f" · 当前段：{data.get('current_segment')}" if data.get("current_segment") else "")
             ).style("color: " + ("var(--color-positive)" if online else "var(--text-hint)"))
+            # 迁移首启横幅（R-dsg5：一次性告知定型/冲突总量；冲突项标冲突徽标）
+            mig = data.get("migration") or {}
+            if mig.get("typed"):
+                msg = (f"已按既有规则为 {mig['typed']} 个存量素材定型类型"
+                       f"（未引用素材默认主线）")
+                if mig.get("conflicts"):
+                    msg += f"；{mig['conflicts']} 个素材存在跨类引用，需在列表中人工改类型"
+                ui.notify(position="top", type="info", message=msg, duration=8)
             _render_materials(items)
+
+        def _material_badges(it: dict) -> str:
+            """素材行徽标系（R-dsg2）：口型/特写/冲突（空格分隔，随类型徽标并存）。"""
+            badges = []
+            if it.get("lip_flag") is False:
+                badges.append("画外音")
+            if it.get("closeup"):
+                badges.append("⚠头部特写")
+            if it.get("conflict"):
+                badges.append("跨类冲突")
+            return " ".join(badges)
 
         def _render_materials(items: list):
             mat_list_slot.clear()
@@ -170,40 +225,106 @@ def create_choreography_tab(
                     ui.label("角色目录暂无素材——先在训练主播页完成角色训练，或在上方添加素材").style(
                         "color: var(--text-hint)")
                     return
-                with ui.row().style("width:100%;gap:16px;color: var(--text-hint)"):
-                    for h in ("段名", "帧数", "人脸比例", "分辨率", "引用/状态", "操作"):
-                        ui.label(h).style("min-width:90px")
+                by_type = {"enter": [], "main": [], "exit": []}
                 for it in items:
-                    with ui.row().style("width:100%;align-items:center;gap:16px"):
+                    by_type.setdefault(str(it.get("type") or "main"), []).append(it)
+                type_names = {"enter": "上场", "main": "主线", "exit": "离场"}
+                for tname in ("enter", "main", "exit"):
+                    group = by_type.get(tname) or []
+                    with ui.row().style("width:100%;gap:10px;align-items:center;"
+                                        "margin-top:8px"):
+                        ui.label(f"{type_names[tname]}").style(
+                            "min-width:52px;font-size: var(--font-size-body)")
+                        ui.label(f"{len(group)} 个").style(
+                            "color: var(--text-hint);font-size: var(--font-size-body)")  # 计数徽标（T9）
+                    if not group:
+                        ui.label(f"暂无{type_names[tname]}素材——上传时类型选「{type_names[tname]}」").style(
+                            "color: var(--text-hint); margin-left:52px")  # R-dsg12① 分组空态
+                        continue
+                    with ui.row().style("width:100%;gap:16px;color: var(--text-hint);margin-left:52px"):
+                        for h in ("段名", "徽标", "时长", "帧数", "人脸比例", "引用/状态", "改类型", "操作"):
+                            ui.label(h).style("min-width:80px")
+                    for it in group:
                         seg = it.get("segment", "?")
-                        ui.label(seg).style("min-width:90px")
-                        ui.label(str(it.get("total_frames") or "?")).style("min-width:90px")
-                        ratio = it.get("face_ratio")
-                        if ratio is None:
-                            rtxt = "?"
-                            rcolor = "var(--text-hint)"
-                        elif ratio <= 0:
-                            rtxt = "0%（画外音素材）"
-                            rcolor = "var(--color-warning)"
-                        else:
-                            rtxt = f"{ratio * 100:.0f}%"
-                            rcolor = "var(--color-positive)"
-                        ui.label(rtxt).style(f"min-width:120px;color:{rcolor}")
-                        res = it.get("resolution")
-                        ui.label(f"{res[0]}x{res[1]}" if isinstance(res, (list, tuple)) and len(res) == 2
-                                 else "?").style("min-width:90px")
-                        refs = it.get("references") or []
-                        tags = []
-                        if it.get("is_current"):
-                            tags.append("渲染中")
-                        if it.get("in_scheduler"):
-                            tags.append("调度中")
-                        tags += refs[:2] + [f"等{len(refs)}处引用" if len(refs) > 2 else ""]
-                        ui.label(" · ".join(x for x in tags if x) or "未引用").style(
-                            "min-width:90px;color: var(--text-hint); max-width:340px;"
-                            "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
-                        ui.button("删除", on_click=lambda s=seg: _delete_material(s)).props(
-                            "outline color=negative dense")
+                        with ui.row().style("width:100%;align-items:center;gap:16px;margin-left:52px"):
+                            ui.label(seg).style("min-width:80px")
+                            badges = _material_badges(it)
+                            lab = ui.label(badges or "—").style("min-width:120px")
+                            if "⚠头部特写" in badges:
+                                lab.tooltip("输出将只有头部区域，请更换完整画面源并重训/重传"
+                                            "（前往训练主播页重训）；部分特写素材可能不触发此警告"
+                                            "——R-eng8 召回率边界")  # F-2/R-dsg2/R-dsg12⑥
+                            dur = it.get("duration_s")
+                            ui.label(f"{dur:.1f}s" if isinstance(dur, (int, float)) else "时长未知").style(
+                                "min-width:80px")
+                            ui.label(str(it.get("total_frames") or "?")).style("min-width:80px")
+                            ratio = it.get("face_ratio")
+                            if ratio is None:
+                                rtxt, rcolor = "?", "var(--text-hint)"
+                            elif ratio <= 0:
+                                rtxt, rcolor = "0%（画外音）", "var(--color-warning)"
+                            else:
+                                rtxt, rcolor = f"{ratio * 100:.0f}%", "var(--color-positive)"
+                            ui.label(rtxt).style(f"min-width:90px;color:{rcolor}")
+                            refs = it.get("references") or []
+                            tags = []
+                            if it.get("is_current"):
+                                tags.append("渲染中")
+                            if it.get("in_scheduler"):
+                                tags.append("调度中")
+                            tags += refs[:2] + [f"等{len(refs)}处引用" if len(refs) > 2 else ""]
+                            ui.label(" · ".join(x for x in tags if x) or "未引用").style(
+                                "min-width:110px;color: var(--text-hint); max-width:280px;"
+                                "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                            # 改类型（R-dsg3：纯元数据即时生效）
+                            ui.select(
+                                options={'enter': '上场', 'main': '主线', 'exit': '离场'},
+                                value=str(it.get("type") or "main"),
+                                on_change=lambda e, s=seg: _change_type(s, e.value),
+                            ).style("min-width:96px")
+                            ui.button("重处理", on_click=lambda s=seg, lf=bool(
+                                it.get("lip_flag", True)): _reprocess(s, lf)).props(
+                                "outline dense").tooltip("按口型推理目标重跑预处理链并热上线"
+                                "（当前播放中的素材会被拒绝——先切走）")
+                            ui.button("删除", on_click=lambda s=seg: _delete_material(s)).props(
+                                "outline color=negative dense")
+
+        async def _change_type(segment: str, new_type: str):
+            """改类型（R-dsg3：纯元数据即时生效+清单刷新）。"""
+            try:
+                import requests
+                resp = await asyncio.to_thread(
+                    requests.post, f"{_main_api_url()}/edtalk_materials/set_meta",
+                    json={"segment": segment, "type": new_type}, timeout=6)
+                if resp.status_code == 200:
+                    ui.notify(position="top", type="positive",
+                              message=f"已改类型：{segment} → {new_type}")
+                    await _refresh_materials()
+                else:
+                    detail = (resp.json() or {}).get("detail", {})
+                    ui.notify(position="top", type="warning",
+                              message=f"改类型被拒（HTTP {resp.status_code}）：{detail}")
+            except Exception as e:
+                ui.notify(position="top", type="negative", message=f"改类型失败：{e}")
+
+        async def _reprocess(segment: str, current_lip: bool):
+            """按口型推理重处理（R-dsg3：切到相反链；R-eng4② 非当前段保护由后端执行）。"""
+            target = not current_lip
+            try:
+                import requests
+                resp = await asyncio.to_thread(
+                    requests.post, f"{_main_api_url()}/edtalk_materials/reprocess",
+                    json={"segment": segment, "lip_flag": target}, timeout=8)
+                if resp.status_code in (200, 202):
+                    ui.notify(position="top", type="positive",
+                              message=f"重处理已受理：{segment}（口型推理={'开' if target else '关'}）")
+                else:
+                    detail = (resp.json() or {}).get("detail", {})
+                    msg = detail.get("message") if isinstance(detail, dict) else str(detail)
+                    ui.notify(position="top", type="warning",
+                              message=f"重处理被拒（HTTP {resp.status_code}）：{msg}")
+            except Exception as e:
+                ui.notify(position="top", type="negative", message=f"重处理失败：{e}")
 
         async def _delete_material(segment: str):
             with ui.dialog() as dlg, ui.card().style(card_css):
@@ -245,24 +366,27 @@ def create_choreography_tab(
     # ==================================================================
     # 卡片 2：编排规则管理（自画面设置页迁移；行为不变）
     # ==================================================================
-    _choreo_avail = {"segments": [], "voiceover": set()}
+    _choreo_avail = {"segments": [], "voiceover": set(), "typed": {}}
 
     def _default_rule():
+        """新语义规则（R-ceo4：pred_version=new——时长/音轨由系统接管）。"""
         return {"rule_id": "new_rule", "trigger_type": "gift", "match": "", "min_price": 0,
+                "pred_version": "new",
                 "sequence": {
-                    "enter": {"segment": "", "switch_at": "segment_end", "duration_s": 4},
-                    "main": {"segment": "", "switch_at": "segment_end", "duration_s": 30},
-                    "exit": {"segment": "", "switch_at": "segment_end", "duration_s": 4},
+                    "enter": {"segment": "", "switch_at": "segment_end"},
+                    "main": {"segment": "", "switch_at": "segment_end"},
+                    "exit": {"segment": "", "switch_at": "segment_end"},
                 },
                 "emotion_tiers": [], "interrupt": "standard"}
 
     choreo_node = _copy.deepcopy(get_nested_value(config, "choreography", default={}) or {})
     if not isinstance(choreo_node, dict) or "enable" not in choreo_node:
         choreo_node = {"enable": False, "default_mode": "rotate", "default_segments": [],
-                       "min_retrigger_s": 2, "min_sequence_hold_s": 5, "step_timeout_s": 60,
-                       "reset_after_s": 300, "rules": []}
+                       "step_timeout_s": 60, "reset_after_s": 300, "rules": []}
     choreo_node.setdefault("rules", [])
     choreo_node.setdefault("default_segments", [])
+    # 退役键不再写出（R-ceo4/R-ceo5：min_retrigger_s/min_sequence_hold_s 已退役——
+    # 旧 config 读取兼容一代（config_model 退役告警），本页应用即清除）
 
     async def _fetch_avail_segments():
         """从 EDTalk /status 拉可用段+人脸信息（步骤下拉；画外音标注数据源）。"""
@@ -287,13 +411,20 @@ def create_choreography_tab(
             ui.notify(position="top", type="negative", message=f"获取失败：{e}")
         _render_rules()
 
-    def _seg_options(current: str) -> dict:
-        """步骤段下拉选项：服务可用段 ∪ 规则已引用段（未拉取时至少能显示现值）。"""
-        opts = list(dict.fromkeys((_choreo_avail["segments"] or []) + [current or ""]))
-        out = {}
+    def _seg_options(current: str, want_type: str = None) -> dict:
+        """步骤段下拉选项（R-dsg12③）：sidecar 素材清单按类型过滤 ∪ 规则已引用段
+        ∪ 服务可用段。EDTalk 不可达不阻塞编辑（素材清单为主源）。"""
+        opts = []
+        for it in (_choreo_avail.get("typed") or {}).get("items", []):
+            if want_type is None or it.get("type") == want_type:
+                opts.append(str(it.get("segment")))
+        opts += _choreo_avail["segments"] or []
+        opts.append(current or "")
+        seen, out = set(), {}
         for s in opts:
-            if not s:
+            if not s or s in seen:
                 continue
+            seen.add(s)
             out[s] = f"{s}（画外音）" if s in _choreo_avail["voiceover"] else s
         return out
 
@@ -301,11 +432,20 @@ def create_choreography_tab(
         rules_container.clear()
         with rules_container:
             for idx, rule in enumerate(choreo_node["rules"]):
+                is_new = str(rule.get("pred_version", "legacy")) == "new"
+                tiers = rule.get("emotion_tiers") or []
+                tier_note = f" · {len(tiers) + 1} 档" if tiers else ""
                 with ui.expansion(
                     f"规则 {rule.get('rule_id') or ('#' + str(idx + 1))}"
                     f"（{rule.get('trigger_type', '?')} · {rule.get('match') or '任意'}）"
+                    f"{' · 新语义' if is_new else ' · 存量语义（重存后转新）'}{tier_note}"
                 ).style("width:100%"):
-                    with ui.grid(columns=4):
+                    if not is_new:
+                        ui.label("⚠ 存量语义规则：维持旧时长/音轨判定直至本页重存；"
+                                 "重存后转新语义（时长=素材时长，音轨由系统判断）").style(
+                            "color: var(--color-warning); font-size: var(--font-size-body)")
+                    # 第一行：规则ID | 触发类型 | 匹配值 | 价值门槛 | 触发次数摘要（R-dsg1）
+                    with ui.grid(columns=5):
                         FormField.create_input(
                             label='规则 ID（唯一）', value=str(rule.get("rule_id", "")),
                             on_change=lambda e, r=rule: r.__setitem__("rule_id", (e.value or "").strip()),
@@ -315,7 +455,8 @@ def create_choreography_tab(
                             options={'gift': '礼物打赏', 'keyword': '弹幕关键词', 'song': '点歌命中'},
                             value=str(rule.get("trigger_type", "gift")),
                             on_change=lambda e, r=rule: r.__setitem__("trigger_type", e.value),
-                            tooltip="entrance/follow 为预留枚举位（P1 不订阅，需先给节流方案）",
+                            tooltip="song 触发=接管（歌曲音频走既有链路，主线保持至歌终）；"
+                                    "gift/keyword 新语义=不接管（原生答谢照常）",
                             style="width:100%;")
                         FormField.create_input(
                             label='匹配值（gift=礼物名全等 / keyword=子串 / song 可空=任意）',
@@ -323,59 +464,72 @@ def create_choreography_tab(
                             on_change=lambda e, r=rule: r.__setitem__("match", e.value or ""),
                             style="width:100%;")
                         FormField.create_input(
-                            label='最低价值门槛（仅 gift，与答谢链同口径）',
+                            label='价值门槛（仅 gift；0=不限）',
                             value=str(rule.get("min_price", 0)),
                             on_change=lambda e, r=rule: r.__setitem__(
                                 "min_price", float(e.value or 0) if str(e.value or "").replace(".", "", 1).isdigit() else 0),
                             style="width:100%;")
+                        # 触发次数摘要（R-dsg4 D2-3：多档「档位 K：≤n1/≤n2/…」）
+                        tier_caps = [str(t.get("max_count")) for t in tiers]
+                        n_label = ("档位 " + str(len(tiers) + 1) + "：基础+≤" + "/≤".join(tier_caps)
+                                   if tier_caps else "基础档（无覆盖档）")
+                        ui.label(n_label).style(
+                            "color: var(--text-hint); align-self:center; "
+                            "font-size: var(--font-size-body)").tooltip(
+                            "触发次数=档位阈值：计数 ≤ N 的档位生效，超档沿用最高档"
+                            "（select_tier 上界语义）")
+                    # 第二行：上场|切换方式|主线|切换方式|离场（R-dsg1 三下拉按类型过滤；
+                    # 基础档与档位编辑器第一行同源——R-dsg4 D2-1 数据映射唯一）
                     for step_name in ("enter", "main", "exit"):
                         step = rule.setdefault("sequence", {}).setdefault(step_name, {})
                         step.setdefault("switch_at", "segment_end")
+                        want_type = {"enter": "enter", "main": "main", "exit": "exit"}[step_name]
+                        dur = step.get("duration_s")
+                        dur_txt = (f"素材时长 {dur:.1f}s" if isinstance(dur, (int, float))
+                                   else ("素材时长（重存后自动）" if is_new else "时长未知"))
                         with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
                             ui.label({"enter": "上场", "main": "主线", "exit": "离场"}[step_name]).style(
                                 "min-width:44px;color: var(--text-hint);font-size: var(--font-size-body)")
                             ui.select(
-                                options=_seg_options(str(step.get("segment", ""))),
+                                options=_seg_options(str(step.get("segment", "")), want_type),
                                 value=str(step.get("segment", "")),
                                 label="段名",
                                 on_change=lambda e, s=step: s.__setitem__("segment", e.value or ""),
-                            ).style("min-width:150px").tooltip(
-                                "段名=素材管理页的段名；标「画外音」的段无正脸，"
-                                "播放时画面原样+语音照常（自动跳过口型）")
+                            ).style("min-width:180px").tooltip(
+                                "候选=该类型素材（素材管理页三列表）∪ 已引用段；"
+                                "标「画外音」的段播放时画面原样+语音照常")
+                            if is_new and step_name == "main" and rule.get("trigger_type") == "song":
+                                dur_txt += "（歌曲未结束前主线素材循环播放）"  # R-dsg7/F-12
+                            ui.label(dur_txt).style(
+                                "min-width:150px;color: var(--text-hint);"
+                                "font-size: var(--font-size-body)").tooltip(
+                                "播放时长=素材时长（X2 系统接管）；时长未知=允许保存+生效待就绪"
+                                "（R-eng6 两分法）" if is_new else "存量规则保留手工时长")
                             ui.select(
                                 options={"segment_end": "segment_end（边界无缝）", "immediate": "immediate（立即硬切）"},
                                 value=str(step.get("switch_at", "segment_end")),
                                 label="切换方式",
                                 on_change=lambda e, s=step: s.__setitem__("switch_at", e.value),
                             ).style("min-width:170px").tooltip("衔接短素材建议 segment_end；immediate 硬切≤一次边界")
-                            FormField.create_input(
-                                label='时长(s)', value=str(step.get("duration_s", "")),
-                                on_change=lambda e, s=step: s.__setitem__(
-                                    "duration_s", float(e.value) if str(e.value or "").replace(".", "", 1).isdigit() and e.value else None),
-                                tooltip="无音轨步骤必填 >0；有音轨时语义=完成上限（F1 看门狗）",
-                                style="width:90px;")
-                            FormField.create_select(
-                                label='音轨', options={'none': '无（TTS 照常）', 'tts': '答谢语音', 'file': '本地文件'},
-                                value=str((step.get("audio") or {}).get("mode", "none")),
-                                on_change=lambda e, s=step: s.__setitem__(
-                                    "audio", {"mode": e.value, "path": (s.get("audio") or {}).get("path", "")}
-                                    if e.value != "none" else None),
-                                style="width:130px;")
-                            if (step.get("audio") or {}).get("mode") == "file":
+                            if not is_new:
+                                # 存量规则旧编辑器（时长/音轨——R-ceo4 零静默直至重存）
                                 FormField.create_input(
-                                    label='音频路径', value=str((step.get("audio") or {}).get("path", "")),
+                                    label='时长(s)', value=str(step.get("duration_s", "")),
                                     on_change=lambda e, s=step: s.__setitem__(
-                                        "audio", {"mode": "file", "path": e.value or ""}),
-                                    tooltip="本地音频走点歌直通通道（type=song）",
-                                    style="width:220px;")
-                    tiers_raw = _json.dumps(rule.get("emotion_tiers", []), ensure_ascii=False)
-                    ui.textarea(
-                        label='情绪分级（JSON 数组；可空=单档恒用基础素材）', value=tiers_raw,
-                        on_change=lambda e, r=rule: _set_tiers(r, e.value),
-                    ).style("width:100%").tooltip('[{"max_count":3,"mood":"happy"},'
-                                                  '{"max_count":6,"mood":"angry",'
-                                                  '"segment_overrides":{"enter":"段名"}}] '
-                                                  'max_count 严格递增；超出末档用最高档')
+                                        "duration_s", float(e.value) if str(e.value or "").replace(".", "", 1).isdigit() and e.value else None),
+                                    style="width:90px;")
+                                FormField.create_select(
+                                    label='音轨', options={'none': '无（TTS 照常）', 'tts': '答谢语音', 'file': '本地文件'},
+                                    value=str((step.get("audio") or {}).get("mode", "none")),
+                                    on_change=lambda e, s=step: s.__setitem__(
+                                        "audio", {"mode": e.value, "path": (s.get("audio") or {}).get("path", "")}
+                                        if e.value != "none" else None),
+                                    style="width:130px;")
+                    # 档位编辑器（R-dsg4 D2-1/2/3/4：第 1 行=基础档同源，第 2 行起=覆盖档）
+                    ui.label("触发次数档位（第 1 行=基础档与上方三下拉同源；覆盖档留空=沿用基础档；"
+                             "首覆盖档阈值须 ≥2——=1 会在首次触发即遮蔽基础档）").style(
+                        "color: var(--text-hint); font-size: var(--font-size-body); margin-top:6px")
+                    _render_tier_editor(rule)
                     with ui.row():
                         ui.button("删除规则", on_click=lambda i=idx: _delete_rule(i)).props(
                             "outline color=negative")
@@ -388,17 +542,61 @@ def create_choreography_tab(
         except NameError:
             pass
 
-    def _set_tiers(rule: dict, raw: str):
-        """情绪分级 JSON 解析（非法 JSON 保持旧值+提示，防半编辑态写坏结构）。"""
+    def _render_tier_editor(rule: dict):
+        """多档编辑器（R-dsg4/R-dsg12④：结构化档位行，取代 JSON textarea）。
+
+        第 1 行=基础档摘要（同源展示非第二控件实例）；第 2 行起=覆盖档
+        （max_count+三下拉继承哨兵+mood）；增删档按钮。零静默扁平化。
+        """
+        base = rule.setdefault("sequence", {})
+        with ui.row().style("width:100%;align-items:center;gap:8px;margin-left:44px"):
+            ui.label("基础档").style("min-width:64px;color: var(--text-hint)")
+            ui.label("—（基础）").style("min-width:70px;color: var(--text-hint)")
+            for n in ("enter", "main", "exit"):
+                seg = ((base.get(n) or {}).get("segment") or "（未选）")
+                ui.label(f"{ {'enter': '上场', 'main': '主线', 'exit': '离场'}[n] }: {seg}").style(
+                    "min-width:150px;color: var(--text-hint); font-size: var(--font-size-body)")
+        tiers = rule.setdefault("emotion_tiers", [])
+        for ti, tier in enumerate(tiers):
+            ov = tier.setdefault("segment_overrides", {})
+            with ui.row().style("width:100%;align-items:flex-end;gap:8px;margin-left:44px"):
+                ui.label(f"覆盖档 {ti + 1}").style("min-width:64px;color: var(--text-hint)")
+                FormField.create_input(
+                    label='触发次数阈值 N', value=str(tier.get("max_count", "")),
+                    on_change=lambda e, tr=tier: tr.__setitem__(
+                        "max_count", int(e.value) if str(e.value or "").strip().isdigit() else 0),
+                    tooltip="计数 ≤ N 的档位生效（须 ≥2 且严格递增）；首覆盖档=1 会在首次触发即遮蔽基础档",
+                    style="width:110px;")
+                for n in ("enter", "main", "exit"):
+                    cur = str(ov.get(n, "") or "")
+                    ui.select(
+                        options=dict([("（继承基础档）", "")] + list(_seg_options(cur).items())),
+                        value=cur,
+                        label={"enter": "上场", "main": "主线", "exit": "离场"}[n],
+                        on_change=lambda e, o=ov, k=n: (
+                            o.__setitem__(k, e.value) if e.value else o.pop(k, None)),
+                    ).style("min-width:170px").tooltip("留空=沿用基础档（部分覆盖语义）")
+                FormField.create_input(
+                    label='mood（可空）', value=str(tier.get("mood", "")),
+                    on_change=lambda e, tr=tier: tr.__setitem__("mood", e.value or ""),
+                    style="width:110px;")
+                ui.button("删档", on_click=lambda i=ti: (_del_tier(rule, i))).props(
+                    "outline color=negative dense")
+        with ui.row().style("margin-left:44px"):
+            ui.button("加一档", on_click=lambda: _add_tier(rule)).props("outline dense")
+
+    def _add_tier(rule: dict):
+        tiers = rule.setdefault("emotion_tiers", [])
+        prev = int(tiers[-1].get("max_count", 0)) if tiers else 1
+        tiers.append({"max_count": prev + 1, "mood": "", "segment_overrides": {}})
+        _render_rules()
+
+    def _del_tier(rule: dict, idx: int):
         try:
-            parsed = _json.loads(raw) if (raw or "").strip() else []
+            rule.setdefault("emotion_tiers", []).pop(idx)
         except Exception:
-            ui.notify(position="top", type="warning", message="情绪分级不是合法 JSON，未保存本次修改")
             return
-        if not isinstance(parsed, list):
-            ui.notify(position="top", type="warning", message="情绪分级需为 JSON 数组")
-            return
-        rule["emotion_tiers"] = parsed
+        _render_rules()
 
     def _delete_rule(idx: int):
         try:
@@ -409,6 +607,11 @@ def create_choreography_tab(
 
     async def _apply_choreography():
         """组装整节 → main /choreography/rules（校验+热生效+持久化，单写者）。"""
+        # 总开关已迁二级菜单（enable_paths.py）：choreo_node 为进页快照，
+        # 应用前回读实时 config 的 enable，防菜单开关刚切换被快照旧值回写翻转
+        choreo_node["enable"] = bool(get_nested_value(config, "choreography", "enable", default=False))
+        choreo_node.pop("min_retrigger_s", None)        # R-ceo5 退役键不再写出
+        choreo_node.pop("min_sequence_hold_s", None)    # R-ceo5/uc2a 退役键不再写出
         try:
             import requests
             resp = await asyncio.to_thread(
@@ -426,7 +629,12 @@ def create_choreography_tab(
                     msg += f"，缺失段 {missing}"
                 if not data.get("persisted"):
                     msg += "（⚠ 持久化失败：重启后丢失）"
-                ui.notify(position="top", type="positive", message=msg)
+                ui.notify(position="top", type="positive", message=msg)  # 已生效
+            elif resp.status_code == 503:
+                # R-dsg6 两态提示（R-eng6① C5-1 语义）：已保存但 EDTalk 不可达暂未生效
+                detail = data.get("message") or "EDTalk 不可达"
+                ui.notify(position="top", type="warning", duration=8,
+                          message=f"已保存、暂未生效（EDTalk 不可达，就绪后重试应用）：{detail}")
             else:
                 detail = data.get("message") or (resp.json() or {}).get("detail", {})
                 ui.notify(position="top", type="warning",
@@ -478,13 +686,12 @@ def create_choreography_tab(
         with ui.row().style("width:100%;align-items:center;gap:12px"):
             ui.label("编排规则（事件驱动画面序列）").style("font-size: var(--font-size-title)")
             choreo_status_label = ui.label("状态：未轮询").style("color: var(--text-hint)")
-        ui.label("打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 情绪分级。"
+        ui.label("打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 触发次数轮换档位。"
                  "改动后点『应用』= 校验 + 热生效 + 写回 config（重启后按 config 装载）。"
-                 "前置：EDTalk 驱动启用且服务运行（段名校验依赖 available_segments）").style(
+                 "⚠ 触发命中立即切换，无最短保持保护（最短再触发间隔/序列最小展示已按"
+                 "用户裁决退役；去重由弹幕层承担）——R-dsg7/R-ceo5").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
-        with ui.grid(columns=6):
-            ui.switch("总开关", value=bool(choreo_node.get("enable")),
-                      on_change=lambda e: choreo_node.__setitem__("enable", e.value))
+        with ui.grid(columns=3):
             FormField.create_select(
                 label='默认画面模式',
                 options={'rotate': '轮播（顺序）', 'random': '随机', 'single': '单段'},
@@ -493,28 +700,19 @@ def create_choreography_tab(
                 tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）",
                 style="width:100%;")
             FormField.create_input(
-                label='最短再触发间隔(s)', value=str(choreo_node.get("min_retrigger_s", 2)),
-                on_change=lambda e: choreo_node.__setitem__(
-                    "min_retrigger_s", float(e.value or 2) if str(e.value or "").replace(".", "", 1).isdigit() else 2),
-                tooltip="每规则防连点风暴；被节流触发不计数",
-                style="width:100%;")
-            FormField.create_input(
-                label='序列最小展示(s)', value=str(choreo_node.get("min_sequence_hold_s", 5)),
-                on_change=lambda e: choreo_node.__setitem__(
-                    "min_sequence_hold_s", float(e.value or 5) if str(e.value or "").replace(".", "", 1).isdigit() else 5),
-                tooltip="hold 窗口内他键触发忽略（防画面乒乓，F5）",
-                style="width:100%;")
-            FormField.create_input(
-                label='步骤超时上限(s)', value=str(choreo_node.get("step_timeout_s", 60)),
+                label='步骤超时上限(s)——步骤推进保险丝',
+                value=str(choreo_node.get("step_timeout_s", 60)),
                 on_change=lambda e: choreo_node.__setitem__(
                     "step_timeout_s", float(e.value or 60) if str(e.value or "").replace(".", "", 1).isdigit() else 60),
-                tooltip="音轨步骤完成回调丢失时的强制推进上限（F1 看门狗）",
+                tooltip="F3 调查结论（2026-10-27）：当前步完成上限——防 segment_end 等待悬挂"
+                        "卡死序列（materialized 于 current_deadline，monotonic）；新语义规则"
+                        "素材时长未知时亦以此兜底推进。建议保持默认 60s",
                 style="width:100%;")
             FormField.create_input(
                 label='计数窗口(s)', value=str(choreo_node.get("reset_after_s", 300)),
                 on_change=lambda e: choreo_node.__setitem__(
                     "reset_after_s", float(e.value or 300) if str(e.value or "").replace(".", "", 1).lstrip("-").isdigit() else 300),
-                tooltip="情绪分级计数时间窗口（GAP-2）：超过该秒数未触发则计数清零重新累计；0=禁用衰减",
+                tooltip="触发次数计数时间窗口（GAP-2）：超过该秒数未触发则计数清零重新累计；0=禁用衰减",
                 style="width:100%;")
         ui.textarea(
             label='默认画面段名池（一行一个；序列段结束后恢复轮播的池）',

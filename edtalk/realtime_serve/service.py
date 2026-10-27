@@ -461,6 +461,10 @@ class RealtimeService:
         status['repair_mode'] = rl.face_repair_mode if rl is not None else 'off'
         status['repair_capable'] = self.face_repair is not None
         status['lip_mode'] = rl.lip_mode if rl is not None else 'on'
+        # 统一画布合成层计数回显（2026-10-27 画面输出分叉，R-eng11④ 可观测面）
+        comp = getattr(rl, 'canvas_compositor', None)
+        if comp is not None:
+            status['composite'] = comp.stats()
 
         fb = self.frame_buffer
         if fb is not None:

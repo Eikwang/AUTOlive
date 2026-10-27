@@ -122,6 +122,10 @@ def build_steps(rule: RuleCfg, count: int, seq_counter: int) -> List[dict]:
             "duration_s": base.duration_s,
             "audio_mode": base.audio_mode,
             "audio_path": base.audio_path,
+            "pred_version": rule.pred_version,   # R-eng3：mute 谓词按步分叉
+            "lip_flag": base.lip_flag,           # new 谓词：素材口型标志（apply 二段解析）
+            "hold_for_song": (base.hold_for_song and name == "main"
+                              and rule.trigger_type == "song"),
         })
     return steps
 
@@ -166,9 +170,12 @@ class ChoreoEngine:
             return {"accepted": False, "takeover": False, "rule": None, "commands": commands,
                     "reason": match_reason or "no_match", "retry_after_s": None}
 
-        # 节流窗口（每规则 min_retrigger_s，防连点风暴）：忽略不计数（WP-6 同语义）
+        # 节流窗口已退役（R-ceo5/终门 P6 用户方向，2026-10-27 批次）：弹幕层限时
+        # 去重（ac90fe60）已在上游拦截重复，引擎级节流不再生效；同键重入走
+        # 条件2 计数+重排（触发次数轮换语义）。key_last 保留（reset_after_s 衰减
+        # 窗口锚点仍需最后一次尝试时刻）。
         last = self.key_last.get(rule.rule_id)
-        if last is not None and (now - last) < self.cfg.min_retrigger_s:
+        if False and last is not None and (now - last) < self.cfg.min_retrigger_s:
             self.key_last[rule.rule_id] = now
             return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
                     "reason": "throttled",
@@ -182,10 +189,9 @@ class ChoreoEngine:
 
         if self.state == "sequence" and self.seq is not None:
             seq = self.seq
-            # 全局序列最小展示时间（F5）：hold 内他键触发忽略（不终止不计数）
-            if rule.rule_id != seq["rule_id"] and now < seq["hold_until"]:
-                return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
-                        "reason": "hold", "retry_after_s": round(seq["hold_until"] - now, 2)}
+            # 全局序列最小展示保护已退役（R-ceo5/终门 uc2a 用户裁决：触发命中
+            # 立即切换，无最短保持保护——R-dsg7 文案+模拟连打验收对冲）。hold_until
+            # 字段保留但恒为过去时刻，本判定永假（下一打断检查即时生效）。
             if rule.rule_id == seq["rule_id"]:
                 # 条件2（同键再触发）
                 if not seq["main_done"]:
@@ -247,7 +253,7 @@ class ChoreoEngine:
             "rule_id": rule.rule_id,
             "steps": steps,
             "idx": 0,
-            "hold_until": now + self.cfg.min_sequence_hold_s,
+            "hold_until": now,  # 保护窗已退役（R-ceo5/uc2a）：恒可打断
             "main_done": False,
             "exit_started": False,
             "pending_requeue": None,
@@ -283,7 +289,7 @@ class ChoreoEngine:
             "rule_id": rule.rule_id,
             "steps": queue,
             "idx": 0,
-            "hold_until": now + self.cfg.min_sequence_hold_s,
+            "hold_until": now,  # 保护窗已退役（R-ceo5/uc2a）：恒可打断
             "main_done": False,
             "exit_started": False,
             "pending_requeue": None,
@@ -334,6 +340,32 @@ class ChoreoEngine:
             return self._complete_step(now, timeout_degrade=False)
         self.seq["step_accepted"] = True
         self.seq["accepted_at"] = now
+        if step.get("pred_version") == "new":
+            # 新语义（R-ceo4）：时长=素材时长（apply 二段物化）。hold_for_song=
+            # song 规则主线段：deadline=step_timeout_s 保险丝（R-eng1 歌曲未起播
+            # 的诚实降级），on_song_started 到达时以「锚点+剩余时长」覆盖延长。
+            if step.get("hold_for_song"):
+                self.seq["hold_for_song"] = True
+                self.seq["current_deadline"] = now + float(self.cfg.step_timeout_s)
+                return []
+            dur = step.get("duration_s")
+            if dur is None or float(dur) <= 0:
+                # R-eng6② 引擎防御：时长未知→step_timeout_s 兜底+timeout_degrade
+                # 报警形态（不静默跳段；UI 侧「生效待就绪」标记为事前面）
+                logger.warning(
+                    f"[编排] 步骤 {step_id} 素材时长未知（sidecar 缺 duration_s），"
+                    f"以 step_timeout_s={self.cfg.step_timeout_s}s 兜底推进；"
+                    "problem=素材时长未知；cause=sidecar 无该段时长；"
+                    "fix=重新添加素材或重处理以补齐时长")
+                self.degrade_total += 1
+                alarm_notifier.alarm_error(
+                    alarm_notifier.MODULE_ORCHESTRATION,
+                    f"编排步骤 {step_id} 素材时长未知，{self.cfg.step_timeout_s}s 兜底推进",
+                    fix_hint="重新添加素材或按口型推理重处理以补齐时长")
+                self.seq["current_deadline"] = now + float(self.cfg.step_timeout_s)
+                return []
+            self.seq["current_deadline"] = now + float(dur)
+            return []
         if step["audio_mode"] == "none":
             self.seq["current_deadline"] = now + float(step["duration_s"] or 0)
             return []
@@ -365,6 +397,53 @@ class ChoreoEngine:
         self.seq["inflight"] = {"step_id": step_id, "qtype": qtype,
                                 "content": content, "enqueued_at": now}
         return []
+
+    def current_step_lip_need(self) -> Optional[bool]:
+        """当前步素材口型标志（T6/R-eng5：None=无需联动——legacy 步不动 lip_mode）。
+
+        仅 new 谓词步返回 lip_flag；song hold 主线段按素材标志照常（歌曲音频
+        驱动口型与 lip 门控正交——off 素材+画外音音频合法组合，R-ceo4 F5）。
+        """
+        if self.state != "sequence" or self.seq is None:
+            return None
+        steps = self.seq["steps"]
+        idx = self.seq["idx"]
+        if idx >= len(steps):
+            return None
+        step = steps[idx]
+        if step.get("pred_version") != "new":
+            return None
+        return bool(step.get("lip_flag", True))
+
+    def on_song_started(self, song_name: str, remaining_s: float,
+                        now: float) -> List:
+        """歌曲起播通知（R-eng1/F-M4 权威信号）：hold_for_song 主线段 deadline
+        以「锚点+剩余时长」覆盖 step_timeout_s 保险丝——杜绝「歌没播完序列走完」。
+
+        仅 song 规则主线段生效；remaining_s≤0 或无 hold 段=忽略（幂等安全）。
+        """
+        commands: List = []
+        if self.state != "sequence" or self.seq is None or remaining_s is None:
+            return commands
+        if not self.seq.get("hold_for_song"):
+            return commands
+        steps = self.seq["steps"]
+        idx = self.seq["idx"]
+        if idx >= len(steps) or not steps[idx].get("hold_for_song"):
+            return commands
+        try:
+            remaining = float(remaining_s)
+        except (TypeError, ValueError):
+            return commands
+        if remaining <= 0:
+            return commands
+        anchor = now
+        self.seq["current_deadline"] = anchor + remaining
+        commands.append(LogCmd(
+            "info",
+            f"[编排] 歌曲起播（{song_name}）：主线段保持至歌曲结束"
+            f"（锚点+{remaining:.1f}s，R-eng1 预排程权威信号）"))
+        return commands
 
     def on_audio_complete(self, qtype: str, content: str, now: float) -> List:
         """播放完成回调关联（CL-2：(type,content)+晚于入队时间；误匹配忽略）。"""
@@ -513,7 +592,15 @@ class ChoreoEngine:
         idx = self.seq["idx"]
         if idx >= len(steps):
             return False
-        return steps[idx]["audio_mode"] == "none"
+        step = steps[idx]
+        if step.get("pred_version") == "new":
+            # 新语义（R-ceo4/R-eng3）：素材口型标志 off=纯画面窗口；窗口长度=
+            # 素材时长（duration_s 已由 apply 二段从 sidecar 物化）。on 素材=
+            # 音频驱动口型照常。F-M2/R-eng5：off 桩素材在渲染层恒直通，本窗口
+            # 的增量=音频延迟推送时序（GPU 经济由 lip 联动承担，非正确性依赖）。
+            return step.get("lip_flag") is False
+        # 存量规则旧谓词（R-ceo4 零静默行为变化：维持 audio_mode==none 直至重存）
+        return step["audio_mode"] == "none"
 
     def mute_window_remaining_s(self) -> Optional[float]:
         """纯画面窗口剩余秒数（None=不在窗口）；看门狗 F1 保证窗口必然结束。"""
@@ -563,6 +650,7 @@ class ChoreoEngine:
             "mood": (seq.get("tier_mood") or "") if seq else "",
             "counters": dict(self.counters),
             "hold_remaining": max(0.0, (seq["hold_until"] - self.clock())) if seq else 0.0,
+            "hold_for_song": bool(seq.get("hold_for_song")) if seq else False,
             "degrade_total": self.degrade_total,
             "enabled_rules": [r.rule_id for r in self.enabled_rules],
             "pending_requeue": bool(seq.get("pending_requeue")) if seq else False,
@@ -587,6 +675,8 @@ class ActionChoreographer:
         self._events: "queue.Queue" = queue.Queue()
         self._worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._lip_mode_cache = None  # T6/R-eng5：lip 联动去抖缓存（None=未知不下发判断失效）
+        self._muted_audio_pending: list = []  # R-eng10：静默窗口内被延迟推送的音频摘要（观测）
         # enable=false 或 EDTalk 客户端缺失：不启动 worker（订阅点短路直通，
         # 关闭=全链零行为变化——义务"总开关"）。_ensure_worker 幂等（GAP-1：
         # __init__ 与 apply_config 共用单一启动路径，is_alive 判定不二次 start）。
@@ -678,11 +768,19 @@ class ActionChoreographer:
         except Exception as e:
             logger.error(f"[编排] 完成回调异常：problem=完成关联异常；cause={type(e).__name__}: {e}；fix=依赖 F1 超时兜底推进")
 
+    def on_song_started(self, song_name: str, remaining_s: float) -> None:
+        """歌曲起播通知（R-eng1；点歌播放链 push_full 受理时刻调用——帧锁定
+        起播锚点）。入事件队列由工作线程锁内处理（非阻塞）。"""
+        if remaining_s is None:
+            return
+        self._events.put(("song_started", str(song_name or ""), remaining_s))
+
     def get_state(self) -> dict:
         with self._lock:
             state = self.engine.get_state()
             state["worker_alive"] = self.worker_alive()
             state["queue_depth"] = self._events.qsize()
+            state["lip_mode"] = self._lip_mode_cache  # R-eng9：lip_mode 观测透出
             return state
 
     # ---------- 口型推理联动（2026-10-25 goal：playback_manager 推送守卫消费） ----------
@@ -790,6 +888,42 @@ class ActionChoreographer:
                 "message": self._SIM_MESSAGES.get(reason, reason),
                 "fix": self._SIM_FIXES.get(reason, "查看编排日志")}
 
+    @staticmethod
+    def _resolve_new_rule_material_props(cfg) -> None:
+        """new 规则素材属性解析（T5/R-ceo4/R-eng2）：时长+口型标志物化。
+
+        sidecar 读取（data/edtalk_materials_meta.json，main 单写者）；missing
+        字段留 None（时长）/缺省 on（口型标志）——运行期兜底路径见 on_switch_result。
+        hold_for_song：song 规则主线段（R-eng1 保持至歌曲结束）。
+        """
+        try:
+            from utils.edtalk_realtime.materials import get_material_meta
+        except Exception as e:
+            logger.warning(f"[编排] sidecar 模块不可用（new 规则时长/口型未解析）：{e}")
+            return
+        for rule in cfg.rules:
+            if rule.pred_version != "new":
+                continue
+            for step in (rule.enter, rule.main, rule.exit):
+                if step is None:
+                    continue
+                try:
+                    meta = get_material_meta(step.segment)
+                except Exception as e:
+                    logger.warning(f"[编排] 素材元数据读取失败 seg={step.segment}: {e}")
+                    continue
+                step.lip_flag = bool(meta.get("lip_flag", True))
+                step.duration_s = meta.get("duration_s")
+                if rule.trigger_type == "song" and step.name == "main":
+                    step.hold_for_song = True
+            logger.info(
+                f"[编排] new 规则 {rule.rule_id} 素材属性已解析："
+                f"enter={rule.enter.segment}({rule.enter.duration_s}s/"
+                f"lip={rule.enter.lip_flag}) main={rule.main.segment}"
+                f"({rule.main.duration_s}s/lip={rule.main.lip_flag}"
+                f"{'/hold_for_song' if rule.main.hold_for_song else ''}) "
+                f"exit={rule.exit.segment}({rule.exit.duration_s}s/lip={rule.exit.lip_flag})")
+
     def apply_config(self, cfg_node: dict) -> dict:
         """运行时热换装（P2 管理页「应用」按钮；写者=orchestration.api 持久化）。
 
@@ -821,6 +955,12 @@ class ActionChoreographer:
                                    "服务就绪后重试应用"}
             result = validate_rule_segments(new_cfg.rules, segments)
             enabled_ids = set(result["enabled_rules"])
+            # new 规则素材属性解析（R-ceo7/R-eng2/R-eng6③：时长+口型标志从
+            # sidecar 物化进 RuleCfg——运行期零 I/O；FB-2 替代守卫的第二段位置。
+            # 时长未知不拒绝（F-M1 两分法：允许保存+「生效待就绪」）——运行期
+            # 由 on_switch_result 的 step_timeout_s 兜底+timeout_degrade 报警。
+            # EDTalk 不可达时本段已在上方 503 返回（C5-1），此处必有 sidecar 可读。
+            self._resolve_new_rule_material_props(new_cfg)
             # 换装：cfg/enabled_rules 替换；计数保留同名键（规则语义可能已变）
             new_engine = ChoreoEngine(new_cfg, clock=self._clock)
             new_engine.ready = self.engine.ready
@@ -935,9 +1075,70 @@ class ActionChoreographer:
             elif kind == "restore_result":
                 _, ok = event
                 commands = self.engine.on_restore_result(ok, self._clock())
+            elif kind == "song_started":
+                _, song_name, remaining_s = event
+                commands = self.engine.on_song_started(song_name, remaining_s,
+                                                       self._clock())
             else:
                 commands = []
         self._execute(commands)
+
+    # ---------- lip 联动（T6/R-eng5：性能层；失败=debug 日志，off→on 方向读回重试） ----------
+
+    def _apply_lip_linkage(self, need_on: bool, step_id: str) -> None:
+        """下发口型门控（去抖+读回断言+一次重试；线程=worker 或 lip-linkage）。"""
+        want = "on" if need_on else "off"
+        if getattr(self, "_lip_mode_cache", None) == want:
+            return  # R-eng5 MED-4 去抖：值不变不下发
+        result = self.edtalk_client.set_lip_params(want)
+        if not result.get("ok"):
+            self._lip_linkage_fail(want, step_id, result, retried=False)
+            return
+        self._lip_mode_cache = want
+        # F-M5 off→on 读回断言（on 失败=数字人静止不张嘴=可见缺陷）
+        if want == "on":
+            st = {}
+            try:
+                st = self.edtalk_client.get_status() or {}
+            except Exception:
+                pass
+            if st.get("lip_mode") != "on":
+                retry = self.edtalk_client.set_lip_params("on")
+                if retry.get("ok"):
+                    self._lip_mode_cache = "on"
+                    logger.info(f"[编排] lip 联动读回不符已重试成功（step={step_id}）")
+                else:
+                    self._lip_linkage_fail("on", step_id, retry, retried=True)
+        logger.debug(f"[编排] lip 联动：{want}（step={step_id}）")
+
+    def _lip_linkage_fail(self, want: str, step_id: str, result: dict,
+                          retried: bool) -> None:
+        """联动失败（R-eng5 性能层）：debug 日志；on 方向低频告警（可见缺陷）。"""
+        logger.debug(
+            f"[编排] lip 联动失败（step={step_id} want={want} retried={retried}）："
+            f"{result}")
+        if want == "on":
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_ORCHESTRATION,
+                f"编排 lip 联动置 on 失败（step={step_id}）——数字人可能静止不张嘴",
+                fix_hint="检查 EDTalk 服务与 /lip/params 端点；切回 on 素材会自动重试")
+
+    def _lip_linkage_at_boundary(self, segment: str, need_on: bool,
+                                 step_id: str) -> None:
+        """segment_end 切换的边界轮询联动（T0b 降级语义：轮询 current_segment
+        达成后前置位；不阻塞 worker；超时 60s 放弃=容忍窗写明于验收清单）。"""
+        deadline = time.time() + 60.0
+        while time.time() < deadline:
+            try:
+                st = self.edtalk_client.get_status() or {}
+                if st.get("current_segment") == segment:
+                    self._apply_lip_linkage(need_on, step_id)
+                    return
+            except Exception:
+                pass
+            time.sleep(1.0)
+        logger.debug(f"[编排] lip 联动边界轮询超时（step={step_id} seg={segment}）——"
+                     "容忍窗内口型可能提前/滞后")
 
     def _execute(self, commands: List) -> None:
         """命令执行（工作线程；HTTP 调用与音频入队，结果回填事件队列）。"""
@@ -949,6 +1150,21 @@ class ActionChoreographer:
                     result = self.edtalk_client.switch_segment(cmd.segment, at=cmd.at)
                     ok = bool(result.get("ok", True)) if isinstance(result, dict) else False
                     self._events.put(("switch_result", cmd.step_id, ok))
+                    # lip 联动（T6/R-ceo2③/R-eng5 性能层）：按当前步素材口型标志
+                    # 前置位。immediate=切换受理即联动（容忍窗≤2帧）；segment_end=
+                    # 后台轮询边界（不阻塞 worker——单线程，阻塞会拖垮 deadline 轮询）。
+                    # 失败=debug 日志（on→off 方向无害）；off→on 失败=可见缺陷→
+                    # 读回断言+一次重试+低频告警（F-M5 方向限定）。
+                    with self._lock:
+                        _lip_need = self.engine.current_step_lip_need()
+                    if _lip_need is not None:
+                        if cmd.at == "immediate":
+                            self._apply_lip_linkage(_lip_need, cmd.step_id)
+                        else:
+                            threading.Thread(
+                                target=self._lip_linkage_at_boundary,
+                                args=(cmd.segment, _lip_need, cmd.step_id),
+                                daemon=True, name="lip-linkage").start()
                 elif isinstance(cmd, TtsThanks):
                     # 经注入引用复用原生答谢链（E-2 限流+周期通道全复用，WP-3）
                     try:
