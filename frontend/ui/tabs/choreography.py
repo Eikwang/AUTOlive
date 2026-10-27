@@ -205,6 +205,13 @@ def create_choreography_tab(
                 _choreo_avail["typed"] = {"items": items}
             except NameError:
                 pass
+            # 片段池候选同步（typed 主源到达后刷新；池控件定义在卡片 2——
+            # 定时器/按钮触发均晚于定义，NameError 兜底沿上方同款模式）
+            try:
+                _def_pool_select.options = _def_pool_options()
+                _def_pool_select.update()
+            except NameError:
+                pass
             mat_status_label.set_text(
                 f"共 {len(items)} 个素材 · 数字人服务{'运行中' if online else '未运行（磁盘清单）'}"
                 + (f" · 当前段：{data.get('current_segment')}" if data.get("current_segment") else "")
@@ -219,18 +226,9 @@ def create_choreography_tab(
                 ui.notify(position="top", type="info", message=msg, duration=8)
             _render_materials(items)
 
-        def _material_badges(it: dict) -> str:
-            """素材行徽标系（R-dsg2）：口型/特写/冲突（空格分隔，随类型徽标并存）。"""
-            badges = []
-            if it.get("lip_flag") is False:
-                badges.append("画外音")
-            if it.get("closeup"):
-                badges.append("⚠头部特写")
-            if it.get("conflict"):
-                badges.append("跨类冲突")
-            return " ".join(badges)
-
         def _render_materials(items: list):
+            """素材库三列显示（2026-10-27 用户裁决：上场/主线/离场三列分离，
+            每列只显示段名/帧数/引用状态/操作，「改类型」并入操作菜单）。"""
             mat_list_slot.clear()
             with mat_list_slot:
                 if not items:
@@ -241,65 +239,52 @@ def create_choreography_tab(
                 for it in items:
                     by_type.setdefault(str(it.get("type") or "main"), []).append(it)
                 type_names = {"enter": "上场", "main": "主线", "exit": "离场"}
-                for tname in ("enter", "main", "exit"):
-                    group = by_type.get(tname) or []
-                    with ui.row().style("width:100%;gap:10px;align-items:center;"
-                                        "margin-top:8px"):
-                        ui.label(f"{type_names[tname]}").style(
-                            "min-width:52px;font-size: var(--font-size-body)")
-                        ui.label(f"{len(group)} 个").style(
-                            "color: var(--text-hint);font-size: var(--font-size-body)")  # 计数徽标（T9）
-                    if not group:
-                        ui.label(f"暂无{type_names[tname]}素材——上传时类型选「{type_names[tname]}」").style(
-                            "color: var(--text-hint); margin-left:52px")  # R-dsg12① 分组空态
-                        continue
-                    with ui.row().style("width:100%;gap:16px;color: var(--text-hint);margin-left:52px"):
-                        for h in ("段名", "徽标", "时长", "帧数", "人脸比例", "引用/状态", "改类型", "操作"):
-                            ui.label(h).style("min-width:80px")
-                    for it in group:
-                        seg = it.get("segment", "?")
-                        with ui.row().style("width:100%;align-items:center;gap:16px;margin-left:52px"):
-                            ui.label(seg).style("min-width:80px")
-                            badges = _material_badges(it)
-                            lab = ui.label(badges or "—").style("min-width:120px")
-                            if "⚠头部特写" in badges:
-                                lab.tooltip("输出将只有头部区域，请更换完整画面源并重训/重传"
-                                            "（前往训练主播页重训）；部分特写素材可能不触发此警告"
-                                            "——R-eng8 召回率边界")  # F-2/R-dsg2/R-dsg12⑥
-                            dur = it.get("duration_s")
-                            ui.label(f"{dur:.1f}s" if isinstance(dur, (int, float)) else "时长未知").style(
-                                "min-width:80px")
-                            ui.label(str(it.get("total_frames") or "?")).style("min-width:80px")
-                            ratio = it.get("face_ratio")
-                            if ratio is None:
-                                rtxt, rcolor = "?", "var(--text-hint)"
-                            elif ratio <= 0:
-                                rtxt, rcolor = "0%（画外音）", "var(--color-warning)"
-                            else:
-                                rtxt, rcolor = f"{ratio * 100:.0f}%", "var(--color-positive)"
-                            ui.label(rtxt).style(f"min-width:90px;color:{rcolor}")
-                            refs = it.get("references") or []
-                            tags = []
-                            if it.get("is_current"):
-                                tags.append("渲染中")
-                            if it.get("in_scheduler"):
-                                tags.append("调度中")
-                            tags += refs[:2] + [f"等{len(refs)}处引用" if len(refs) > 2 else ""]
-                            ui.label(" · ".join(x for x in tags if x) or "未引用").style(
-                                "min-width:110px;color: var(--text-hint); max-width:280px;"
-                                "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
-                            # 改类型（R-dsg3：纯元数据即时生效）
-                            ui.select(
-                                options={'enter': '上场', 'main': '主线', 'exit': '离场'},
-                                value=str(it.get("type") or "main"),
-                                on_change=lambda e, s=seg: _change_type(s, e.value),
-                            ).style("min-width:96px")
-                            ui.button("重处理", on_click=lambda s=seg, lf=bool(
-                                it.get("lip_flag", True)): _reprocess(s, lf)).props(
-                                "outline dense").tooltip("按口型推理目标重跑预处理链并热上线"
-                                "（当前播放中的素材会被拒绝——先切走）")
-                            ui.button("删除", on_click=lambda s=seg: _delete_material(s)).props(
-                                "outline color=negative dense")
+                with ui.grid(columns=3).style("width:100%;gap:14px"):
+                    for tname in ("enter", "main", "exit"):
+                        group = by_type.get(tname) or []
+                        with ui.column().style("width:100%;gap:4px").classes("border rounded"):
+                            with ui.row().style("width:100%;gap:8px;align-items:center;padding:6px 10px"):
+                                ui.label(type_names[tname]).style(
+                                    "font-size: var(--font-size-body);font-weight:500")
+                                ui.label(f"{len(group)} 个").style(
+                                    "color: var(--text-hint);font-size: var(--font-size-body)")
+                            if not group:
+                                ui.label(f"暂无{type_names[tname]}素材").style(
+                                    "color: var(--text-hint);font-size: var(--font-size-body);"
+                                    "padding:2px 10px 8px")
+                                continue
+                            with ui.row().style("width:100%;gap:10px;color: var(--text-hint);padding:0 10px"):
+                                for h in ("段名", "帧数", "引用/状态"):
+                                    ui.label(h).style("min-width:76px")
+                            for it in group:
+                                seg = it.get("segment", "?")
+                                with ui.row().style("width:100%;align-items:center;gap:10px;padding:2px 10px"):
+                                    ui.label(seg).style(
+                                        "min-width:76px;max-width:120px;overflow:hidden;"
+                                        "text-overflow:ellipsis;white-space:nowrap")
+                                    ui.label(str(it.get("total_frames") or "?")).style("min-width:76px")
+                                    refs = it.get("references") or []
+                                    tags = []
+                                    if it.get("is_current"):
+                                        tags.append("渲染中")
+                                    if it.get("in_scheduler"):
+                                        tags.append("调度中")
+                                    tags += refs[:2] + [f"等{len(refs)}处引用" if len(refs) > 2 else ""]
+                                    ui.label(" · ".join(x for x in tags if x) or "未引用").style(
+                                        "min-width:76px;color: var(--text-hint);max-width:150px;"
+                                        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                                    # 操作菜单（改类型并入操作——2026-10-27 用户裁决）
+                                    with ui.dropdown_button("操作", auto_close=True).props(
+                                            "outline dense").style("min-width:70px"):
+                                        for target_t, t_label in type_names.items():
+                                            if target_t != str(it.get("type") or "main"):
+                                                ui.item(f"改为{t_label}", on_click=lambda
+                                                        s=seg, tt=target_t: _change_type(s, tt))
+                                        ui.item("重处理", on_click=lambda s=seg, lf=bool(
+                                            it.get("lip_flag", True)): _reprocess(s, lf)) \
+                                            .tooltip("按口型推理目标重跑预处理链并热上线"
+                                                     "（当前播放中的素材会被拒绝——先切走）")
+                                        ui.item("删除", on_click=lambda s=seg: _delete_material(s))
 
         async def _change_type(segment: str, new_type: str):
             """改类型（R-dsg3：纯元数据即时生效+清单刷新）。"""
@@ -456,7 +441,8 @@ def create_choreography_tab(
                         ui.label("⚠ 存量语义规则：维持旧时长/音轨判定直至本页重存；"
                                  "重存后转新语义（时长=素材时长，音轨由系统判断）").style(
                             "color: var(--color-warning); font-size: var(--font-size-body)")
-                    # 第一行：规则ID | 触发类型 | 匹配值 | 价值门槛 | 触发次数摘要（R-dsg1）
+                    # 第一行：规则ID | 触发类型 | 匹配值 | 价值门槛 | 档位摘要+删除
+                    # （2026-10-27 用户裁决：多规则触发方式冗余移除——主线切换方式已覆盖）
                     with ui.grid(columns=5):
                         FormField.create_input(
                             label='规则 ID（唯一）', value=str(rule.get("rule_id", "")),
@@ -481,96 +467,62 @@ def create_choreography_tab(
                             on_change=lambda e, r=rule: r.__setitem__(
                                 "min_price", float(e.value or 0) if str(e.value or "").replace(".", "", 1).isdigit() else 0),
                             style="width:100%;")
-                        # 打断模式（2026-10-27 批次：优先级排序联动——相互依赖，
-                        # 由「切换方式」+权重队列配合完成灵活动态画面控制）
-                        ui.select(
-                            options={"standard": "打断当前（触发即切）",
-                                     "queue": "排队等待（当前序列播完再切）"},
-                            value=str(rule.get("interrupt", "standard")),
-                            label="多规则触发方式",
-                            on_change=lambda e, r=rule: r.__setitem__("interrupt", e.value),
-                        ).style("width:100%;").tooltip(
-                            "打断当前=新触发立即切换画面（高权重规则用）；排队等待=低权重"
-                            "触发进入队列，等待当前片段播放完成后再切换执行（配合优先级"
-                            "排序权重使用，如点歌权重低于动态文案时排队）")
-                        # 触发次数摘要（2026-10-27 批次：计次进档「从第 N 次起」）
+                        # 触发次数摘要（计次进档「从第 N 次起」）+规则删除按钮
                         tier_mins = [str(t.get("min_count", t.get("max_count"))) for t in tiers]
                         n_label = ("档位：从第 " + "/从第 ".join(tier_mins) + " 次起"
-                                   if tier_mins else "基础档（无覆盖档）")
-                        ui.label(n_label).style(
-                            "color: var(--text-hint); align-self:center; "
-                            "font-size: var(--font-size-body)").tooltip(
-                            "计次进档：设定时间内或主线片段播放完成前再次触发进入档位计次，"
-                            "从第 N 次起的触发使用该档片段（示例：档位一 1 次/档位二 4 次/"
-                            "档位三 7 次 → 第 1~3 次档一、第 4~6 次档二、第 7 次起档三）")
-                    # 第二行：上场|主线|离场（2026-10-27 批次：主线必选+设切换方式；
-                    # 上场/离场=可选过渡片段，固定播完接下一步，无切换方式——R-dsg1）
-                    for step_name in ("enter", "main", "exit"):
-                        step = rule.setdefault("sequence", {}).setdefault(step_name, {})
-                        want_type = {"enter": "enter", "main": "main", "exit": "exit"}[step_name]
-                        is_optional = step_name != "main"
-                        dur = step.get("duration_s")
-                        dur_txt = (f"素材时长 {dur:.1f}s" if isinstance(dur, (int, float))
-                                   else ("素材时长（重存后自动）" if is_new else "时长未知"))
-                        with ui.row().style("width:100%;align-items:flex-end;gap:8px"):
-                            ui.label({"enter": "上场", "main": "主线", "exit": "离场"}[step_name]
-                                     + ("（可选）" if is_optional else "（必选）")).style(
-                                "min-width:74px;color: var(--text-hint);font-size: var(--font-size-body)")
-                            ui.select(
-                                options=_seg_options(str(step.get("segment", "")), want_type),
-                                value=str(step.get("segment", "")) or None,
-                                label=("过渡片段（可空）" if is_optional else "主线片段"),
-                                clearable=is_optional,
-                                on_change=lambda e, s=step: s.__setitem__("segment", e.value or ""),
-                            ).style("min-width:180px").tooltip(
-                                "候选=该类型素材（素材管理页三列表）∪ 已引用段；"
-                                "标「画外音」的段播放时画面原样+语音照常；"
-                                + ("过渡片段可空=跳过该步（如默认画面→主线直连）" if is_optional
-                                   else "主线片段必选"))
-                            if is_new and step_name == "main" and rule.get("trigger_type") == "song":
-                                dur_txt += "（歌曲未结束前主线素材循环播放）"  # R-dsg7/F-12
-                            ui.label(dur_txt).style(
-                                "min-width:150px;color: var(--text-hint);"
-                                "font-size: var(--font-size-body)").tooltip(
-                                "播放时长=素材时长（X2 系统接管）；时长未知=允许保存+生效待就绪"
-                                "（R-eng6 两分法）" if is_new else "存量规则保留手工时长")
-                            if is_optional:
-                                ui.label("过渡片段·播完接下一步").style(
-                                    "min-width:170px;color: var(--text-hint);"
-                                    "font-size: var(--font-size-body)").tooltip(
-                                    "上场/离场是片段间过渡片段，不设切换方式（固定 segment_end）")
-                            else:
-                                ui.select(
-                                    options={"segment_end": "无缝切换（播完后切）",
-                                             "immediate": "立刻切换（触发即切）"},
-                                    value=str(step.get("switch_at", "segment_end")),
-                                    label="切换方式",
-                                    on_change=lambda e, s=step: s.__setitem__("switch_at", e.value),
-                                ).style("min-width:170px").tooltip(
-                                    "无缝切换=等当前片段播放完成后再切换；"
-                                    "立刻切换=触发新规则后立即切换（用户裁决 2026-10-27：仅主线可设）")
-                            if not is_new:
-                                # 存量规则旧编辑器（时长/音轨——R-ceo4 零静默直至重存）
-                                FormField.create_input(
-                                    label='时长(s)', value=str(step.get("duration_s", "")),
-                                    on_change=lambda e, s=step: s.__setitem__(
-                                        "duration_s", float(e.value) if str(e.value or "").replace(".", "", 1).isdigit() and e.value else None),
-                                    style="width:90px;")
-                                FormField.create_select(
-                                    label='音轨', options={'none': '无（TTS 照常）', 'tts': '答谢语音', 'file': '本地文件'},
-                                    value=str((step.get("audio") or {}).get("mode", "none")),
-                                    on_change=lambda e, s=step: s.__setitem__(
-                                        "audio", {"mode": e.value, "path": (s.get("audio") or {}).get("path", "")}
-                                        if e.value != "none" else None),
-                                    style="width:130px;")
+                                   if tier_mins else "基础档")
+                        with ui.row().style("width:100%;align-items:center;gap:6px"):
+                            ui.label(n_label).style(
+                                "color: var(--text-hint); font-size: var(--font-size-body)").tooltip(
+                                "计次进档：设定时间内或主线片段播放完成前再次触发进入档位计次，"
+                                "从第 N 次起的触发使用该档片段（示例：档位一 1 次/档位二 4 次/"
+                                "档位三 7 次 → 第 1~3 次档一、第 4~6 次档二、第 7 次起档三）")
+                            ui.button(icon="delete", on_click=lambda i=idx: _delete_rule(i)).props(
+                                "outline color=negative dense").tooltip("删除本规则")
+                    # 第二行：上场|主线|切换方式|离场 一行四参数（2026-10-27 用户裁决重排；
+                    # 时长/音轨删除——新语义由系统接管，存量语义重存后自动转换）
+                    seq = rule.setdefault("sequence", {})
+                    with ui.row().style("width:100%;align-items:flex-end;gap:10px"):
+                        ui.select(
+                            options=_seg_options(str((seq.get("enter") or {}).get("segment", "")), "enter"),
+                            value=str((seq.get("enter") or {}).get("segment", "")) or None,
+                            label="上场（可选）", clearable=True,
+                            on_change=lambda e: (seq.setdefault("enter", {})
+                                                 .__setitem__("segment", e.value or "")),
+                        ).style("min-width:200px;flex:1").tooltip(
+                            "过渡片段（可空=跳过该步，默认画面→主线直连）；固定播完接主线，不设切换方式；"
+                            "标「画外音」的段播放时画面原样+语音照常")
+                        ui.select(
+                            options=_seg_options(str((seq.get("main") or {}).get("segment", "")), "main"),
+                            value=str((seq.get("main") or {}).get("segment", "")) or None,
+                            label="主线（必选）",
+                            on_change=lambda e: (seq.setdefault("main", {})
+                                                 .__setitem__("segment", e.value or "")),
+                        ).style("min-width:200px;flex:1").tooltip(
+                            "主线片段必选；候选=主线素材∪已引用段∪服务可用段")
+                        ui.select(
+                            options={"segment_end": "无缝切换（播完后切）",
+                                     "immediate": "立刻切换（触发即切）"},
+                            value=str((seq.get("main") or {}).get("switch_at", "segment_end")),
+                            label="切换方式（主线）",
+                            on_change=lambda e: (seq.setdefault("main", {})
+                                                 .__setitem__("switch_at", e.value)),
+                        ).style("min-width:180px").tooltip(
+                            "无缝切换=等当前片段播放完成后再切换；"
+                            "立刻切换=触发新规则后立即切换")
+                        ui.select(
+                            options=_seg_options(str((seq.get("exit") or {}).get("segment", "")), "exit"),
+                            value=str((seq.get("exit") or {}).get("segment", "")) or None,
+                            label="离场（可选）", clearable=True,
+                            on_change=lambda e: (seq.setdefault("exit", {})
+                                                 .__setitem__("segment", e.value or "")),
+                        ).style("min-width:200px;flex:1").tooltip(
+                            "过渡片段（可空=主线播完直接回默认画面）；固定播完接下一步，不设切换方式")
                     # 档位编辑器（R-dsg4 D2-1/2/3/4：第 1 行=基础档同源，第 2 行起=覆盖档）
                     ui.label("触发次数档位（第 1 行=基础档与上方三下拉同源；覆盖档留空=沿用基础档；"
                              "首覆盖档阈值须 ≥2——=1 会在首次触发即遮蔽基础档）").style(
                         "color: var(--text-hint); font-size: var(--font-size-body); margin-top:6px")
                     _render_tier_editor(rule)
-                    with ui.row():
-                        ui.button("删除规则", on_click=lambda i=idx: _delete_rule(i)).props(
-                            "outline color=negative")
         # GAP-3：规则增删后同步模拟触发下拉选项（控件在下方创建，首次调用晚于其定义）
         try:
             choreo_sim_select.options = {
@@ -737,22 +689,13 @@ def create_choreography_tab(
                  "⚠ 触发命中立即切换，无最短保持保护（最短再触发间隔/序列最小展示已按"
                  "用户裁决退役；去重由弹幕层承担）——R-dsg7/R-ceo5").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
-        with ui.grid(columns=3):
+        with ui.grid(columns=2):
             FormField.create_select(
                 label='默认画面模式',
                 options={'rotate': '轮播（顺序）', 'random': '随机', 'single': '单段'},
                 value=str(choreo_node.get("default_mode", "rotate")),
                 on_change=lambda e: choreo_node.__setitem__("default_mode", e.value),
                 tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）",
-                style="width:100%;")
-            FormField.create_input(
-                label='步骤超时上限(s)——步骤推进保险丝',
-                value=str(choreo_node.get("step_timeout_s", 60)),
-                on_change=lambda e: choreo_node.__setitem__(
-                    "step_timeout_s", float(e.value or 60) if str(e.value or "").replace(".", "", 1).isdigit() else 60),
-                tooltip="F3 调查结论（2026-10-27）：当前步完成上限——防 segment_end 等待悬挂"
-                        "卡死序列（materialized 于 current_deadline，monotonic）；新语义规则"
-                        "素材时长未知时亦以此兜底推进。建议保持默认 60s",
                 style="width:100%;")
             FormField.create_input(
                 label='计数窗口(s)', value=str(choreo_node.get("reset_after_s", 300)),
@@ -763,14 +706,27 @@ def create_choreography_tab(
         # 默认画面（2026-10-27 动作编排完善批次）：段名池改选择模式（多选主线段）；
         # 一律立刻切换，无需设切换方式；单段模式=pingpong 首尾循环（可指定循环段，
         # 空=列表第一个）
+        def _def_pool_options() -> dict:
+            """片段池候选=素材清单段 ∪ EDTalk 可用段 ∪ 已配置段（修复：此前仅
+            EDTalk /status 可用段——服务未跑时为空、已配置段被 value 过滤丢失）。"""
+            opts = [str(it.get("segment"))
+                    for it in (_choreo_avail.get("typed") or {}).get("items", [])]
+            opts += _choreo_avail["segments"] or []
+            opts += [str(s) for s in (choreo_node.get("default_segments") or [])]
+            seen, out = set(), {}
+            for s in opts:
+                if s and s not in seen:
+                    seen.add(s)
+                    out[s] = f"{s}（画外音）" if s in _choreo_avail["voiceover"] else s
+            return out
+
         _def_pool_select = ui.select(
             multiple=True, label='默认画面片段池（多选；空=不接管默认轮播）',
-            options={s: s for s in _choreo_avail["segments"]},
-            value=[s for s in (choreo_node.get("default_segments") or [])
-                   if s in _choreo_avail["segments"]],
+            options=_def_pool_options(),
+            value=[str(s) for s in (choreo_node.get("default_segments") or [])],
             on_change=lambda e: choreo_node.__setitem__("default_segments", list(e.value or [])),
             with_input=True,
-        ).style("width:60%").tooltip("候选=EDTalk 可用段（「刷新可用段」同步）；"
+        ).style("width:60%").tooltip("候选=素材清单段∪EDTalk 可用段（「刷新可用段」同步）；"
                                      "轮播=按列表顺序逐个 / 随机=随机播放 / 单段=循环指定片段")
 
         def _sync_default_single(v):
