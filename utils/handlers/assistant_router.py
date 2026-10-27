@@ -160,9 +160,14 @@ def _split_kb_line(line):
     return None
 
 
-def load_assistant_text_kb(file_path):
-    """加载助播文本词库（E-E3）：UTF-8(errors='replace')、按行、脏行跳过并计数；
-    mtime 缓存；文件删除→缓存失效→空词条集。"""
+def load_qa_library(file_path):
+    """加载一问一答 TXT 词库（E-E3，主侧本地问答与助播知识库共用——TODOS
+    主 local_qa 格式收敛项落地后两库同构）：UTF-8(errors='replace')、按行、
+    脏行跳过并计数；mtime 缓存；文件删除→缓存失效→空词条集。
+
+    Returns:
+        list[tuple]: (question, answer, question_tokens|None) 三元组列表
+    """
     try:
         if not file_path or not os.path.exists(file_path):
             if file_path:
@@ -210,7 +215,7 @@ def match_assistant_text(config, content):
             threshold = float(config.get("assistant_anchor", "local_qa", "text", "similarity"))
         except (TypeError, ValueError):
             threshold = 0.8
-        entries = load_assistant_text_kb(file_path)
+        entries = load_qa_library(file_path)
         if not entries:
             return None
         q_norm = normalize_for_match(content)
@@ -259,21 +264,16 @@ def _audio_title_base(filename):
     return base
 
 
-def match_assistant_audio(config, content):
-    """助播音频匹配（D5 三级归一）：归一化（去扩展名/去全部空白/全半角/大小写）→
-    ①精确 → ②包含 → ③difflib 相似度；同分取标题更长者。
-    档位（E-T2 映射语义）：包含关系档=①+②；相似度匹配档=①+②+③。
+def match_audio_titles(dir_path, content, tier="相似度匹配", threshold=0.5):
+    """音频标题三级归一匹配（纯函数，主侧本地问答与助播知识库共用）：
+    归一化（去扩展名/去全部空白/全半角/大小写）→ ①精确 → ②包含 → ③difflib
+    相似度；同分取标题更长者。档位映射（E-T2）：包含关系档=①+②；
+    相似度匹配档=①+②+③。
 
     Returns:
         str | None: 命中的音频文件绝对路径
     """
     try:
-        dir_path = config.get("assistant_anchor", "local_qa", "audio", "file_path")
-        try:
-            threshold = float(config.get("assistant_anchor", "local_qa", "audio", "similarity"))
-        except (TypeError, ValueError):
-            threshold = 0.5
-        tier = config.get("assistant_anchor", "local_qa", "audio", "type") or "相似度匹配"
         names = _list_audio_titles(dir_path)
         if not names:
             return None
@@ -305,6 +305,21 @@ def match_assistant_audio(config, content):
             if best_name:
                 return os.path.abspath(os.path.join(dir_path, best_name))
         return None
+    except Exception as e:
+        logger.error(f"音频标题匹配失败（未命中处理）：{e}")
+        return None
+
+
+def match_assistant_audio(config, content):
+    """助播音频匹配（D5）：读 assistant_anchor.local_qa.audio 配置调共用引擎。"""
+    try:
+        dir_path = config.get("assistant_anchor", "local_qa", "audio", "file_path")
+        try:
+            threshold = float(config.get("assistant_anchor", "local_qa", "audio", "similarity"))
+        except (TypeError, ValueError):
+            threshold = 0.5
+        tier = config.get("assistant_anchor", "local_qa", "audio", "type") or "相似度匹配"
+        return match_audio_titles(dir_path, content, tier=tier, threshold=threshold)
     except Exception as e:
         logger.error(f"助播音频匹配失败（未命中处理）：{e}")
         return None

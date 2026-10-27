@@ -171,27 +171,16 @@ class FeatureHandler:
             from ..common.text_mixin import normalize_for_match, tokenize_for_match
             q_norm = normalize_for_match(question)
             q_tokens = tokenize_for_match(question)
-            # D4：词条预分词随 mtime 缓存（load_data_from_file 已缓存 data+mtime，
-            # 词元缓存对齐同一 mtime 键；运行时仅对查询分词一次）
-            _cached = FeatureHandler._qa_file_cache.get(file_path)
-            _mtime = _cached[0] if _cached else None
-            _tok_cached = FeatureHandler._qa_token_cache.get(file_path)
-            if _tok_cached is None or _tok_cached[0] != _mtime:
-                _tok_cached = (_mtime, [tokenize_for_match(it[0]) if len(it) >= 2 else None
-                                        for it in data])
-                FeatureHandler._qa_token_cache[file_path] = _tok_cached
-            _entry_tokens = _tok_cached[1]
+            # 词条词元随 load_qa_library 加载缓存（item[2]），运行时仅对查询分词一次
             best_answer = None
             best_similarity = 0.0
-            for _i, item in enumerate(data):
-                if len(item) < 2:
-                    continue
+            for item in data:
                 q, a = item[0], item[1]
                 # 精确短路：归一化全等直接返回（不依赖阈值）
                 if q_norm and normalize_for_match(q) == q_norm:
                     return a
                 sim = self.my_handle.common.calculate_similarity(
-                    question, q, b_tokens=_entry_tokens[_i])
+                    question, q, b_tokens=item[2] if len(item) > 2 else None)
                 if sim > best_similarity and sim >= similarity:
                     best_similarity = sim
                     best_answer = a
@@ -227,49 +216,32 @@ class FeatureHandler:
         """
         return self._qa_best_match(question, file_path, similarity)
     
-    # 词库文件缓存（2026-10-25 识别中枢批次）：path -> (mtime, data)。
-    # 本地问答匹配在识别中枢高频调用（每条弹幕/语音一次），原实现每次重读
-    # 文件是延时实锤；mtime 变化即失效，热改词库无需手动刷新。
+    # 词库缓存已随加载器委托 assistant_router.load_qa_library 迁移（2026-10-27
+    # 主 local_qa 收敛项）；以下类属性仅作退役占位——保留防未知外部引用
+    # AttributeError，勿再读写。
     _qa_file_cache = {}
-    # 词条预分词缓存（D4/E-T5）：path -> (mtime, [tokens|None per entry])——
-    # 与 _qa_file_cache 同 mtime 键对齐，运行时仅对查询分词一次。
     _qa_token_cache = {}
 
     def load_data_from_file(self, file_path):
-        """
-        从文件加载数据（mtime 缓存：文件未变直接复用，避免每条消息重读 IO）
+        """从文件加载数据（/autoplan main-20261026-214845 主 local_qa 收敛项：
+        委托 assistant_router.load_qa_library 单一实现——E-E3 增强语义（脏行
+        跳过计数/括号兼容切分/errors='replace'/删除文件缓存失效）+词条预分词
+        随 mtime 缓存，与助播知识库同构）。
 
         Args:
             file_path (str): 文件路径
 
         Returns:
-            list: 数据列表
+            list[tuple]: (question, answer, question_tokens|None) 三元组列表；
+                文件缺失/不可读返回空列表（原 None 语义由调用方 falsy 判断兼容）
         """
         try:
-            if not os.path.exists(file_path):
-                logger.error(f"文件不存在：{file_path}")
-                return None
-
-            mtime = os.path.getmtime(file_path)
-            cached = FeatureHandler._qa_file_cache.get(file_path)
-            if cached is not None and cached[0] == mtime:
-                return cached[1]
-
-            data = []
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        parts = line.split('|')
-                        if len(parts) >= 2:
-                            data.append(parts)
-
-            FeatureHandler._qa_file_cache[file_path] = (mtime, data)
-            return data
+            from .assistant_router import load_qa_library
+            return load_qa_library(file_path)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"加载数据失败：{e}")
-            return None
+            return []
     
     def local_qa_match(self, content, username=None):
         """本地问答词库纯查询（基础功能 2026-10-22 批次抽取，DRY：三消费点共用）。
@@ -277,6 +249,12 @@ class FeatureHandler:
         仅做匹配与渲染（变量替换+随机括号），不含 enable 检查、不播音频——
         enable 检查统一在调用点（spec R2-1）；local_qa_handle/LLM 托底/
         chat_type=local_qa 通道三消费点统一调用（ENG E-2）。
+
+        主 local_qa 收敛（/autoplan main-20261026-214845 终门 rec 后续项，
+        TODOS 主侧格式收敛落地）：键面统一到 UI 子节 local_qa.text.*（原实现
+        读顶层 local_qa.file_path/similarity 与 UI 写入的 text.* 分裂——路径恒
+        None 的第二层断裂，与 F5 同族）；格式单一路径（原 json/text 分支两函数
+        体本相同，F6）。
 
         Args:
             content (str): 弹幕内容（查询文本）
@@ -286,12 +264,14 @@ class FeatureHandler:
             str | None: 渲染后的回答文本；未匹配返回 None
         """
         try:
-            # 根据类型，执行不同的问答匹配算法
-            if self.my_handle.config.get("local_qa", "format") == "text":
-                tmp = self.find_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
-            else:
-                tmp = self.find_similar_answer(content, self.my_handle.config.get("local_qa", "file_path"), self.my_handle.config.get("local_qa", "similarity"))
-
+            # 文本级开关（主 local_qa 收敛项：UI"启用文本匹配"local_qa.text.enable
+            # 此前零消费——死开关；显式 False 关闭，缺键/None 视为启用保兼容）
+            if self.my_handle.config.get("local_qa", "text", "enable") is False:
+                return None
+            tmp = self._qa_best_match(
+                content,
+                self.my_handle.config.get("local_qa", "text", "file_path"),
+                self.my_handle.config.get("local_qa", "text", "similarity"))
             if tmp is None:
                 return None
             return self.local_qa_render(tmp, content_username=username)
@@ -343,16 +323,45 @@ class FeatureHandler:
             username = data["username"]
             content = data["content"]
 
+            # 总开关前置（主 local_qa 收敛项）：音频级同样受 local_qa.enable 管辖
+            if not self.my_handle.config.get("local_qa", "enable"):
+                return False
+
+            # 主知识库音频级（主 local_qa 收敛项，镜像助播 D5 链序=音频→文本）：
+            # local_qa.audio.enable 时先做标题三级匹配（共用引擎），命中直接播
+            # 音频（type=local_qa_audio，synthesis_manager 分支既有）；未命中落
+            # 文本匹配。音频配置此前零消费（死链，与助播接线前同病）。
+            if self.my_handle.config.get("local_qa", "audio", "enable"):
+                from .assistant_router import match_audio_titles
+                try:
+                    _tier = self.my_handle.config.get("local_qa", "audio", "type") or "相似度匹配"
+                except Exception:
+                    _tier = "相似度匹配"
+                _audio_path = match_audio_titles(
+                    self.my_handle.config.get("local_qa", "audio", "file_path"),
+                    content, tier=_tier,
+                    threshold=self.my_handle.config.get("local_qa", "audio", "similarity") or 0.5)
+                if _audio_path:
+                    logger.info(f'触发本地问答音频库 [{username}]: {content} → {_audio_path}')
+                    self.my_handle.audio_synthesis_handle({
+                        "type": "local_qa_audio",
+                        "tts_type": "none",
+                        "voice_path": _audio_path,
+                        "file_path": _audio_path,
+                        "content": content,
+                        "config": self.my_handle.config.get("filter"),
+                        "username": username,
+                    })
+                    self.my_handle.webui_show_chat_log_callback(
+                        "本地问答-音频", dict(data, type="local_qa_audio"), _audio_path)
+                    return True
+
             if hub_result is not None:
                 # 中枢已判定：命中才回复，未命中（空串）静默交回弹幕链
                 resp_content = hub_result.local_qa_answer
                 if not resp_content:
                     return False
             else:
-                # 检查是否启用本地问答
-                if not self.my_handle.config.get("local_qa", "enable"):
-                    return False
-
                 # 匹配+渲染走共享函数（DRY，ENG E-2）
                 resp_content = self.local_qa_match(content, username=username)
                 if resp_content is None:
@@ -364,7 +373,7 @@ class FeatureHandler:
             # 消息来源勾选对应选项（comment 源→AI对话、chatbox 源→聊天）时改判
             # 助播路由——主 KB 命中响应"均使用助播TTS"的"均"字；voice 源/未勾选
             # 维持原路（uc2a）。来源取 data.chat_source（comment_handle 侧标记）。
-            from .assistant_router import assistant_route, assistant_copy_message, ASSISTANT_TEXT_TYPE
+            from .assistant_router import assistant_route, assistant_copy_message
             _src = (data or {}).get("chat_source") or "comment"
             if assistant_route(self.my_handle.config, "main_kb_hit", _src):
                 message = assistant_copy_message(

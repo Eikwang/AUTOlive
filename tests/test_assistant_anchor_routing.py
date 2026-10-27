@@ -199,7 +199,7 @@ def test_kb_loader_bracket_aware_split():
     答案侧首个括号外 | 为界（maxsplit=1 语义）。"""
     kb = _write_kb(["怎么称呼[小明|小红]|左|右"])
     try:
-        entries = ar.load_assistant_text_kb(kb)
+        entries = ar.load_qa_library(kb)
         assert len(entries) == 1
         q, a, _tokens = entries[0]
         assert q == "怎么称呼[小明|小红]"
@@ -212,7 +212,7 @@ def test_kb_loader_dirty_lines_skipped_and_counted():
     """E-E3：空行/单列/无分隔符行跳过；正常行保留。"""
     kb = _write_kb(["", "没有分隔符的行", "正常问题|正常答案", "只有问题|"])
     try:
-        entries = ar.load_assistant_text_kb(kb)
+        entries = ar.load_qa_library(kb)
         assert [(q, a) for q, a, _ in entries] == [("正常问题", "正常答案")]
     finally:
         os.unlink(kb)
@@ -222,10 +222,10 @@ def test_kb_loader_deleted_file_yields_empty():
     """E-E3：文件删除→缓存失效→空词条集（不抛异常）。"""
     kb = _write_kb(["q|a"])
     try:
-        assert ar.load_assistant_text_kb(kb)
+        assert ar.load_qa_library(kb)
     finally:
         os.unlink(kb)
-    assert ar.load_assistant_text_kb(kb) == []
+    assert ar.load_qa_library(kb) == []
 
 
 def test_kb_match_adversarial_question_brackets():
@@ -367,6 +367,12 @@ _D12_EXPECTED = {
     ("my_handle.py", "audio_synthesis_handle"): ("exempt", "定义委托链（my_handle→audio_handler 包装层，非生产点）"),
 }
 
+# 条件站点：在途批次的生产点（树上可能尚不存在——missing 断言对其豁免，
+# 落地后须保持注册；unknown 断言仍严格）。注册理由必填。
+_D12_CONDITIONAL = {
+    ("chat_handler.py", "llm_stream_reply"): ("routed", "流式分句回复（主链延迟优化批次在途；消息构建经 _build_stream_message 走 llm_reply 路由，已接）"),
+}
+
 
 def _scan_audio_synthesis_call_sites():
     """ast 扫描全仓 audio_synthesis_handle 调用点 → {(file, enclosing_func)}。
@@ -411,12 +417,12 @@ def test_d12_production_site_exhaustiveness():
     """D12/E-T3：全仓 audio_synthesis_handle 调用点 ⊆ 路由矩阵清单 ∪ 显式豁免。
     新增生产点而不更新 _D12_EXPECTED → 本测试红（附清单指引）。"""
     found = _scan_audio_synthesis_call_sites()
-    expected_keys = set(_D12_EXPECTED.keys())
+    expected_keys = set(_D12_EXPECTED.keys()) | set(_D12_CONDITIONAL.keys())
     unknown = found - expected_keys
     assert not unknown, (
         f"发现清单外消息生产点（D12）：{sorted(unknown)}——"
         f"请接线对应产线并更新 tests/test_assistant_anchor_routing.py::_D12_EXPECTED")
-    missing = expected_keys - found
+    missing = set(_D12_EXPECTED.keys()) - found
     assert not missing, f"清单内站点已消失（请清理 _D12_EXPECTED）：{sorted(missing)}"
 
 
@@ -456,3 +462,135 @@ def test_route_stats_snapshot_shape():
     assert "gift|" in "".join(stats["counters"].keys())
     last = next(v for k, v in stats["last"].items() if k.startswith("gift|"))
     assert last["producer_type"] == "gift" and last["routed"] is True
+
+
+# ---------- 主 local_qa 收敛（终门 rec 后续项，2026-10-27） ----------
+
+def test_main_loader_delegates_to_shared_library():
+    """主加载器委托 load_qa_library：括号兼容切分+脏行跳过（与助播同构）。"""
+    from utils.handlers.feature_handler import FeatureHandler
+
+    class _Stub:
+        common = Common()
+        config = None
+
+    fh = FeatureHandler.__new__(FeatureHandler)
+    fh.my_handle = _Stub()
+    kb = _write_kb(["怎么称呼[小明|小红]|叫我小助就好", "", "脏行", "主播多大了|秘密"])
+    try:
+        entries = fh.load_data_from_file(kb)
+        assert [(q, a) for q, a, _t in entries] == [
+            ("怎么称呼[小明|小红]", "叫我小助就好"), ("主播多大了", "秘密")]
+        # 词条词元随加载缓存（item[2]）
+        assert all(len(e) == 3 for e in entries)
+    finally:
+        os.unlink(kb)
+
+
+def test_main_local_qa_match_uses_text_subsection_keys():
+    """键面统一回归：local_qa_match 读 text.* 子节（原读顶层键恒 None 的
+    第二层断裂）。"""
+    from utils.handlers.feature_handler import FeatureHandler
+
+    kb = _write_kb(["怎么点歌|发送点歌歌名即可"])
+
+    class _Stub:
+        common = Common()
+
+        def __init__(self, cfg):
+            self.config = FakeConfig(cfg)
+
+    fh = FeatureHandler.__new__(FeatureHandler)
+    fh.my_handle = _Stub({
+        "local_qa": {"enable": True,
+                     "text": {"enable": True, "file_path": kb, "similarity": 0.6}},
+    })
+    try:
+        assert fh.local_qa_match("怎么点歌") == "发送点歌歌名即可"
+        assert fh.local_qa_match("完全无关的问题内容") is None
+    finally:
+        os.unlink(kb)
+
+
+def test_main_local_qa_text_enable_gate():
+    """文本级开关（原死开关接通）：text.enable=False 不匹配；缺键=启用（兼容）。"""
+    from utils.handlers.feature_handler import FeatureHandler
+
+    kb = _write_kb(["怎么点歌|发送点歌歌名即可"])
+
+    class _Stub:
+        common = Common()
+
+        def __init__(self, cfg):
+            self.config = FakeConfig(cfg)
+
+    fh = FeatureHandler.__new__(FeatureHandler)
+    fh.my_handle = _Stub({
+        "local_qa": {"enable": True,
+                     "text": {"enable": False, "file_path": kb, "similarity": 0.6}},
+    })
+    assert fh.local_qa_match("怎么点歌") is None
+    # 缺 text.enable 键（存量）→ 启用
+    fh2 = FeatureHandler.__new__(FeatureHandler)
+    fh2.my_handle = _Stub({
+        "local_qa": {"enable": True,
+                     "text": {"file_path": kb, "similarity": 0.6}},
+    })
+    try:
+        assert fh2.local_qa_match("怎么点歌") == "发送点歌歌名即可"
+    finally:
+        os.unlink(kb)
+
+
+def test_main_local_qa_audio_stage():
+    """主 KB 音频级（镜像 D5 音频→文本）：音频命中产 local_qa_audio 且短路文本。"""
+    from utils.handlers.feature_handler import FeatureHandler
+    import tempfile
+
+    kb = _write_kb(["怎么点歌|文本答案"])
+    d = tempfile.mkdtemp(prefix="mainqa_audio_")
+    open(os.path.join(d, "怎么点歌.mp3"), "wb").close()
+
+    captured = []
+
+    class _Stub:
+        common = Common()
+
+        def __init__(self, cfg):
+            self.config = FakeConfig(cfg)
+
+        def audio_synthesis_handle(self, msg):
+            captured.append(msg)
+
+        def webui_show_chat_log_callback(self, *a, **k):
+            pass
+
+    fh = FeatureHandler.__new__(FeatureHandler)
+    fh.my_handle = _Stub({
+        "local_qa": {"enable": True,
+                     "text": {"enable": True, "file_path": kb, "similarity": 0.6},
+                     "audio": {"enable": True, "type": "相似度匹配",
+                               "file_path": d, "similarity": 0.5}},
+    })
+    try:
+        assert fh.local_qa_handle({"username": "u", "content": "怎么点歌"}) is True
+        assert len(captured) == 1
+        assert captured[0]["type"] == "local_qa_audio"
+        assert captured[0]["file_path"].endswith("怎么点歌.mp3")
+    finally:
+        os.unlink(kb)
+
+
+def test_migration_main_local_qa_keys():
+    """主 local_qa 迁移：type/format 退役键清理+顶层遗留键并入 text.*+音频档位补默认。"""
+    cfg = {"local_qa": {
+        "file_path": "data/旧路径.txt", "similarity": 0.7,
+        "format": "json",
+        "text": {"enable": True, "type": "json"},
+        "audio": {"enable": True, "file_path": "out/x/"},
+    }}
+    out = _run_migration(cfg)
+    t = out["local_qa"]["text"]
+    assert "type" not in t and "format" not in out["local_qa"]
+    assert t["file_path"] == "data/旧路径.txt" and t["similarity"] == 0.7  # 顶层并入（不覆盖子节）
+    assert out["local_qa"]["audio"]["type"] == "相似度匹配"

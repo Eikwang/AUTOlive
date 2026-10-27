@@ -38,16 +38,19 @@ def create_local_qa_tab(
 
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
+                # 存储格式下拉已退役（/autoplan main-20261026-214845 主 local_qa
+                # 收敛项：唯一格式=一问一答 TXT（问题|答案），与助播知识库同构；
+                # 存量 text.type 键经 settings 迁移移除——F6 实证两格式历来同一加载器）
                 _auto_save(ui.switch('启用文本匹配', value=get_nested_value(config, "local_qa", "text", "enable")).style(switch_internal_css), ("local_qa", "text", "enable"))
-                _auto_save(ui.select(
-                    label='存储格式',
-                    options={'json': '自定义json', 'text': '一问一答'},
-                    value=get_nested_value(config, "local_qa", "text", "type")
-                ).style("width:100%;"), ("local_qa", "text", "type"))
-                _auto_save(ui.input(label='文本问答数据路径', placeholder='本地问答文本数据存储路径', value=get_nested_value(config, "local_qa", "text", "file_path")).style("width:100%;"), ("local_qa", "text", "file_path"))
-                _auto_save(ui.input(label='文本最低相似度', placeholder='最低文本匹配相似度', value=get_nested_value(config, "local_qa", "text", "similarity")).style("width:100%;"), ("local_qa", "text", "similarity"))
+                _auto_save(ui.input(label='文本问答数据路径', placeholder='一问一答 TXT 路径（每行：问题|答案）', value=get_nested_value(config, "local_qa", "text", "file_path")).style("width:100%;").tooltip('一问一答 TXT：每行一条，问题|答案；同答案多问法写多行；支持 {username}/{cur_time} 变量与 [1|2] 随机括号'), ("local_qa", "text", "file_path"))
+                _auto_save(ui.input(label='文本最低相似度', placeholder='最低文本匹配相似度', value=get_nested_value(config, "local_qa", "text", "similarity")).style("width:100%;").tooltip('jieba 分词混合匹配；默认 0.6（误命中多调高，漏命中多调低）'), ("local_qa", "text", "similarity"))
                 _auto_save(ui.input(label='用户名最大长度', value=get_nested_value(config, "local_qa", "text", "username_max_len"), placeholder='需要保留的用户名的最大长度').style("width:100%;"), ("local_qa", "text", "username_max_len"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('启用音频匹配', value=get_nested_value(config, "local_qa", "audio", "enable")).style(switch_internal_css), ("local_qa", "audio", "enable"))
-                _auto_save(ui.input(label='音频存储路径', placeholder='本地问答音频文件存储路径', value=get_nested_value(config, "local_qa", "audio", "file_path")).style("width:100%;"), ("local_qa", "audio", "file_path"))
+                _auto_save(ui.select(
+                    label='匹配档位',
+                    options={'包含关系': '包含关系（精确+包含）', '相似度匹配': '相似度匹配（精确+包含+相似度）'},
+                    value=get_nested_value(config, "local_qa", "audio", "type")
+                ).style("width:100%;"), ("local_qa", "audio", "type"))
+                _auto_save(ui.input(label='音频存储路径', placeholder='本地问答音频文件存储路径', value=get_nested_value(config, "local_qa", "audio", "file_path")).style("width:100%;").tooltip('音频文件名（去扩展名）即问题；命中直接播放该音频'), ("local_qa", "audio", "file_path"))
                 _auto_save(ui.input(label='音频最低相似度', placeholder='最低音频匹配相似度', value=get_nested_value(config, "local_qa", "audio", "similarity")).style("width:100%;"), ("local_qa", "audio", "similarity"))

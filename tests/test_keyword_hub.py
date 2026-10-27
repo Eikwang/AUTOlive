@@ -334,14 +334,16 @@ class TestRobustnessAndCache:
         p.write_text("问题|答案\n", encoding="utf-8")
         fh = FeatureHandler(MagicMock())
         d1 = fh.load_data_from_file(str(p))
-        assert d1 == [["问题", "答案"]]
+        # 2026-10-27 主 local_qa 收敛：加载器委托 load_qa_library，条目为
+        # (question, answer, tokens) 三元组（词元随 mtime 缓存）——[0]/[1] 形状不变
+        assert [(q, a) for q, a, _t in d1] == [("问题", "答案")]
         d2 = fh.load_data_from_file(str(p))
         assert d1 is d2  # 缓存命中（同一 list 对象）
         p.write_text("问题2|答案2\n", encoding="utf-8")
         st = os.stat(str(p))
         os.utime(str(p), (st.st_atime, st.st_mtime + 5))  # 确保 mtime 变化
         d3 = fh.load_data_from_file(str(p))
-        assert d3 == [["问题2", "答案2"]]
+        assert [(q, a) for q, a, _t in d3] == [("问题2", "答案2")]
 
 
 # ==================== 4. 编排订阅与链路接线（源级守卫） ====================

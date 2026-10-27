@@ -412,6 +412,33 @@ def _ensure_defaults(config: "Settings") -> None:
             _aa_fmt["format"] = "text"
             changed = True
 
+    # 主 local_qa 收敛迁移（/autoplan main-20261026-214845 终门 rec 后续项）：
+    # ① 存储格式键退役——local_qa.text.type 与遗留顶层 local_qa.format 均无
+    #    消费（F6：json/text 历来同一加载器；键面原与匹配代码读取的顶层键分裂）；
+    # ② 顶层 local_qa.file_path/similarity 遗留值迁入 text.* 子节（UI/匹配代码
+    #    统一读子节；仅子节缺键时回填，不覆盖既有值）；
+    # ③ 音频档位键补默认（UI 档位下拉，缺失=相似度匹配）。
+    _lq = cfg.get("local_qa") if isinstance(cfg.get("local_qa"), dict) else None
+    if isinstance(_lq, dict):
+        _lq_text = _lq.get("text") if isinstance(_lq.get("text"), dict) else None
+        if _lq_text is not None and "type" in _lq_text:
+            del _lq_text["type"]
+            changed = True
+        if "format" in _lq:
+            del _lq["format"]
+            changed = True
+        if _lq_text is None:
+            _lq_text = {}
+            _lq["text"] = _lq_text
+        for _lk in ("file_path", "similarity", "username_max_len"):
+            if _lk in _lq and _lk not in _lq_text:
+                _lq_text[_lk] = _lq[_lk]
+                changed = True
+        _lq_audio = _lq.get("audio") if isinstance(_lq.get("audio"), dict) else None
+        if _lq_audio is not None and "type" not in _lq_audio:
+            _lq_audio["type"] = "相似度匹配"
+            changed = True
+
     # UI-16 二轮验收（任务 10）：答谢三通道（entrance/gift/follow）周期同样
     # 合并为单键 periodic_time（max 回填+旧键退役；local_qa 不动）
     for _th_type in ("entrance", "gift", "follow"):
