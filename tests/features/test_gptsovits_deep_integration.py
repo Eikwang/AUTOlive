@@ -7,6 +7,7 @@ GPU 全链路冒烟=TST-2（环境依赖，另行执行）。
 """
 import json
 import os
+import shutil
 import sys
 import threading
 from unittest.mock import MagicMock, patch
@@ -65,6 +66,7 @@ def test_s1_pretrained_is_s1v3_not_bernard():
     p = _make_pipeline()
     p._opt_dir = lambda: "."
     import yaml as _yaml
+    import utils.gpu_policy as _gp  # GPU 门卫密封（本机 EDTalk 探活时真时假，与被测语义无关）
     data = {"train": {"epochs": 0, "batch_size": 0, "save_every_n_epoch": 0,
                       "if_save_latest": False, "if_save_every_weights": False,
                       "if_dpo": 0},
@@ -77,6 +79,7 @@ def test_s1_pretrained_is_s1v3_not_bernard():
         return True
 
     with patch.object(TrainVoicePipeline, "_run", _fake_run), \
+         patch.object(_gp, "is_background_task_allowed", lambda *a, **k: (True, "")), \
          patch("builtins.open", MagicMock()), \
          patch("yaml.safe_load", return_value=data), \
          patch("yaml.safe_dump", return_value=""):
@@ -92,9 +95,11 @@ def test_s2_params_written():
     """s2 模板覆写：batch/epochs/lr 权重/save_every/pretrained v2ProPlus 路径。"""
     p = _make_pipeline()
     p._opt_dir = lambda: "."
+    import utils.gpu_policy as _gp  # GPU 门卫密封（同 test_s1_pretrained_is_s1v3_not_bernard）
     data = {"train": {}, "model": {}, "data": {}, "s2_ckpt_dir": "", "save_weight_dir": "",
             "name": "", "version": ""}
     with patch.object(TrainVoicePipeline, "_run", return_value=True), \
+         patch.object(_gp, "is_background_task_allowed", lambda *a, **k: (True, "")), \
          patch("builtins.open", MagicMock()), \
          patch("json.load", return_value=data), \
          patch("json.dump", return_value=None):
@@ -110,6 +115,7 @@ def test_s2_params_written():
 
 def test_slice_11_argv():
     """切分调用回归（2026-10-14 用户裁决）：自有脚本+上游 9 参数+max_sec=8 一道流程。"""
+    pytest.importorskip("librosa")  # _st_slice 时长校验依赖 librosa（重依赖，缺则跳过）
     p = _make_pipeline()
     captured = {}
 
@@ -251,12 +257,17 @@ def test_split_long_clips():
     import numpy as np
     import importlib.util
     import tempfile
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg 未安装——slicer2/my_utils 音频解码链路依赖（环境预存缺依赖）")
     # 加载 smart_slice_audio（依赖 gsv_root/tools 的 slicer2）
     sys.path.insert(0, os.path.join(os.getcwd(), "apps", "gpt-sovits", "tools"))
     spec = importlib.util.spec_from_file_location(
         "smart_slice_audio", os.path.join(os.getcwd(), "utils", "smart_slice_audio.py"))
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except ImportError as e:
+        pytest.skip(f"slicer2 链路依赖缺失：{e}")
     sr = 32000
     # 构造 25 秒连续正弦（无静音——绕过静音切分的场景）+分段细分
     t = np.linspace(0, 25, sr * 25, endpoint=False)

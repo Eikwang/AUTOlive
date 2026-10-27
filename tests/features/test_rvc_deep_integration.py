@@ -212,6 +212,7 @@ def test_extract_argv_case_contracts(tmp_path):
 
 def test_index_naming_and_ivf(tmp_path):
     """added_IVF{n}_Flat_nprobe_1_{exp}_v2.index 命名+n_ivf=min(16√N,N//39)。"""
+    pytest.importorskip("faiss")  # _st_index 构建索引依赖 faiss（重依赖，缺则跳过）
     import numpy as np
     p, root = _make_pipeline(tmp_path)
     exp = root / "logs" / "t"

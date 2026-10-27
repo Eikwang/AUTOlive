@@ -402,6 +402,34 @@ class CommentHandler:
                     "ori_content": data.get("ori_content", content)
                 }
 
+                # ① 流式回复链路（2026-10-27）：保守门通过时增量分句合成，首句
+                # 音频延迟从「全文生成完」缩短为「首句生成完」；不可流式/熔断/
+                # 零产出返回 None 自动回退下方全文链路（语义零变化）
+                if self.my_handle.chat_handler.stream_reply_gate(chat_type):
+                    def _build_stream_message(_c, _src=_chat_src, _u=username):
+                        from .assistant_router import assistant_route as _ar, assistant_copy_message as _acm
+                        if _ar(self.my_handle.config, "llm_reply", _src):
+                            return _acm(self.my_handle.config, _c, username=_u,
+                                        producer_type="llm_reply", source=_src,
+                                        hit_layer="llm")
+                        return {
+                            "type": "comment",
+                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                            "config": self.my_handle.config.get("filter"),
+                            "username": _u,
+                            "content": _c
+                        }
+                    _streamed = self.my_handle.chat_handler.llm_stream_reply(
+                        chat_type, data_json, _build_stream_message)
+                    if _streamed is not None:
+                        logger.info(f"[AI回复{username}]：{_streamed}")
+                        self.my_handle.webui_show_chat_log_callback(
+                            "聊天发送" if _is_chatbox else "弹幕信息",
+                            dict(data, chat_source=_chat_src),
+                            _streamed, content_type="answer")
+                        return
+
                 # LLM处理（失败→托底→熔断在 llm_handle 单点实现）
                 resp_content = self.my_handle.llm_handle(chat_type, data_json)
 
@@ -444,12 +472,11 @@ class CommentHandler:
 
             # logger.info("resp_content=" + resp_content)
 
-            # 回复内容是否进行翻译
+            # 回复内容是否进行翻译（④ 2026-10-27：目标语言一致跳过 API 往返，
+            # comment/talk 双链共用 trans_reply 单点）
             if self.my_handle.config.get("translate", "enable") and (self.my_handle.config.get("translate", "trans_type") == "回复" or \
                 self.my_handle.config.get("translate", "trans_type") == "弹幕+回复"):
-                tmp = self.my_handle.my_translate.trans(resp_content)
-                if tmp:
-                    resp_content = tmp
+                resp_content = self.my_handle.my_translate.trans_reply(resp_content)
 
             # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→TTS，
             # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本；写日志环节已随

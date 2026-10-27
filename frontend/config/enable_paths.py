@@ -29,6 +29,9 @@ ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
     "choose_song": ("choose_song", "enable"),
     "key_mapping": ("key_mapping", "enable"),
     "trends_config": ("trends_config", "enable"),
+    # 2026-10-26：动作编排总开关迁移至二级菜单（choreography.py 参数页开关移除；
+    # 页面「应用」提交整节前会从实时 config 回读 enable，防快照回写翻转菜单开关）
+    "choreography": ("choreography", "enable"),
 }
 
 

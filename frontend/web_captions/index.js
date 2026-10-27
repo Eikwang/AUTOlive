@@ -23,6 +23,7 @@ let config = {
     subtitle_font_size: 24,
     subtitle_font_weight: 'bold',
     subtitle_webkit_text_stroke: 0,
+    subtitle_stroke_color: '#000000',
     subtitle_bg_width: 400,
     subtitle_bg_height: 60,
     bg_color: 'rgba(0,0,0,0.6)',
@@ -52,7 +53,7 @@ function applyConfig(cfg) {
     subtitleDiv.style.fontSize = config.subtitle_font_size;
     subtitleDiv.style.fontWeight = config.subtitle_font_weight;
     subtitleDiv.style.color = config.font_color;
-    subtitleDiv.style.webkitTextStroke = String(config.subtitle_webkit_text_stroke) + 'px black';
+    subtitleDiv.style.webkitTextStroke = String(config.subtitle_webkit_text_stroke) + 'px ' + (config.subtitle_stroke_color || '#000000');
     bgDiv.style.width = config.subtitle_bg_width;
     bgDiv.style.minHeight = config.subtitle_bg_height;
     applyTransparent(bgDiv, config.bg_color);

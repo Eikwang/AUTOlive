@@ -508,6 +508,68 @@ class TestR39SelfEchoDedup(unittest.TestCase):
         self.assertFalse(svc._is_self_echo("z"))     # 降级放行
 
 
+class TestR39IdleSendWindow(unittest.TestCase):
+    """③ 闲时源回环窗扩展（2026-10-27）：真实弹幕进直播间可见延迟可超默认 10s，
+    闲时源条目 window_s=120s——默认窗边界外但闲时窗内的回放仍判自联回环。"""
+
+    import time as _time
+
+    def _svc(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._queue = dc._BoundedDropQueue(100)
+        svc._evt_lock = __import__("threading").Lock()
+        from collections import deque
+        svc.events = deque(maxlen=200)
+        svc._event_seq = 0
+        svc._seen_event_keys = OrderedDict()
+        svc.login_queue = []
+        svc.login_active = None
+        svc._unknown_type_count = 0
+        svc._invalid_msg_count = 0
+        svc._msg_today_count = 0
+        svc._last_msg_ts = 0.0
+        svc._last_heartbeat = 0.0
+        svc._no_active_warned = False
+        svc._self_send = OrderedDict()
+        svc._self_echo_dropped = 0
+        svc._cfg = lambda: {"rooms": [{"platform": "bilibili", "room_id": "23058",
+                                       "enabled": True, "active": True}]}
+        return svc
+
+    def test_idle_entry_blocked_within_120s(self):
+        """默认窗（10s）外、闲时窗（120s）内 → 仍判回环（30s 前发送的闲时文案）。"""
+        svc = self._svc()
+        svc._record_self_send({"sent_at": int(self._time.time()) - 30,
+                               "content": "闲时文案", "window_s": dc.SELF_SEND_WINDOW_IDLE_S})
+        self.assertTrue(svc._is_self_echo("闲时文案"))
+
+    def test_default_entry_still_10s(self):
+        """无 window_s 的存量条目（整型 sent_at 与 (sent_at, 10) 元组两种形态）
+        默认窗语义不回归。"""
+        svc = self._svc()
+        svc._record_self_send({"sent_at": int(self._time.time()) - 30, "content": "a"})
+        self.assertFalse(svc._is_self_echo("a"))     # 默认 10s 窗外 → 放行
+        svc._self_send["b"] = int(self._time.time()) - 30   # 存量整型形态
+        self.assertFalse(svc._is_self_echo("b"))
+
+    def test_idle_entry_expires_after_120s(self):
+        """闲时窗（120s）外 → 放行（防同内容合法弹幕长期误杀）。"""
+        svc = self._svc()
+        svc._record_self_send({"sent_at": int(self._time.time()) - 130,
+                               "content": "闲时文案", "window_s": dc.SELF_SEND_WINDOW_IDLE_S})
+        self.assertFalse(svc._is_self_echo("闲时文案"))
+
+    def test_invalid_window_falls_back_default(self):
+        """window_s 非法（非数字）→ 回落默认窗，不抛异常。"""
+        svc = self._svc()
+        svc._record_self_send({"sent_at": int(self._time.time()) - 30,
+                               "content": "w", "window_s": "bad"})
+        self.assertFalse(svc._is_self_echo("w"))
+        svc._record_self_send({"sent_at": int(self._time.time()), "content": "w2",
+                               "window_s": "bad"})
+        self.assertTrue(svc._is_self_echo("w2"))
+
+
 class TestSendControlPlane(unittest.TestCase):
     """发送控制面服务层（O2 第一阶段）：鉴权语义同组件（503/401）+ 管线直调线格式转换。"""
 
@@ -625,6 +687,73 @@ class TestSetServiceEnabled(unittest.TestCase):
         self.assertFalse(svc._service_on)
         m_push.assert_called_once()     # service_state 事件照推（前端 pill 联动）
         _w.assert_called_once()         # 意图落盘（重启语义一致）
+
+
+class TestIdleDanmuSend(unittest.TestCase):
+    """闲时任务真实弹幕发送（2026-10-27 架构调整：闲时 comment 模式对接发送弹幕）。
+
+    契约：进程内免 token 直调管线（守卫链/审计/dry-run 全链生效）；非阻塞提交；
+    目标房间=监听中（status=running）房间；服务未运行/无监听房间=未提交三段式。
+    """
+
+    def _svc(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+
+        class _FakeLoop:
+            def is_closed(self):
+                return False
+        svc._loop = _FakeLoop()
+        svc._service_on = True
+        return svc
+
+    def test_service_off_rejected(self):
+        svc = self._svc()
+        svc._service_on = False
+        r = svc.send_danmu_idle("hi")
+        self.assertFalse(r["submitted"])
+        self.assertEqual(r["reason_code"], "service.not_running")
+
+    def test_no_running_room_rejected(self):
+        svc = self._svc()
+        svc.get_rooms = lambda: {"rooms": [
+            {"platform": "bilibili", "room_id": "1", "status": "stopped"},
+            {"platform": "douyin", "room_id": "2", "status": "login_required"},
+        ], "running": True}
+        r = svc.send_danmu_idle("hi")
+        self.assertFalse(r["submitted"])
+        self.assertEqual(r["reason_code"], "room.not_listened")
+
+    def test_submit_running_room_pipeline_called(self):
+        svc = self._svc()
+        svc.get_rooms = lambda: {"rooms": [
+            {"platform": "bilibili", "room_id": "1", "status": "stopped"},
+            {"platform": "douyin", "room_id": "2", "status": "running"},
+        ], "running": True}
+        captured = {}
+
+        def _fake_handle(**kw):
+            captured.update(kw)
+            return {"payload": {"status": "sent", "content": kw["content"]}}
+
+        class _FakeFuture:
+            def add_done_callback(self, cb):
+                cb(self)                      # 立即回调——回执日志路径同步走通
+            def result(self):
+                return {"payload": {"status": "sent", "content": "hi"}}
+
+        stub = type("P", (), {"handle_request": staticmethod(_fake_handle)})
+        with _mock.patch("danmaku_listener.senders.wiring.get_send_pipeline", return_value=stub()), \
+                _mock.patch.object(dc.asyncio, "run_coroutine_threadsafe",
+                                   side_effect=lambda coro, loop: _FakeFuture()):
+            r = svc.send_danmu_idle("hi")
+        self.assertTrue(r["submitted"])
+        self.assertEqual(r["status"], "submitted")
+        self.assertEqual(r["platform"], "douyin")     # 只选监听中房间
+        self.assertEqual(r["room_id"], "2")
+        self.assertEqual(captured["platform"], "douyin")
+        self.assertEqual(captured["source"], "autolive-idle-task")
+        self.assertEqual(captured["content"], "hi")
+        self.assertTrue(captured["request_id"])       # 幂等键必填
 
 
 if __name__ == "__main__":

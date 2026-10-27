@@ -260,6 +260,24 @@ def test_ui_tab_source_bindings():
     assert '("web_captions_printer", "desktop_window")' in src
     # 手动打开按钮走主系统 API
     assert "captions_desktop_window/open" in src
+    # 2026-10-26 批次：字幕页地址输入移除（桌面窗口直接被 OBS 窗口捕捉，无需手拼地址）
+    assert "ui.input(label='字幕页地址'" not in src
+    assert "content_copy" not in src  # 地址复制按钮随输入一并退役
+    # 样式下拉批次：描边色新键渲染绑定；背景色合并控件同值双写两键
+    assert '("web_captions_printer", "subtitle_stroke_color")' in src
+    assert '("web_captions_printer", "bg_color")' in src
+    assert '("web_captions_printer", "body_bg_color")' in src
+
+
+def test_window_connected_status_hidden(dcw):
+    """连接成功后状态栏必须隐藏（2026-10-26 批次：状态字会被 OBS 窗口捕捉拍到）。
+
+    双引号字面量断言仅命中状态栏文本（日志语句无引号包裹，不误伤）。"""
+    src_path = os.path.abspath(dcw.__file__)
+    with open(src_path, "r", encoding="utf-8") as f:
+        src = f.read()
+    assert '"已连接"' not in src
+    assert "def _hide_status" in src
 
 
 def test_window_source_retry_loop(dcw):

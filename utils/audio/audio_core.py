@@ -84,6 +84,11 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         # 即时生效（经 priority provider 供播放器消费），持久化随「互动设置-优先级
         # 配置」页下次保存落盘；启动告警列出全部迁移键。
         self._merge_legacy_priority_mapping()
+        # ② 点歌切片插播（2026-10-27 架构优化批次）：存量 song=20 一次性降为 10
+        # （config.example 新默认，显式存量值不自动生效——点歌需低于 comment=20
+        # 才能被回复音频插播）。仅精确命中旧默认 20 时迁移，用户自定义值尊重不
+        # 动；内存即时生效，落盘随优先级配置页下次保存。幂等：已是 10 不再触发。
+        self._migrate_song_priority_v2_4()
 
         # 旧版同步写法
         # threading.Thread(target=self.message_queue_thread).start()
@@ -166,6 +171,26 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
                     f"共 {len(merged)} 键：{detail}（内存即时生效；持久化随「互动设置-优先级配置」页下次保存）")
         except Exception:
             logger.error("优先级单源迁移失败（沿用 filter 表）\n" + traceback.format_exc())
+
+    def _migrate_song_priority_v2_4(self):
+        """② 存量 song 优先级一次性迁移（2026-10-27）：20 → 10（切片插播前提：
+        点歌需低于 comment=20 才能被回复音频插播）。仅精确命中旧默认 20 时迁移，
+        用户自定义值尊重不动；内存即时生效，落盘随优先级配置页下次保存。"""
+        try:
+            base = self.config.config.get("filter")
+            if not isinstance(base, dict):
+                return
+            pm = base.get("priority_mapping")
+            if not isinstance(pm, dict) or pm.get("song") != 20:
+                return
+            pm["song"] = 10
+            logger.warning(
+                "[架构优化迁移] filter.priority_mapping.song: 20 → 10"
+                "（点歌切片插播前提——点歌需低于评论优先级才能被回复音频插播；"
+                "内存即时生效，落盘随「互动设置-优先级配置」页下次保存；"
+                "如需恢复整曲独占播放可改回 20 并将 play_audio.song_segment_seconds 置 0）")
+        except Exception:
+            logger.error("song 优先级迁移失败（沿用现值）\n" + traceback.format_exc())
 
     def _builtin_player_paused(self):
         """字幕节流用：builtin 播放器是否暂停中（eng E-4；非 builtin 返回 False）"""

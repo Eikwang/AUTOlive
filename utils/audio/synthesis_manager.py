@@ -4,8 +4,10 @@
 
 import asyncio
 import aiohttp
+import math
 import os
 import random
+import shutil
 import time
 import traceback
 from copy import deepcopy
@@ -68,6 +70,81 @@ class SynthesisMixin:
     # 变声=独立 rvc-vc 流程，不参与系统主流程；外部 so-vits-svc 服务依赖解除）
 
 
+    # ---------- ② 点歌切片插播（2026-10-27 架构优化批次） ----------
+
+    _SONG_SEG_DIR_PREFIX = ".segs_"
+    _SONG_SEG_STALE_S = 3600  # 泄漏兜底：切片目录超 1h 未清理则清扫
+
+    def _song_segment_seconds(self):
+        """点歌切片时长读侧（play_audio.song_segment_seconds，缺省 45s；
+        ≤0 = 关闭切片维持整曲单条目）。"""
+        try:
+            v = float(self.config.get("play_audio", "song_segment_seconds"))
+        except (TypeError, ValueError):
+            return 45.0
+        return v if v > 0 else 0.0
+
+    def _purge_stale_song_segments(self, base_dir):
+        """陈旧切片目录清扫（泄漏兜底：跳过/打断导致末段清理未触达时，下次
+        切片前按目录 mtime 清扫超时目录）。"""
+        try:
+            if not os.path.isdir(base_dir):
+                return
+            now = time.time()
+            for name in os.listdir(base_dir):
+                if not name.startswith(self._SONG_SEG_DIR_PREFIX):
+                    continue
+                path = os.path.join(base_dir, name)
+                try:
+                    if now - os.path.getmtime(path) > self._SONG_SEG_STALE_S:
+                        shutil.rmtree(path, ignore_errors=True)
+                        logger.info(f"[song] 陈旧切片目录清扫：{path}")
+                except OSError:
+                    pass
+        except Exception:
+            logger.error(traceback.format_exc())
+
+    def _split_audio_segments(self, voice_path, seg_seconds):
+        """点歌音频切片（② 可打断背景位）：按 N 秒切片分条目入队——回复等
+        更高优先级音频可经优先级排序插播到片段之间，打断延迟上限=单片段时长。
+
+        切片文件置于源文件同目录隐藏子目录 .segs_<ns>/（末段播放完 rmtree，
+        异常残留由 _purge_stale_song_segments 兜底）。
+
+        Args:
+            voice_path (str): 歌曲音频文件路径
+            seg_seconds (float): 单片段秒数（>0）
+
+        Returns:
+            list[dict] | None: 片段列表 [{voice_path, seq, total, seg_dir}]；
+                短音频/失败返回 None（调用方降级整曲单条目，原语义）
+        """
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_file(voice_path)
+            total_ms = len(seg)
+            if total_ms <= seg_seconds * 1000:
+                return None
+            self._purge_stale_song_segments(os.path.dirname(voice_path) or ".")
+            seg_ms = int(seg_seconds * 1000)
+            count = math.ceil(total_ms / seg_ms)
+            seg_dir = os.path.join(
+                os.path.dirname(voice_path) or ".",
+                f"{self._SONG_SEG_DIR_PREFIX}{time.time_ns()}")
+            os.makedirs(seg_dir, exist_ok=True)
+            out = []
+            for i in range(count):
+                piece = seg[i * seg_ms:(i + 1) * seg_ms]
+                p = os.path.join(seg_dir, f"seg_{i:02d}.mp3")
+                piece.export(p, format="mp3")
+                out.append({"voice_path": p, "seq": i, "total": count, "seg_dir": seg_dir})
+            logger.info(f"[song] 点歌切片：{count} 段 × {seg_seconds:g}s"
+                        f"（回复音频可按优先级插播）：{voice_path}")
+            return out
+        except Exception:
+            logger.error("点歌切片失败，降级整曲单条目播放\n" + traceback.format_exc())
+            return None
+
     def audio_synthesis(self, message):
         """音频合成（edge-tts / vits_fast等）并播放"""
         try:
@@ -84,14 +161,39 @@ class SynthesisMixin:
 
             # 判断是否是点歌模式
             if message['type'] == "song":
+                voice_path = message['content']
+                _backing = message.get("backing_path") or ""
+                # ② 点歌切片插播（2026-10-27）：无伴奏轨且切片开启（>0）时按
+                # N 秒切片分条目入队——回复等更高优先级音频经优先级排序插播到
+                # 片段之间，点歌不再独占播放数分钟。带伴奏轨走原语义（R6 双轨
+                # 伴奏与整曲人声同步起播，逐段重启伴奏语义错误）。
+                _seg_seconds = self._song_segment_seconds() if not _backing else 0
+                segments = (self._split_audio_segments(voice_path, _seg_seconds)
+                            if _seg_seconds > 0 else None)
+                if segments:
+                    for s in segments:
+                        data_json = {
+                            "type": "song",
+                            "tts_type": "none",
+                            "voice_path": s["voice_path"],
+                            "content": message.get("content", voice_path),
+                            "song_segment": {
+                                "seq": s["seq"], "total": s["total"],
+                                "seg_dir": s["seg_dir"],
+                            },
+                        }
+                        # 是否开启了音频播放
+                        if self.config.get("play_audio", "enable"):
+                            self.data_priority_insert("等待合成消息", data_json)
+                    return
                 # 拼接json数据，存入队列（R6 双轨：backing_path 伴奏轨+音量透传，
                 # /autoplan 2026-10-23 批次——EDTalk 分支伴奏外放/builtin 分支 overlay 混音）
                 data_json = {
                     "type": message['type'],
                     "tts_type": "none",
-                    "voice_path": message['content'],
-                    "content": message["content"],
-                    "backing_path": message.get("backing_path") or "",
+                    "voice_path": voice_path,
+                    "content": message.get("content", voice_path),
+                    "backing_path": _backing,
                     "backing_volume": message.get("backing_volume", 0.8),
                 }
 

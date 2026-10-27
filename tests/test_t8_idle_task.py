@@ -75,14 +75,26 @@ class TestDoTaskModes:
         assert args[0]["content"] in ("文案1",)
 
     def test_comment_mode_dispatch(self, scheduler):
-        """弹幕触发 LLM 模式：process_data(comment) 分派。"""
+        """弹幕触发 LLM 模式（2026-10-27 对接发送弹幕）：先调度真实弹幕发送，
+        再 process_data(comment) 本地触发 LLM 对话。"""
         ts, mh = scheduler
         ts.config._cfg["idle_time_task"]["copywriting"]["enable"] = False
         ts.config._cfg["idle_time_task"]["comment"]["enable"] = True
         ts.do_task(0, [], ["你是谁呀"], [])
+        mh.send_live_danmu.assert_called_once_with("你是谁呀")
         args = mh.process_data.call_args[0]
         assert args[1] == "comment"
         assert args[0]["content"] == "你是谁呀"
+
+    def test_comment_mode_send_unavailable_degrades(self, scheduler):
+        """发送弹幕功能不可用（返回 None/未提交）→ 降级虚拟弹幕本地触发（零损失）。"""
+        ts, mh = scheduler
+        ts.config._cfg["idle_time_task"]["copywriting"]["enable"] = False
+        ts.config._cfg["idle_time_task"]["comment"]["enable"] = True
+        mh.send_live_danmu = MagicMock(return_value=None)
+        ts.do_task(0, [], ["你是谁呀"], [])
+        args = mh.process_data.call_args[0]
+        assert args[1] == "comment" and args[0]["content"] == "你是谁呀"
 
     def test_local_audio_mode_song_direct(self, scheduler):
         """本地音频模式：song 直通（不经 TTS）。"""

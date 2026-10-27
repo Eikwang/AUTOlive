@@ -6,12 +6,46 @@
 """
 
 import os
+import re
 import traceback
 from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
 from ..gpt_model.gpt import GPT_MODEL
 from .. import alarm_notifier
+
+# ① 流式分句句末标点（2026-10-27 主链延迟优化批次）
+_STREAM_SENT_END = re.compile(r"[\n。！？；!?;]")
+
+
+def split_stream_sentences(deltas):
+    """增量分句器：累积流式 delta，遇句末标点即吐出完整句子；流结束吐余量。
+
+    供 LLM 流式回复→逐句 TTS 流水线使用（llm_stream_reply）：首句音频延迟
+    从「全文生成完」缩短为「首句生成完」。
+
+    Args:
+        deltas (Iterable[str]): LLM 流式增量文本
+
+    Yields:
+        str: 完整句子（去首尾空白，空句跳过）
+    """
+    buf = ""
+    for delta in deltas:
+        if not delta:
+            continue
+        buf += delta
+        while True:
+            m = _STREAM_SENT_END.search(buf)
+            if not m:
+                break
+            sentence, buf = buf[: m.end()], buf[m.end():]
+            sentence = sentence.strip()
+            if sentence:
+                yield sentence
+    tail = buf.strip()
+    if tail:
+        yield tail
 
 
 class ChatHandler:
@@ -159,43 +193,87 @@ class ChatHandler:
                 pass
             return self._try_local_qa_fallback(chat_type, data_json, f"异常 {type(e).__name__}: {e}")
     
-    def llm_stream_handle_and_audio_synthesis(self, chat_type, data_json, type="chat"):
+    def stream_reply_gate(self, chat_type):
+        """流式回复链路适用性判定（① 2026-10-27）：全部满足才走流式分句合成。
+
+        保守门（任一不满足回退全文链路，回复语义零变化）：
+        - chat_type=custom_llm（唯一声明流式能力的通道）；
+        - custom_llm.stream_reply 非 False（缺省开启）；
+        - 翻译未启用「回复/弹幕+回复」（翻译吃全文，逐句翻译语义不兼容）；
+        - 回复模板未启用（模板 {data} 包裹全文，逐句套用会重复模板）；
+        - 按键映射非「回复/弹幕+回复」型（其触发吃全文内容）。
+
+        Returns:
+            bool: True=走流式链路
         """
-        LLM流式处理和音频合成
-        
+        if chat_type != "custom_llm":
+            return False
+        if self.my_handle.config.get("custom_llm", "stream_reply") is False:
+            return False
+        if (self.my_handle.config.get("translate", "enable")
+                and self.my_handle.config.get("translate", "trans_type") in ("回复", "弹幕+回复")):
+            return False
+        if self.my_handle.config.get("reply_template", "enable"):
+            return False
+        if self.my_handle.config.get("key_mapping", "type") in ("回复", "弹幕+回复"):
+            return False
+        return True
+
+    def llm_stream_reply(self, chat_type, data_json, build_message):
+        """流式 LLM 回复→逐句 TTS 合成（① 2026-10-27 主链延迟优化）。
+
+        增量拉取 LLM 输出按句切分：每句过违禁过滤后立即交 build_message(content)
+        构建消息并 audio_synthesis_handle 合成——首句音频延迟从「全文生成完」
+        缩短为「首句生成完」。熔断与 llm_handle 同源（per-channel breaker）。
+        违禁语义差异（登记）：全文链路任一违禁词丢整段，本链路仅丢违禁句
+        （更细粒度，其余句子照常）。
+
         Args:
-            chat_type (str): 聊天类型
-            data_json (dict): 数据JSON
-            type (str): 类型
+            chat_type (str): 通道名（gate 已保证 custom_llm）
+            data_json (dict): LLM 输入数据
+            build_message (Callable[[str], dict]): 单句消息构建器（调用方闭包，
+                封装 assistant_route 路由差异——comment/talk 两链复用）
+
+        Returns:
+            str | None: 已播句拼接全文（含流式中断的部分保留）；None=不可流式/
+                熔断开路/流式失败零产出/空输出（调用方回退 llm_handle 全文链路）
         """
+        model = self.my_handle.__dict__.get(chat_type)
+        if model is None or not hasattr(model, "stream_resp_sync"):
+            return None
+        breaker = self._get_breaker(chat_type)
+        if not breaker.allow_request():
+            # 熔断开路：交回调用方走 llm_handle 托底链（其内置同源熔断检查+托底）
+            return None
+        spoken = []
         try:
-            # 获取模型
-            model = self.my_handle.__dict__.get(chat_type)
-            if model is None:
-                logger.error(f"模型 {chat_type} 未初始化")
-                return
-            
-            # 流式调用模型
-            for chunk in model.stream_chat(data_json):
-                if chunk:
-                    # 音频合成
-                    message = {
-                        "type": "talk",
-                        "tts_type": self.my_handle.config.get("audio_synthesis_type"),
-                        "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
-                        "config": self.my_handle.config.get("filter"),
-                        "username": data_json.get("username", ""),
-                        "content": chunk
-                    }
-                    self.my_handle.audio.audio_synthesis(message)
+            for sentence in split_stream_sentences(model.stream_resp_sync(data_json)):
+                sentence = self.my_handle.prohibitions_handle(sentence)
+                if sentence is None:
+                    logger.info(f"[流式回复] 违禁句丢弃：{sentence!r}")
+                    continue
+                spoken.append(sentence)
+                self.my_handle.audio_synthesis_handle(build_message(sentence))
+            if not spoken:
+                # 空流按通道失败（对齐 llm_handle 返回空语义）——托底在调用方全文链路
+                breaker.record_failure()
+                return None
+            breaker.record_success()
+            return "".join(spoken)
         except Exception as e:
             logger.error(traceback.format_exc())
-            logger.error(f"LLM流式处理失败：{e}")
-            # 报警重构（2026-10-26）：流式路径不经 _try_local_qa_fallback，独立挂载
+            logger.error(f"LLM 流式回复失败（已播 {len(spoken)} 句，部分保留）：{e}")
+            try:
+                breaker.record_failure()
+            except Exception:
+                pass
+            if spoken:
+                return "".join(spoken)
             alarm_notifier.alarm_error(
                 alarm_notifier.MODULE_LLM,
-                f"LLM 流式处理失败（通道 {chat_type}）：{type(e).__name__}: {e}",
-                fix_hint="检查对应 LLM 服务/密钥/网络，详见主系统日志")
+                f"LLM 流式回复失败（通道 {chat_type}）：{type(e).__name__}: {e}",
+                fix_hint="检查 LLM 服务/密钥/网络；流式不可用将自动回退全文链路")
+            return None
     
     def split_by_chinese_punctuation(self, text):
         """
@@ -307,8 +385,9 @@ class ChatHandler:
             # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Capture→Keyword）=====
             # 语音源经过滤后单次识别全部功能的关键词命中，后续各模块凭结果分发、
             # 零重复匹配（原实现与弹幕链各自独立扫描同一套词表）。talk 源功能集
-            # 与原链一致：积分签到/查询、按键映射弹幕型、本地问答、点歌意图
-            # （复读/编排订阅原语音链未开，保持不开——需统一时改 KeywordHub._TEXT_FEATURES）。
+            # （2026-10-27 对齐流程图终版 v2.5）：积分签到/查询、按键映射弹幕型、
+            # 本地问答、点歌意图、动作编排（Capture→Keyword→Compile 统一识别语义；
+            # 复读保持不开——语音链复读自身无意义，需开时改 KeywordHub._TEXT_FEATURES）。
             # 审查修复（发布批次）：回写过滤后文本（同 comment 链，原文留存 ori_content）
             if "ori_content" not in data:
                 data["ori_content"] = data["content"]
@@ -348,6 +427,31 @@ class ChatHandler:
                     "ori_username": data.get("ori_username", username),
                     "ori_content": data.get("ori_content", content)
                 }
+
+                # ① 流式回复链路（2026-10-27，与 comment 链同构）：保守门通过时
+                # 增量分句合成；返回 None 自动回退下方全文链路
+                if self.stream_reply_gate(chat_type):
+                    def _build_stream_message(_c, _u=username):
+                        from .assistant_router import assistant_route as _ar, assistant_copy_message as _acm
+                        if _ar(self.my_handle.config, "llm_reply", "voice"):
+                            return _acm(self.my_handle.config, _c, username=_u,
+                                        producer_type="llm_reply", source="voice",
+                                        hit_layer="llm")
+                        return {
+                            "type": "talk",
+                            "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                            "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                            "config": self.my_handle.config.get("filter"),
+                            "username": _u,
+                            "content": _c
+                        }
+                    _streamed = self.llm_stream_reply(chat_type, data_json, _build_stream_message)
+                    if _streamed is not None:
+                        logger.info(f"[AI回复{username}]：{_streamed}")
+                        self.my_handle.webui_show_chat_log_callback(
+                            "语音对话", dict(data, chat_source=data.get("chat_source", "voice")),
+                            _streamed, content_type="answer")
+                        return None
 
                 # LLM处理（失败→托底→熔断在 llm_handle 单点实现）
                 resp_content = self.llm_handle(chat_type, data_json)
@@ -391,12 +495,11 @@ class ChatHandler:
 
             # logger.info("resp_content=" + resp_content)
 
-            # 回复内容是否进行翻译
+            # 回复内容是否进行翻译（④ 2026-10-27：目标语言一致跳过 API 往返，
+            # comment/talk 双链共用 trans_reply 单点）
             if self.my_handle.config.get("translate", "enable") and (self.my_handle.config.get("translate", "trans_type") == "回复" or \
                 self.my_handle.config.get("translate", "trans_type") == "弹幕+回复"):
-                tmp = self.my_handle.my_translate.trans(resp_content)
-                if tmp:
-                    resp_content = tmp
+                resp_content = self.my_handle.my_translate.trans_reply(resp_content)
 
             # 回复模板应用（G6，基础功能 2026-10-22：违禁→翻译→模板→TTS，
             # ENG Section 4 顺序裁决——模板 {data} 吃翻译后文本；写日志环节已随

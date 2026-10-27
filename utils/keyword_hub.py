@@ -118,8 +118,9 @@ class KeywordHub:
             return default
 
     def _recognize_text(self, data, source):
-        """弹幕/语音源全量识别（comment 全功能；talk 保持原链功能集——
-        语音链原无复读/编排订阅，不开以守行为，需统一时改 _TEXT_FEATURES）。"""
+        """弹幕/语音源全量识别（comment 全功能；talk 复读不开——语音链复读自身
+        无意义，编排订阅 2026-10-27 对齐流程图 Capture→Keyword→动作编排 统一
+        识别语义：识别到关键词即并行触发画面序列）。"""
         content = str(data.get("content", "") or "")
         with_reread, with_choreo = self._TEXT_FEATURES.get(
             source, (True, True))
@@ -132,7 +133,10 @@ class KeywordHub:
         rec.keymap_groups = self._safe(lambda: self._match_keymap_danmu(content), [])
         rec.local_qa_answer = self._safe(lambda: self._match_local_qa(data), "")
         rec.song_verdict = self._safe(lambda: self._match_song(content), None)
-        if with_choreo:
+        # ③ 自源守卫（2026-10-27）：闲时任务系统源（origin=system-idle）跳过编排
+        # 触发——闲时文案/LLM 触发链内容可能含编排关键词，系统自引发画面切换属
+        # 非预期行为；LLM 对话触发语义保持（process_data 照常入链）。
+        if with_choreo and not (source == "comment" and data.get("origin") == "system-idle"):
             rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
         return rec
 
@@ -153,10 +157,11 @@ class KeywordHub:
         rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
         return rec
 
-    # talk 源功能集开关：(复读, 编排)——语音链原行为不含这两订阅
+    # talk 源功能集开关：(复读, 编排)——复读保持关闭（语音链复读自身无意义）；
+    # 编排 2026-10-27 启用（flowchartTD Capture→Keyword→动作编排 统一识别语义）
     _TEXT_FEATURES = {
         "comment": (True, True),
-        "talk": (False, False),
+        "talk": (False, True),
     }
 
     # ==================== 匹配器（严格对照原实现语义） ====================

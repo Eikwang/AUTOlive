@@ -338,6 +338,10 @@ class My_handle(metaclass=SingletonMeta):
     def llm_handle(self, chat_type, data_json):
         return self.chat_handler.llm_handle(chat_type, data_json)
 
+    def llm_stream_reply(self, chat_type, data_json, build_message):
+        """① 流式回复→逐句 TTS（2026-10-27）：委托 chat_handler，见其 docstring。"""
+        return self.chat_handler.llm_stream_reply(chat_type, data_json, build_message)
+
     # ==================== 基础功能共享层（2026-10-22 批次，ENG E-1） ====================
     # 弹幕主路径（comment_handle）与语音路径（talk_handle）共用的 LLM 输入构建、
     # 语言过滤与回复模板——单点实现防双路径行为分裂（dual-code-path 教训）。
@@ -463,9 +467,6 @@ class My_handle(metaclass=SingletonMeta):
             logger.info(f"语言过滤汇总（每50条）：{self.common.lang_detect_stats_summary()}")
         return True
 
-    def llm_stream_handle_and_audio_synthesis(self, chat_type, data_json, type="chat"):
-        return self.chat_handler.llm_stream_handle_and_audio_synthesis(chat_type, data_json, type)
-    
     def split_by_chinese_punctuation(self, text):
         return self.chat_handler.split_by_chinese_punctuation(text)
     
@@ -565,6 +566,25 @@ class My_handle(metaclass=SingletonMeta):
     
     def idle_time_task_handle(self, data):
         return self.event_handler.idle_time_task_handle(data)
+
+    def send_live_danmu(self, content: str):
+        """调度「发送弹幕」功能（2026-10-27 架构调整，flowchartTD 系统任务模块：
+        闲时任务-弹幕触发LLM模式 对接发送弹幕——原发送虚拟弹幕触发 LLM 对话，
+        现将文本以真实弹幕发送进当前监听中的直播间）。
+
+        Returns:
+            dict | None: 提交/回执 dict；弹幕监听服务未运行或异常返回 None
+                （调用方降级处理，不中断主链）
+        """
+        try:
+            from .danmaku_consumer import get_service_instance
+            svc = get_service_instance()
+            if svc is None:
+                return None
+            return svc.send_danmu_idle(content)
+        except Exception:
+            logger.error("发送弹幕调度异常（降级处理）", exc_info=True)
+            return None
 
     # 工具相关
     def webui_show_chat_log_callback(self, data_type: str, data: dict, resp_content: str, content_type: str = "answer"):

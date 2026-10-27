@@ -366,8 +366,14 @@ class TestDualTrackMessage:
 
     def test_synthesis_manager_song_passthrough(self):
         # D-20 双代码路径：synthesis_manager song 构造透传 backing 两键
+        # （2026-10-27 ② 切片插播：无伴奏轨走 .segs_ 切片分支分条目入队；
+        #   带伴奏轨维持整曲单条目原语义，R6 双轨伴奏与人声同步起播）
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         with open(os.path.join(root, "utils/audio/synthesis_manager.py"), encoding="utf-8") as f:
             src = f.read()
-        assert '"backing_path": message.get("backing_path")' in src
-        assert '"backing_volume"' in src
+        assert '"backing_path": _backing' in src            # 带伴奏整曲分支（R6 双轨）
+        assert '"backing_volume": message.get("backing_volume"' in src
+        assert '"song_segment"' in src                      # 切片片段分支透传片段元数据
+        assert "_split_audio_segments" in src               # 切片器挂接
+        # 切片分支不携带伴奏键（R6：伴奏轨与切片互斥）
+        assert 'if segments:' in src and 'return' in src

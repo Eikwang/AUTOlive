@@ -11,7 +11,9 @@
   含 enable），本地直接读 config.json 同键作初始兜底（不依赖源项目 /get_config）；
 - 显示时序：服务端节流线程已完成 start_delay/keep_time 节流，客户端收到即显示、
   keep_time 后清除（源项目客户端二次排队+二次延时为双重节拍，不再移植）；
-- 断线自动重连（python-socketio 内建 reconnection），窗口状态栏实时可见。
+- 断线自动重连（python-socketio 内建 reconnection）；状态栏仅承载未就绪/异常态
+  （连接中/断开/未开启），连接成功自动隐藏——状态字不得被 OBS 窗口捕捉拍到
+  （2026-10-26 批次：移除常驻「已连接」状态显示）。
 
 启动方式：主系统 web_server 按配置自动 spawn（web_captions_printer.enable &&
 desktop_window），或字幕打印页「打开桌面字幕窗口」按钮经
@@ -253,7 +255,7 @@ class DesktopCaptionWindow:
 
         @self._client.event
         def connect():
-            self._root_after(0, lambda: self._set_status("已连接", "green"))
+            self._root_after(0, self._hide_status)
 
         @self._client.event
         def disconnect():
@@ -276,7 +278,7 @@ class DesktopCaptionWindow:
                     self._client.connect(url, socketio_path=SOCKETIO_PATH,
                                          wait_timeout=5)
                     logging.info("字幕窗口已连接字幕服务")
-                    self._root_after(0, lambda: self._set_status("已连接", "green"))
+                    self._root_after(0, self._hide_status)
                     self._client.wait()
                 except Exception as e:
                     logging.error("字幕窗口连接失败（3 秒后重试）: %s", e)
@@ -296,7 +298,13 @@ class DesktopCaptionWindow:
             pass
 
     def _set_status(self, text, color):
+        """状态栏仅承载未就绪/异常态（重新可见并更新文本/颜色）"""
         self.status_label.configure(text=text, fg=color)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _hide_status(self):
+        """连接成功后隐藏状态栏（状态字不得被 OBS 窗口捕捉拍到）"""
+        self.status_label.pack_forget()
 
     def _show_text(self, text):
         self.caption_label.configure(text=text)

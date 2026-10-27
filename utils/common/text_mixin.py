@@ -39,6 +39,51 @@ def normalize_for_match(text):
     return "".join("".join(out).split()).lower()
 
 
+# jieba 可用性探测（E-E2 降级：不可用时 token 项恒 0，仅字符相似度生效，一次性 warn）
+_jieba_checked = False
+_jieba_ok = False
+
+
+def tokenize_for_match(text):
+    """jieba 分词（D4 混合评分的词项；调用方对词条预分词并随 mtime 缓存）。
+
+    Returns:
+        list | None: 词元列表；jieba 不可用返回 None（评分侧降级）
+    """
+    global _jieba_checked, _jieba_ok
+    try:
+        import jieba
+        if not _jieba_checked:
+            _jieba_checked = True
+            _jieba_ok = True
+            logger.info("jieba 分词引擎已就绪（匹配器混合评分启用，D4）")
+        return [t for t in jieba.lcut(normalize_for_match(text)) if t.strip()]
+    except Exception as e:
+        if not _jieba_checked:
+            _jieba_checked = True
+            logger.warning(f"jieba 不可用（{e}），匹配器降级纯字符相似度（E-E2，本异常仅告警一次）")
+        return None
+
+
+def token_similarity(text_a, text_b, a_tokens=None, b_tokens=None):
+    """D4 分词评分项：`token_jaccard × len_penalty`。
+    token_jaccard=词集交并比；len_penalty=min/max 词数（防短词集合误命中）。
+    jieba 不可用或任一侧空词集 → 0.0（仅字符项生效）。"""
+    if a_tokens is None:
+        a_tokens = tokenize_for_match(text_a)
+    if b_tokens is None:
+        b_tokens = tokenize_for_match(text_b)
+    if not a_tokens or not b_tokens:
+        return 0.0
+    sa, sb = set(a_tokens), set(b_tokens)
+    inter = len(sa & sb)
+    if not inter:
+        return 0.0
+    jaccard = inter / len(sa | sb)
+    penalty = min(len(sa), len(sb)) / max(len(sa), len(sb))
+    return jaccard * penalty
+
+
 def match_song_intent(text: str, trigger_words, song_names, similarity: float = 0.5):
     """弹幕点歌意图匹配（R2：contains 命中——句中关键词，非前缀命令）。
 
@@ -421,17 +466,21 @@ class TextMixin:
         return [s for s in result if s.strip()]
 
 
-    # 字符串相似度（0-1，D4/F5 修复 2026-10-27）：归一化后 difflib 字符相似度。
+    # 字符串相似度（0-1，D4 混合评分 2026-10-27）：
+    # score = max(归一化字符 SequenceMatcher, token_jaccard × len_penalty)。
     # 修复记录：本方法此前从未存在——feature_handler.find_answer/find_similar_answer
     # 调用恒 AttributeError 被吞→主知识库匹配运行时 100% 失败（/autoplan
-    # main-20261026-214845 F5 运行时探证实锤）。T6 将在调用侧叠加 jieba 分词项。
+    # main-20261026-214845 F5 运行时探证实锤）。jieba 不可用时自动降级纯字符
+    # 评分（E-E2）。
     @staticmethod
-    def calculate_similarity(text_a, text_b):
-        """归一化文本相似度（0-1）：精确全等=1.0，否则 SequenceMatcher.ratio()。
+    def calculate_similarity(text_a, text_b, b_tokens=None):
+        """归一化混合相似度（0-1）：精确全等=1.0，否则 max(字符, 分词项)。
 
         Args:
             text_a (str): 文本 A（如弹幕问题）
             text_b (str): 文本 B（如词库问题）
+            b_tokens (list | None): B 侧预分词词元（词条加载时缓存，免逐查询分词；
+                None=现场分词）
 
         Returns:
             float: 0-1 相似度
@@ -441,7 +490,9 @@ class TextMixin:
             return 0.0
         if a == b:
             return 1.0
-        return difflib.SequenceMatcher(None, a, b).ratio()
+        char_score = difflib.SequenceMatcher(None, a, b).ratio()
+        token_score = token_similarity(text_a, text_b, b_tokens=b_tokens)
+        return max(char_score, token_score)
 
     # 字符串匹配算法来计算字符串之间的相似度，并选择匹配度最高的字符串作为结果
     def find_best_match(self, substring, string_list, similarity=0.5):

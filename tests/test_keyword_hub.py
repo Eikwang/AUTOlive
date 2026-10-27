@@ -110,12 +110,18 @@ class TestSourceRouting:
         state, song_name, _ratio = rec.song_verdict
         assert state == "matched" and song_name == "孤勇者"
 
-    def test_talk_no_reread_no_choreo(self):
-        """talk 源功能集：原语音链无复读/编排订阅，保持不开（_TEXT_FEATURES）。"""
+    def test_talk_no_reread_with_choreo(self, monkeypatch):
+        """talk 源功能集（2026-10-27 对齐 flowchartTD Capture→Keyword→动作编排）：
+        复读保持不开（语音链复读自身无意义）；编排订阅启用——识别到关键词即
+        并行触发画面序列。"""
+        calls = []
+        import utils.orchestration as orch
+        monkeypatch.setattr(orch, "get_choreographer", lambda: _FakeChoreo(calls))
         hub = _make_hub()
         rec = hub.recognize({"content": "复读", "username": "u"}, "talk")
         assert rec.reread_type == ""
-        assert rec.choreo_accepted is False
+        assert rec.choreo_accepted is True
+        assert calls == [("keyword", "复读")]
         # 积分/按键映射/点歌仍全量识别
         assert rec.integral_sign is False
         assert hub.recognize({"content": "签到", "username": "u"}, "talk").integral_sign is True
@@ -383,6 +389,23 @@ class TestChoreoRouting:
         hub = _make_hub()
         rec = hub.recognize({"content": "你好"}, "schedule")
         assert rec.choreo_accepted is True
+        assert calls == [("keyword", "你好")]
+
+    def test_idle_origin_choreo_skipped(self, monkeypatch):
+        """③ 闲时自源守卫（2026-10-27）：origin=system-idle 的 comment 源跳过编排
+        触发——闲时文案/LLM 触发链内容可能含编排关键词，系统自引发画面切换属非
+        预期行为；LLM 对话触发语义保持（process_data 照常入链）。"""
+        calls = []
+        import utils.orchestration as orch
+        monkeypatch.setattr(orch, "get_choreographer", lambda: _FakeChoreo(calls))
+        hub = _make_hub()
+        rec = hub.recognize(
+            {"content": "你好", "username": "闲时任务", "origin": "system-idle"}, "comment")
+        assert rec.choreo_accepted is False
+        assert calls == []
+        # 同内容普通弹幕照常触发（守卫只对闲时源生效）
+        rec2 = hub.recognize({"content": "你好", "username": "u"}, "comment")
+        assert rec2.choreo_accepted is True
         assert calls == [("keyword", "你好")]
 
 

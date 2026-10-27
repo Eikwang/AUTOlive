@@ -3,19 +3,63 @@
 字幕打印标签页模块（整合计划 §6.2：内置化改造；2026-10-22 审查批次 F1 改名）
 
 义务：
-- 补 enable 开关（现状 UI 缺失——断链三重奏之一）+ 三步微指引（D12）
-- 移除外部 API 地址；新增字幕页地址回显+复制（0G#3）+ 远程 OBS 说明（dx8）
-- 样式配置卡 14 键三组信息架构（D2：平铺/次级/高级折叠区默认收起）
+- 补 enable 开关（现状 UI 缺失——断链三重奏之一）+ 微指引（D12）
+- 2026-10-26 批次：移除字幕页地址回显/复制（桌面字幕窗口直接被 OBS 窗口捕捉，
+  无需手拼地址；/captions 网页本身保留不受影响）
+- 样式配置卡三组信息架构（D2：平铺/次级/高级折叠区默认收起）；
+  2026-10-26 批次：字体/字重/文字颜色改下拉（固定常见项），字幕背景色+页面
+  背景色合并为「背景色」（同值双写 bg_color+body_bg_color），新增「描边色」
+  （subtitle_stroke_color，网页字幕页 -webkit-text-stroke 颜色；桌面窗口
+  tk 不支持描边，仅网页生效）
 - keep_time_align_audio 开关（E-1：对齐音频时长）
 - 热更新语义标注（样式与开关均即时生效——dx 发现2 修订）
-- bg_color/body_bg_color 支持 rgba/none 透明语义（D10，taste 已批：透明默认）
 """
-import json
-
 from nicegui import ui
 from typing import Dict, Any, Callable
 
 from frontend.ui.components.config_helper import get_nested_value
+
+
+# 样式下拉固定选项（2026-10-26 批次：颜色/字体收敛常见项，防自由文本写坏样式值）
+_FONT_OPTIONS = {
+    "Microsoft YaHei": "微软雅黑",
+    "SimHei": "黑体",
+    "SimSun": "宋体",
+    "KaiTi": "楷体",
+    "FangSong": "仿宋",
+    "DengXian": "等线",
+    "Arial": "Arial",
+}
+_FONT_WEIGHT_OPTIONS = {
+    "normal": "常规",
+    "bold": "加粗",
+    "600": "半粗",
+    "900": "特粗",
+}
+_FONT_COLOR_OPTIONS = {
+    "#FFFFFF": "白色",
+    "#FFD700": "黄色",
+    "#000000": "黑色",
+    "#87CEEB": "浅蓝",
+    "#98FB98": "浅绿",
+    "#FFA6C9": "粉色",
+}
+# 背景色合并语义：同值双写 bg_color（字幕条底）+ body_bg_color（窗口/页面底）；
+# 透明（none）：网页全透明（OBS 叠加）、桌面窗口回退绿幕底（利于色键抠像）
+_BG_COLOR_OPTIONS = {
+    "rgba(0,0,0,0.6)": "半透明黑（默认）",
+    "none": "透明",
+    "#000000": "黑色",
+    "#222222": "深灰",
+    "#FFFFFF": "白色",
+    "#14213D": "藏青",
+}
+_STROKE_COLOR_OPTIONS = {
+    "#000000": "黑色",
+    "#FFFFFF": "白色",
+    "#444444": "深灰",
+    "#8B0000": "暗红",
+}
 
 
 def create_web_captions_printer_tab(
@@ -32,18 +76,12 @@ def create_web_captions_printer_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="web_captions_printer")
 
     def _webui_base() -> str:
-        """字幕页地址 = 本 webui 地址（页面挂在主系统内部 API——注意两进程端口不同）
-
-        字幕页实际由主系统内部 HTTP API 提供（http://<api_ip>:<api_port>/captions）；
-        本页仅做地址回显，取 api_ip/api_port（0.0.0.0 回显转 127.0.0.1，先例 main.py:902）。
-        """
+        """主系统内部 API 地址（桌面窗口打开端点所在；0.0.0.0 回显转 127.0.0.1）"""
         api_ip = get_nested_value(config, "api_ip", default="127.0.0.1") or "127.0.0.1"
         if api_ip == "0.0.0.0":
             api_ip = "127.0.0.1"
         api_port = get_nested_value(config, "api_port", default=8082)
         return f"http://{api_ip}:{api_port}"
-
-    captions_url = f"{_webui_base()}/captions"
 
     def _open_desktop_window():
         """打开桌面字幕窗口（经主系统 API 在主系统所在机器弹出；幂等）"""
@@ -69,28 +107,17 @@ def create_web_captions_printer_tab(
                 _auto_save(ui.switch('启动时打开桌面字幕窗口', value=get_nested_value(config, "web_captions_printer", "desktop_window", default=True) is not False).style(switch_internal_css).tooltip(
                     '开启：主系统启动且字幕打印启用时，自动弹出桌面字幕窗口\n'
                     '（可拖拽/置顶/调透明度，直接被 OBS 窗口捕捉）。\n'
-                    '关闭：仅使用下方网页地址（OBS 浏览器源场景）。'), ("web_captions_printer", "desktop_window"))
+                    '关闭：不自动弹出，需要时点右侧按钮手动打开。'), ("web_captions_printer", "desktop_window"))
             with ui.column().style("width:100%;"):
-                ui.label('使用三步：① 开启并保存 → ② 重启主系统（首次，桌面窗口自动弹出） → ③ 或复制下方地址到 OBS 浏览器源').style(
+                ui.label('使用两步：① 开启并保存 → ② 重启主系统（首次，桌面字幕窗口自动弹出）。\n'
+                         'OBS 添加「窗口捕捉」源并选择字幕显示窗口即可。').style(
                     'font-size: var(--font-size-assist, 12px);')
-                with ui.row().style("align-items:center; gap:4px;"):
-                    url_input = ui.input(label='字幕页地址', value=captions_url).style("width:100%; min-width:260px;").props('readonly')
-                    ui.button(icon='content_copy', on_click=lambda: _copy(url_input.value)).props('dense flat').tooltip('复制字幕页地址')
                 with ui.row().style("align-items:center; gap:4px;"):
                     ui.button('打开桌面字幕窗口', on_click=_open_desktop_window, icon='desktop_windows').props('dense outline')
                     ui.label('窗口被误关时点此重开').style(
                         'font-size: var(--font-size-assist, 12px);')
-                ui.label('在 OBS 中添加"浏览器"源并粘贴此地址。双机直播：请将 127.0.0.1 替换为本机局域网 IP（dx8）。').style(
-                    'font-size: var(--font-size-assist, 12px);')
 
-    def _copy(text: str):
-        try:
-            ui.run_javascript(f'navigator.clipboard.writeText({json.dumps(text)})')
-            ui.notify('地址已复制', type='positive')
-        except Exception:
-            ui.notify('复制失败，请手动选择地址复制', type='warning')
-
-    # ---------- 样式配置卡（14 键三组信息架构，D2） ----------
+    # ---------- 样式配置卡（D2 三组信息架构；2026-10-26 批次下拉化） ----------
     with ui.card().style(card_css):
         ui.label('字幕样式')
         with ui.grid(columns=3):
@@ -99,13 +126,38 @@ def create_web_captions_printer_tab(
                 options={'1': '渐显', '2': '打字机'},
                 value=str(get_nested_value(config, "web_captions_printer", "show_mode", default="1")),
             ).style("width:100%;"), ("web_captions_printer", "show_mode"))
-            _auto_save(ui.input(label='字体', value=get_nested_value(config, "web_captions_printer", "subtitle_font_family")).style("width:100%;"), ("web_captions_printer", "subtitle_font_family"))
+            _auto_save(ui.select(
+                label='字体',
+                options=_FONT_OPTIONS,
+                value=get_nested_value(config, "web_captions_printer", "subtitle_font_family") or "Microsoft YaHei",
+            ).style("width:100%;"), ("web_captions_printer", "subtitle_font_family"))
             _auto_save(ui.input(label='字号(px)', value=get_nested_value(config, "web_captions_printer", "subtitle_font_size")).style("width:100%;"), ("web_captions_printer", "subtitle_font_size"))
-            _auto_save(ui.input(label='字重', value=get_nested_value(config, "web_captions_printer", "subtitle_font_weight")).style("width:100%;").tooltip('如 bold / 600'), ("web_captions_printer", "subtitle_font_weight"))
+            _auto_save(ui.select(
+                label='字重',
+                options=_FONT_WEIGHT_OPTIONS,
+                value=str(get_nested_value(config, "web_captions_printer", "subtitle_font_weight") or "bold"),
+            ).style("width:100%;"), ("web_captions_printer", "subtitle_font_weight"))
             _auto_save(ui.input(label='描边(px)', value=get_nested_value(config, "web_captions_printer", "subtitle_webkit_text_stroke")).style("width:100%;").tooltip('文字描边厚度，0 为无描边'), ("web_captions_printer", "subtitle_webkit_text_stroke"))
-            _auto_save(ui.input(label='文字颜色', value=get_nested_value(config, "web_captions_printer", "font_color")).style("width:100%;").tooltip('支持 #RRGGBB 或 rgba(...)'), ("web_captions_printer", "font_color"))
-            _auto_save(ui.input(label='字幕背景色', value=get_nested_value(config, "web_captions_printer", "bg_color")).style("width:100%;").tooltip('支持 rgba(...)/#RRGGBB；填 none 为透明'), ("web_captions_printer", "bg_color"))
-            _auto_save(ui.input(label='页面背景色', value=get_nested_value(config, "web_captions_printer", "body_bg_color")).style("width:100%;").tooltip('OBS 叠加场景请保持 none（透明）；填 #RRGGBB 可用于纯浏览器观看'), ("web_captions_printer", "body_bg_color"))
+            _auto_save(ui.select(
+                label='描边色',
+                options=_STROKE_COLOR_OPTIONS,
+                value=get_nested_value(config, "web_captions_printer", "subtitle_stroke_color") or "#000000",
+            ).style("width:100%;").tooltip('文字描边颜色（描边厚度>0 时生效）。\n网页字幕页渲染；桌面窗口暂不支持描边。'), ("web_captions_printer", "subtitle_stroke_color"))
+            _auto_save(ui.select(
+                label='文字颜色',
+                options=_FONT_COLOR_OPTIONS,
+                value=get_nested_value(config, "web_captions_printer", "font_color") or "#FFFFFF",
+            ).style("width:100%;"), ("web_captions_printer", "font_color"))
+            # 背景色合并控件（2026-10-26 批次）：同值双写字幕条底色与窗口/页面底色
+            bg_select = ui.select(
+                label='背景色',
+                options=_BG_COLOR_OPTIONS,
+                value=get_nested_value(config, "web_captions_printer", "bg_color") or "rgba(0,0,0,0.6)",
+            ).style("width:100%;").tooltip(
+                '字幕条与窗口/页面的统一底色（同值双写）。\n'
+                '透明：网页全透明（OBS 叠加场景）、桌面窗口回退绿幕底（利于色键抠像）。')
+            _auto_save(bg_select, ("web_captions_printer", "bg_color"))
+            _auto_save(bg_select, ("web_captions_printer", "body_bg_color"))
             _auto_save(ui.input(label='字幕区宽', value=get_nested_value(config, "web_captions_printer", "subtitle_bg_width")).style("width:100%;"), ("web_captions_printer", "subtitle_bg_width"))
             _auto_save(ui.input(label='字幕区高(最小)', value=get_nested_value(config, "web_captions_printer", "subtitle_bg_height")).style("width:100%;"), ("web_captions_printer", "subtitle_bg_height"))
 

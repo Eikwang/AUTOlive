@@ -13,6 +13,10 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+# torch 为主环境缺席的重依赖——RVC 推理组件由独立运行时解释器承载（EDTalk runtime），
+# 与仓库其他 RVC 测试的 importorskip 守卫惯例一致，主环境整文件跳过
+pytest.importorskip("torch", reason="主环境无 torch，RVC 推理依赖独立运行时解释器")
+
 from utils.cover_worker import CoverQueue  # noqa: E402
 from utils.rvc_realtime_service import RealtimeVC  # noqa: E402
 

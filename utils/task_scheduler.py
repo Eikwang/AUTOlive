@@ -220,11 +220,23 @@ class TaskScheduler:
             self.my_handle.process_data(data, "idle_time_task")
 
         elif mode == "comment":
-            # 弹幕触发 LLM 模式：随机弹幕激活系统对话
+            # 弹幕触发 LLM 模式（2026-10-27 架构调整：对接「发送弹幕」功能）：
+            # 闲时文案先调度发送弹幕功能以真实弹幕进直播间（观众可见；守卫链/
+            # 审计/dry-run/熔断全链生效，非阻塞提交，回执异步记日志），随后本地
+            # 照常触发 LLM 对话（弹幕触发LLM语义保持）——监听端 R39 自联回环
+            # 滤除保证自发送弹幕 ≤10s 窗口内不被二次处理；发送能力缺失（服务
+            # 未运行/无监听房间/平台未启用）降级为原虚拟弹幕本地触发，功能零损失。
             comment_content = self._pop_from_list(comment_copy_list, "comment")
             if comment_content is None:
                 return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
-            data = {"platform": self.platform, "username": "闲时任务", "content": comment_content}
+            send_result = self.my_handle.send_live_danmu(comment_content)
+            if send_result is None or not send_result.get("submitted"):
+                logger.info(f"[闲时任务] 真实弹幕未提交"
+                            f"（{str((send_result or {}).get('reason_code') or '发送弹幕功能不可用')}）"
+                            f"——降级虚拟弹幕本地触发：{comment_content[:30]}")
+            data = {"platform": self.platform, "username": "闲时任务",
+                    "content": comment_content,
+                    "origin": "system-idle"}  # ③ 自源标记：编排跳过（keyword_hub）
             self.my_handle.process_data(data, "comment")
 
         elif mode == "local_audio":

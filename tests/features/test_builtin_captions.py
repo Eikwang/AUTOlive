@@ -265,6 +265,8 @@ def test_ensure_defaults_migration():
     assert "priority_mapping" not in settings_mod._AUDIO_PLAYER_DEFAULTS
     assert "keep_time_align_audio" in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
     assert "api_ip_port" not in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
+    # 2026-10-26 批次：描边色新键默认登记（存量配置经 _ensure_defaults 自动补键）
+    assert "subtitle_stroke_color" in settings_mod._WEB_CAPTIONS_PRINTER_DEFAULTS
 
 
 # ---------- 字幕推送时序对齐（2026-10-25 用户实测批次） ----------

@@ -400,7 +400,8 @@ class TestRound2Fixes:
         # 发送对：语音输入 question（talk_handle）+语音回复 answer（补发）
         chat = _src("utils/handlers/chat_handler.py")
         assert '"type": "语音对话"' in chat
-        assert chat.count('content_type="answer"') == 1  # 回复侧补发
+        # 回复侧补发 ×2（2026-10-27 流式链路：全文回复 + 流式逐句回复各一处，语义同源）
+        assert chat.count('content_type="answer"') == 2
         # 弹幕：输入 question+回复 answer 成对（弹幕监听默认源 comment 打标）
         cm = _src("utils/handlers/comment_handler.py")
         assert 'content_type="question"' in cm

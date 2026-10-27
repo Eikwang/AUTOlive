@@ -37,6 +37,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from collections import OrderedDict, deque
 from typing import Any, Callable, Optional
 
@@ -54,6 +55,7 @@ REBUILD_GUARD_MAX = 3              # 守护重建失控防护（连续 3 次停�
 GIFT_LRU_MAX = 5000                # 抖音 GIFT 换算映射上限（Section 7 闭环）
 SELF_SEND_LRU_MAX = 5000           # R39 自联回环去重键上限（对齐 GIFT_LRU_MAX 先例）
 SELF_SEND_WINDOW_S = 10            # R39：收到时刻与 sent_at 差 ≤10s 才判回环（sent_at 秒级、payload 无 room 维度——窗口收紧防批量同秒误杀）
+SELF_SEND_WINDOW_IDLE_S = 120      # ③（2026-10-27）：闲时源（autolive-idle-task）发送回环窗——真实弹幕进直播间可见延迟可超 10s，超窗回放会二次触发 LLM
 
 # 溢出丢弃优先级（数值小先丢；与组件 bus_drop_order 及契约对齐——双端一致性）
 _DROP_ORDER = {"LIKE": 0, "ENTER_ROOM": 1, "DANMU": 2, "SOCIAL": 3, "ROOM_STATS": 4, "GIFT": 5, "SUPER_CHAT": 6}
@@ -425,31 +427,43 @@ class DanmakuListenerService:
     # ---------- R39 自联回环去重（ENG-M4/M5：sent_at+content，≤10s 窗口收紧） ----------
 
     def _record_self_send(self, payload: dict) -> None:
-        """登记发送回执的 sent_at+content（LRU 有界；异常降级为不登记）。"""
+        """登记发送回执的 sent_at+content（LRU 有界；异常降级为不登记）。
+
+        ③（2026-10-27）：payload 可带 window_s 扩展该条目回环窗（闲时源
+        120s）；缺省沿用 SELF_SEND_WINDOW_S。存量整型条目按默认窗判定。"""
         try:
             sent_at = payload.get("sent_at")
             content = payload.get("content")
             if not sent_at or not content:
                 return
             content = str(content)
+            try:
+                window_s = int(payload.get("window_s") or SELF_SEND_WINDOW_S)
+            except (TypeError, ValueError):
+                window_s = SELF_SEND_WINDOW_S
             if content in self._self_send:
                 self._self_send.move_to_end(content)
-            self._self_send[content] = int(sent_at)
+            self._self_send[content] = (int(sent_at), window_s)
             while len(self._self_send) > SELF_SEND_LRU_MAX:
                 self._self_send.popitem(last=False)
         except Exception:
             logger.warning("[danmaku_listener] R39 自发声登记异常（降级不登记）", exc_info=True)
 
     def _is_self_echo(self, content: str) -> bool:
-        """R39 判定：content 命中已登记发送且 |now-sent_at| ≤10s → 自联回环。
+        """R39 判定：content 命中已登记发送且 |now-sent_at| ≤窗（默认 10s，
+        闲时源条目 120s）→ 自联回环。
 
         窗口外放行（防同内容合法弹幕误杀）；去重自身异常放行（监听主链不断）。
         """
         try:
-            sent_at = self._self_send.get(content)
-            if sent_at is None:
+            entry = self._self_send.get(content)
+            if entry is None:
                 return False
-            return abs(time.time() - sent_at) <= SELF_SEND_WINDOW_S
+            if isinstance(entry, tuple):
+                sent_at, window_s = entry
+            else:
+                sent_at, window_s = entry, SELF_SEND_WINDOW_S
+            return abs(time.time() - sent_at) <= window_s
         except Exception:
             return False
 
@@ -695,6 +709,85 @@ class DanmakuListenerService:
             return {"status_code": 200, "send": get_send_pipeline().send_status_snapshot()}
         except Exception:
             return {"status_code": 503, "send": None}
+
+    def send_danmu_idle(self, content: str, source: str = "autolive-idle-task") -> dict:
+        """闲时任务发送真实弹幕（2026-10-27 架构调整：闲时 comment 模式对接
+        「发送弹幕」功能——原设计发送虚拟弹幕触发 LLM 对话，现调度发送管线把
+        闲时文案以真实弹幕送进直播间，观众可见、更拟真）。
+
+        进程内直调发送管线（免 token 鉴权——token 门为 HTTP 面设计，进程内
+        调用无伪造面），守卫链/审计/dry-run/熔断/幂等全链生效（与 webui 手动
+        发送同管线 F1）。目标房间=当前监听中（status=running）的任一房间。
+
+        非阻塞：提交组件事件循环后立即返回（发送耗时最长 70s——taobao 慢路径，
+        闲时线程不得被同步挂住）；回执经 done-callback 记日志。R39 自联回环
+        滤除依赖 DANMU_SEND_RESULT(sent) 登记路径——本方法不改登记语义，
+        监听端收到自发送弹幕 ≤10s 窗口内照常丢弃（防二次触发）。
+
+        Returns:
+            dict: submitted=True 提交成功（status=submitted，含 platform/room_id/
+                  request_id）；submitted=False 未提交（reason_code 三段式，调用方降级）
+        """
+        if self._loop is None or self._loop.is_closed() or not self._service_on:
+            return {"submitted": False, "status": "failed",
+                    "reason_code": "service.not_running",
+                    "fix_hint": "弹幕监听服务未运行（danmaku_listener.enabled）"}
+        target = None
+        try:
+            for r in (self.get_rooms().get("rooms") or []):
+                if str(r.get("status", "")) == "running":
+                    target = r
+                    break
+        except Exception:
+            logger.error("[danmaku_listener] 闲时发送目标房间解析异常", exc_info=True)
+        if target is None:
+            return {"submitted": False, "status": "failed",
+                    "reason_code": "room.not_listened",
+                    "fix_hint": "无监听中房间——先在弹幕监听页添加并启动房间"}
+        platform = str(target.get("platform", ""))
+        room_id = str(target.get("room_id", ""))
+        try:
+            from danmaku_listener.senders.wiring import get_send_pipeline
+            pipeline = get_send_pipeline()
+        except Exception:
+            logger.error("[danmaku_listener] 发送管线构建失败", exc_info=True)
+            return {"submitted": False, "status": "failed",
+                    "reason_code": "send.pipeline_unavailable",
+                    "fix_hint": "查看启动日志 senders/registry 段"}
+
+        request_id = uuid.uuid4().hex
+        text = str(content or "")
+        fut = asyncio.run_coroutine_threadsafe(
+            pipeline.handle_request(platform=platform, room_id=room_id,
+                                    request_id=request_id, content=text,
+                                    source=source),
+            self._loop)
+
+        def _on_send_done(f: "concurrent.futures.Future") -> None:
+            """发送回执记日志（尽力而为；管线自身已兜底异常转 FAILED 回执）。
+
+            ③ 闲时源 sent 回执以 120s 窗重登记自发声（管线默认 10s 登记——
+            真实弹幕进直播间可见延迟可超 10s，超窗回放会二次触发 LLM）。"""
+            try:
+                wire = f.result() or {}
+                payload = json.loads(json.dumps(wire.get("payload") or {}))
+                logger.info(
+                    f"[闲时任务] 真实弹幕发送回执：{platform}:{room_id} "
+                    f"status={payload.get('status', 'unknown')} "
+                    f"reason={payload.get('reason_code') or ''} "
+                    f"content={str(payload.get('content', ''))[:30]}")
+                if payload.get("status") == "sent" and payload.get("content"):
+                    self._record_self_send({
+                        "sent_at": payload.get("sent_at") or int(time.time()),
+                        "content": payload.get("content"),
+                        "window_s": SELF_SEND_WINDOW_IDLE_S,
+                    })
+            except Exception:
+                logger.error("[闲时任务] 真实弹幕发送回执读取异常", exc_info=True)
+
+        fut.add_done_callback(_on_send_done)
+        return {"submitted": True, "status": "submitted",
+                "platform": platform, "room_id": room_id, "request_id": request_id}
 
     # ---- 房间 ----
 

@@ -111,6 +111,7 @@
     "message_queue_max_len": "20",
     "voice_tmp_path_queue_max_len": 100,
     "voice_tmp_path_queue_min_start_play": 0,
+    "song_segment_seconds": 45,
     "priority_mapping": {
       "trends_copywriting": 10,
       "schedule": 10,
@@ -118,7 +119,7 @@
       "local_qa_audio": 20,
       "entrance": 20,
       "comment": 20,
-      "song": 20,
+      "song": 10,
       "read_comment": 20,
       "gift": 20,
       "follow": 20,
@@ -250,13 +251,13 @@
     },
     "text": {
       "enable": true,
-      "type": "text",
       "file_path": "data/本地问答库.txt",
       "similarity": 0.6,
       "username_max_len": 10
     },
     "audio": {
       "enable": true,
+      "type": "相似度匹配",
       "file_path": "out/本地问答音频/",
       "similarity": 0.5
     }

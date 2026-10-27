@@ -9,7 +9,9 @@ data_analysis/resp_template/method/proxies/body_type/headers/body/url 全部退�
 """
 import asyncio
 import json
+import queue
 import re
+import threading
 import traceback
 
 from utils.my_log import logger
@@ -293,6 +295,113 @@ class Custom_LLM:
             logger.error(traceback.format_exc())
             logger.error(f"problem=LLM 请求失败；cause={e}；fix=查看日志定位")
             return None
+
+    async def stream_resp(self, data, timeout=60):
+        """流式请求 LLM，逐段产出文本增量（① 2026-10-27 主链延迟优化）。
+
+        OpenAI-compatible SSE（"stream": true）——data: 行解析 choices[0].
+        delta.content；服务端不支持流式时多数兼容服务自动降级为单块响应，
+        解析层不感知（delta.content 空时回读 message.content 一次）。
+
+        Args:
+            data (dict): {"prompt": ...} 或运行时弹幕数据 {"content": ...}
+            timeout (int): 超时秒数
+
+        Yields:
+            str: 文本增量（可能为空串，调用方跳过）
+        """
+        aiohttp = _get_aiohttp()
+        try:
+            prompt = self._build_prompt(data)
+            url = self._chat_completions_url()
+            headers = self._build_headers()
+            body = self._build_body(prompt)
+            body["stream"] = True
+            logger.debug(f"custom_llm 流式请求: url={url} model={body['model']}")
+
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(url, headers=headers, json=body) as response:
+                    if response.status != 200:
+                        logger.error(
+                            f"problem=LLM 流式返回非 200（HTTP {response.status}）；"
+                            "cause=服务端拒绝；fix=检查 base_url/model 配置；"
+                            "流式不可用将回退全文链路"
+                        )
+                        return
+                    buffer = ""
+                    async for raw in response.content:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if delta:
+                            buffer += delta
+                            yield delta
+                    # 非流式降级响应（部分兼容服务忽略 stream 标志整块返回）：
+                    # delta.content 恒空时回读一次 message.content
+                    if not buffer:
+                        try:
+                            resp = json.loads(await response.text())
+                            content = (resp.get("choices") or [{}])[0].get(
+                                "message", {}).get("content")
+                            if content:
+                                yield str(content)
+                        except Exception:
+                            pass
+        except asyncio.TimeoutError:
+            logger.error(
+                "problem=LLM 流式请求超时；cause=服务未响应；"
+                "fix=确认 LLM 服务已启动且 base_url 可达；回退全文链路"
+            )
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            logger.error(f"problem=LLM 流式请求失败；cause={e}；回退全文链路")
+
+    def stream_resp_sync(self, data):
+        """stream_resp 的同步生成器桥（线程内独立事件循环 + 队列转交）。
+
+        独立线程跑 asyncio.run（绕开主线程事件循环占用——get_resp_sync 的
+        executor 方案无法分块转交增量），生成器耗尽/异常时终止。
+
+        Args:
+            data (dict): 请求参数
+
+        Yields:
+            str: 文本增量；上游异常时原样抛出（调用方按流式失败处理）
+        """
+        q = queue.Queue()
+        _DONE = object()
+
+        def _run():
+            async def _pump():
+                try:
+                    async for delta in self.stream_resp(data):
+                        q.put(delta)
+                except Exception as e:
+                    q.put(e)
+                finally:
+                    q.put(_DONE)
+            asyncio.run(_pump())
+
+        threading.Thread(target=_run, name="llm-stream-pump", daemon=True).start()
+        while True:
+            item = q.get()
+            if item is _DONE:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
     def get_resp_sync(self, data):
         """同步版本的 get_resp（向后兼容）

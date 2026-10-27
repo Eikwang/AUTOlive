@@ -183,3 +183,47 @@ class My_Translate:
         except Exception as e:
             logger.error(f"[translate-llm] LLM 翻译失败，原文直通主链路：{e}")
             return None
+
+    # ④ 翻译跳过优化（2026-10-27 架构优化批次）：翻译在回复主链串行（翻译结果
+    # 即 TTS 输入，无法并行），但「文本已是目标语言」场景占多数——跳过可省一次
+    # 串行 API 往返（LLM 通道翻译更是一次完整 LLM 调用）。
+    _LANG_CODE_ALIASES = {
+        "zh": "zh", "zh-cn": "zh", "zh-tw": "zh", "yue": "yue", "auto_yue": "yue",
+        "jp": "ja", "ja": "ja", "ko": "ko", "en": "en",
+    }
+
+    def _target_lang(self, type=None):
+        """读当前翻译通道目标语言，映射到 lang_check 判定码（未知返回 None）。"""
+        try:
+            if type in (None, "baidu"):
+                to = self.baidu_config.get("to_lang")
+            elif type == "google":
+                to = self.google_config.get("tgt_lang")
+            elif type == "argos":
+                to = self.config.get("translate", "argos", "to_lang")
+            else:
+                return None
+            return self._LANG_CODE_ALIASES.get(str(to or "").strip().lower())
+        except Exception:
+            return None
+
+    def trans_reply(self, text):
+        """回复链翻译入口（comment/talk 双链共用单点，D-20 纪律）：目标语言与
+        文本语言一致时跳过翻译（省一次串行 API 往返）；否则按配置通道翻译。
+
+        失败/未翻译返回原文（等价调用方既有 `if tmp: resp_content = tmp` 语义）。
+        """
+        if not text:
+            return text
+        try:
+            type = self.config_data["type"]
+        except Exception:
+            return text
+        target = self._target_lang(type)
+        if target:
+            detected = self.common.lang_check(text)
+            if detected == target:
+                logger.debug(f"[translate] 文本已为目标语言 {target}，跳过翻译")
+                return text
+        out = self.trans(text, type)
+        return out if out else text
