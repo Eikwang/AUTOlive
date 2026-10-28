@@ -1,9 +1,8 @@
 ```mermaid
 flowchart TD
-    %% ==================== 主干图元数据 ====================
-    %% 版本：v2.6 —— 2026-10-27 动作编排完善批次（用户终版手改 v2.5 基础上重落盘：新增 Sort→|权重&队列信息|Compile 权重联动边与「已消费信息回传」子图 Frame→lineout→|回传|Sort；编排上级=Keyword 关键词触发+Sort 权重排序双入，切换方式=无缝/立刻，打队模式=打断/排队；代码侧 utils/orchestration/）
-    %% 图例：四态语义〔真实/断链/骨架/规划〕v1 定义见 docs/flowchart-detail.md（归档详图）；行号为书写时参考，随重构过期以符号名为准
-    %% 纪律：改链必改图 —— 对应批次须同步检查本图节点/边（TODOS 2026-10-20 节 #5；tests/test_flowchart_alignment.py 守卫）
+    %% 图头 v2.7（2026-10-28 消费逻辑审查批次，用户终版手改定稿）：已消费回传子图回传目标 Sort→AudioList——消费完成回执落音频队列模块（QueueMixin.report_consumed 消费回执+播放循环完成点后串行取下一条，G1/G2 两路消费点互斥不双报）；其余拓扑与 v2.6 一致（Keyword 中枢→Compile 双出边、Sort 权重边、NoDM/Listenoff 闲时任务调度）
+    %% 图例：{菱形}=判断/路由节点 | ([圆角])=起止节点 | :::listenNode=监听交互 | :::subLogicNode=子逻辑 | :::logicNode=核心处理 | 无箭头依赖=并行支路
+    %% 纪律：改链必改图——任何链路代码变更须同步本图并升级版本号；守卫 tests/test_flowchart_alignment.py 断言图头与编排拓扑边
     %% 样式定义
     classDef startNode fill:#FFD3D3,stroke:#FF6666,stroke-width:2px,color:#000;
     classDef listenNode fill:#A8D5FF,stroke:#3399FF,stroke-width:1px,color:#000;
@@ -129,13 +128,13 @@ flowchart TD
         Compile --> |需要口型|AvatarAI
         Compile --> |不需口型|Frame
         AvatarPlay --> Frame
-        Sync --> Frame
         SystemPlay --> Frame
+        Sync --> Frame
     end    
 
     %% 消费完成
     subgraph 已消费信息回传 
         Frame --> lineout{已消费信息}:::logicNode
-        lineout --> |回传|Sort
+        lineout --> |回传|AudioList
     end    
 ```

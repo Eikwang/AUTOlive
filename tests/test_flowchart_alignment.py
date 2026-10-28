@@ -129,7 +129,7 @@ class TestGraphAnchors:
 
 
 class TestChoreoTopology:
-    """v2.6 终版拓扑断言（2026-10-27 动作编排完善批次，用户终版手改图定稿）。
+    """v2.7 终版拓扑断言（2026-10-28 用户终版手改图定稿）。
 
     图语义：所有信息源（Capture/Idle/Timed/DynamicCopy/Filter）→ Keyword 中枢；
     Keyword → |关键词| Compile{动作编排}（识别即触发，与消息处理并行）；
@@ -137,15 +137,16 @@ class TestChoreoTopology:
     低权重触发经 queue 打断模式排队等待当前序列播完）；Compile 双出边——
     |需要口型|→AvatarAI（数字人服务，口型/面部修复/眼神修正热开关联动）、
     |不需口型|→Frame（纯画面序列直出，音频作画外音由系统播放流程消费）；
-    已消费信息回传：Frame→lineout→|回传|Sort（消费完成信息回传排序模块，
-    代码侧=编排队列出队重放+音频队列消费出清）。"""
+    已消费信息回传：Frame→lineout→|回传|AudioList（消费完成信息回传待播放
+    音频列表——代码侧=QueueMixin report_consumed 消费回执落账+播放循环完成
+    点后串行取下一条，2026-10-28 用户改定：回传目标由 Sort 改指 AudioList）。"""
 
     EDGES = (
         ("Keyword --> |关键词|Compile", "编排触发上级必须为关键词触发中枢"),
         ("Sort --> |权重&队列信息|Compile", "优先级排序必须向编排提供权重&队列信息（v2.6 用户终版边）"),
         ("Compile --> |需要口型|AvatarAI", "编排口型音频必须直达数字人服务（AvatarAI）"),
         ("Compile --> |不需口型|Frame", "编排纯画面必须直出画面帧（Frame，不经口型）"),
-        ("lineout --> |回传|Sort", "已消费信息必须回传排序模块（v2.6 回传子图）"),
+        ("lineout --> |回传|AudioList", "已消费信息必须回传音频队列（v2.7 用户终版回传子图：消费完成驱动串行消费）"),
     )
 
     # Compile 不允许的歧义形态：旧 Sort→Compile 裸边 / 标签漂移
@@ -182,10 +183,11 @@ class TestChoreoTopology:
 
 class TestGraphHeader:
     """C7 图头断言：元数据两行在位（restore 回滚曾静默丢失图头，native Eng F2；
-    2026-10-27 动作编排完善批次用户终版手改覆盖后随批次重落盘，版本升至 v2.6）。"""
+    2026-10-28 消费逻辑审查批次用户终版手改覆盖（回传边改指 AudioList）后随批次
+    重落盘，版本升至 v2.7）。"""
 
     def test_version_line_present(self):
-        assert "v2.6" in _graph_text(), "图头版本行（v2.6）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.7" in _graph_text(), "图头版本行（v2.7）缺失——疑 restore 回滚，须随批次重落盘"
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"
