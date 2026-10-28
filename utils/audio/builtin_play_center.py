@@ -537,6 +537,12 @@ class AUDIO_PLAY_CENTER:
             self.stream = None
 
     # ---------- 接口适配（与 AUDIO_PLAYER 客户端同名同参；get_status 为 UI 专用新增） ----------
+    def internal_queue_len(self) -> int:
+        """内部队列深度快照（TODOS 2026-10-28 消费逻辑审查 #4）：play() 提前移交
+        的条目脱离 voice_tmp_path_queue，get_audio_info 叠加本值防观测面低估积压。"""
+        with self.list_lock:
+            return len(self.audio_json_list)
+
     def play(self, data):
         """入队（映射源 add_audio_json）；队列满载阻塞背压（S7，queue_max 可配）"""
         queue_max = int(self._hot_value("queue_max", 50) or 50)

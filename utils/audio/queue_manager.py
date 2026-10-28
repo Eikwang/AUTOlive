@@ -79,11 +79,24 @@ class QueueMixin:
         return False
     
     def get_audio_info(self):
-        """获取音频队列信息"""
-        return {
+        """获取音频队列信息
+
+        TODOS 2026-10-28 消费逻辑审查 #4：builtin 播放器的 play() 是提前移交
+        （满载背压上限 queue_max 条进 audio_json_list），已移交条目脱离
+        voice_tmp_path_queue——wait_play_audio_num 叠加其内部队列深度，防观测
+        面低估积压（仅统计语义，不影响 is_queue_less_or_greater_than 等门控）。
+        """
+        info = {
             "wait_play_audio_num": len(self.voice_tmp_path_queue),
             "wait_synthesis_msg_num": len(self.message_queue),
         }
+        player = getattr(self, "audio_player", None)
+        if player is not None and hasattr(player, "internal_queue_len"):
+            try:
+                info["wait_play_audio_num"] += player.internal_queue_len()
+            except Exception:
+                pass  # 观测叠加失败不阻塞统计（快照尽力而为）
+        return info
 
     # ------------------------------------------------------------------
     # G2（2026-10-28 消费回传批次）：音频条目消费完成回执（Sort 侧显式 API——

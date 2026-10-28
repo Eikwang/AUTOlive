@@ -851,3 +851,26 @@ class TestConsumptionReceipt:
         assert stats["total_consumed"] == _CONSUMED_RECEIPT_MAX + 10
         assert len(stats["recent"]) == 10  # 快照只透出最近 10 条
         assert stats["recent"][-1]["content"] == f"c{_CONSUMED_RECEIPT_MAX + 9}"
+
+    def test_get_audio_info_aggregates_builtin_backlog(self):
+        """TODOS 2026-10-28 审查 #4：wait_play_audio_num 叠加 builtin 内部队列
+        深度（play() 提前移交的条目脱离 voice_tmp_path_queue，观测面防低估）。"""
+        host = self._host()
+
+        class _FakeBuiltin:
+            def internal_queue_len(self):
+                return 7
+
+        host.audio_player = _FakeBuiltin()
+        host.voice_tmp_path_queue = [{"a": 1}, {"b": 2}]
+        host.message_queue = []
+        info = host.get_audio_info()
+        assert info["wait_play_audio_num"] == 9  # 队列 2 + builtin 内部 7
+        assert info["wait_synthesis_msg_num"] == 0
+
+    def test_get_audio_info_without_builtin_player(self):
+        """未挂播放器（pygame 模式/未构造）不叠加——保持原语义。"""
+        host = self._host()
+        host.voice_tmp_path_queue = [{"a": 1}]
+        host.message_queue = []
+        assert host.get_audio_info()["wait_play_audio_num"] == 1
