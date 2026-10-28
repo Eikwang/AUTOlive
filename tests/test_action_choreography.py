@@ -528,7 +528,7 @@ class TestCompletionPredicate:
 
     def test_queue_interrupt_defers_then_dequeues(self):
         """queue 打断模式（2026-10-27 批次：优先级排序联动）——低权重触发排队：
-        序列执行中触发 queue 规则 → 不打断、入单槽；当前序列 exit 完成 → 自动
+        序列执行中触发 queue 规则 → 不打断、入队；当前序列 exit 完成 → 自动
         出队重放（decide_trigger 正常路径启动新序列）。"""
         queued_rule = make_rule(rule_id="song_q", match="", trigger_type="song",
                                 sequence={"main": {"segment": "B_跳舞", "duration_s": 8}})
@@ -537,7 +537,7 @@ class TestCompletionPredicate:
         h.trigger_gift()  # girl_A 序列执行中
         res = h.engine.decide_trigger("song", "", {"user": "u1"})
         assert res["reason"] == "queued" and res["accepted"] is False
-        assert h.engine.pending_queue["rule_id"] == "song_q"
+        assert [p["rule_id"] for p in h.engine.pending_queue] == ["song_q"]
         assert h.engine.state == "sequence"  # 未打断
         # 走完 enter→main→exit 完成链（deadline 完成路径）→ 回默认 + 出队重放
         h.engine.seq["current_deadline"] = h.now - 1  # enter 超时降级推进
@@ -548,18 +548,31 @@ class TestCompletionPredicate:
         h.engine.on_tick(h.now)
         assert h.engine.state == "sequence"
         assert h.engine.seq["rule_id"] == "song_q"
-        assert h.engine.pending_queue is None
+        assert h.engine.pending_queue == []
 
-    def test_queue_interrupt_overwrite_single_slot(self):
-        """单槽待播队列：后到覆盖先到（最新触发优先）+ 原值丢弃。"""
-        q1 = make_rule(rule_id="q1", match="", trigger_type="song",
-                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        q1["interrupt"] = "queue"
-        h = EngineHarness(rules=[make_rule(), q1])
+    def test_queue_fifo_multiple_slots(self):
+        """多槽 FIFO（2026-10-28 G3）：多规则密集触发依次保留，先到先出。"""
+        q = make_rule(rule_id="q", match="", trigger_type="song",
+                      sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        q["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), q])
         h.trigger_gift()
         h.engine.decide_trigger("song", "", {"user": "u1"})
         h.engine.decide_trigger("song", "", {"user": "u2"})
-        assert h.engine.pending_queue["data"] == {"user": "u2"}
+        assert [p["data"]["user"] for p in h.engine.pending_queue] == ["u1", "u2"]
+        assert h.engine.get_state()["pending_depth"] == 2
+
+    def test_queue_overflow_drops_oldest(self):
+        """多槽上限（G3）：排满 PENDING_QUEUE_MAX 后新触发挤掉最旧（最新触发保留）。"""
+        q = make_rule(rule_id="q", match="", trigger_type="song",
+                      sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        q["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), q])
+        h.trigger_gift()
+        for i in range(ChoreoEngine.PENDING_QUEUE_MAX + 1):
+            h.engine.decide_trigger("song", "", {"user": f"u{i}"})
+        assert [p["data"]["user"] for p in h.engine.pending_queue] == \
+            [f"u{i}" for i in range(1, ChoreoEngine.PENDING_QUEUE_MAX + 1)]
 
     def test_queue_mode_default_state_starts_directly(self):
         """DEFAULT 态 queue 规则照常直接启动（排队仅作用于序列执行中）。"""

@@ -138,12 +138,13 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
             # 晚于入队时间匹配 inflight（CL-2），不匹配即忽略——999 续播/积压乱序安全。
             async def _choreo_completion_cb(data):
                 try:
+                    _item = (data or {}).get("data") or {}
+                    _type, _content = _item.get("item_type", ""), _item.get("item_content", "")
                     from utils.orchestration import get_choreographer
                     _choreo = get_choreographer()
                     if _choreo is not None:
-                        _item = (data or {}).get("data") or {}
-                        _choreo.on_audio_complete(
-                            _item.get("item_type", ""), _item.get("item_content", ""))
+                        _choreo.on_audio_complete(_type, _content)
+                    self.report_consumed(_type, _content)  # G2：Sort 侧消费回执（完成点②）
                 except Exception:
                     pass  # 编排异常不回传播放器线程（沿 playback_manager 隔离惯例）
 

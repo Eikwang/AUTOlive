@@ -1,7 +1,7 @@
 ## Deferred Items from /goal (2026-10-27) — 动作编排完善批次（用户四部分需求全量落地，图 v2.6）
 
-1. **Sort 侧显式消费回执 API**（P3, M）— v2.6 回传子图（Frame→lineout→|回传|Sort）代码侧现状=编排队列出队重放（choreographer.py pending_queue）+音频队列消费即出清（playback_manager pop/999 释放）；场景2（点歌排队等动态文案播完）行为已闭环。Sort 侧若需显式回执（排序模块维护已消费集/去重窗），需在 playback_manager 完成点加回执接口+Sort 侧消费。依赖：实播中出现队列状态失真再评估。
-2. **编排 queue 单槽→多槽队列**（P3, S）— 排队模式现为单槽（后到覆盖先到，最新触发优先）；多规则密集触发且都需保留时升级为 FIFO 多槽。依赖：实播反馈。
+1. **~~Sort 侧显式消费回执 API~~（已完成 2026-10-28 G2）**— v2.6 回传子图（Frame→lineout→|回传|Sort）代码侧现状=编排队列出队重放（choreographer.py pending_queue）+音频队列消费即出清（playback_manager pop/999 释放）；场景2（点歌排队等动态文案播完）行为已闭环。Sort 侧若需显式回执（排序模块维护已消费集/去重窗），需在 playback_manager 完成点加回执接口+Sort 侧消费。
+2. **~~编排 queue 单槽→多槽队列~~（已完成 2026-10-28 G3：pending_queue 改多槽 FIFO，PENDING_QUEUE_MAX=5 满额挤最旧，get_state 透出 pending_depth）**— 排队模式现为单槽（后到覆盖先到，最新触发优先）；多规则密集触发且都需保留时升级为 FIFO 多槽。依赖：实播反馈。
 3. **avatar 联动 adaptive 值域 UI 归一**（P3, S）— webui 数字人页面部修复/眼神修正当前只有开/关两档，编排侧 _apply_avatar_aux_flags 已透传 on|adaptive|off 三值；webui 补 adaptive 档后联动即全量生效。依赖：数字人页触碰。
 
 ## Deferred Items from /autoplan (2026-10-27) — 流程图终版（v2.5）架构对齐批次（用户定稿手改图，代码审查收口）

@@ -153,6 +153,8 @@ class ChoreoEngine:
     状态：default（默认轮播，承载=上游 SegmentScheduler）| sequence（片段序列执行中）。
     """
 
+    PENDING_QUEUE_MAX = 5  # queue 模式多槽上限（2026-10-28 G3：满额挤最旧）
+
     def __init__(self, cfg: ChoreographyConfig, clock: Callable[[], float] = time.monotonic):
         self.cfg = cfg
         self.clock = clock
@@ -161,7 +163,7 @@ class ChoreoEngine:
         self.enabled_rules: List[RuleCfg] = list(cfg.rules)
         self.counters: dict = {}          # rule_id -> consecutive_count
         self.key_last: dict = {}          # rule_id -> 上次触发尝试时刻（节流窗口）
-        self.pending_queue = None         # queue 模式待播单槽（2026-10-27 批次：排序联动）
+        self.pending_queue: list = []     # queue 模式待播多槽 FIFO（2026-10-28 G3：排序联动）
         self.degrade_total = 0
         self._seq_counter = 0
         self._restore_attempts = 0
@@ -224,17 +226,22 @@ class ChoreoEngine:
                 return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands,
                         "reason": "requeued", "retry_after_s": None}
             # 条件3（他键触发，beyond hold）
-            # queue 模式（2026-10-27 批次：优先级排序联动）：低权重触发不打断
-            # 当前序列——入单槽待播队列（后到覆盖先到+日志），当前序列播完
-            # （exit 完成）后自动出队重放。消息/音频侧照常入链（Sort 排序消费），
-            # 本排队仅作用于画面序列。
+            # queue 模式（2026-10-27 批次：优先级排序联动；2026-10-28 G3 多槽化）：
+            # 低权重触发不打断当前序列——入多槽 FIFO 待播队列（先到先出；满
+            # PENDING_QUEUE_MAX 挤最旧），当前序列播完（exit 完成）后依次出队
+            # 重放。消息/音频侧照常入链（Sort 排序消费），本排队仅作用于画面序列。
             if rule.interrupt == "queue":
-                self.pending_queue = {
+                if len(self.pending_queue) >= self.PENDING_QUEUE_MAX:
+                    dropped = self.pending_queue.pop(0)
+                    commands.append(LogCmd(
+                        "warning", f"[编排] 排队已满（{self.PENDING_QUEUE_MAX}），"
+                                   f"丢弃最旧触发 {dropped['rule_id']}"))
+                self.pending_queue.append({
                     "trigger_type": trigger_type, "match_value": match_value,
-                    "data": dict(data or {}), "rule_id": rule.rule_id}
+                    "data": dict(data or {}), "rule_id": rule.rule_id})
                 commands.append(LogCmd(
-                    "info", f"[编排] 规则 {rule.rule_id} 排队等待（interrupt=queue，"
-                    f"当前序列 {seq['rule_id']} 播完后执行）"))
+                    "info", f"[编排] 规则 {rule.rule_id} 排队等待（第 {len(self.pending_queue)} 位，"
+                            f"interrupt=queue，当前序列 {seq['rule_id']} 播完后依次执行）"))
                 return {"accepted": False, "takeover": False, "rule": rule,
                         "commands": commands, "reason": "queued", "retry_after_s": None}
             result = self._interrupt_sequence(rule, data, now, commands)
@@ -554,13 +561,15 @@ class ChoreoEngine:
                                    "[编排] 默认段池为空，无法恢复轮播；problem=default_segments 校验后为空；"
                                    "cause=段名不在 EDTalk available_segments；fix=修正 default_segments"))
         self.seq = None
-        # queue 模式出队（2026-10-27 批次）：当前序列播完 → 待播触发自动重放
-        # （state 已回 default，走正常 _start_sequence；出队失败不回滚——日志留痕）
-        pending = self.pending_queue
-        self.pending_queue = None
+        # queue 模式出队（2026-10-27 批次；2026-10-28 G3 FIFO 化）：当前序列播完
+        # → 取队首待播触发重放（余下保留，下一序列播完继续出队）。state 已回
+        # default，走正常 _start_sequence；出队失败不回滚——日志留痕
+        pending = self.pending_queue.pop(0) if self.pending_queue else None
         if pending:
+            remaining = len(self.pending_queue)
             commands.append(LogCmd("info",
-                                   f"[编排] 出队执行排队的规则 {pending['rule_id']}"))
+                                   f"[编排] 出队执行排队的规则 {pending['rule_id']}"
+                                   + (f"（余 {remaining} 条排队）" if remaining else "")))
             try:
                 replay = self.decide_trigger(pending["trigger_type"],
                                              pending["match_value"], pending["data"])
@@ -711,6 +720,7 @@ class ChoreoEngine:
             "step_remaining_s": (round(seq["current_deadline"] - self.clock(), 1)
                                  if seq and seq.get("current_deadline") is not None else None),
             "mute_window": self.mute_window(),
+            "pending_depth": len(self.pending_queue),  # G3：queue 多槽排队深度观测
         }
 
 

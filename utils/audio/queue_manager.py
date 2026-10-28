@@ -3,8 +3,12 @@
 """
 
 import threading
+import time
 import traceback
 from ..my_log import logger
+
+# G2（2026-10-28 消费回传批次）：消费回执环形窗容量
+_CONSUMED_RECEIPT_MAX = 50
 
 
 def _split_group_note(data_json):
@@ -80,6 +84,46 @@ class QueueMixin:
             "wait_play_audio_num": len(self.voice_tmp_path_queue),
             "wait_synthesis_msg_num": len(self.message_queue),
         }
+
+    # ------------------------------------------------------------------
+    # G2（2026-10-28 消费回传批次）：音频条目消费完成回执（Sort 侧显式 API——
+    # 图 v2.6 Frame→lineout→|回传|Sort 边的 Sort 侧落点）。类属性沿
+    # message_queue 模式（Mixin 无 __init__，宿主继承共享）。
+    # ------------------------------------------------------------------
+    _consumed_receipts = []       # 环形窗（最近 _CONSUMED_RECEIPT_MAX 条回执）
+    _consumed_total = 0           # 累计消费回执数
+    _consumed_by_type = {}        # 累计分类型计数
+    _consumed_lock = threading.Lock()
+
+    def report_consumed(self, qtype: str = "", content: str = ""):
+        """音频条目真实消费完成回执。
+
+        接入点：playback_manager EDTalk push_full 返回处 + audio_core builtin
+        完成回调转发处（两路消费互斥不双报，G1）。维护环形回执窗+累计计数，
+        供排序层/观测面查询（get_consumption_stats）；当前无排序决策依赖，
+        仅观测透出（TODOS 2026-10-27 批 #1）。异常吞掉——回执不得影响消费链。"""
+        try:
+            receipt = {"ts": round(time.time(), 3), "type": str(qtype or ""),
+                       "content": str(content or "")[:80]}
+            with QueueMixin._consumed_lock:
+                QueueMixin._consumed_total += 1
+                t = receipt["type"]
+                QueueMixin._consumed_by_type[t] = QueueMixin._consumed_by_type.get(t, 0) + 1
+                QueueMixin._consumed_receipts.append(receipt)
+                if len(QueueMixin._consumed_receipts) > _CONSUMED_RECEIPT_MAX:
+                    QueueMixin._consumed_receipts.pop(0)
+        except Exception:
+            logger.debug(f"消费回执记录异常（忽略）：{traceback.format_exc()}")
+
+    def get_consumption_stats(self):
+        """消费回执统计快照（累计计数+分类型计数+最近 10 条回执）。"""
+        with QueueMixin._consumed_lock:
+            return {
+                "total_consumed": QueueMixin._consumed_total,
+                "by_type": dict(QueueMixin._consumed_by_type),
+                "recent": list(QueueMixin._consumed_receipts[-10:]),
+            }
+
 
     def flush_starved_playback_queue(self):
         """E2 饥饿路径 flush：首次播放阈值门的保底放行

@@ -174,7 +174,7 @@ class TestChoreoTopology:
         """代码侧镜像断言（v2.6）：queue 打断模式（低权重触发排队，序列播完出队）。"""
         engine_src = (REPO / "utils" / "orchestration" / "choreographer.py").read_text(
             encoding="utf-8")
-        assert "pending_queue" in engine_src, "编排引擎缺少排队单槽（Sort 权重联动落点）"
+        assert "pending_queue" in engine_src, "编排引擎缺少排队多槽 FIFO（Sort 权重联动落点）"
         cfg_src = (REPO / "utils" / "orchestration" / "config_model.py").read_text(
             encoding="utf-8")
         assert '"standard", "queue"' in cfg_src, "打断模式值域缺少 queue（排序联动语义）"

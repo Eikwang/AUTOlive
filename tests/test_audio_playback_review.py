@@ -813,3 +813,41 @@ class TestAssistantPlaybackRouting:
         src = inspect.getsource(queue_manager)
         for t in ASSISTANT_PLAYBACK_TYPES:
             assert t in src, f"playback_manager 助播类型 {t} 在 queue_manager 侧无同名产出"
+
+
+class TestConsumptionReceipt:
+    """G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执 API
+    （report_consumed/get_consumption_stats——图 v2.6 回传子图的 Sort 侧落点）。"""
+
+    def _host(self):
+        from utils.audio.queue_manager import QueueMixin
+        # 回执计数是 QueueMixin 类属性（跨实例共享）——每例重置防测试间污染
+        QueueMixin._consumed_receipts = []
+        QueueMixin._consumed_total = 0
+        QueueMixin._consumed_by_type = {}
+        return _QueueFixture()
+
+    def test_receipt_ring_and_stats(self):
+        host = self._host()
+        host.report_consumed("song", "music/a.mp3")
+        host.report_consumed("comment", "你好世界")
+        stats = host.get_consumption_stats()
+        assert stats["total_consumed"] == 2
+        assert stats["by_type"] == {"song": 1, "comment": 1}
+        assert stats["recent"][-1]["content"] == "你好世界"
+        assert stats["recent"][-1]["type"] == "comment"
+
+    def test_receipt_content_truncated(self):
+        host = self._host()
+        host.report_consumed("comment", "x" * 200)
+        assert len(host.get_consumption_stats()["recent"][-1]["content"]) == 80
+
+    def test_receipt_ring_window_capacity(self):
+        from utils.audio.queue_manager import _CONSUMED_RECEIPT_MAX
+        host = self._host()
+        for i in range(_CONSUMED_RECEIPT_MAX + 10):
+            host.report_consumed("comment", f"c{i}")
+        stats = host.get_consumption_stats()
+        assert stats["total_consumed"] == _CONSUMED_RECEIPT_MAX + 10
+        assert len(stats["recent"]) == 10  # 快照只透出最近 10 条
+        assert stats["recent"][-1]["content"] == f"c{_CONSUMED_RECEIPT_MAX + 9}"

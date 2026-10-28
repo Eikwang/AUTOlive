@@ -324,6 +324,10 @@ class PlaybackMixin:
                                     data_json.get("type", ""), data_json.get("content", ""))
                         except Exception as _choreo_err:
                             logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{_choreo_err}")
+                        # G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执
+                        # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
+                        self.report_consumed(
+                            data_json.get("type", ""), data_json.get("content", ""))
                         if _was_999:
                             self.active_reread_top_999 = False
                         # ② 点歌切片末段清理（EDTalk 路径即时清）
