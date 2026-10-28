@@ -798,3 +798,33 @@ class TestClientSchedule:
         client = EDTalkClient({"api_ip_port": "http://127.0.0.1:8000"})
         with patch("requests.post", side_effect=ConnectionError("down")):
             assert client.schedule(["1"], align=True).get("ok") is False  # 降级不抛
+
+
+class TestBuiltinCompletionForward:
+    """G1（2026-10-28 消费回传补齐）：builtin 播放器完成回调→编排转发注册点守卫。
+
+    A3 死链清理时移除了 audio_core 的完成回调注册，外放/助播（SystemPlay）
+    场景编排步推进退化为 F1 看门狗 60s 超时兜底；本次在 audio_core 重新注册
+    （_fire_completion 载荷携带 item_type/item_content，转发 on_audio_complete
+    匹配 inflight，CL-2）。镜像断言防再退役（沿 TestChoreoTopology 惯例）。
+    """
+
+    def test_audio_core_registers_completion_forward(self):
+        import inspect
+        from utils.audio import audio_core
+        src = inspect.getsource(audio_core)
+        assert "set_completion_callback(_choreo_completion_cb)" in src, \
+            "audio_core 必须注册 builtin 完成回调（G1 消费回传，A3 后重新注册）"
+        assert "get_choreographer" in src, \
+            "完成回调必须转发编排 on_audio_complete（外放/助播真实消费驱动）"
+        assert "item_type" in src and "item_content" in src, \
+            "转发必须取载荷 item_type/item_content"
+
+    def test_builtin_play_center_payload_contract(self):
+        import inspect
+        from utils.audio import builtin_play_center
+        src = inspect.getsource(builtin_play_center)
+        assert "def _fire_completion(self, data_json=None)" in src, \
+            "_fire_completion 必须接收被播条目（载荷 item_type/item_content 来源）"
+        assert '"item_type"' in src and '"item_content"' in src, \
+            "完成载荷必须携带被播条目 (type,content)（CL-2 匹配键）"

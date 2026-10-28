@@ -131,6 +131,23 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         if self.config.get("play_audio", "player") == "builtin" and Audio.audio_player is not None and hasattr(Audio.audio_player, "set_started_callback"):
             Audio.audio_player.set_started_callback(
                 lambda data: self.captions_manager.push(data))
+            # G1（2026-10-28 消费回传补齐，A3 死链清理后的重新注册）：builtin 完成
+            # 回调转发编排 on_audio_complete——外放/助播场景编排步推进由真实消费
+            # 完成驱动（替代 F1 看门狗 60s 超时兜底）。载荷 item_type/item_content
+            # 由 _fire_completion 携带被播条目 (type,content)，编排侧 (type,content)+
+            # 晚于入队时间匹配 inflight（CL-2），不匹配即忽略——999 续播/积压乱序安全。
+            async def _choreo_completion_cb(data):
+                try:
+                    from utils.orchestration import get_choreographer
+                    _choreo = get_choreographer()
+                    if _choreo is not None:
+                        _item = (data or {}).get("data") or {}
+                        _choreo.on_audio_complete(
+                            _item.get("item_type", ""), _item.get("item_content", ""))
+                except Exception:
+                    pass  # 编排异常不回传播放器线程（沿 playback_manager 隔离惯例）
+
+            Audio.audio_player.set_completion_callback(_choreo_completion_cb)
 
         # EDTalk 实时推理客户端（EDTalk功能集成计划 §4.3.1）：
         # 无论是否激活都创建（构造廉价），is_edtalk_active() 在使用点判定；

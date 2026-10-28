@@ -407,3 +407,31 @@ def test_started_callback_exception_isolated():
         time.sleep(0.02)
     assert p.last_error is not None and "字幕开播回调异常" in str(p.last_error.get("message", "")), \
         "回调异常必须被隔离并记录（错误条可见）"
+
+
+def test_completion_payload_carries_item_identity():
+    """G1（2026-10-28 消费回传补齐）：完成回调载荷携带被播条目 item_type/item_content
+    ——audio_core 编排转发回调据 (type,content) 匹配编排 inflight（CL-2）；旧键保留兼容。"""
+    p = _make_player_with_cb_loop()
+    received = []
+
+    async def cb(data):
+        received.append(data)
+
+    p.set_completion_callback(cb)
+    p._fire_completion({"type": "comment", "content": "你好世界"})
+    deadline = time.time() + 2
+    while not received and time.time() < deadline:
+        time.sleep(0.02)
+    assert received, "完成回调未触发"
+    payload = received[0]
+    assert payload["type"] == "audio_playback_completed"
+    assert payload["data"]["item_type"] == "comment"
+    assert payload["data"]["item_content"] == "你好世界"
+    assert "wait_play_audio_num" in payload["data"], "旧键 wait_play_audio_num 必须保留兼容"
+
+
+def test_completion_cb_none_is_noop():
+    """G1：未注册完成回调时 _fire_completion 自检跳过不抛异常（A3 注销后常态）。"""
+    p = _make_player_with_cb_loop()
+    p._fire_completion({"type": "comment", "content": "x"})

@@ -186,13 +186,20 @@ class AUDIO_PLAY_CENTER:
         except Exception:
             self._record_error(f"字幕开播回调异常\n{traceback.format_exc()}")
 
-    def _fire_completion(self):
+    def _fire_completion(self, data_json=None):
         try:
             if self._completion_cb is None:
                 return
+            # G1（2026-10-28 消费回传补齐）：载荷扩展 item_type/item_content——
+            # audio_core 注册的编排转发回调据 (type,content) 匹配编排 inflight
+            # （CL-2 语义，沿 playback_manager EDTalk 路径同款）；旧键保留兼容。
             data = {
                 "type": "audio_playback_completed",
-                "data": {"wait_play_audio_num": len(self.audio_json_list)},
+                "data": {
+                    "wait_play_audio_num": len(self.audio_json_list),
+                    "item_type": (data_json or {}).get("type", ""),
+                    "item_content": (data_json or {}).get("content", ""),
+                },
             }
             if not self._cb_loop.submit(self._completion_cb(data)):
                 self._record_error("播放完成回调提交失败")
@@ -366,7 +373,7 @@ class AUDIO_PLAY_CENTER:
             self._skip_event.clear()
             status = self._wait_loop(is_999=True)
             if status == "completed":
-                self._fire_completion()
+                self._fire_completion(item)
             self._release_999()
             self._finish_cleanup(wf, held.get("tmp_audio_path"))
             self._post_play_interval()
@@ -507,7 +514,7 @@ class AUDIO_PLAY_CENTER:
             logger.info(f"builtin播放结束：{'跳过' if skipped else '完成'} type={data_json.get('type')}")
 
             if not skipped:
-                self._fire_completion()
+                self._fire_completion(data_json)
             if is_999:
                 self._release_999()
             self._finish_cleanup(wf, tmp_audio_path)
