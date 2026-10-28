@@ -313,8 +313,9 @@ class PlaybackMixin:
                         )
                         # 动作编排完成回调（/autoplan 2026-10-21 批次，义务 CL-2/D-2）：
                         # EDTalk push 路径每条目完成处（push_full 返回=单飞行句完成判定）。
-                        # builtin 的 play() 为入队背压非播放结束——编排完成观测仅声明
-                        # 支持 EDTalk 激活场景（前置条件 is_edtalk_active，RUNBOOK 边界）。
+                        # G1（2026-10-28）：builtin 播放器的完成回传已由 audio_core 注册
+                        # 完成回调补齐（_fire_completion 携带条目 type/content）——两路
+                        # 互斥不双报（EDTalk 激活走本路径，未激活走 builtin 播放回调）。
                         try:
                             from utils.orchestration import get_choreographer
                             _choreo = get_choreographer()

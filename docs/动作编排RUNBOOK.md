@@ -45,7 +45,7 @@
 
 ## 3. 语义与边界声明（必读）
 
-- **完成观测仅支持 EDTalk 激活场景**（WP-5）：观测点 = playback EDTalk push 路径的 `push_full` 返回（单飞行句完成判定）。builtin 的 `play()` 是入队背压非播放结束，pygame 路径语义不同——非 EDTalk 模式编排器整体禁用。
+- **完成观测支持 EDTalk 激活场景与 builtin 播放器**（WP-5 + G1 2026-10-28）：EDTalk 观测点 = playback EDTalk push 路径的 `push_full` 返回（单飞行句完成判定）；builtin 观测点 = 播放器完成回调（`_fire_completion` 载荷携带被播条目 type/content，audio_core 注册转发 `on_audio_complete`，A3 死链清理后重新注册）。两路互斥不双报。pygame/外部模式语义不同——该模式下编排器整体禁用。
 - **计时起点 = 切换请求被 EDTalk 接受时**（CL-1）：`switch_at=segment_end` 的边界等待会计入实际显示时长（显示时长 ≥ duration_s）。衔接片段（enter 等短素材）建议 segment_end；长段默认池勿用作序列段。
 - **file 音轨完成精度**受 `_wait_flight_complete` 启发式限制（EDTalk 完成判定启发式，宁迟勿截）。
 - **tts 音轨与周期答谢通道**（WP-3/WP-4）：编排答谢经注入引用复用原生 `_thanks_generate`，E-2 每分钟限流窗口与周期通道全共享。**注意**：`thanks.gift.periodic_trigger.enable=true` 时答谢进周期缓存延后播报，画面按 F1 上限（duration_s 或 60s）推进——语音与画面的同步在该组合下降级为超时驱动。
