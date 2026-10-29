@@ -648,6 +648,19 @@ class AutoliveApp:
         # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2 延续；
         # python 路线由 config.py 补丁 P4 读 FASTRAG__SERVER__PORT）
         env["FASTRAG__SERVER__PORT"] = str(port)
+        # 量化三键 env 注入（config.py P7 域校验 fail-fast；前端值域外回退默认并告警）
+        for _key, _default, _domain in (
+                ("llm_quant_bits", 16, (4, 8, 16)),
+                ("reranker_quant_bits", 16, (4, 8, 16)),
+                ("embedder_device", "cpu", ("cpu", "cuda-fp16", "cuda"))):
+            _val = fastrag_cfg.get(_key, _default)
+            if _val not in _domain:
+                logger.warning(
+                    f"fastrag {_key}={_val!r} 值域外，回退默认 {_default!r}。"
+                    f"problem=配置非法；cause=WebUI 值异常；fix=在知识库页『推理配置』改为 {list(_domain)}")
+                _val = _default
+            env_key = f"FASTRAG__{_key.upper()}"
+            env[env_key] = str(_val)
 
         try:
             # stdout/stderr 落盘（对齐 _start_edtalk_realtime：服务全 print 输出

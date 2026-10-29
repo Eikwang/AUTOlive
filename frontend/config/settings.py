@@ -190,7 +190,10 @@ _EDTALK_REALTIME_DEFAULTS: Dict[str, Any] = {
 _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "enable": False,
     "port": 11420,
-    "stream_reply": True,   # fastrag 流式输出开关（2026-10-29 用户裁决独立键）
+    "stream_reply": True,        # fastrag 流式输出开关（2026-10-29 用户裁决独立键）
+    "llm_quant_bits": 16,        # LLM 量化：4=INT4 / 8=INT8 / 16=BF16（启动 env 注入）
+    "reranker_quant_bits": 16,   # Reranker 量化：4/8/16（同上）
+    "embedder_device": "cpu",    # Embedder 设备：cpu / cuda-fp16 / cuda（同上）
 }
 
 # DanmakuListener 整合（2026-09-27 计划 G6/DX）：弹幕监听组件配置节

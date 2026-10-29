@@ -33,6 +33,9 @@ def test_ensure_defaults_fills_missing_sections(tmp_path):
     assert settings.get("edtalk_realtime", "character_dir") == "wy"
     assert settings.get("fastrag", "port") == 11420
     assert settings.get("fastrag", "stream_reply") is True
+    assert settings.get("fastrag", "llm_quant_bits") == 16
+    assert settings.get("fastrag", "reranker_quant_bits") == 16
+    assert settings.get("fastrag", "embedder_device") == "cpu"
     # 内部量键不再注入
     ed = settings.get("edtalk_realtime")
     for internal in ("port", "api_ip_port", "interpreter_path", "segments",
@@ -367,8 +370,22 @@ def test_fastrag_python_cmd_and_env(tmp_path, monkeypatch):
     assert not any("server.exe" in part for part in cmd), "启动物不得再是 rust exe"
     assert captured["cwd"] == str(tmp_path / "edtalk" / "fastrag" / "fastrag-python")
     assert captured["env"]["FASTRAG__SERVER__PORT"] == "11420"
+    assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
+    assert captured["env"]["FASTRAG__RERANKER_QUANT_BITS"] == "16"
+    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cpu"
     assert captured["shell"] is False
     assert "fastrag" in app.my_subprocesses
+
+
+def test_fastrag_invalid_quant_falls_back(tmp_path, monkeypatch):
+    """量化值域外→回退默认并告警（前端 fail-soft，服务端 P7 严格域校验）。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch)
+    cfg["fastrag"]["llm_quant_bits"] = 7
+    cfg["fastrag"]["embedder_device"] = "tpu"
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is True
+    assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
+    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cpu"
 
 
 def test_fastrag_preflight_index_missing(tmp_path, monkeypatch):

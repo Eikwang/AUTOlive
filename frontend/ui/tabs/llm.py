@@ -239,43 +239,64 @@ def _create_fastrag_card(
         threading.Thread(target=_run_build_index, daemon=True).start()
 
     def _on_health_check():
-        """GET /health 状态探测（离线态灰字引导，design 义务）。"""
+        """GET /health 状态探测（完善：全量运行态字段+连接拒绝/HTTP 错误分支区分）。"""
         import requests
         port = get_nested_value(config, "fastrag", "port", default=11420)
         try:
-            resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=2)
-            data = resp.json() if resp.status_code == 200 else {}
-            health_label.set_text(
-                f"运行中 | 文本块:{data.get('chunks', '?')} | rerank:{data.get('rerank_enabled', '?')}"
-            ).style("color: var(--color-positive)")
-        except Exception:
+            resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=3)
+        except requests.exceptions.ConnectionError:
             health_label.set_text(
                 "服务未运行——开启开关并『运行系统』后自动拉起"
             ).style("color: var(--text-hint)")
+            return
+        except Exception as _e:
+            health_label.set_text(
+                f"探测异常：{type(_e).__name__}——查 log/fastrag_server.log"
+            ).style("color: var(--color-warning, #f59e0b)")
+            return
+        if resp.status_code != 200:
+            health_label.set_text(
+                f"服务异常：HTTP {resp.status_code}（503=索引未就绪）——查 log/fastrag_server.log"
+            ).style("color: var(--color-danger, #dc2626)")
+            return
+        data = resp.json() or {}
+        health_label.set_text(
+            f"运行中 | 文本块:{data.get('chunks', '?')} | rerank:{data.get('rerank_enabled', '?')}"
+            f" | LLM:{data.get('llm_quant', '?')} | Rerank量化:{data.get('reranker_quant', '?')}"
+            f" | 显存:{data.get('vram_gb', '?')}GB"
+        ).style("color: var(--color-positive)")
 
     def _on_query_test():
         """基础功能节#1：一次性真实 /query 试连（health 只证服务存活，本按钮证
         RAG 契约链路——{"question"}→{"answer"} 全链）。与 R2-2 不轮询裁决不冲突。"""
+        import time as _time
         import requests as _rq
         port = get_nested_value(config, "fastrag", "port", default=11420)
+        t0 = _time.perf_counter()
         try:
             resp = _rq.post(f"http://127.0.0.1:{port}/query",
-                            json={"question": "连接测试"}, timeout=15)
-            if resp.status_code != 200:
-                ui.notify(position="top", type="negative",
-                          message=f"problem=/query 返回 HTTP {resp.status_code}；cause=服务异常或索引未就绪；fix=查 server 日志后重试")
-                return
-            answer = (resp.json() or {}).get("answer")
-            if answer is None:
-                ui.notify(position="top", type="negative",
-                          message="problem=响应无 answer 字段；cause=fastrag 版本契约漂移；fix=核对 edtalk/fastrag/api_client.py 契约")
-                return
-            preview = str(answer)[:60] + ("…" if len(str(answer)) > 60 else "")
-            ui.notify(position="top", type="positive",
-                      message=f"测试问答连通：{preview}")
-        except Exception as e:
+                            json={"question": "连接测试"}, timeout=60)
+        except _rq.exceptions.ConnectionError:
             ui.notify(position="top", type="negative",
-                      message=f"problem=连接失败；cause={type(e).__name__}；fix=确认服务已启动（先点检查服务状态）")
+                      message="problem=连接被拒绝；cause=fastrag 服务未启动；fix=开启开关并『运行系统』拉起，或先点检查服务状态")
+            return
+        except _rq.exceptions.Timeout:
+            ui.notify(position="top", type="negative",
+                      message="problem=问答超时（60s）；cause=模型推理未返回（首次冷启动加载或服务挂起）；fix=查 log/fastrag_server.log")
+            return
+        elapsed = _time.perf_counter() - t0
+        if resp.status_code != 200:
+            ui.notify(position="top", type="negative",
+                      message=f"problem=/query 返回 HTTP {resp.status_code}；cause=服务异常或索引未就绪；fix=查 log/fastrag_server.log 后重试")
+            return
+        answer = (resp.json() or {}).get("answer")
+        if answer is None:
+            ui.notify(position="top", type="negative",
+                      message="problem=响应无 answer 字段；cause=fastrag 版本契约漂移；fix=核对 PATCHES.md 契约锚")
+            return
+        preview = str(answer)[:60] + ("…" if len(str(answer)) > 60 else "")
+        ui.notify(position="top", type="positive",
+                  message=f"测试问答连通（{elapsed:.1f}s）：{preview}")
 
     # （C4 收敛注：原『应用 fastrag 请求模板』/『还原上次配置』按钮已退役——
     #  fastrag /query 为私有 schema（{"question"}→{"answer"}），S2 裁决响应解析
@@ -304,14 +325,7 @@ def _create_fastrag_card(
                 value="edtalk/fastrag/knowledgebase/",
                 style="width:100%;",
             ).props("disable")
-            health_label = ui.label("").style("color: var(--text-hint)")
 
-        with ui.row():
-            build_btn = ui.button("构建索引", on_click=_on_build_click).props("outline")
-            build_spinner = ui.label("").style("color: var(--text-hint)")
-            ui.button("检查服务状态", on_click=_on_health_check).props("flat")
-            ui.button("测试问答", on_click=_on_query_test).props("flat").tooltip(
-                "POST /query 一次真实试连（验证 RAG 契约链路，非仅服务存活）")
 
         # ---------- 上传文档 UI（义务块"fastrag 系统级整合"：多文档+文件名清洗 F-E5+五件套） ----------
         upload_docs_label = ui.label("尚未选择文档").style("color: var(--text-hint)")
@@ -378,8 +392,18 @@ def _create_fastrag_card(
                 ".querySelector('input.q-uploader__input, input[type=file]');"
                 "if (input) { input.value = ''; input.click(); } })()")  # 选前清空：同文件重选也触发 change
 
-        ui.button("上传知识库文档（.md/.txt，可多选）", icon='upload_file',
-                  on_click=_pick_docs).props("outline")
+        # 按钮并列行（2026-10-29 用户裁决：上传文档+构建索引并列；诊断两键同行）
+        with ui.row().style("align-items:center; gap:8px; flex-wrap:wrap"):
+            ui.button("上传文档", icon='upload_file',
+                      on_click=_pick_docs).props("outline").tooltip(
+                "选择 .md/.txt 文档，选择后自动落盘到 knowledgebase/")
+            build_btn = ui.button("构建索引", on_click=_on_build_click).props("outline").tooltip(
+                "对 knowledgebase/ 全量文档重建向量索引（构建前自动暂停 fastrag 服务）")
+            build_spinner = ui.label("").style("color: var(--text-hint)")
+            ui.button("检查服务状态", on_click=_on_health_check).props("flat")
+            ui.button("测试问答", on_click=_on_query_test).props("flat").tooltip(
+                "POST /query 一次真实试连（验证 RAG 契约链路+耗时，非仅服务存活）")
+            health_label = ui.label("").style("color: var(--text-hint)")
 
         # ---------- 已入库文档列表（D4：读 knowledgebase/ 目录+删除按钮） ----------
         # 说明：utils/fastrag 服务端点仅 /health /query /batch_query /clear_cache，无上传 API——
@@ -418,6 +442,32 @@ def _create_fastrag_card(
                         ui.button(icon='delete', on_click=_del_doc).props('flat dense round')
 
         _refresh_kb_list()
+
+        # ---------- 推理配置（量化——2026-10-29 用户裁决显式暴露；改后需重启系统生效） ----------
+        with ui.expansion("推理配置（量化——改后需重启系统生效）").style("width:100%"):
+            ui.label(
+                "模型/路径与检索参数由系统内置默认管理（无需配置）；以下量化项经启动 env 注入服务"
+                "（config.py 补丁 P7 域校验，非法值拒绝启动）。显存参考：INT4 约 -1.0GB/项。"
+            ).style("color: var(--text-hint); font-size: var(--font-size-assist, 12px)")
+            with ui.grid(columns=3):
+                ui.select(
+                    options={4: "INT4（省约 1.0GB）", 8: "INT8（省约 0.5GB）", 16: "BF16（默认，无量化）"},
+                    value=get_nested_value(config, "fastrag", "llm_quant_bits", default=16),
+                    on_change=lambda e: set_config_callback("fastrag", "llm_quant_bits", value=e.value),
+                    label="LLM 量化",
+                ).props("outlined").style("width:100%;")
+                ui.select(
+                    options={4: "INT4（省约 0.3GB）", 8: "INT8（省约 0.3GB）", 16: "BF16（默认，无量化）"},
+                    value=get_nested_value(config, "fastrag", "reranker_quant_bits", default=16),
+                    on_change=lambda e: set_config_callback("fastrag", "reranker_quant_bits", value=e.value),
+                    label="Reranker 量化",
+                ).props("outlined").style("width:100%;")
+                ui.select(
+                    options={"cpu": "CPU（省显存 ~1.8GB）", "cuda-fp16": "GPU FP16（推荐生产）", "cuda": "GPU FP32（显存较高）"},
+                    value=get_nested_value(config, "fastrag", "embedder_device", default="cpu"),
+                    on_change=lambda e: set_config_callback("fastrag", "embedder_device", value=e.value),
+                    label="Embedder 设备",
+                ).props("outlined").style("width:100%;")
 
         # ---------- 请求模板参数页（R9 义务：六参数暴露+落盘 override+应用重启+脏标记 D6） ----------
         with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%"):
@@ -498,7 +548,10 @@ def _create_fastrag_card(
             ui.button("应用并重启 fastrag 服务", on_click=_apply_template_and_restart).props("outline")
 
         # ---------- 区分文案（native F8；C4 收敛后仅余生成参数一侧） ----------
-        ui.label("本页『对话人设与生成参数』= fastrag 生成行为（语气/长度）——保存后需应用重启；"
+        ui.label("本页『对话人设与生成参数』= fastrag 生成行为（人设/回答规则/长度/温度），"
+                 "由系统全面接管：保存经 config_override.py 覆盖服务端内置值，随服务重启生效"
+                 "（ANSWER_RULES 为显式配置，不同功能模块可各设不同规则）；"
+                 "LLM_DO_SAMPLE=True 与 enable_thinking=False 为系统固定默认，不提供配置；"
                  "LLM 请求通道（端点/格式）在上方『自定义LLM』卡片配置（OpenAI-compatible 固定协议）。"
                  "两侧分工勿混淆，改错一侧会出现『模板不生效』。").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")

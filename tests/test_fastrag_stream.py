@@ -81,6 +81,51 @@ class TestFastragConfigPort:
         assert "1-65535" in msg
 
 
+# ==================== P7：config.py 量化 env 注入域校验 ====================
+
+
+class TestFastragConfigQuant:
+    def test_quant_env_overrides(self):
+        os.environ["FASTRAG__LLM_QUANT_BITS"] = "4"
+        os.environ["FASTRAG__RERANKER_QUANT_BITS"] = "8"
+        os.environ["FASTRAG__EMBEDDER_DEVICE"] = "cuda-fp16"
+        try:
+            mod = _load_fastrag_config(None)
+            assert mod.LLM_QUANT_BITS == 4
+            assert mod.RERANKER_QUANT_BITS == 8
+            assert mod.EMBEDDER_DEVICE == "cuda-fp16"
+        finally:
+            for k in ("FASTRAG__LLM_QUANT_BITS", "FASTRAG__RERANKER_QUANT_BITS",
+                      "FASTRAG__EMBEDDER_DEVICE"):
+                os.environ.pop(k, None)
+
+    def test_quant_unset_keeps_defaults(self):
+        mod = _load_fastrag_config(None)
+        assert mod.LLM_QUANT_BITS == 16
+        assert mod.RERANKER_QUANT_BITS == 16
+        assert mod.EMBEDDER_DEVICE == "cpu"
+
+    def test_quant_invalid_fails_fast(self):
+        os.environ["FASTRAG__LLM_QUANT_BITS"] = "7"
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                _load_fastrag_config(None)
+            msg = str(exc_info.value)
+            assert "FASTRAG__LLM_QUANT_BITS" in msg and "7" in msg
+        finally:
+            os.environ.pop("FASTRAG__LLM_QUANT_BITS", None)
+
+    def test_device_invalid_fails_fast(self):
+        os.environ["FASTRAG__EMBEDDER_DEVICE"] = "tpu"
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                _load_fastrag_config(None)
+            msg = str(exc_info.value)
+            assert "cuda-fp16" in msg
+        finally:
+            os.environ.pop("FASTRAG__EMBEDDER_DEVICE", None)
+
+
 # ==================== T3③：fastrag_llm.stream_resp SSE 客户端契约 ====================
 
 
