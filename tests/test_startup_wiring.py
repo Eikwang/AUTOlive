@@ -32,6 +32,7 @@ def test_ensure_defaults_fills_missing_sections(tmp_path):
     assert settings.get("edtalk_realtime", "enable") is False
     assert settings.get("edtalk_realtime", "character_dir") == "wy"
     assert settings.get("fastrag", "port") == 11420
+    assert settings.get("fastrag", "stream_reply") is True
     # 内部量键不再注入
     ed = settings.get("edtalk_realtime")
     for internal in ("port", "api_ip_port", "interpreter_path", "segments",

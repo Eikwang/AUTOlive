@@ -555,11 +555,9 @@ class AutoliveApp:
     def _start_fastrag(self, config_data: dict):
         """拉起 fastrag server（python 路线，autoplan main-20261029-102545 终门 rec）。
 
-        2026-10-29 fastrag 内部化批次：启动物从 rust server.exe 切换为
-        fastrag-python/server.py（完成 2026-10-15 uc1a 裁决——此前构建按钮产
-        kbindex_py/、模板参数写 config_override.py，而 rust server 只读
-        kbindex/ + Config.toml，知识库更新与模板参数对生产服务永不生效）。
-        rust 产物保留为备用（回滚=本方法改回拉起 server.exe）。
+        2026-10-29 fastrag 内部化批次：启动物=fastrag-python/server.py（完成
+        2026-10-15 uc1a 裁决）。rust 线已弃用删除（同日用户裁决：对话与索引
+        构建全面应用 python 线；server.exe/src/Config.toml 等已清理）。
 
         预检四件（索引 faiss+data.json 双存在/解释器/server.py，缺失→ok=False
         +D-14 式 fix 指引）+ 端口预检（占用幂等探测，Eng E4）；端口经

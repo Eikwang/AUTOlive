@@ -42,7 +42,7 @@ COPY_ITEMS = [
     ("tools", "tools", "track", "评估工具（eval_finetune/mouth_metrics）"),
     ("ckpts", "ckpts", "ignore", "底模权重（大文件）"),
     ("ckpt_models/wy_runC", "ckpt_models/wy_runC", "ignore", "RunC resume 产物（Eng F7）"),
-    ("fastrag", "fastrag", "ignore-exe", "fastrag 服务（exe+模型）"),
+    ("fastrag", "fastrag", "ignore-exe", "fastrag 服务（python+模型；rust 线已退役 2026-10-29）"),
 ]
 
 # .gitignore 追加段（大文件不入库）

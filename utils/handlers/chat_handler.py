@@ -198,10 +198,10 @@ class ChatHandler:
         全部满足才走流式分句合成。
 
         保守门（任一不满足回退全文链路，回复语义零变化）：
-        - chat_type ∈ {custom_llm, fastrag}（声明流式能力的通道白名单；
-          fastrag 流式开关保守复用 custom_llm.stream_reply 跨通道控制——
-          本批不新增 fastrag 侧键，docs/参数生效语义矩阵.md 已注明怪癖）；
-        - custom_llm.stream_reply 非 False（缺省开启）；
+        - chat_type ∈ {custom_llm, fastrag}（声明流式能力的通道白名单）；
+        - 流式开关 per-channel：custom_llm 读 custom_llm.stream_reply，
+          fastrag 读 fastrag.stream_reply（2026-10-29 用户裁决：fastrag 独立
+          开关，取代此前跨通道复用；均缺省开启，WebUI fastrag 生成参数页）；
         - 翻译未启用「回复/弹幕+回复」（翻译吃全文，逐句翻译语义不兼容）；
         - 回复模板未启用（模板 {data} 包裹全文，逐句套用会重复模板）；
         - 按键映射非「回复/弹幕+回复」型（其触发吃全文内容）。
@@ -211,7 +211,8 @@ class ChatHandler:
         """
         if chat_type not in ("custom_llm", "fastrag"):
             return False
-        if self.my_handle.config.get("custom_llm", "stream_reply") is False:
+        # 流式开关 per-channel（fastrag 独立键=2026-10-29 用户裁决）
+        if self.my_handle.config.get(chat_type, "stream_reply") is False:
             return False
         if (self.my_handle.config.get("translate", "enable")
                 and self.my_handle.config.get("translate", "trans_type") in ("回复", "弹幕+回复")):

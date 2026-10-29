@@ -238,10 +238,20 @@ class TestStreamReplyGateFastrag:
     def test_fastrag_default_open(self):
         assert self._handler().stream_reply_gate("fastrag") is True
 
-    def test_fastrag_stream_reply_false_closed(self):
-        """L211 语义冻结：fastrag 流式受 custom_llm.stream_reply 跨通道控制。"""
-        assert self._handler({"custom_llm": {"stream_reply": False}}) \
+    def test_fastrag_own_switch_false_closed(self):
+        """fastrag 独立流式开关（2026-10-29 用户裁决：fastrag.stream_reply）。"""
+        assert self._handler({"fastrag": {"stream_reply": False}}) \
             .stream_reply_gate("fastrag") is False
+
+    def test_fastrag_independent_of_custom_llm_switch(self):
+        """独立键语义：custom_llm.stream_reply=False 不再影响 fastrag 通道。"""
+        assert self._handler({"custom_llm": {"stream_reply": False}}) \
+            .stream_reply_gate("fastrag") is True
+
+    def test_custom_llm_own_switch_false_closed(self):
+        """custom_llm 通道仍读自身键（语义不变）。"""
+        assert self._handler({"custom_llm": {"stream_reply": False}}) \
+            .stream_reply_gate("custom_llm") is False
 
     def test_fastrag_translate_reply_closed(self):
         assert self._handler({"translate": {"enable": True, "trans_type": "回复"}}) \

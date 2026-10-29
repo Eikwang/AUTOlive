@@ -190,6 +190,7 @@ _EDTALK_REALTIME_DEFAULTS: Dict[str, Any] = {
 _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "enable": False,
     "port": 11420,
+    "stream_reply": True,   # fastrag 流式输出开关（2026-10-29 用户裁决独立键）
 }
 
 # DanmakuListener 整合（2026-09-27 计划 G6/DX）：弹幕监听组件配置节

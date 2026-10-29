@@ -276,6 +276,6 @@
 
 ## Deferred Items from /autoplan (2026-10-29) — fastrag 内部化整合批次
 
-1. **rust 备用时效复检点**（P3, S）— server.exe/query.exe/build-index.exe 保留为 uc1a 备用，但 python 侧持续演化（P 序列补丁+流式）而 rust 侧停滞，备份半衰期约 6 个月。触发条件：python 路线稳定运行数月后或下次 fastrag 上游同步时，复裁 rust 备用去留（恢复不可用的备份比没有更糟）。依赖：本批 T1 落地。
+1. **~~rust 备用时效复检点~~（已执行 2026-10-29：用户裁决 rust 线弃用，server.exe/src/Config.toml/kbindex 等盘上删除，去留问题随删除终结）**— 原：python 侧持续演化而 rust 停滞，备份半衰期约 6 个月。
 2. **流式门控按通道键迁移评估**（P3, S）— fastrag 流式开关当前保守复用 custom_llm.stream_reply（跨通道控制，无 fastrag 侧独立键，语义矩阵已注明怪癖）。若未来出现"开 custom_llm 流式但关 fastrag 流式"的真实需求，评估新增 fastrag.stream_reply 键+gate 读取迁移。依赖：本批 T3 落地+需求实证。
 3. **fastrag 构建按钮解释器分叉收编核验**（P3, S）— T4 将构建按钮 llm.py:159 切到 resolve_interpreter 消除与启动路径的解析分叉（Eng A1）；实施后核验构建链在解释器挪位场景下的行为与启动链一致。依赖：本批 T4。

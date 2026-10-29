@@ -20,7 +20,6 @@ from frontend.config.paths import get_base_path
 from utils.my_log import logger
 
 # fastrag 文档上传暂存（auto_upload=False：逐文件收集，落盘按钮统一写入 knowledgebase）
-_pending_docs: list = []
 
 
 def create_llm_tab(
@@ -113,7 +112,7 @@ def _create_fastrag_card(
     """fastrag 知识库 RAG 卡片。
 
     服务进程级开关（不进 ENABLE_PATHS）；server 由开关随系统启动；
-    build-index 由构建知识库按钮手动触发。端口真源 = config.fastrag.port，
+    build-index 由『构建索引』按钮手动触发。端口真源 = config.fastrag.port，
     启动时经 FASTRAG__SERVER__PORT 环境变量注入（Eng 义务⑬，零 TOML 手术）。
     """
     card_css = theme_config.get("card", "")
@@ -175,7 +174,7 @@ def _create_fastrag_card(
                     f"fix=手动结束 python server.py 进程后重试构建，否则索引文件可能被占用")
 
     def _run_build_index():
-        """后台线程：构建知识库索引。"""
+        """后台线程：构建知识库索引（『构建索引』按钮）。"""
         try:
             import subprocess
             _stop_fastrag_server_if_running()
@@ -198,11 +197,11 @@ def _create_fastrag_card(
             code = proc.wait()
             if code == 0:
                 ui.notify(position="top", type="positive",
-                          message="知识库构建完成。重启系统后新索引生效（启动物=python 路线；索引缺失时启动预检会指引先构建再重启）")
+                          message="索引构建完成。重启系统后新索引生效（启动物=python 路线；索引缺失时启动预检会指引先构建再重启）")
             else:
                 ui.notify(position="top", type="negative", message=f"构建失败（exit {code}），详见日志")
         except Exception as e:
-            logger.error(f"构建知识库异常：{e}")
+            logger.error(f"构建索引异常：{e}")
             ui.notify(position="top", type="negative", message=f"构建异常：{e}")
         finally:
             build_btn.set_enabled(True)
@@ -286,7 +285,7 @@ def _create_fastrag_card(
             health_label = ui.label("").style("color: var(--text-hint)")
 
         with ui.row():
-            build_btn = ui.button("构建知识库", on_click=_on_build_click).props("outline")
+            build_btn = ui.button("构建索引", on_click=_on_build_click).props("outline")
             build_spinner = ui.label("").style("color: var(--text-hint)")
             ui.button("检查服务状态", on_click=_on_health_check).props("flat")
             ui.button("测试问答", on_click=_on_query_test).props("flat").tooltip(
@@ -297,48 +296,36 @@ def _create_fastrag_card(
         doc_status_col = ui.column().style("width:100%;gap:2px")  # 逐文件状态行（D4）
 
         def _collect_doc(e):
+            """选择文档即校验+落盘（2026-10-29 用户裁决：去掉『落盘所选文档』
+            中间按钮——上传→自动落盘→点『构建索引』两步完成）。"""
+            import re as _re
             name = getattr(e, "name", "")
             ext = os.path.splitext(name)[1].lower()
             if ext not in (".md", ".txt"):
                 ui.notify(position="top", type="negative",
                           message=f"problem=不支持的格式；cause={name}；fix=仅支持 .md/.txt（其他格式随路线能力扩展）")
                 return
-            _pending_docs.append(e)
-            upload_docs_label.set_text(f"已选 {len(_pending_docs)} 份文档（点下方按钮落盘）")
-
-        def _persist_docs():
             kb = os.path.join(_fastrag_dir(), "knowledgebase")
             os.makedirs(kb, exist_ok=True)
-            import re as _re
-            saved, failed = 0, 0
-            doc_status_col.clear()
-            with doc_status_col:
-                for f in list(_pending_docs):
-                    safe = os.path.basename(getattr(f, "name", "doc.md"))
-                    stem = _re.sub(r"[^A-Za-z0-9_一-鿿-]", "_", os.path.splitext(safe)[0]) or "doc"
-                    target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
-                    n = 1
-                    while os.path.exists(target):
-                        target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
-                        n += 1
-                    try:
-                        with open(target, "wb") as out:
-                            out.write(f.content.read())
-                        _pending_docs.remove(f)
-                        saved += 1
-                        # 逐文件状态行（D4）：已保存
-                        ui.label(f"✓ 已保存：{os.path.basename(target)}").style(
-                            "font-size: var(--font-size-assist, 12px); color: var(--color-positive, #16a34a);")
-                    except Exception as e:
-                        failed += 1
-                        # 逐文件状态行（D4）：失败原因
-                        ui.label(f"✗ 失败：{safe}——{e}").style(
-                            "font-size: var(--font-size-assist, 12px); color: var(--color-danger, #dc2626);")
-            if failed:
-                upload_docs_label.set_text(f"已落盘 {saved} 份、失败 {failed} 份（原因见下方状态行）；点击构建生效")
-            else:
-                upload_docs_label.set_text(f"已落盘 {saved} 份到 edtalk/fastrag/knowledgebase/（点击构建生效）")
-            _refresh_kb_list()
+            safe = os.path.basename(getattr(e, "name", "doc.md"))
+            stem = _re.sub(r"[^A-Za-z0-9_一-鿿-]", "_", os.path.splitext(safe)[0]) or "doc"
+            target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
+            n = 1
+            while os.path.exists(target):
+                target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
+                n += 1
+            try:
+                with open(target, "wb") as out:
+                    out.write(e.content.read())
+                doc_status_col.clear()
+                with doc_status_col:
+                    ui.label(f"✓ 已落盘：{os.path.basename(target)}——点『构建索引』生成索引").style(
+                        "font-size: var(--font-size-assist, 12px); color: var(--color-positive, #16a34a);")
+                upload_docs_label.set_text(f"已落盘到 edtalk/fastrag/knowledgebase/（点『构建索引』生效）")
+                _refresh_kb_list()
+            except Exception as ex:
+                ui.notify(position="top", type="negative",
+                          message=f"problem=文档落盘失败；cause={safe}——{ex}；fix=检查磁盘与目录权限后重试")
 
         # 2026-10-29 批次：q-uploader 自带拾取按钮过小不易点击——隐藏原生上传器
         # 外壳，改用与页面其它按钮一致的 outline 标准按钮触发文件选择。
@@ -363,14 +350,13 @@ def _create_fastrag_card(
 
         ui.button("上传知识库文档（.md/.txt，可多选）", icon='upload_file',
                   on_click=_pick_docs).props("outline")
-        ui.button("落盘所选文档", on_click=lambda: _persist_docs()).props("outline")
 
         # ---------- 已入库文档列表（D4：读 knowledgebase/ 目录+删除按钮） ----------
         # 说明：utils/fastrag 服务端点仅 /health /query /batch_query /clear_cache，无上传 API——
         # 前端直写 knowledgebase/ 目录即入库源（构建索引后生效），无需动 utils/fastrag。
         ui.label("已入库文档（edtalk/fastrag/knowledgebase/）").style(
             "font-size: var(--font-size-body, 14px);")
-        ui.label("删除文档后需重新『构建知识库』生成索引").style(
+        ui.label("删除文档后需重新『构建索引』生成索引").style(
             "color: var(--text-hint); font-size: var(--font-size-assist, 12px);")
         kb_list_col = ui.column().style("width:100%;gap:2px;max-height:200px;overflow:auto")
 
@@ -405,6 +391,14 @@ def _create_fastrag_card(
 
         # ---------- 请求模板参数页（R9 义务：六参数暴露+落盘 override+应用重启+脏标记 D6） ----------
         with ui.expansion("对话人设与生成参数（fastrag 生成行为——保存后需应用重启）").style("width:100%"):
+            # 流式输出独立开关（2026-10-29 用户裁决：fastrag.stream_reply 独立键，
+            # 取代此前跨通道复用 custom_llm.stream_reply 的保守方案）
+            ui.switch(
+                "流式输出（LLM 逐段生成→逐句 TTS，首句提前出声）",
+                value=bool(get_nested_value(config, "fastrag", "stream_reply", default=True)),
+                on_change=lambda e: set_config_callback("fastrag", "stream_reply", value=e.value),
+            ).tooltip("关闭后 fastrag 通道走全文链路（生成完整回答后一次性合成）；"
+                      "流式失败零产出时自动回退全文链")
             tpl_dirty = {"v": False}
             _TPL_KEYS = [
                 ("system_role", "人设（SYSTEM_ROLE）", "你是一位专业、友好的线上销售，现在正在进行直播。"),
