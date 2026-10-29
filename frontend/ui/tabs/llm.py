@@ -131,11 +131,12 @@ def _create_fastrag_card(
         return None
 
     def _stop_fastrag_server_if_running():
-        """构建前先停 server（native H2：Windows 下 server 持有索引句柄会
-        PermissionError）。在 webui 进程内无法直接拿到 my_subprocesses 的
-        场景下用 taskkill 按映像名兜底。"""
+        """构建前先停 server（python 路线：Windows 下 server 持有索引句柄会
+        PermissionError）。wmic 精确按命令行特征杀 python server.py（避免误伤
+        其他 python）；wmic 缺失（Win11 24H2+ 按需功能，DX F7）时回退
+        PowerShell Get-CimInstance，均失败输出可行动日志。"""
+        killed = False
         try:
-            # 终门 uc1a：python 路线——按命令行特征精确杀 python server.py（避免误伤其他 python）
             out = subprocess.run(
                 ["wmic", "process", "where",
                  "name='python.exe' and commandline like '%fastrag-python%server.py%'",
@@ -147,17 +148,45 @@ def _create_fastrag_card(
                 if pid.isdigit():
                     subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
                                    capture_output=True, timeout=10)
+                    killed = True
+        except FileNotFoundError:
+            logger.warning("wmic 不可用（Win11 24H2+ 按需功能），回退 PowerShell 探测 fastrag server 进程")
         except Exception as e:
-            logger.warning(f"停止 fastrag server 失败（可能未运行）：{e}")
+            logger.warning(f"wmic 探测 fastrag server 失败（可能未运行）：{e}")
+        if not killed:
+            # DX F7 备选链：PowerShell Get-CimInstance 按命令行特征精确杀
+            try:
+                _ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                       "Where-Object { $_.CommandLine -like '*fastrag-python*server.py*' } | "
+                       "Select-Object -ExpandProperty ProcessId")
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", _ps],
+                    capture_output=True, text=True, timeout=20,
+                )
+                for line in (out.stdout or "").splitlines():
+                    pid = line.strip()
+                    if pid.isdigit():
+                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                                       capture_output=True, timeout=10)
+                        killed = True
+            except Exception as e:
+                logger.warning(
+                    f"停止 fastrag server 失败（可能未运行）：{e}；"
+                    f"fix=手动结束 python server.py 进程后重试构建，否则索引文件可能被占用")
 
     def _run_build_index():
         """后台线程：构建知识库索引。"""
         try:
             import subprocess
             _stop_fastrag_server_if_running()
-            # 终门 uc1a：python 路线——build_index_native.py（runtime312 解释器）
-            interpreter = get_nested_value(config, "edtalk_realtime", "interpreter_path",
-                                           default="D:\\AI\\EDTalk\\runtime312\\python.exe")
+            # 解释器解析与启动路径同源（Eng A1：resolve_interpreter 四级链，
+            # 消除硬编码默认 llm.py:159 旧分叉——解释器挪位后构建/启动不再分裂）
+            from utils.edtalk_realtime.runtime import resolve_interpreter
+            interpreter = resolve_interpreter(config)
+            if not interpreter or not os.path.exists(interpreter):
+                ui.notify(position="top", type="negative",
+                          message="problem=解释器未找到；cause=runtime312 缺失；fix=系统设置页配置 edtalk_realtime 解释器路径")
+                return
             proc = subprocess.Popen(
                 [interpreter, os.path.join(_fastrag_dir(), "fastrag-python", "build_index_native.py")],
                 cwd=os.path.join(_fastrag_dir(), "fastrag-python"), shell=False,
@@ -169,7 +198,7 @@ def _create_fastrag_card(
             code = proc.wait()
             if code == 0:
                 ui.notify(position="top", type="positive",
-                          message="知识库构建完成。点击『重启 fastrag 服务』生效（需系统处于运行状态或下次运行系统时自动拉起）")
+                          message="知识库构建完成。重启系统后新索引生效（启动物=python 路线；索引缺失时启动预检会指引先构建再重启）")
             else:
                 ui.notify(position="top", type="negative", message=f"构建失败（exit {code}），详见日志")
         except Exception as e:
@@ -311,10 +340,29 @@ def _create_fastrag_card(
                 upload_docs_label.set_text(f"已落盘 {saved} 份到 edtalk/fastrag/knowledgebase/（点击构建生效）")
             _refresh_kb_list()
 
-        ui.upload(
+        # 2026-10-29 批次：q-uploader 自带拾取按钮过小不易点击——隐藏原生上传器
+        # 外壳，改用与页面其它按钮一致的 outline 标准按钮触发文件选择。
+        # 实测勘误：Quasar pick() 方法不可用（Method "pick" not found）——
+        # 改为直接 click 上传器内部原生 input[type=file]（隐藏态程序化点击
+        # 有效，且处于按钮点击的用户激活上下文内）
+        _doc_uploader = ui.upload(
             label="上传知识库文档（.md/.txt，可多选）",
             multiple=True, auto_upload=False, on_upload=_collect_doc,
         ).props('accept=".md,.txt"').style("width:100%")
+        _doc_uploader.set_visibility(False)
+
+        def _pick_docs():
+            # NiceGUI 元素根节点无 DOM id（getElementById 仅作快速路径）；
+            # 本应用唯一 ui.upload——按 q-uploader 原生 input 类名全局选取
+            ui.run_javascript(
+                "(() => { const root = document.getElementById("
+                f"'{_doc_uploader.id}');"
+                "const input = (root || document)"
+                ".querySelector('input.q-uploader__input, input[type=file]');"
+                "if (input) input.click(); })()")
+
+        ui.button("上传知识库文档（.md/.txt，可多选）", icon='upload_file',
+                  on_click=_pick_docs).props("outline")
         ui.button("落盘所选文档", on_click=lambda: _persist_docs()).props("outline")
 
         # ---------- 已入库文档列表（D4：读 knowledgebase/ 目录+删除按钮） ----------
