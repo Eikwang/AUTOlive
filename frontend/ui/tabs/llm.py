@@ -175,6 +175,20 @@ def _create_fastrag_card(
                     f"停止 fastrag server 失败（可能未运行）：{e}；"
                     f"fix=手动结束 python server.py 进程后重试构建，否则索引文件可能被占用")
 
+    def _notify_alive(kind: str, message: str):
+        """后台线程通知（client 存活守卫）：构建耗时 ~20s，期间页面刷新/重连
+        会替换 NiceGUI client——向已删除 client 发通知会被吞掉（实测 log2.txt
+        「Client has been deleted」，成功提示丢失致用户误判失败）。is_deleted()
+        预检 + 降级日志；同时兜 try/except 防 notify 其他异常外溢。"""
+        from nicegui import client as _ng_client
+        try:
+            if _ng_client.get().is_deleted():
+                logger.info(f"[build-index] 页面已刷新，跳过前端通知（{kind}）：{message}")
+                return
+            ui.notify(position="top", type=kind, message=message)
+        except Exception as _e:
+            logger.info(f"[build-index] 前端通知失败（{kind}）：{message}（{_e}）")
+
     def _run_build_index():
         """后台线程：构建知识库索引（『构建索引』按钮）。"""
         try:
@@ -185,12 +199,18 @@ def _create_fastrag_card(
             from utils.edtalk_realtime.runtime import resolve_interpreter
             interpreter = resolve_interpreter(config)
             if not interpreter or not os.path.exists(interpreter):
-                ui.notify(position="top", type="negative",
-                          message="problem=解释器未找到；cause=runtime312 缺失；fix=系统设置页配置 edtalk_realtime 解释器路径")
+                _notify_alive("negative",
+                              "problem=解释器未找到；cause=runtime312 缺失；fix=系统设置页配置 edtalk_realtime 解释器路径")
                 return
+            env = os.environ.copy()
+            # 子进程中文编码：Windows 管道默认 GBK，父进程按 UTF-8 解读→
+            # 控制台乱码（实测 log2.txt）；强制 UTF-8 对齐读侧
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             proc = subprocess.Popen(
                 [interpreter, os.path.join(_fastrag_dir(), "fastrag-python", "build_index_native.py")],
                 cwd=os.path.join(_fastrag_dir(), "fastrag-python"), shell=False,
+                env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 encoding="utf-8", errors="replace", bufsize=1,
             )
@@ -198,13 +218,13 @@ def _create_fastrag_card(
                 logger.info(f"[build-index] {line.rstrip()}")
             code = proc.wait()
             if code == 0:
-                ui.notify(position="top", type="positive",
-                          message="索引构建完成。重启系统后新索引生效（启动物=python 路线；索引缺失时启动预检会指引先构建再重启）")
+                _notify_alive("positive",
+                              "索引构建完成。重启系统后新索引生效（启动物=python 路线；索引缺失时启动预检会指引先构建再重启）")
             else:
-                ui.notify(position="top", type="negative", message=f"构建失败（exit {code}），详见日志")
+                _notify_alive("negative", f"构建失败（exit {code}），详见日志")
         except Exception as e:
             logger.error(f"构建索引异常：{e}")
-            ui.notify(position="top", type="negative", message=f"构建异常：{e}")
+            _notify_alive("negative", f"构建异常：{e}")
         finally:
             build_btn.set_enabled(True)
             build_spinner.set_text("")
