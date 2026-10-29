@@ -297,19 +297,24 @@ def _create_fastrag_card(
         upload_docs_label = ui.label("尚未选择文档").style("color: var(--text-hint)")
         doc_status_col = ui.column().style("width:100%;gap:2px")  # 逐文件状态行（D4）
 
-        def _collect_doc(e):
+        async def _collect_doc(e):
             """选择文档即校验+落盘（2026-10-29 用户裁决：去掉『落盘所选文档』
-            中间按钮——上传→自动落盘→点『构建索引』两步完成）。"""
+            中间按钮——上传→自动落盘→点『构建索引』两步完成）。
+
+            NiceGUI 3.16 事件形态：UploadEventArguments.file=FileUpload
+            （.name + await .save(path)）——旧版 e.name/e.content 直挂形态
+            已随 3.x 破坏性变更移除（实测空名根因）。"""
             import re as _re
-            name = getattr(e, "name", "")
+            file = getattr(e, "file", None)
+            name = getattr(file, "name", "") if file is not None else ""
             ext = os.path.splitext(name)[1].lower()
-            if ext not in (".md", ".txt"):
+            if not name or ext not in (".md", ".txt"):
                 ui.notify(position="top", type="negative",
-                          message=f"problem=不支持的格式；cause={name}；fix=仅支持 .md/.txt（其他格式随路线能力扩展）")
+                          message=f"problem=不支持的格式；cause={name or '(事件未携带文件名)'}；fix=仅支持 .md/.txt（其他格式随路线能力扩展）")
                 return
             kb = os.path.join(_fastrag_dir(), "knowledgebase")
             os.makedirs(kb, exist_ok=True)
-            safe = os.path.basename(getattr(e, "name", "doc.md"))
+            safe = os.path.basename(name)
             stem = _re.sub(r"[^A-Za-z0-9_一-鿿-]", "_", os.path.splitext(safe)[0]) or "doc"
             target = os.path.join(kb, stem + os.path.splitext(safe)[1].lower())
             n = 1
@@ -317,12 +322,11 @@ def _create_fastrag_card(
                 target = os.path.join(kb, f"{stem}_{n}{os.path.splitext(safe)[1].lower()}")
                 n += 1
             try:
-                with open(target, "wb") as out:
-                    out.write(e.content.read())
+                await file.save(target)
                 with doc_status_col:
                     ui.label(f"✓ 已落盘：{os.path.basename(target)}——点『构建索引』生成索引").style(
                         "font-size: var(--font-size-assist, 12px); color: var(--color-positive, #16a34a);")
-                upload_docs_label.set_text(f"已落盘到 edtalk/fastrag/knowledgebase/（点『构建索引』生效）")
+                upload_docs_label.set_text("已落盘到 edtalk/fastrag/knowledgebase/（点『构建索引』生效）")
                 _refresh_kb_list()
             except Exception as ex:
                 ui.notify(position="top", type="negative",
@@ -347,7 +351,7 @@ def _create_fastrag_card(
                 f"'{_doc_uploader.id}');"
                 "const input = (root || document)"
                 ".querySelector('input.q-uploader__input, input[type=file]');"
-                "if (input) input.click(); })()")
+                "if (input) { input.value = ''; input.click(); } })()")  # 选前清空：同文件重选也触发 change
 
         ui.button("上传知识库文档（.md/.txt，可多选）", icon='upload_file',
                   on_click=_pick_docs).props("outline")
