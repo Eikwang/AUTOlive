@@ -19,7 +19,9 @@ from frontend.utils.common import is_url_check
 from frontend.config.paths import get_base_path
 from utils.my_log import logger
 
-# fastrag 文档上传暂存（auto_upload=False：逐文件收集，落盘按钮统一写入 knowledgebase）
+# fastrag 文档上传（auto_upload=True：选择即上传触发 on_upload 落盘——
+# 2026-10-29 实测修复：False+隐藏外壳时文件只进 Quasar 客户端队列，
+# on_upload 永不触发、服务端零日志，落盘静默失败）
 
 
 def create_llm_tab(
@@ -317,7 +319,6 @@ def _create_fastrag_card(
             try:
                 with open(target, "wb") as out:
                     out.write(e.content.read())
-                doc_status_col.clear()
                 with doc_status_col:
                     ui.label(f"✓ 已落盘：{os.path.basename(target)}——点『构建索引』生成索引").style(
                         "font-size: var(--font-size-assist, 12px); color: var(--color-positive, #16a34a);")
@@ -334,7 +335,7 @@ def _create_fastrag_card(
         # 有效，且处于按钮点击的用户激活上下文内）
         _doc_uploader = ui.upload(
             label="上传知识库文档（.md/.txt，可多选）",
-            multiple=True, auto_upload=False, on_upload=_collect_doc,
+            multiple=True, auto_upload=True, on_upload=_collect_doc,
         ).props('accept=".md,.txt"').style("width:100%")
         _doc_uploader.set_visibility(False)
 
