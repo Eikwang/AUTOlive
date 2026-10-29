@@ -280,3 +280,163 @@ def test_edtalk_already_running_skip(tmp_path, monkeypatch):
     runtime_data = json.loads(
         (tmp_path / "data" / "edtalk_runtime.json").read_text(encoding="utf-8"))
     assert runtime_data["port"] == 8000  # 复用已有服务也回写（客户端可解析）
+
+
+# ---------- 4. fastrag 启动路径 python 化（autoplan main-20261029-102545 批次） ----------
+
+
+class _FakeSock:
+    """connect_ex 可编程的假 socket（1=占用，0=空闲）。"""
+
+    def __init__(self, result):
+        self._result = result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def settimeout(self, t):
+        pass
+
+    def connect_ex(self, addr):
+        return self._result
+
+
+def _fastrag_env(tmp_path, monkeypatch, *, port=11420, index=True, data_json=True,
+                 server_py=True, interpreter="fake-python.exe", connect=1):
+    """装配 fastrag 预检环境：返回 (app, captured, cfg)。"""
+    from frontend.main import AutoliveApp
+
+    app = AutoliveApp.__new__(AutoliveApp)
+    app.config = MagicMock()
+    app.my_subprocesses = {}
+    captured = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured["cmd"] = cmd
+            captured["cwd"] = kw.get("cwd")
+            captured["env"] = kw.get("env")
+            captured["shell"] = kw.get("shell")
+            self.pid = 77
+
+        def poll(self):
+            return None
+
+    fastrag_dir = tmp_path / "edtalk" / "fastrag"
+    py_dir = fastrag_dir / "fastrag-python"
+    py_dir.mkdir(parents=True, exist_ok=True)
+    if index:
+        (fastrag_dir / "kbindex_py").mkdir(parents=True, exist_ok=True)
+        if data_json:
+            (fastrag_dir / "kbindex_py" / "data.json").write_text("{}", encoding="utf-8")
+        (fastrag_dir / "kbindex_py" / "chunk_index.faiss").write_bytes(b"faiss")
+    if server_py:
+        (py_dir / "server.py").write_text("# server", encoding="utf-8")
+    if interpreter:
+        (tmp_path / interpreter).write_text("", encoding="utf-8")
+
+    monkey_targets = {
+        "frontend.main.get_base_path": lambda: tmp_path,
+        "frontend.main.get_log_dir": lambda: tmp_path / "log",
+        "frontend.main.subprocess.Popen": FakeProc,
+        "frontend.main.socket.socket": lambda *a, **k: _FakeSock(connect),
+        "utils.edtalk_realtime.runtime.resolve_interpreter":
+            lambda cfg: str(tmp_path / interpreter) if interpreter else "",
+    }
+    for target, value in monkey_targets.items():
+        monkeypatch.setattr(target, value)
+
+    cfg = {"fastrag": {"enable": True, "port": port}}
+    app.config._config = cfg
+    return app, captured, cfg
+
+
+def test_fastrag_python_cmd_and_env(tmp_path, monkeypatch):
+    """T1 守卫：cmd=[interpreter, server.py]（无 server.exe）、cwd=fastrag-python、
+    端口 env 注入、shell=False、route=python 日志。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch)
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is True, (reason, fix)
+    cmd = captured["cmd"]
+    assert cmd[0] == str(tmp_path / "fake-python.exe")
+    assert cmd[1] == str(tmp_path / "edtalk" / "fastrag" / "fastrag-python" / "server.py")
+    assert not any("server.exe" in part for part in cmd), "启动物不得再是 rust exe"
+    assert captured["cwd"] == str(tmp_path / "edtalk" / "fastrag" / "fastrag-python")
+    assert captured["env"]["FASTRAG__SERVER__PORT"] == "11420"
+    assert captured["shell"] is False
+    assert "fastrag" in app.my_subprocesses
+
+
+def test_fastrag_preflight_index_missing(tmp_path, monkeypatch):
+    """预检①：python 索引缺失 → ok=False + fix 指向构建知识库（DX F1 完整序列）。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, index=False)
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "构建知识库" in fix and "重启系统" in fix
+    assert "cmd" not in captured
+
+
+def test_fastrag_preflight_half_built_index(tmp_path, monkeypatch):
+    """Eng E2：faiss 在而 data.json 缺（构建中断半成品）→ ok=False 不穿透。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, data_json=False)
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "data.json" in reason
+    assert "cmd" not in captured
+
+
+def test_fastrag_preflight_server_py_missing(tmp_path, monkeypatch):
+    """预检②：server.py 缺失 → fix 指向 copy_edtalk.py。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, server_py=False)
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "copy_edtalk.py" in fix
+    assert "cmd" not in captured
+
+
+def test_fastrag_preflight_interpreter_missing(tmp_path, monkeypatch):
+    """预检③：解释器缺失 → fix 指向系统设置页（Eng A1/DX F3）。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, interpreter="")
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "解释器" in fix
+    assert "cmd" not in captured
+
+
+def test_fastrag_invalid_port_fail_soft(tmp_path, monkeypatch):
+    """Eng E3：非法端口 → ok=False fail-soft（前端），fix 含改端口指引。"""
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, port="abc")
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "端口" in fix
+    assert "cmd" not in captured
+
+
+def test_fastrag_port_busy_other_process(tmp_path, monkeypatch):
+    """Eng E4/DX F4：端口被占用且 /health 不通（其他进程）→ ok=False+改端口指引。"""
+    import urllib.request
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, connect=0)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        MagicMock(side_effect=ConnectionError))
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is False
+    assert "端口" in reason
+    assert "cmd" not in captured
+
+
+def test_fastrag_already_running_idempotent(tmp_path, monkeypatch):
+    """Eng E4：fastrag 自身在运行（/health 200）→ ok=True 幂等跳过，不重复拉起。"""
+    import urllib.request
+    app, captured, cfg = _fastrag_env(tmp_path, monkeypatch, connect=0)
+    fake_resp = MagicMock()
+    fake_resp.status = 200
+    fake_resp.__enter__.return_value = fake_resp  # with ... as _resp 指回自身
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        MagicMock(return_value=fake_resp))
+    ok, reason, fix = app._start_fastrag(cfg)
+    assert ok is True
+    assert "cmd" not in captured
+    assert "fastrag" not in app.my_subprocesses

@@ -19,6 +19,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from nicegui import ui, app
+from nicegui import context
+from nicegui import core as _nicegui_core
 
 # 导入配置模块
 from frontend.config.settings import init_config, get_config
@@ -148,6 +150,13 @@ class AutoliveApp:
     # async endpoint 并发启停的 TOCTOU 窗口收口——类级锁串行化运行态写入。
     # 读侧（状态条轮询）不加锁（bool 原子读；GIL 下无撕裂）。
     _running_flag_lock = threading.Lock()
+
+    # 登录会话令牌表（类级共享：script mode 每连接重跑 __init__，不能落实例字段；
+    # token -> user_info）。纯内存态：webui 重启即全部失效，浏览器需重新登录。
+    # 页面构建阶段读不到 app.storage.tab（tab_id 由 websocket 握手才建立），
+    # 故登录态以「内存令牌表 + 会话 cookie」承载（见 _enter_after_login）。
+    _shared_sessions: dict = {}
+    _AUTH_COOKIE = "autolive_auth"
 
     @property
     def running_flag(self) -> bool:
@@ -544,12 +553,22 @@ class AutoliveApp:
             return False, f"启动 EDTalk realtime_serve 失败: {e}", "请查看完整日志（log/edtalk_realtime.log）定位原因"
 
     def _start_fastrag(self, config_data: dict):
-        """拉起 fastrag server（计划 §6.2 + Eng 义务⑬：端口环境变量注入）。
+        """拉起 fastrag server（python 路线，autoplan main-20261029-102545 终门 rec）。
+
+        2026-10-29 fastrag 内部化批次：启动物从 rust server.exe 切换为
+        fastrag-python/server.py（完成 2026-10-15 uc1a 裁决——此前构建按钮产
+        kbindex_py/、模板参数写 config_override.py，而 rust server 只读
+        kbindex/ + Config.toml，知识库更新与模板参数对生产服务永不生效）。
+        rust 产物保留为备用（回滚=本方法改回拉起 server.exe）。
+
+        预检四件（索引 faiss+data.json 双存在/解释器/server.py，缺失→ok=False
+        +D-14 式 fix 指引）+ 端口预检（占用幂等探测，Eng E4）；端口经
+        FASTRAG__SERVER__PORT 环境变量注入（Eng 义务⑬延续，服务端 config.py
+        补丁 P4 读入并 fail-fast 解析非法值，DX F2）。
 
         Returns:
-            (ok, reason, fix_hint)——D-14：ok=False 由调用方降级继续并汇总告警；
-            未启用不算失败。端口预检用 connect_ex 试探（任务书 D-14：端口占用
-            =启动失败，fix=修改端口配置）。
+            (ok, reason, fix_hint)——D-14：ok=False 时由调用方（start_programs
+            → run_external_program）降级继续并汇总告警；未启用不算失败。
         """
         fastrag_cfg = config_data.get("fastrag", {})
         if not fastrag_cfg.get("enable"):
@@ -557,43 +576,100 @@ class AutoliveApp:
 
         base = str(get_base_path())
         fastrag_dir = os.path.join(base, "edtalk", "fastrag")
-        server_exe = os.path.join(fastrag_dir, "server.exe")
-        if not os.path.exists(server_exe):
+        py_dir = os.path.join(fastrag_dir, "fastrag-python")
+        server_py = os.path.join(py_dir, "server.py")
+
+        # 预检①：python 索引双件（Eng E2：faiss+data.json 双存在——build_index_native
+        # save() 先写 faiss 后写 data.json，两写间崩溃留半成品索引穿透预检→lifespan 抛错）
+        faiss_path = os.path.join(fastrag_dir, "kbindex_py", "chunk_index.faiss")
+        data_path = os.path.join(fastrag_dir, "kbindex_py", "data.json")
+        if not os.path.exists(faiss_path) or not os.path.exists(data_path):
+            missing = "chunk_index.faiss" if not os.path.exists(faiss_path) else "data.json"
+            miss_abs = faiss_path if missing == "chunk_index.faiss" else data_path
             logger.error(
-                f"fastrag server.exe 不存在：{server_exe}。problem=可执行文件缺失；"
-                f"cause=fastrag 未复制；fix=运行 scripts/copy_edtalk.py 一键复制脚本"
-            )
-            return False, f"fastrag server.exe 不存在：{server_exe}", "请运行 scripts/copy_edtalk.py 一键复制脚本"
+                f"fastrag python 索引不完整：{missing} 缺失（{miss_abs}）。"
+                f"problem=知识库索引缺失或上次构建中断；cause=尚未构建或构建中断；"
+                f"fix=WebUI 知识库页点『构建知识库』，完成后重启系统")
+            return False, f"fastrag 索引不完整：{missing} 缺失", "点『构建知识库』，完成后重启系统"
+        # 预检②：入口脚本（副本区 fresh-install 现实态，DX F3：fix 给完整命令行+实际路径）
+        if not os.path.exists(server_py):
+            logger.error(
+                f"fastrag server.py 不存在：{server_py}。problem=fastrag-python 副本缺失；"
+                f"cause=fastrag 未复制；fix=在 AUTOlive 根目录运行 "
+                f"python scripts/copy_edtalk.py 一键复制（含 fastrag-python/）")
+            return False, f"fastrag server.py 不存在：{server_py}", "运行 scripts/copy_edtalk.py 一键复制脚本"
+        # 预检③：解释器（Eng A1：resolve_interpreter 四级链，与 _start_edtalk_realtime 同源；
+        # 构建按钮 llm.py 亦已统一切换，消除硬编码默认分叉）
+        from utils.edtalk_realtime.runtime import resolve_interpreter
+        interpreter = resolve_interpreter(config_data)
+        if not interpreter or not os.path.exists(interpreter):
+            logger.error(
+                "fastrag 解释器未找到。problem=runtime312 缺失；"
+                "cause=仓库副本与 EDTalk 安装目录均无 python.exe；"
+                "fix=系统设置页配置 edtalk_realtime 解释器路径，或运行 scripts/copy_edtalk.py")
+            return False, "fastrag 解释器未找到（runtime312 缺失）", "系统设置页配置 edtalk_realtime 解释器路径"
 
-        port = int(fastrag_cfg.get("port", 11420))
+        # 端口解析（Eng E3：int() 收编 try——非法端口 fail-soft ok=False，
+        # 与服务端 config.py P4 fail-fast 呼应）
+        try:
+            port = int(fastrag_cfg.get("port", 11420))
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except (TypeError, ValueError):
+            bad_port = fastrag_cfg.get("port")
+            logger.error(
+                f"fastrag 端口配置非法：{bad_port!r}。problem=端口不是 1-65535 内整数；"
+                f"cause=系统设置页 fastrag『端口』配置异常；fix=改为合法整数后重启系统")
+            return False, f"fastrag 端口配置非法：{bad_port!r}", "修改 fastrag『端口』配置项（1-65535）"
 
-        # 端口预检（D-14：connect_ex 连接试探，被监听即占用）
+        # 端口预检（D-14 connect_ex + Eng E4 幂等探测：fastrag 自身在运行→跳过拉起，
+        # 防手动拉起过再点运行系统误报占用失败）
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
                 _probe.settimeout(0.5)
                 if _probe.connect_ex(("127.0.0.1", port)) == 0:
+                    import urllib.request
+                    try:
+                        with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/health", timeout=2) as _resp:
+                            if _resp.status == 200:
+                                logger.warning(
+                                    f"fastrag 服务已在运行（端口 {port}，/health 探测通过），跳过重复拉起")
+                                return True, "", ""
+                    except Exception:
+                        pass
                     logger.error(
-                        f"fastrag 端口 {port} 已被占用。problem=端口冲突；"
-                        f"cause=端口被其他进程监听；fix=修改系统设置页 fastrag『端口』配置"
-                    )
-                    return False, f"fastrag 端口 {port} 已被占用", "请修改 fastrag『端口』配置项"
+                        f"fastrag 端口 {port} 已被其他进程占用。problem=端口冲突；"
+                        f"cause=端口被未知服务监听（非 fastrag）；fix=修改系统设置页 "
+                        f"fastrag『端口』配置，或停止占用 {port} 的进程")
+                    return False, f"fastrag 端口 {port} 已被占用", "修改 fastrag『端口』配置或停旧实例"
         except Exception:
             pass  # 探测失败不阻断拉起（保持宽容，Popen 层兜底）
 
         env = os.environ.copy()
-        # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2）
+        # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2 延续；
+        # python 路线由 config.py 补丁 P4 读 FASTRAG__SERVER__PORT）
         env["FASTRAG__SERVER__PORT"] = str(port)
 
         try:
+            # stdout/stderr 落盘（对齐 _start_edtalk_realtime：服务全 print 输出
+            # 随 webui 控制台丢失则故障无从取证）
+            log_dir = str(get_log_dir())
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "fastrag_server.log")
+            log_f = open(log_path, "ab", buffering=0)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_f.write(f"\n===== 启动 {stamp} 端口 {port} 路线 python =====\n".encode("utf-8"))
             process = subprocess.Popen(
-                [server_exe], cwd=fastrag_dir, shell=False, env=env
-            )
+                [interpreter, server_py], cwd=py_dir, shell=False, env=env,
+                stdout=log_f, stderr=subprocess.STDOUT)
             self.my_subprocesses["fastrag"] = process
-            logger.info(f"运行程序: fastrag（PID {process.pid}，端口 {port}）")
+            self._fastrag_log_f = log_f  # 保引用防 GC 关闭句柄
+            logger.info(f"运行程序: fastrag（route=python，PID {process.pid}，端口 {port}，日志 {log_path}）")
             return True, "", ""
         except Exception as e:
             logger.error(f"启动 fastrag 失败: {e}")
-            return False, f"启动 fastrag 失败: {e}", "请查看完整日志定位原因"
+            return False, f"启动 fastrag 失败: {e}", "请查看完整日志（log/fastrag_server.log）定位原因"
 
         # 注意（2026-10-15 EDTalk 整合义务修复）：此处曾残留 webui-bak 移植的
         # main.py 拉起代码——fastrag.enable=true 时 main.py 双拉起、首个进程成孤儿
@@ -815,10 +891,12 @@ class AutoliveApp:
     
     def goto_func_page(self):
         """跳转到功能页"""
-        # 清除登录页面
-        if hasattr(self, 'login_column') and self.login_column:
-            self.login_column.clear()
-        
+        # 清除登录页面（整体删除：登录页为全屏 fixed 覆盖层，仅 clear 子元素会
+        # 残留占满视口的空容器，把主界面顶出可视区）
+        if getattr(self, 'login_column', None):
+            self.login_column.delete()
+            self.login_column = None
+
         # 创建主界面
         self.create_main_ui()
     
@@ -828,76 +906,138 @@ class AutoliveApp:
             # 不需要登录，直接进入功能页
             self.goto_func_page()
             return
-        
+
+        # 会话令牌校验（cookie + 内存令牌表）：登录成功后经 JS 写入会话 cookie 并
+        # 整页刷新，此处读 cookie 比对内存令牌，在页面构建上下文（slot 栈正常）里
+        # 创建主界面。NiceGUI 3.x 事件处理器任务没有 slot 栈（新建元素无 parent
+        # 不渲染，布局元素还会触发 require_top_level_layout 异常），不能在 handler
+        # 里直接构建主界面。boot 阶段（app 未启动）无请求上下文，视为未登录。
+        token = None
+        if getattr(_nicegui_core.app, "is_started", False):
+            try:
+                token = context.client.request.cookies.get(self._AUTH_COOKIE)
+            except RuntimeError:
+                token = None
+        if token is not None and token in AutoliveApp._shared_sessions:
+            self.user_info = AutoliveApp._shared_sessions[token]
+            logger.info(f"会话令牌校验通过，进入功能页（token={token[:8]}…）")
+            if (get_nested_value(self.config._config, "login", "ums_api", default="")
+                    and isinstance(self.user_info, dict) and "accessToken" in self.user_info):
+                # UMS 登录：启动过期检查定时器
+                ui.timer(600.0, lambda: self._check_expiration())
+            self.goto_func_page()
+            return
+
         # 显示登录页面
         self.login_column = self.login_form.create_login_form(
             on_login=self.handle_login,
             on_forget_password=self.handle_forget_password
         )
+
+    def _enter_after_login(self):
+        """登录成功后进入功能页。
+
+        NiceGUI 3.x 事件处理器上下文没有 slot 栈（Element 无 parent 不渲染），
+        不能在 handler 里直接构建主界面；页面构建阶段又读不到 app.storage.tab
+        （tab_id 由 websocket 握手才建立）——改为签发随机会话令牌：写入类级内存
+        令牌表（webui 重启即失效）+ JS 写会话 cookie，随后整页 reload，由
+        check_login 在页面构建上下文里凭 cookie 完成鉴权与主界面构建。
+
+        reload 以令牌为幂等守卫（sessionStorage 记录已消费的令牌）：websocket
+        重连的消息重放不会再次触发 reload（否则重放→reload→重连→再重放会
+        无限循环卡死页面）。
+        """
+        import secrets
+        token = secrets.token_urlsafe(32)
+        AutoliveApp._shared_sessions[token] = self.user_info
+        cookie = f"{self._AUTH_COOKIE}={token}; path=/; SameSite=Strict"
+        ui.run_javascript(
+            f"if (sessionStorage.getItem('autolive_relogin') !== '{token}') {{"
+            f"sessionStorage.setItem('autolive_relogin', '{token}');"
+            f"document.cookie = '{cookie}';"
+            f"location.reload();"
+            f"}}"
+        )
     
     def handle_login(self):
-        """处理登录（与原文件 webui-bak.py L5132-5184 一致）"""
+        """处理登录。
+
+        鉴权顺序：配置了 ums_api 则优先走外部 UMS 服务（/auth/login，含账号到期
+        管理）；UMS 未部署/未启动（重启后端口无监听、连接被拒）时兜底本地账号
+        校验（login.username/password，即系统设置→账号管理页维护的账号）——
+        修复开启登录后重启因 1119 拒绝连接而无法登录的问题。未配置 ums_api
+        时直接走本地账号校验。
+        """
         if not self.login_form.validate_input():
             return
 
         username = self.login_form.get_username()
         password = self.login_form.get_password()
 
-        try:
+        login_cfg = self.config._config.get("login", {})
+        ums_api = login_cfg.get("ums_api", "")
+
+        if ums_api:
             import requests
             from urllib.parse import urljoin
 
-            config_data = self.config._config
-            ums_api = config_data.get("login", {}).get("ums_api", "")
+            try:
+                API_URL = urljoin(ums_api, '/auth/login')
 
-            if not ums_api:
-                # 没有配置UMS API，直接登录成功
-                self.user_info = {"username": username}
-                ui.notify(position="top", type="positive", message="登录成功")
-                logger.info(f"用户 {username} 登录成功")
-                self.goto_func_page()
+                resp_json = requests.post(API_URL, json={
+                    "username": username,
+                    "password": password
+                }, timeout=5).json()
+
+                if resp_json is None:
+                    ui.notify(position="top", type="negative", message="登录失败")
+                    return
+
+                if "data" not in resp_json or "success" not in resp_json:
+                    ui.notify(position="top", type="negative", message="用户名或密码不正确")
+                    return
+
+                if not resp_json["success"]:
+                    ui.notify(position="top", type="warning",
+                              message=f'账号过期时间：{resp_json["data"].get("expiration_ts", "未知")}，已到期，请联系管理员续费')
+                    return
+
+                self.user_info = resp_json["data"]
+                expiration_ts = resp_json["data"].get("expiration_ts", "")
+
+                app.storage.tab["login_notify"] = f'登录成功，账号到期时间：{expiration_ts}'
+                logger.info(f"用户 {username} 登录成功（UMS）")
+
+                # 写入登录态并整页刷新进入功能页
+                self._enter_after_login()
                 return
 
-            API_URL = urljoin(ums_api, '/auth/login')
-
-            resp_json = requests.post(API_URL, json={
-                "username": username,
-                "password": password
-            }).json()
-
-            if resp_json is None:
-                ui.notify(position="top", type="negative", message="登录失败")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # UMS 服务不可达（本机未部署该服务/重启后未监听）：兜底本地账号校验
+                logger.warning(f"UMS 服务不可达（{ums_api}），兜底本地账号校验：{e}")
+            except Exception as e:
+                logger.error(f"登录失败: {e}")
+                ui.notify(position="top", type="negative", message=f"登录失败: {e}")
                 return
 
-            if "data" not in resp_json or "success" not in resp_json:
+        # 本地账号校验（与账号管理页配置的 login.username/password 比对；
+        # 两者均未配置时保持旧行为直接放行）
+        expected_username = str(login_cfg.get("username", "") or "")
+        expected_password = str(login_cfg.get("password", "") or "")
+        if expected_username or expected_password:
+            if username != expected_username or password != expected_password:
                 ui.notify(position="top", type="negative", message="用户名或密码不正确")
                 return
 
-            if not resp_json["success"]:
-                ui.notify(position="top", type="warning",
-                          message=f'账号过期时间：{resp_json["data"].get("expiration_ts", "未知")}，已到期，请联系管理员续费')
-                return
+        self.user_info = {"username": username}
+        logger.info(f"用户 {username} 本地登录成功")
 
-            self.user_info = resp_json["data"]
-            expiration_ts = resp_json["data"].get("expiration_ts", "")
+        # 写入登录态并整页刷新进入功能页
+        self._enter_after_login()
 
-            ui.notify(position="top", type="info",
-                      message=f'登录成功，账号到期时间：{expiration_ts}')
-            logger.info(f"用户 {username} 登录成功")
-
-            # 启动过期检查定时器
-            ui.timer(600.0, lambda: self._check_expiration())
-
-            # 进入功能页
-            self.goto_func_page()
-
-        except Exception as e:
-            logger.error(f"登录失败: {e}")
-            ui.notify(position="top", type="negative", message=f"登录失败: {e}")
-    
     def handle_forget_password(self):
         """处理忘记密码"""
-        ui.notify(position="top", type="info", message="请联系管理员重置密码")
+        ui.notify(position="top", type="info", message="本地账号可在『系统设置 → 账号管理』中查看/修改")
     
     def create_main_ui(self):
         """创建主界面 - 使用新的 drawer 布局"""
