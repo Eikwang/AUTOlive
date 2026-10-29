@@ -87,7 +87,7 @@ flowchart TD
     C4 -.->|音频入队| Queue
 
     Queue --> KBQ{"助播通道〔断链〕<br>未实现：仅队列类型名<br>queue_manager.py:160 + 配置残留<br>config.example.json:1032<br>处置=标注不删除（终门 d2a 产品决策）"}
-    KBQ -->|否| SysKB["本地问答匹配〔真实〕<br>feature_handler.py:144<br>fastrag 前端拉起但 utils 零调用<br>chat_with_file.py 死代码"]
+    KBQ -->|否| SysKB["本地问答匹配〔真实〕<br>feature_handler.py:144<br>fastrag=fastrag-python server.py（2026-10-29 起 python 启动路线）<br>Fastrag_LLM HTTP 通道 chat_type=fastrag 在用<br>chat_with_file.py 死代码"]
     KBQ -->|是| AsstKB["助播知识库〔断链〕<br>未实现——处置=标注不删除（终门 d2a）"]
     SysKB --> SysTTS["系统 TTS〔真实〕<br>my_tts.py:13<br>GPT-SoVITS inproc main.py:137 / edge-tts :206<br>随机语速 speed_factor my_tts.py:106<br>pydub 播放侧回退 playback_manager.py:96"]
     AsstKB --> AsstTTS["助播 TTS〔断链〕<br>未实现——处置=标注不删除（终门 d2a）"]
@@ -158,7 +158,7 @@ flowchart TD
 | F13 | 动作编排待开发 | 全仓库无骨架/TODO/占位；audio_handler.py:62-115 直调无编排层 | 图注正确（未开发） |
 | F14 | 是否翻译（Compile 后） | my_translate.py:35-63; 触发点 comment_handler.py:357-361 / chat_handler.py:272-276 —— 入队**之前** | 位置错 |
 | F15 | 助播知识库/助播TTS 分支 | 仅剩类型名 queue_manager.py:160-161、synthesis_manager.py:204-219 + 前端配置；无任何运行链触发器 | 不存在（配置残留） |
-| F16 | 系统知识库 | 本地问答 feature_handler.py:144-305 真实；fastrag frontend/main.py:309 拉起但 utils/ 零调用；chat_with_file.py:18 死代码 | 部分 |
+| F16 | 系统知识库 | 本地问答 feature_handler.py:144-305 真实；fastrag 启动物=fastrag-python server.py（2026-10-29 切换）；Fastrag_LLM 通道在用（chat_type=fastrag，/query+/query_stream 回环）；chat_with_file.py:18 死代码 | 部分 |
 | F17 | 随机语速 | my_tts.py:106-109/163-169 speed_factor 合成侧 + playback_manager.py:96-99 pydub 播放侧回退 | verified（双路径） |
 | F18 | GenerateAudio 三路分发 | EDTalk 激活：push_full+字幕，本地播放跳过（playback_manager.py:109-112）；非 EDTalk：本地播放+字幕无 AvatarAI | 三路不成立（互斥两路） |
 | F19 | 字幕打印→对齐同步 | captions_manager.py:164 出队时 push; :179-211 keep_time=音频时长估算; E-2 变速折算; E-4 暂停挂起 | verified（非播放回调） |

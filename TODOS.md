@@ -273,3 +273,9 @@
 2. **audio_mode 全量退役清理**（P2, S）— R-ceo7 锚点（CEO cycle-2 F6 期限化）：触发条件=存量规则全部重存 **或本批上线后 30 天**（以先到者为准）；届时移除旧谓词分支与 file 音轨兼容读，删除退役告警。依赖：本批实施。
 3. **编排静默窗口 busy-wait 观测**（P3, S）— 既有条目（2026-10-26 批 #2）与本批 R-eng10 交叉：R-ceo4 窗口长度改由素材时长接替后，_CHOREO_MUTE_MAX_WAIT 300s 上限随 T5 复核对齐；等待 >60s 打点并入 alarm_notifier。依赖：T5 实施。
 4. **合成层缺陷升级槽位**（条件性，P1-条件触发）— R-ceo1 探针任务（uc1b）证伪判据②：若 blend 产物含完整背景而出画仅头部=服务端/桥接缺陷成立，登记修复任务（本批不含修复，合成层 A 方案不受影响）。依赖：uc1b 探针实测。
+
+## Deferred Items from /autoplan (2026-10-29) — fastrag 内部化整合批次
+
+1. **rust 备用时效复检点**（P3, S）— server.exe/query.exe/build-index.exe 保留为 uc1a 备用，但 python 侧持续演化（P 序列补丁+流式）而 rust 侧停滞，备份半衰期约 6 个月。触发条件：python 路线稳定运行数月后或下次 fastrag 上游同步时，复裁 rust 备用去留（恢复不可用的备份比没有更糟）。依赖：本批 T1 落地。
+2. **流式门控按通道键迁移评估**（P3, S）— fastrag 流式开关当前保守复用 custom_llm.stream_reply（跨通道控制，无 fastrag 侧独立键，语义矩阵已注明怪癖）。若未来出现"开 custom_llm 流式但关 fastrag 流式"的真实需求，评估新增 fastrag.stream_reply 键+gate 读取迁移。依赖：本批 T3 落地+需求实证。
+3. **fastrag 构建按钮解释器分叉收编核验**（P3, S）— T4 将构建按钮 llm.py:159 切到 resolve_interpreter 消除与启动路径的解析分叉（Eng A1）；实施后核验构建链在解释器挪位场景下的行为与启动链一致。依赖：本批 T4。
