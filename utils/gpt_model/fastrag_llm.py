@@ -37,6 +37,7 @@ class Fastrag_LLM:
         base = f"http://{self.host}:{self.port}"
         # ENG E-8：host 限定 http(s) 形态（默认 http://localhost:{port}）
         self.query_url = base + "/query"
+        self.query_url_stream = base + "/query_stream"
 
     def _build_prompt(self, data):
         """对齐 Custom_LLM：兼容 {"prompt": ...} 与运行时弹幕数据 {"content": ...}。"""
@@ -102,6 +103,100 @@ class Fastrag_LLM:
                 f"附 traceback 降级托底；fix=按 traceback 定位代码缺陷")
             logger.error(traceback.format_exc(limit=8))
             return None
+
+    async def stream_resp(self, data, timeout=60):
+        """流式请求 fastrag /query_stream，逐段产出文本增量。
+
+        SSE 帧协议（server.py 同批补丁）：data: {"delta": "..."} 增量帧；
+        {"done": true} 纯终止帧（不产出——Eng A2 防终帧文本重复播报）；
+        {"error": "..."} 错误帧→抛异常。契约对齐 Custom_LLM.stream_resp：
+        逐段 yield 文本增量；与 custom_llm 的差异=失败显式抛异常（计划 T3-③
+        裁决），由调用方（chat_handler.llm_stream_reply）回退全文链路。
+
+        Args:
+            data (dict): {"prompt": ...} 或运行时弹幕数据 {"content": ...}
+            timeout (int): 超时秒数
+
+        Yields:
+            str: 文本增量（可能为空串，调用方跳过）
+
+        Raises:
+            Exception: 非 200/网络/错误帧/零产出——调用方按流式失败回退全文链
+        """
+        aiohttp = _get_aiohttp()
+        question = self._build_prompt(data)
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+                async with session.post(
+                        self.query_url_stream, json={"question": question}) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"fastrag /query_stream HTTP {response.status}（{self.host}:{self.port}）")
+                    buffer = ""
+                    async for raw in response.content:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue  # SSE 注释/空行跳过
+                        payload = line[5:].strip()
+                        if not payload:
+                            continue
+                        try:
+                            frame = json.loads(payload)
+                        except (json.JSONDecodeError, TypeError):
+                            continue  # 畸形帧跳过（对齐 custom_llm 容错）
+                        if frame.get("done"):
+                            break  # 纯终止帧：不产出任何文本（Eng A2）
+                        err = frame.get("error")
+                        if err:
+                            raise RuntimeError(f"fastrag 流式错误帧: {err}")
+                        delta = frame.get("delta")
+                        if delta:
+                            buffer += delta
+                            yield delta
+                    if not buffer:
+                        # 零产出（服务端未产出任何 delta）——按流式失败回退
+                        raise RuntimeError("fastrag 流式零产出")
+        except asyncio.TimeoutError:
+            logger.error(
+                f"LLM_FALLBACK fastrag /query_stream 超时 {timeout}s（{self.host}:{self.port}）；"
+                f"回退全文链路")
+            raise
+        except Exception as e:
+            logger.error(
+                f"LLM_FALLBACK fastrag /query_stream 失败({type(e).__name__}: {e})；回退全文链路")
+            raise
+
+    def stream_resp_sync(self, data):
+        """stream_resp 的同步生成器桥（契约对齐 Custom_LLM.stream_resp_sync）。
+
+        独立线程跑 asyncio.run（绕开主线程事件循环占用），生成器耗尽/异常时
+        终止；上游异常原样抛出（调用方按流式失败处理）。
+        """
+        import queue
+        import threading
+        q = queue.Queue()
+        _DONE = object()
+
+        def _run():
+            async def _pump():
+                try:
+                    async for delta in self.stream_resp(data):
+                        q.put(delta)
+                except Exception as e:
+                    q.put(e)
+                finally:
+                    q.put(_DONE)
+            asyncio.run(_pump())
+
+        threading.Thread(target=_run, name="fastrag-stream-pump", daemon=True).start()
+        while True:
+            item = q.get()
+            if item is _DONE:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
     def get_resp_sync(self, data):
         """同步版本（对齐 Custom_LLM.get_resp_sync，向后兼容）。"""

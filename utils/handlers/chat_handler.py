@@ -194,10 +194,13 @@ class ChatHandler:
             return self._try_local_qa_fallback(chat_type, data_json, f"异常 {type(e).__name__}: {e}")
     
     def stream_reply_gate(self, chat_type):
-        """流式回复链路适用性判定（① 2026-10-27）：全部满足才走流式分句合成。
+        """流式回复链路适用性判定（① 2026-10-27；2026-10-29 fastrag 批次放行 fastrag）：
+        全部满足才走流式分句合成。
 
         保守门（任一不满足回退全文链路，回复语义零变化）：
-        - chat_type=custom_llm（唯一声明流式能力的通道）；
+        - chat_type ∈ {custom_llm, fastrag}（声明流式能力的通道白名单；
+          fastrag 流式开关保守复用 custom_llm.stream_reply 跨通道控制——
+          本批不新增 fastrag 侧键，docs/参数生效语义矩阵.md 已注明怪癖）；
         - custom_llm.stream_reply 非 False（缺省开启）；
         - 翻译未启用「回复/弹幕+回复」（翻译吃全文，逐句翻译语义不兼容）；
         - 回复模板未启用（模板 {data} 包裹全文，逐句套用会重复模板）；
@@ -206,7 +209,7 @@ class ChatHandler:
         Returns:
             bool: True=走流式链路
         """
-        if chat_type != "custom_llm":
+        if chat_type not in ("custom_llm", "fastrag"):
             return False
         if self.my_handle.config.get("custom_llm", "stream_reply") is False:
             return False
@@ -229,7 +232,7 @@ class ChatHandler:
         （更细粒度，其余句子照常）。
 
         Args:
-            chat_type (str): 通道名（gate 已保证 custom_llm）
+            chat_type (str): 通道名（gate 已保证为白名单内声明流式能力的通道）
             data_json (dict): LLM 输入数据
             build_message (Callable[[str], dict]): 单句消息构建器（调用方闭包，
                 封装 assistant_route 路由差异——comment/talk 两链复用）
