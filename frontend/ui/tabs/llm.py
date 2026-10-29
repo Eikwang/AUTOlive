@@ -342,6 +342,11 @@ def _create_fastrag_card(
             multiple=True, auto_upload=True, on_upload=_collect_doc,
         ).props('accept=".md,.txt"').style("width:100%")
         _doc_uploader.set_visibility(False)
+        # 静默失败面收口：文件选择被浏览器/Quasar 拒绝（类型不符 accept 等）
+        # 时给出可见提示——不留无声失败（2026-10-29 实测教训二则）
+        _doc_uploader.on_rejected(lambda _e: ui.notify(
+            position="top", type="negative",
+            message="problem=文件被拒绝；cause=浏览器/上传器拒绝该文件；fix=确认文件为 .md/.txt 且可读后重试"))
 
         def _pick_docs():
             # NiceGUI 元素根节点无 DOM id（getElementById 仅作快速路径）；
