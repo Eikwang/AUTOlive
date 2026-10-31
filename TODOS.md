@@ -1,4 +1,15 @@
-## Deferred Items from /goal (2026-10-27) — 动作编排完善批次（用户四部分需求全量落地，图 v2.6）
+## Deferred Items from /autoplan (2026-10-31) — 全面系统架构审查第二轮盘点（main-20261031-201249，终门 rec 全推荐批准）
+
+> 审查报告：docs/架构审查报告-2026-10-31.md（v2 第二轮盘点，前版独立 commit 5150e2f9 保底）。以下为近期档建议登记（d2a 裁决：不落 TODOS 的建议清单是死信）。
+
+1. **T1 观测面补齐包**（P1, M-L）— 实播指标采集（队列延迟/水位、TTS 吞吐、丢帧、GPU 利用率）+两级队列丢弃计数器（分桶：满载/未识别/999 舍弃/限入/去重，参照监听侧 _BoundedDropQueue.dropped_count 模式）+三报警盲区并入 alarm_notifier（伴奏线程 F6b/闲时发送失败/编排静默窗口 >60s 打点 F6a）。跨阶段共识第一优先——H-3 合成并行化与 D-1 常驻状态条的数据源前提。依赖：无。
+2. **T2 /set_config 加固交付包**（P1, M）— 原子写（临时文件+os.replace 收敛两进程写点）+路径白名单锚定 config.json（现 config_path 参数零校验，frontend/main.py:1326-1364 可篡改任意既有 JSON）+鉴权门（与 /sys_cmd 0.0.0.0 绑定暴露同批收敛，TODOS 2026-09-23 #6 并入）+gpu_policy fail-closed（S-2：_vram_free_gb 查询失败现返回 999.0 放行）。依赖：无。
+3. **T2b 翻译 LRU 缓存+LLM 并发信号量**（P2, S-M）— H-1（键=内容+目标语言，my_translate.py 现无任何缓存）+H-2（max_concurrency≈3，timer_handler.py:94/148 裸 Thread 无节流；落地时验证熔断开路不占信号量槽位）。依赖：无。
+4. **T4 前提表→运行时冒烟断言扩展**（P2, M）— 【到期义务提级：TODOS 2026-10-20 #3 原文"下一改链/图对齐批次必须含本条实施（native CEO F1/F3/F5——不留开放式 defer）"】26 条流程图前提转启动期自检（开关存在/路径可达/出边有消费端）。依赖：无。
+5. **S-5 flaky 测试隔离**（P2, S）— test_voice_profiles.py::test_atomic_write_preserves_other_sections 全量态失败单跑通过（2026-10-31 实测 1f/1875p/80s，commit 6b27c622 脏树态），套件内前序污染，定位 fixture 状态残留。依赖：无。
+6. **H-5 产线注册单点化**（P3, S）— timer_handler._dispatch 的 handler_names 映射并入 assistant_router.ROUTE_TABLE 数据驱动表，新增产线从改 3 处收敛为 1 处。依赖：下次触碰 assistant_router/timer_handler 时顺带。
+
+
 
 1. **~~Sort 侧显式消费回执 API~~（已完成 2026-10-28 G2）**— v2.6 回传子图（Frame→lineout→|回传|Sort）代码侧现状=编排队列出队重放（choreographer.py pending_queue）+音频队列消费即出清（playback_manager pop/999 释放）；场景2（点歌排队等动态文案播完）行为已闭环。Sort 侧若需显式回执（排序模块维护已消费集/去重窗），需在 playback_manager 完成点加回执接口+Sort 侧消费。
 2. **~~编排 queue 单槽→多槽队列~~（已完成 2026-10-28 G3：pending_queue 改多槽 FIFO，PENDING_QUEUE_MAX=5 满额挤最旧，get_state 透出 pending_depth）**— 排队模式现为单槽（后到覆盖先到，最新触发优先）；多规则密集触发且都需保留时升级为 FIFO 多槽。依赖：实播反馈。
@@ -18,7 +29,7 @@
 3. **语音对话（voice）归"聊天"选项路由**（P3, S）— 终门 uc2a 确认本批不归（"聊天"=chatbox 文字消息）；若用户后续确认纳入，路由表加 (talk产线, voice源) 一行即可。依赖：用户提出。
 4. **RapidFuzz 备选**（P3, S）— native CEO 4.1：音频侧手搓包含匹配若实现超出预期，RapidFuzz partial_ratio 为已论证备选（否决理由=规模论证非供应链）。依赖：E-T2 实施反馈。
 5. **助播独立合成队列**（P3, L）— 触发条件=实播 D9 门槛成立（≥20 条/分钟时助播合成排队 >10s）；届时评估独立通道。归属=下一音频相关批次。依赖：D9 实测。
-6. **"两周后回看路由计数"复查动作**（P3, S）— native CEO 3.3：助播上线两周后回看 D11 观测面板计数（每类型播报条数/KB 命中率），验证产品级成功度量；若多数 checkbox 回到未勾选态=特性弃用预警。依赖：本批上线+两周。
+6. ~~**"两周后回看路由计数"复查动作**（P3, S）~~（2026-10-31 助播审查批次失效关闭：数据源 D11 路由观测面板已按用户裁决退役——纯内存态调试面板且原路决策从不记录，观测核心残缺；产品级成功度量改由聊天记录中助播名发言与运行日志人工评估）
 
 # TODOS.md
 
@@ -36,7 +47,7 @@
 
 ## Deferred Items from /autoplan (2026-10-23) — 点歌模式重构批次（R0-R13 义务块，用户预授权直接实施）
 
-1. **CP-2 完整最近播放去重**（P3, S）— CEO defer：同歌最小冷却已入本批（choose_song.song_cooldown_s）；完整去重=跨会话记忆最近 N 首不重复，防长直播周期性重复。依赖：点歌功能实播稳定后。
+1. **CP-2 完整最近播放去重**（P3, S）— CEO defer：同歌最小冷却已随 2026-10-31 点歌审查批次退役（choose_song.song_cooldown_s 三键全链移除，防刷屏由限入/去重/优先级队列承担）；完整去重=跨会话记忆最近 N 首不重复，防长直播周期性重复。依赖：点歌功能实播稳定后。
 2. **CP-6 歌曲列表 JSON 导入导出**【2026-10-23 已实施：choose_song.py 导出（download gift_song_map.json）+导入（粘贴对话框+归一判重校验+表格重建）】（P3, S）— CEO defer：gift_song_map 表格编辑已可用；批量导入导出（粘贴 JSON）在歌曲数 >20 时才有价值。依赖：无。
 3. **供给源抽象（text-to-song 替代曲线）**（P3, M）— native CEO 战略备注：歌曲供给接口已是"歌名→音频文件"，架构可替换；竞品用生成式秒级出歌时本方案分钟级翻唱显旧。登记防下次做新内容类型时重写触发面；同时"礼物→内容"通用触发引擎（歌曲为第一内容源）同属此抽象。依赖：无。
 
