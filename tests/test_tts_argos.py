@@ -438,6 +438,13 @@ class TestEdgeExtraArgs:
 # ---------- P27：my_translate 分发 ----------
 
 class TestMyTranslateDispatch:
+    def setup_method(self, method):
+        """T2b 翻译缓存测试隔离：模块级 LRU 跨测试清空（缓存命中优先于通道降级
+        是产品语义——本类测试各自从无缓存态起跑）。"""
+        from utils.my_translate import _translate_cache, _translate_cache_lock
+        with _translate_cache_lock:
+            _translate_cache.clear()
+
     def _make_translator(self, tmpdir, trans_type):
         from utils.my_translate import My_Translate
         from utils.config import Config

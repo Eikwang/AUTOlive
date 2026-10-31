@@ -26,26 +26,26 @@ class TestTranslateCache(unittest.TestCase):
         _reset_cache()
 
     def test_put_get_roundtrip(self):
-        _cache_put("hello", "zh", "你好")
-        self.assertEqual(_cache_get("hello", "zh"), "你好")
+        _cache_put("hello", "zh", "baidu", "你好")
+        self.assertEqual(_cache_get("hello", "zh", "baidu"), "你好")
 
     def test_key_includes_target_lang(self):
-        _cache_put("hello", "zh", "你好")
-        self.assertIsNone(_cache_get("hello", "en"))  # 不同目标语言不串键
+        _cache_put("hello", "zh", "baidu", "你好")
+        self.assertIsNone(_cache_get("hello", "en", "baidu"))  # 不同目标语言不串键
 
     def test_lru_eviction(self):
         for i in range(_TRANSLATE_CACHE_MAX + 10):
-            _cache_put(f"t{i}", "zh", f"v{i}")
-        self.assertIsNone(_cache_get("t0", "zh"))       # 最老的被淘汰
-        self.assertEqual(_cache_get(f"t{_TRANSLATE_CACHE_MAX + 9}", "zh"),
+            _cache_put(f"t{i}", "zh", "baidu", f"v{i}")
+        self.assertIsNone(_cache_get("t0", "zh", "baidu"))       # 最老的被淘汰
+        self.assertEqual(_cache_get(f"t{_TRANSLATE_CACHE_MAX + 9}", "zh", "baidu"),
                          f"v{_TRANSLATE_CACHE_MAX + 9}")
 
     def test_lru_touch_extends_life(self):
         for i in range(_TRANSLATE_CACHE_MAX):
-            _cache_put(f"t{i}", "zh", f"v{i}")
-        _cache_get("t0", "zh")  # touch 最老条目→移到队尾
-        _cache_put("new-entry", "zh", "new")
-        self.assertIsNotNone(_cache_get("t0", "zh"))    # 被 touch 后不在淘汰序
+            _cache_put(f"t{i}", "zh", "baidu", f"v{i}")
+        _cache_get("t0", "zh", "baidu")  # touch 最老条目→移到队尾
+        _cache_put("new-entry", "zh", "baidu", "new")
+        self.assertIsNotNone(_cache_get("t0", "zh", "baidu"))    # 被 touch 后不在淘汰序
 
     def test_failed_translation_not_cached(self):
         """失败返回 None→不缓存（防固定坏值）。"""
@@ -56,10 +56,10 @@ class TestTranslateCache(unittest.TestCase):
             inst.config = mock.MagicMock()
             out = inst.trans("some text")
             self.assertIsNone(out)
-            self.assertIsNone(_cache_get("some text", "zh"))
+            self.assertIsNone(_cache_get("some text", "zh", "baidu"))
 
     def test_reload_clears_cache(self):
-        _cache_put("hello", "zh", "旧通道译文")
+        _cache_put("hello", "zh", "baidu", "旧通道译文")
         inst = mt.My_Translate.__new__(mt.My_Translate)
         with mock.patch.object(mt.Config, "reload", return_value=True), \
              mock.patch.object(mt.Config, "__init__", return_value=None), \

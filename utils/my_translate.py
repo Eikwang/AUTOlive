@@ -13,30 +13,32 @@ from .config import Config
 
 
 # T2b H-1（/autoplan main-20261031-201249 终门批准批次）：翻译 LRU 缓存——
-# 键=(原文, 目标语言判定码)，仅缓存成功译文（各通道失败返回 None 不缓存，失败
-# 语义不变）。同用户刷同内容/复读场景零外呼（baidu/google 计费+延迟+限流规避，
-# v1 审查 H-1）。reload_config 时清空（通道/目标语言配置变更后缓存作废）。
+# 键=(原文, 目标语言判定码, 通道)，仅缓存成功译文（各通道失败返回 None 不缓存，
+# 失败语义不变）。同用户刷同内容/复读场景零外呼（baidu/google 计费+延迟+限流
+# 规避，v1 审查 H-1）。键含通道：通道切换后各自独立缓存（argos 不可用回退语义
+# 不被其他通道缓存遮蔽——实施期 test_tts_argos 暴露的真实语义缺口）。reload_config
+# 时清空（通道/目标语言配置变更后缓存作废）。
 _TRANSLATE_CACHE_MAX = 512
 _translate_cache = OrderedDict()
 _translate_cache_lock = threading.Lock()
 
 
-def _cache_get(text, to_lang):
+def _cache_get(text, to_lang, type=None):
     try:
         with _translate_cache_lock:
-            v = _translate_cache.get((text, to_lang))
+            v = _translate_cache.get((text, to_lang, type))
             if v is not None:
-                _translate_cache.move_to_end((text, to_lang))
+                _translate_cache.move_to_end((text, to_lang, type))
             return v
     except Exception:
         return None
 
 
-def _cache_put(text, to_lang, value):
+def _cache_put(text, to_lang, type, value):
     try:
         with _translate_cache_lock:
-            _translate_cache[(text, to_lang)] = value
-            _translate_cache.move_to_end((text, to_lang))
+            _translate_cache[(text, to_lang, type)] = value
+            _translate_cache.move_to_end((text, to_lang, type))
             while len(_translate_cache) > _TRANSLATE_CACHE_MAX:
                 _translate_cache.popitem(last=False)
     except Exception:
@@ -92,9 +94,9 @@ class My_Translate:
         if type is None:
             type = self.config_data["type"]
 
-        # T2b H-1：缓存查询（键=原文+目标语言；命中即零外呼）
+        # T2b H-1：缓存查询（键=原文+目标语言+通道；命中即零外呼）
         to_lang = self._target_lang(type)
-        cached = _cache_get(text, to_lang)
+        cached = _cache_get(text, to_lang, type)
         if cached is not None:
             return cached
 
@@ -112,7 +114,7 @@ class My_Translate:
 
         # 仅缓存成功译文（None=失败→调用方回退原文，失败结果不缓存防固定坏值）
         if out is not None:
-            _cache_put(text, to_lang, out)
+            _cache_put(text, to_lang, type, out)
         return out
         
 
