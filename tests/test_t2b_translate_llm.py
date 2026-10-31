@@ -102,7 +102,7 @@ class TestLLMSemaphore(unittest.TestCase):
         from pathlib import Path
         src = Path("utils/handlers/chat_handler.py").read_text(encoding="utf-8")
         breaker_pos = src.find("if not breaker.allow_request():")
-        acquire_pos = src.find("self._llm_semaphore.acquire(timeout=")
+        acquire_pos = src.find("self._get_llm_semaphore().acquire(timeout=")
         self.assertGreater(acquire_pos, breaker_pos > 0 and acquire_pos > 0)
         self.assertGreater(acquire_pos, breaker_pos)
 
@@ -110,8 +110,8 @@ class TestLLMSemaphore(unittest.TestCase):
         """调用段 finally release + 模型未初始化分支显式 release 两路在场。"""
         from pathlib import Path
         src = Path("utils/handlers/chat_handler.py").read_text(encoding="utf-8")
-        self.assertIn("finally:\n                self._llm_semaphore.release()", src)
-        self.assertIn("self._llm_semaphore.release()\n                return self._try_local_qa_fallback(chat_type, data_json, \"模型未初始化\")", src)
+        self.assertIn("finally:\n                self._get_llm_semaphore().release()", src)
+        self.assertIn("self._get_llm_semaphore().release()\n                return self._try_local_qa_fallback(chat_type, data_json, \"模型未初始化\")", src)
 
     def test_timeout_goes_fallback(self):
         """超时语义：acquire 返回 False→走 _try_local_qa_fallback（并发饱和降级）。"""

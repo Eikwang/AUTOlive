@@ -69,8 +69,8 @@ class ChatHandler:
         self.my_handle = my_handle
         # LLM 熔断器（per-channel，ENG E-3：通道间不互扰）
         self._llm_breakers = {}
-        # T2b H-2：LLM 全局并发信号量（槽位准入见 llm_handle；容量常量见模块头）
-        self._llm_semaphore = threading.BoundedSemaphore(_LLM_MAX_CONCURRENCY)
+        # T2b H-2：LLM 并发信号量经 _get_llm_semaphore 惰性创建（对齐 _get_breaker
+        # 模式——兼容部分构造宿主，如测试 __new__ 式替身）
 
     def get_chat_model(self, chat_type, config):
         """
@@ -94,6 +94,16 @@ class ChatHandler:
             from utils.llm_breaker import LLMBreaker
             self._llm_breakers[channel] = LLMBreaker(channel)
         return self._llm_breakers[channel]
+
+    def _get_llm_semaphore(self):
+        """取 LLM 全局并发信号量（T2b H-2；惰性创建——对齐 _get_breaker 模式，
+        兼容 __new__ 式部分构造宿主：test_common_config_wiring 回归发现
+        __init__ 依赖在替身构造下 AttributeError）。"""
+        sem = getattr(self, "_llm_semaphore", None)
+        if sem is None:
+            sem = threading.BoundedSemaphore(_LLM_MAX_CONCURRENCY)
+            self._llm_semaphore = sem
+        return sem
 
     def _try_local_qa_fallback(self, chat_type, data_json, fail_reason):
         """本地问答托底（基础功能 2026-10-22，spec A2）。
@@ -169,7 +179,7 @@ class ChatHandler:
 
             # T2b H-2：并发槽位准入（在熔断之后获取——开路状态不占槽位；超时=并发
             # 饱和降级走托底，不让分发线程无限堆积）。local_qa 直答分支不经过此处。
-            if not self._llm_semaphore.acquire(timeout=_LLM_ACQUIRE_TIMEOUT_S):
+            if not self._get_llm_semaphore().acquire(timeout=_LLM_ACQUIRE_TIMEOUT_S):
                 return self._try_local_qa_fallback(
                     chat_type, data_json,
                     f"LLM 并发饱和（>{_LLM_ACQUIRE_TIMEOUT_S}s 等待 {_LLM_MAX_CONCURRENCY} 槽位全占用）")
@@ -181,7 +191,7 @@ class ChatHandler:
                     f"模型 {chat_type} 未初始化；fix=检查 config chat_type 与对应配置节"
                     f"（custom_llm/fastrag），重启系统")
                 breaker.record_failure()
-                self._llm_semaphore.release()
+                self._get_llm_semaphore().release()
                 return self._try_local_qa_fallback(chat_type, data_json, "模型未初始化")
 
             # 调用模型（使用 get_resp_sync 保持向后兼容）
@@ -192,7 +202,7 @@ class ChatHandler:
                 else:
                     resp_content = model.chat(data_json)
             finally:
-                self._llm_semaphore.release()
+                self._get_llm_semaphore().release()
 
             if resp_content:
                 breaker.record_success()
