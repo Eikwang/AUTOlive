@@ -70,6 +70,14 @@ def _play_backing_local(backing_path: str, volume: float):
         logger.info(f"[song] 伴奏外放完成：{backing_path}")
     except Exception as e:
         logger.warning(f"[song] 伴奏外放失败（人声照唱，伴奏缺失不黑场）：{backing_path} → {e}")
+        # T1 观测面补齐包（F6b 盲区接入）：伴奏失败不再仅日志静默——模块开关门控+60s 冷却
+        try:
+            from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
+            alarm_error(MODULE_AUDIO_PLAYBACK,
+                        f"伴奏外放失败（人声照唱，直播中伴奏无声）：{backing_path}",
+                        fix_hint="检查伴奏文件可读性与音频设备占用；频繁失败可临时调低 backing_volume 或关闭双轨")
+        except Exception:
+            pass  # 报警失败不改变既有降级语义（人声照唱）
     finally:
         for closer in (lambda: stream.stop_stream(), lambda: stream.close(),
                        lambda: wf.close(), lambda: pa.terminate()):
@@ -162,6 +170,14 @@ class PlaybackMixin:
                                 name="song-backing", daemon=True).start()
                         elif data_json.get("backing_path"):
                             logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
+                            # T1 观测面补齐包（F6b 同型盲区）：伴奏轨文件缺失可见化
+                            try:
+                                from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
+                                alarm_error(MODULE_AUDIO_PLAYBACK,
+                                            f"伴奏轨文件缺失（人声照唱）：{_backing_path}",
+                                            fix_hint="检查点歌歌曲的伴奏文件是否被移动/删除")
+                            except Exception:
+                                pass
                         # 口型推理联动（2026-10-25 goal）：编排纯画面窗口
                         # （audio_mode=none 的跳舞/转场片段）内延迟推送——数字人
                         # 只播画面不出声不做口型；音频在此等待（队列背压天然保序
@@ -180,9 +196,29 @@ class PlaybackMixin:
                                 f"（剩余约 {_mute_remaining if _mute_remaining is not None else '?'}s）："
                                 f"{data_json.get('content', '')[:20]}")
                             _waited = 0.0
+                            _mute_punch_done = False
                             while _choreo_guard.in_mute_window() and _waited < _CHOREO_MUTE_MAX_WAIT:
                                 await asyncio.sleep(0.2)
                                 _waited += 0.2
+                                # T1 观测面补齐包（F6a）：等待 >60s 打点一次+计数（量化观测，
+                                # 不报警——300s 上限降级已在位，此处补中间态可见性）
+                                if _waited >= 60.0 and not _mute_punch_done:
+                                    _mute_punch_done = True
+                                    try:
+                                        from utils.obs_stats import record_choreo_mute
+                                        record_choreo_mute(_waited)
+                                    except Exception:
+                                        pass
+                                    logger.warning(
+                                        f"[EDTalk] 编排静默窗口等待已超 60s（当前 {_waited:.0f}s，"
+                                        f"上限 {_CHOREO_MUTE_MAX_WAIT:.0f}s）——后续音频级联延迟，"
+                                        f"排查编排窗口素材时长或看门狗状态")
+                            if _mute_punch_done:
+                                try:
+                                    from utils.obs_stats import record_choreo_mute
+                                    record_choreo_mute(_waited)
+                                except Exception:
+                                    pass
                             if _choreo_guard.in_mute_window():
                                 # 防呆上限兜底：仍处窗口也照推（宁可口型出现不丢语音）
                                 logger.warning(
@@ -242,6 +278,15 @@ class PlaybackMixin:
                         # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
                         self.report_consumed(
                             data_json.get("type", ""), data_json.get("content", ""))
+                        # T1 观测：消费延迟样本（入队→完成；_enqueued_at 缺失=旧条目跳过）
+                        try:
+                            from utils.obs_stats import record_latency
+                            _enq = data_json.get("_enqueued_at")
+                            if _enq:
+                                import time as _t
+                                record_latency(_t.time() - float(_enq))
+                        except Exception:
+                            pass
                         if _was_999:
                             self.active_reread_top_999 = False
                         # ② 点歌切片末段清理（EDTalk 路径即时清）
@@ -288,6 +333,14 @@ class PlaybackMixin:
                         # 时点）；builtin 的真实完成点经完成回调二次回执（G1，互斥不双报
                         # 由回调注册点保证——playback_manager 侧仅移交回执）。
                         self.report_consumed(data_json.get("type", ""), data_json.get("content", ""))
+                        try:
+                            from utils.obs_stats import record_latency
+                            _enq = data_json.get("_enqueued_at")
+                            if _enq:
+                                import time as _t
+                                record_latency(_t.time() - float(_enq))
+                        except Exception:
+                            pass
                         self._notify_choreo_complete(data_json)
                         # ② 点歌切片末段清理：builtin play()=异步入队非播放完成判定，
                         # 末段清理依赖合成侧 _purge_stale_song_segments 清扫兜底。

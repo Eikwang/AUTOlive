@@ -126,6 +126,13 @@ class QueueMixin:
                 info["wait_play_audio_num"] += player.internal_queue_len()
             except Exception:
                 pass  # 观测叠加失败不阻塞统计（快照尽力而为）
+        # T1 观测面补齐包：丢弃分桶/消费延迟/合成吞吐摘要（观测面数据源单点；
+        # D-1 常驻状态条 UI 消费留后续批次）
+        try:
+            from utils.obs_stats import snapshot as _obs_snapshot
+            info["obs"] = _obs_snapshot()
+        except Exception:
+            pass
         return info
 
     # ------------------------------------------------------------------
@@ -289,6 +296,11 @@ class QueueMixin:
                 if pending >= 2:
                     self.voice_tmp_path_queue.clear()
             if pending >= 2:
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("talk_discard")
+                except Exception:
+                    pass
                 logger.info(f"[连续对话] 待播放 {pending} 条 ≥2，舍弃等待播放音频只播最新一条")
                 self._continuous_talk_discard_notify(pending)
         except Exception as e:
@@ -310,6 +322,14 @@ class QueueMixin:
             pass  # 让位触发失败不阻塞入队主流程（999 播完自然轮到插队音频）
 
     def data_priority_insert(self, type:str="等待合成消息", data_json:dict=None):
+        # T1 观测面补齐包：入队时间戳（消费延迟=播放完成-_enqueued_at；_ 前缀=内部观测键，
+        # 消费链无读取点、随条目透传不影响既有键面）
+        try:
+            if isinstance(data_json, dict) and "_enqueued_at" not in data_json:
+                import time as _t
+                data_json["_enqueued_at"] = _t.time()
+        except Exception:
+            pass  # 观测埋点不阻塞入队
         """
         数据根据优先级排队插入待合成音频队列
 
@@ -397,6 +417,11 @@ class QueueMixin:
                 if len(self.message_queue) >= max_len and insert_position >= len(self.message_queue):
                     # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
                     logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("message_queue_full")
+                    except Exception:
+                        pass
                     return {"code": 1, "msg": f"message_queue 已满，数据丢弃：【{data_json['content']}】"}
 
                 # 队满且插队位次有效（新数据优先级高于队内既有条目）→ 插队并驱逐队尾
@@ -410,6 +435,11 @@ class QueueMixin:
                 self.message_queue_not_empty.notify()
 
             if evicted is not None:
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("message_queue_evict")
+                except Exception:
+                    pass
                 logger.warning(
                     f"message_queue 已满，高优数据插队并驱逐队尾（最低优）："
                     f"被驱逐【{evicted.get('content', '')}】{_split_group_note(evicted)}，"
@@ -443,6 +473,11 @@ class QueueMixin:
                     logger.info(
                         f"999 单实例约束：系统中已存在 999 权重音频"
                         f"（{'播放器持有' if active_999 else '队列中'}），舍弃新 999：【{data_json.get('voice_path')}】")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("audio_999_rejected")
+                    except Exception:
+                        pass
                     return {"code": 1, "msg": "999 单实例约束，舍弃新 999 音频"}
 
             # D-22（连续对话最新优先）：talk 整段音频入待播放队列前，待播放 ≥2
@@ -466,6 +501,11 @@ class QueueMixin:
             if new_data_priority is None:
                 if len(queue) >= max_len:
                     logger.warning(f"voice_tmp_path_queue 已满，音频丢弃（未识别类型）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("unknown_type_dropped")
+                    except Exception:
+                        pass
                     return {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}
                 with self.voice_tmp_path_queue_lock:
                     _insert_and_notify(len(queue), data_json)
@@ -498,6 +538,11 @@ class QueueMixin:
                     self.voice_tmp_path_queue.insert(last_idx, data_json)  # pop 后组尾左移1，插回原组尾位
                     if self.voice_tmp_path_queue_not_empty_flag:
                         self.voice_tmp_path_queue_not_empty.notify()
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("audio_same_tier_evict")
+                except Exception:
+                    pass
                 logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                 self._maybe_interrupt_999_for(data_json)
                 return {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
@@ -518,10 +563,20 @@ class QueueMixin:
                     if insert_position > evict_idx:
                         insert_position -= 1
                     _insert_and_notify(insert_position, data_json)
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("audio_same_tier_evict")
+                except Exception:
+                    pass
                 logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组最老条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
                 self._maybe_interrupt_999_for(data_json)
                 return {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
 
             # 规则4：满且新权重更低 → 舍弃
             logger.warning(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("audio_rule4_dropped")
+            except Exception:
+                pass
             return {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}

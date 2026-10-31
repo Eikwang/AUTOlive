@@ -38,18 +38,10 @@
     "enable": true,
     "read_username_enable": true,
     "username_max_len": 10,
-    "voice_change": false,
     "read_username_copywriting": [
       "{username}说:",
       "{username}说道:"
-    ],
-    "periodic_trigger": {
-      "enable": false,
-      "periodic_time_min": 5,
-      "periodic_time_max": 10,
-      "trigger_num_min": 0,
-      "trigger_num_max": 1
-    }
+    ]
   },
   "filter": {
     "badwords": {
@@ -75,12 +67,6 @@
     "like_forget_reserve_num": 1,
     "room_stats_forget_duration": 5.0,
     "room_stats_forget_reserve_num": 1,
-    "talk_forget_duration": 0.1,
-    "talk_forget_reserve_num": 1,
-    "schedule_forget_duration": 0.1,
-    "schedule_forget_reserve_num": 1,
-    "idle_time_task_forget_duration": 0.1,
-    "idle_time_task_forget_reserve_num": 1,
     "limited_time_deduplication": {
       "enable": true,
       "comment": 10,
@@ -99,6 +85,7 @@
       "schedule": 10,
       "idle_time_task": 10,
       "local_qa_audio": 20,
+      "local_qa_text": 20,
       "entrance": 20,
       "comment": 20,
       "song": 10,
@@ -160,15 +147,7 @@
       "嘿，{username}！我注意到你在这个领域很有经验，我们可以一起探讨一下吗？",
       "哇，{username}！你的观点很独特，可以跟我详细说说吗？"
     ],
-    "entrance": {
-      "periodic_trigger": {
-        "enable": false,
-        "periodic_time_min": 10,
-        "periodic_time_max": 30,
-        "trigger_num_min": 0,
-        "trigger_num_max": 2
-      }
-    },
+    "entrance": {},
     "gift_enable": true,
     "gift_random": true,
     "gift_copy": [
@@ -176,15 +155,7 @@
       "感谢{username}送的{gift_num}个单价{unit_price}元，总价{total_price}元的{gift_name}喵",
       "就送个{gift_name}？看不起谁呢？"
     ],
-    "gift": {
-      "periodic_trigger": {
-        "enable": false,
-        "periodic_time_min": 10,
-        "periodic_time_max": 30,
-        "trigger_num_min": 0,
-        "trigger_num_max": 2
-      }
-    },
+    "gift": {},
     "follow_enable": true,
     "follow_random": true,
     "follow_copy": [
@@ -192,15 +163,7 @@
       "感谢{username}的关注[喵|哟]",
       "{username}，关注了就别取关了，我可记住你了"
     ],
-    "follow": {
-      "periodic_trigger": {
-        "enable": false,
-        "periodic_time_min": 5,
-        "periodic_time_max": 10,
-        "trigger_num_min": 0,
-        "trigger_num_max": 2
-      }
-    },
+    "follow": {},
     "lowest_price": 0.1,
     "rate_limit_per_min": 10
   },
@@ -225,18 +188,14 @@
     "system_prompt": ""
   },
   "local_qa": {
-    "periodic_trigger": {
-      "enable": false,
-      "periodic_time_min": 10,
-      "periodic_time_max": 30,
-      "trigger_num_min": 0,
-      "trigger_num_max": 2
-    },
     "text": {
       "enable": true,
-      "file_path": "data/本地问答库.txt",
       "similarity": 0.6,
-      "username_max_len": 10
+      "data": [
+        "你好|你好呀，欢迎来到直播间！",
+        "怎么点歌|发送 点歌 歌名 即可点歌",
+        "主播多大了|主播永远18岁"
+      ]
     },
     "audio": {
       "enable": true,
@@ -420,13 +379,12 @@
       ]
     }
   ],
+  "schedule_groups": [],
   "idle_time_task": {
     "enable": true,
     "type": "直播间无消息更新闲时",
     "idle_time_min": 30,
     "idle_time_max": 60,
-    "wait_play_audio_num_threshold": 10,
-    "idle_time_reduce_to": 0,
     "min_msg_queue_len_to_trigger": 1,
     "min_audio_queue_len_to_trigger": 1,
     "trigger_type": [
@@ -547,6 +505,13 @@
         }
       ]
     },
+    "follow": {
+      "enable": true,
+      "get_integral": 1,
+      "copywriting": [
+        "{username}感谢关注，获得{get_integral}点积分"
+      ]
+    },
     "gift": {
       "enable": true,
       "get_integral_proportion": 10.0,
@@ -617,6 +582,9 @@
         "copywriting": [
           "{username}查询成功，您当前的积分是{integral}",
           "{username}，您当前的积分是{integral}"
+        ],
+        "no_record_copywriting": [
+          "{username}，您暂无积分，签到、互动都可以赚取积分哦"
         ]
       }
     }
@@ -870,7 +838,9 @@
       "tts": true,
       "orchestration": true,
       "train_streamer": true,
-      "train_voice": true
+      "train_voice": true,
+      "audio_playback": true,
+      "danmaku_send": true
     },
     "webhook": {
       "feishu_url": "",
@@ -898,9 +868,10 @@
     "local_qa": {
       "text": {
         "enable": false,
-        "format": "text",
-        "file_path": "data/本地问答库-助播.txt",
-        "similarity": 0.6
+        "similarity": 0.6,
+        "data": [
+          "怎么点歌|发送 点歌 歌名 即可点歌"
+        ]
       },
       "audio": {
         "enable": true,
@@ -924,9 +895,6 @@
       "top_num": 10
     },
     "integral": {
-      "top_num": 10
-    },
-    "gift": {
       "top_num": 10
     }
   },
@@ -1416,10 +1384,7 @@
     "enable": false,
     "default_mode": "rotate",
     "default_segments": [],
-    "min_retrigger_s": 2,
-    "min_sequence_hold_s": 5,
     "step_timeout_s": 60,
-    "reset_after_s": 300,
     "rules": [
       {
         "rule_id": "girl_A_dance",
@@ -1626,8 +1591,7 @@
     "enabled": true
   },
   "train_streamer": {
-    "fine_tune_iter": 20000,
-    "start_stage": 2,
+    "fine_tune_iter": 50000,
     "epoch": 2
   },
   "edge_tts": {

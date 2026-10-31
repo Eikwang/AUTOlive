@@ -779,6 +779,18 @@ class DanmakuListenerService:
                         "content": payload.get("content"),
                         "window_s": SELF_SEND_WINDOW_IDLE_S,
                     })
+                elif payload.get("status") and payload.get("status") != "sent":
+                    # T1 观测面补齐包（盲区接入）：闲时真实弹幕发送失败不再仅日志静默
+                    # ——模块开关门控+60s 冷却（FAILED/超时等非 sent 终态均触达）
+                    try:
+                        from utils.alarm_notifier import alarm_error, MODULE_DANMAKU_SEND
+                        alarm_error(MODULE_DANMAKU_SEND,
+                                    f"闲时弹幕发送失败（{platform}:{room_id}）："
+                                    f"status={payload.get('status')} "
+                                    f"reason={payload.get('reason_code') or ''}",
+                                    fix_hint="检查登录态与平台发送限制；连续失败期间闲时任务仅本地触达")
+                    except Exception:
+                        pass  # 报警失败不影响回执链
             except Exception:
                 logger.error("[闲时任务] 真实弹幕发送回执读取异常", exc_info=True)
 

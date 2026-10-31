@@ -63,9 +63,9 @@ def create_account_manage_tab(config, theme_config, set_config_callback):
 def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
     """创建异常报警页面
 
-    2026-10-26 报警重构批次：配置简化为六个报警模块开关（LLM服务/数字人服务/
-    TTS生成/动作编排/训练主播/训练声音，出错崩溃即报警，训练主播与训练声音
-    训练完成另有进度通知）+ WEBHOOK 通告三平台（飞书/企业微信/钉钉）。
+    2026-10-26 报警重构批次：配置简化为报警模块开关（LLM服务/数字人服务/
+    TTS生成/动作编排/训练主播/训练声音，T1 批次增补 音频播放/弹幕发送；出错崩溃即
+    报警，训练主播与训练声音训练完成另有进度通知）+ WEBHOOK 通告三平台（飞书/企业微信/钉钉）。
     旧六类本地音频报警/错误计数/自动重启配置整体退役。
     """
     card_css = theme_config.get("card", "")
@@ -79,6 +79,8 @@ def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
         ("orchestration", "动作编排"),
         ("train_streamer", "训练主播"),
         ("train_voice", "训练声音"),
+        ("audio_playback", "音频播放（伴奏失败/缺失）"),
+        ("danmaku_send", "弹幕发送（闲时发送失败）"),
     ]
 
     with ui.card().style(card_css):

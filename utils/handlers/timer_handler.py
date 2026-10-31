@@ -6,13 +6,22 @@
 """
 
 import threading
-import random
 from functools import partial
+from .. import my_global
 from ..base import logger
 
 
 class TimerHandler:
     """定时器处理器"""
+
+    # 限流类型白名单（2026-10-31 限入审查批次）：直播间消息六类参与
+    # 遗忘&保留窗口；聊天(talk)/定时任务(schedule)/闲时任务(idle_time_task)
+    # 为系统交互/系统生成消息，不参与弹幕处理流程限流——配置选项已退役，
+    # process_data 对这三类直通分发（跳过去重+遗忘窗口）。
+    _FORGET_FLAGS = frozenset({
+        "comment", "gift", "entrance", "follow", "like", "room_stats",
+    })
+
     
     def __init__(self, my_handle):
         """
@@ -25,206 +34,10 @@ class TimerHandler:
         # 每类型分发锁（防遗忘窗口重构：立即分发与窗口末补发按类型串行）
         self._dispatch_locks = {}
     
-    def periodic_trigger_data_handle(self):
-        """周期性触发数据处理，每秒执行一次，进行计时"""
-        def get_last_n_items(data_list: list, num: int):
-            # 返回最后的 n 个元素，如果不足 n 个则返回实际元素个数
-            return data_list[-num:] if num > 0 else []
-        
-        if self.my_handle.config.get("read_comment", "periodic_trigger", "enable"):
-            type = "read_comment"
-            # 计时+1
-            self.my_handle.task_data[type]["time"] += 1
-
-            # UI-16 批次 R10/EV-1g：触发周期合并为固定单值 periodic_time（不再区间
-            # 随机）；缺省 60 秒+正整数校验（存量 min/max 键已由 settings.py 迁移
-            # 退役）。本分支为 read_comment 专用——local_qa/thanks 等分支保持
-            # min/max+randint 不变（分支隔离约束）。
-            try:
-                periodic_time = max(1, int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time")))
-            except (TypeError, ValueError):
-                periodic_time = 60
-            logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
-
-            # 计时时间是否超过限定的触发周期
-            if self.my_handle.task_data[type]["time"] >= periodic_time:
-                # 计时清零
-                self.my_handle.task_data[type]["time"] = 0
-
-                trigger_num_min = int(self.my_handle.config.get(type, "periodic_trigger", "trigger_num_min"))
-                trigger_num_max = int(self.my_handle.config.get(type, "periodic_trigger", "trigger_num_max"))
-                # 生成触发个数
-                trigger_num = random.randint(trigger_num_min, trigger_num_max)
-                # 获取数据
-                data_list = get_last_n_items(self.my_handle.task_data[type]["data"], trigger_num)
-                logger.debug(f"type={type}, trigger_num={trigger_num}")
-
-                if data_list != []:
-                    # 遍历数据 进行webui数据回传 和 音频合成播放
-                    # 念弹幕路由（十生产端接线之念弹幕回放，D5：念原文直 TTS 不过
-                    # 知识库；勾选 read_comment→助播消息，未勾选原路）
-                    from .assistant_router import assistant_route, assistant_copy_message
-                    _rc_routed = assistant_route(self.my_handle.config, "read_comment")
-                    for data in data_list:
-                        if _rc_routed:
-                            self.my_handle.audio_synthesis_handle(assistant_copy_message(
-                                self.my_handle.config, data.get("content", ""),
-                                producer_type="read_comment", hit_layer="direct"))
-                        else:
-                            self.my_handle.audio_synthesis_handle(data)
-
-                # 数据清空
-                self.my_handle.task_data[type]["data"] = []
-        
-
-        if self.my_handle.config.get("local_qa", "periodic_trigger", "enable"):
-            type = "local_qa"
-            # 计时+1
-            self.my_handle.task_data[type]["time"] += 1
-            
-            periodic_time_min = int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time_min"))
-            periodic_time_max = int(self.my_handle.config.get(type, "periodic_trigger", "periodic_time_max"))
-            # 生成触发周期值
-            periodic_time = random.randint(periodic_time_min, periodic_time_max)
-            logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
-
-            # 计时时间是否超过限定的触发周期
-            if self.my_handle.task_data[type]["time"] >= periodic_time:
-                # 计时清零
-                self.my_handle.task_data[type]["time"] = 0
-
-                trigger_num_min = int(self.my_handle.config.get(type, "periodic_trigger", "trigger_num_min"))
-                trigger_num_max = int(self.my_handle.config.get(type, "periodic_trigger", "trigger_num_max"))
-                # 生成触发个数
-                trigger_num = random.randint(trigger_num_min, trigger_num_max)
-                # 获取数据
-                data_list = get_last_n_items(self.my_handle.task_data[type]["data"], trigger_num)
-                logger.debug(f"type={type}, trigger_num={trigger_num}")
-
-                if data_list != []:
-                    # 遍历数据 进行webui数据回传 和 音频合成播放
-                    for data in data_list:
-                        if data["type"] == "local_qa_audio":
-                            self.my_handle.webui_show_chat_log_callback("本地问答-音频", data, data["file_path"])
-                        else:
-                            self.my_handle.webui_show_chat_log_callback("本地问答-文本", data, data["content"])
-
-                        self.my_handle.audio_synthesis_handle(data)
-
-                # 数据清空
-                self.my_handle.task_data[type]["data"] = []
-        
-        if self.my_handle.config.get("thanks", "gift", "periodic_trigger", "enable"):
-            type = "thanks"
-            type2 = "gift"
-
-            # 计时+1
-            self.my_handle.task_data[type][type2]["time"] += 1
-
-            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
-            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
-            try:
-                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
-            except (TypeError, ValueError):
-                periodic_time = 60
-            logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
-
-            # 计时时间是否超过限定的触发周期
-            if self.my_handle.task_data[type][type2]["time"] >= periodic_time:
-                # 计时清零
-                self.my_handle.task_data[type][type2]["time"] = 0
-
-                trigger_num_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_min"))
-                trigger_num_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_max"))
-                # 生成触发个数
-                trigger_num = random.randint(trigger_num_min, trigger_num_max)
-                # 获取数据
-                data_list = get_last_n_items(self.my_handle.task_data[type][type2]["data"], trigger_num)
-                logger.debug(f"type={type}, trigger_num={trigger_num}")
-
-                if data_list != []:
-                    # 遍历数据 进行webui数据回传 和 音频合成播放
-                    for data in data_list:
-                        self.my_handle.audio_synthesis_handle(data)
-
-                # 数据清空
-                self.my_handle.task_data[type][type2]["data"] = []
-        
-        if self.my_handle.config.get("thanks", "entrance", "periodic_trigger", "enable"):
-            type = "thanks"
-            type2 = "entrance"
-
-            # 计时+1
-            self.my_handle.task_data[type][type2]["time"] += 1
-
-            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
-            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
-            try:
-                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
-            except (TypeError, ValueError):
-                periodic_time = 60
-            logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
-
-            # 计时时间是否超过限定的触发周期
-            if self.my_handle.task_data[type][type2]["time"] >= periodic_time:
-                # 计时清零
-                self.my_handle.task_data[type][type2]["time"] = 0
-
-                trigger_num_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_min"))
-                trigger_num_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_max"))
-                # 生成触发个数
-                trigger_num = random.randint(trigger_num_min, trigger_num_max)
-                # 获取数据
-                data_list = get_last_n_items(self.my_handle.task_data[type][type2]["data"], trigger_num)
-                logger.debug(f"type={type}, trigger_num={trigger_num}")
-
-                if data_list != []:
-                    # 遍历数据 进行webui数据回传 和 音频合成播放
-                    for data in data_list:
-                        self.my_handle.audio_synthesis_handle(data)
-
-                # 数据清空
-                self.my_handle.task_data[type][type2]["data"] = []
-
-        if self.my_handle.config.get("thanks", "follow", "periodic_trigger", "enable"):
-            type = "thanks"
-            type2 = "follow"
-
-            # 计时+1
-            self.my_handle.task_data[type][type2]["time"] += 1
-
-            # UI-16 二轮验收（任务 10）：触发周期合并为固定单值（不再区间随机）；
-            # 缺省 60 秒+正整数校验；与 thanks.entrance/gift/follow 三节共用（type2 区分）
-            try:
-                periodic_time = max(1, int(self.my_handle.config.get(type, type2, "periodic_trigger", "periodic_time")))
-            except (TypeError, ValueError):
-                periodic_time = 60
-            logger.debug(f"type={type}, periodic_time={periodic_time}, My_handle.task_data={self.my_handle.task_data}")
-
-            # 计时时间是否超过限定的触发周期
-            if self.my_handle.task_data[type][type2]["time"] >= periodic_time:
-                # 计时清零
-                self.my_handle.task_data[type][type2]["time"] = 0
-
-                trigger_num_min = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_min"))
-                trigger_num_max = int(self.my_handle.config.get(type, type2, "periodic_trigger", "trigger_num_max"))
-                # 生成触发个数
-                trigger_num = random.randint(trigger_num_min, trigger_num_max)
-                # 获取数据
-                data_list = get_last_n_items(self.my_handle.task_data[type][type2]["data"], trigger_num)
-                logger.debug(f"type={type}, trigger_num={trigger_num}")
-
-                if data_list != []:
-                    # 遍历数据 进行webui数据回传 和 音频合成播放
-                    for data in data_list:
-                        self.my_handle.audio_synthesis_handle(data)
-
-                # 数据清空
-                self.my_handle.task_data[type][type2]["data"] = []
-
-
-        self.my_handle.periodic_trigger_timer = threading.Timer(1, partial(self.periodic_trigger_data_handle))
-        self.my_handle.periodic_trigger_timer.start()
+    # ~~periodic_trigger_data_handle~~周期触发已退役（2026-10-31 本地问答审查批次
+    # 整体移除：task_data 的 local_qa 缓冲自始零写入点——回放永远取空列表的死
+    # 机制；念弹幕/答谢缓冲已先行退役，最后一只消费者随之删除。本地问答命中
+    # 改为 feature_handler.local_qa_handle 即时合成播放，与其它产线同语义）
 
     # 清空live_data直播数据
     def clear_live_data(self, type: str = ""):
@@ -272,17 +85,51 @@ class TimerHandler:
 
             logger.info("启动 限定时间直播数据去重 定时器")
 
-        self.my_handle.periodic_trigger_timer = threading.Timer(1, partial(self.periodic_trigger_data_handle))
-        self.my_handle.periodic_trigger_timer.start()
-        logger.info("启动 周期性触发 定时器")
-
     # 数据丢弃部分
     def process_data(self, data, timer_flag):
+        # 非限流类型直通（2026-10-31 限入审查批次）：talk/schedule/idle_time_task
+        # 为语音对话/系统生成消息——去重与遗忘窗口均不适用（语音对话被"遗忘"
+        # 即丢回复；系统任务低频无需限流），立即异步分发保持与首条消息同语义
+        if timer_flag not in self._FORGET_FLAGS:
+            threading.Thread(target=self._dispatch, args=(timer_flag, [data]),
+                             name=f"direct-dispatch-{timer_flag}", daemon=True).start()
+            return
+
+        # 弹幕黑名单统一拦截（2026-10-31 黑名单审查批次）：名单内用户的一切
+        # 直播间信息（弹幕/礼物/入场/关注/点赞）直接抛弃——先于限入窗口/
+        # 去重/分发/关键词识别，不占窗口名额、不触发任何联动（T7 语义
+        # "不进行任何处理"；此前仅 comment/chat 两链尾部拦截，礼物/关注/
+        # 入场照常触发答谢/积分/编排）。room_stats 无用户维度天然放行；
+        # comment/chat 链内既有拦截保留双保险（聊天框源不经此路径）。
+        if self.my_handle.blacklist_handle(data):
+            return
+
+        # 最近互动用户名记录 + 闲时计时刷新（2026-10-31 定时任务/闲时任务审查
+        # 批次接线）：{last_username} 数据源此前全库零调用恒"未知用户"；
+        # idle_time_auto_clear（trigger_type 消费）此前同样全库零调用——"直播
+        # 间无消息更新闲时"机制下闲时计时仅被 is_handleing 瞬时标志重置（5s
+        # 轮询基本错过），活跃直播间照常触发闲时任务。六类互动消息（非黑名单）
+        # 到达即：勾选类型重置闲时计时（idle_time_task.trigger_type 四选项）+
+        # 记录互动用户名（room_stats 为系统快照无用户维度不参与）。系统自源
+        # （origin=system-idle：闲时任务弹幕触发LLM模式自发弹幕）排除——系统
+        # 消息不算观众互动，不污染 {last_username}、不刷新闲时计时。
+        if data.get("origin") != "system-idle":
+            if timer_flag != "room_stats":
+                _username = data.get("username") or ""
+                if _username:
+                    my_global.add_username_to_last_username_list(_username)
+            my_global.idle_time_auto_clear(self.my_handle.config, timer_flag)
+
         with self.my_handle.data_lock:
             # 限定时间段内重复丢弃（入口统一接线，2026-10-24 审查批次）：重复数据
             # 不进入遗忘窗口（原实现遗漏调用点——live_data 只清空不写入，去重空转）
             if self.my_handle.is_data_repeat_in_limited_time(data, timer_flag):
                 logger.debug(f"[{timer_flag}] 限定时间内重复数据丢弃：{data.get('username')}/{str(data.get('content'))[:30]}")
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("dedup_dropped")
+                except Exception:
+                    pass
                 return
 
             timer = self.my_handle.timers.get(timer_flag)
@@ -307,6 +154,12 @@ class TimerHandler:
                                  name=f"immediate-dispatch-{timer_flag}", daemon=True).start()
             else:
                 timer.last_data.append(data)
+                # T1 观测：窗口合并暂缓计数（非丢弃——窗口末补发最新 reserve_num-1 条）
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("throttle_merged")
+                except Exception:
+                    pass
                 # 这里需要注意配置命名!!!
                 # 保留数据数量（缺键/非法值容错默认 1——存量用户 config 可能缺新键）
                 try:
@@ -360,7 +213,8 @@ class TimerHandler:
                 self.my_handle.is_handleing = 0
 
     def get_interval(self, timer_flag):
-        # 根据标志定义不同计时器的间隔
+        # 根据标志定义不同计时器的间隔（限流类型六类——2026-10-31 限入审查
+        # 批次：聊天/定时任务/闲时任务限流选项退役，三类直通不走窗口）
         intervals = {
             "comment": self.my_handle.config.get("filter", "comment_forget_duration"),
             "gift": self.my_handle.config.get("filter", "gift_forget_duration"),
@@ -368,9 +222,6 @@ class TimerHandler:
             "follow": self.my_handle.config.get("filter", "follow_forget_duration"),
             "like": self.my_handle.config.get("filter", "like_forget_duration"),
             "room_stats": self.my_handle.config.get("filter", "room_stats_forget_duration"),
-            "talk": self.my_handle.config.get("filter", "talk_forget_duration"),
-            "schedule": self.my_handle.config.get("filter", "schedule_forget_duration"),
-            "idle_time_task": self.my_handle.config.get("filter", "idle_time_task_forget_duration")
             # 根据需要添加更多计时器及其间隔，记得添加config.json中的配置项
         }
 

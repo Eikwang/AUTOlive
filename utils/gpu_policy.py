@@ -55,6 +55,27 @@ def _vram_free_gb() -> float:
         return 999.0
 
 
+def gpu_snapshot() -> dict:
+    """GPU 观测快照（T1 观测面补齐包：空闲显存 GB + 利用率%，低频面板/诊断调用）。
+
+    与 _vram_free_gb 的准入语义分离——本函数纯观测，查询失败返回 error 键不兜底大数。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip().splitlines()
+        if not out:
+            return {"error": "nvidia-smi no output"}
+        parts = [x.strip() for x in out[0].split(",")]
+        free_gb = (float(parts[0]) / 1024.0) if parts and parts[0] else None
+        util = (float(parts[1]) if len(parts) > 1 and parts[1] else None)
+        return {"vram_free_gb": free_gb, "util_percent": util}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def is_background_task_allowed(vram_reserve_gb: float = 4.0,
                                inproc_tts_reserve_gb: float = 2.0) -> Tuple[bool, str]:
     """背景任务（音频训练/翻唱）准入判定。返回 (允许, 原因)。
