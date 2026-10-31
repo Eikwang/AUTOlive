@@ -7,6 +7,30 @@ from typing import Dict, List, Optional, Any
 logger = logging.getLogger(__name__)
 
 
+def atomic_write_json(path, data, indent=2):
+    """JSON 原子落盘（T2 /set_config 加固交付包，S-1 根修）。
+
+    临时文件同目录写 + os.replace 原子替换——进程中途断电/崩溃只留完整旧文件
+    或完整新文件，不存在半截 JSON。写点收敛：/set_config 远程端点与
+    frontend/config/settings.py save（既有内联实现）同语义。失败时清理临时
+    文件并抛出（调用方决定反馈）。"""
+    path = str(path)
+    tmp_path = path + f".tmp{os.getpid()}"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 class Config:
     """
     配置管理类

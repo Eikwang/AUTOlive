@@ -42,17 +42,28 @@ def _edtalk_busy() -> bool:
 
 
 def _vram_free_gb() -> float:
-    """空闲显存（GB）。查询失败返回大数（不误拒）。"""
-    try:
-        import subprocess
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip().splitlines()
-        return float(out[0]) / 1024.0 if out else 999.0
-    except Exception as e:
-        logger.warning(f"[gpu-policy] 显存查询失败（放行）: {e}")
-        return 999.0
+    """空闲显存（GB）。S-2 fail-closed（/autoplan main-20261031-201249 终门批准批次）：
+    查询失败重试一次（间隔 0.5s），再失败返回 -1 由调用方拒绝——训练入场的代价
+    远低于误放行 OOM 连带推理进程（v1 审查 S-2 建议：失败模式从"放行"改"拒绝"）。"""
+    import time as _time
+    last_err = None
+    for attempt in range(2):
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip().splitlines()
+            if out:
+                return float(out[0]) / 1024.0
+            last_err = "nvidia-smi no output"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            logger.warning(f"[gpu-policy] 显存查询失败（第 {attempt + 1}/2 次）: {e}")
+        if attempt == 0:
+            _time.sleep(0.5)
+    logger.error(f"[gpu-policy] 显存查询最终失败（fail-closed，训练准入将拒绝）: {last_err}")
+    return -1.0
 
 
 def gpu_snapshot() -> dict:
@@ -89,6 +100,16 @@ def is_background_task_allowed(vram_reserve_gb: float = 4.0,
     if _edtalk_busy():
         return False, "EDTalk 占用中（完成后可重试）"
     free = _vram_free_gb()
+    if free < 0:
+        # S-2 fail-closed：查询失败拒绝训练入场（原返回 999.0 兜底放行→OOM 连带推理）
+        try:
+            from utils.alarm_notifier import alarm_error, MODULE_DIGITAL_HUMAN
+            alarm_error(MODULE_DIGITAL_HUMAN,
+                        "GPU 显存查询失败（nvidia-smi 两次尝试均失败），背景任务准入按 fail-closed 拒绝",
+                        fix_hint="检查 nvidia-smi 可用性与驱动状态；显存信息恢复后训练可重试")
+        except Exception:
+            pass
+        return False, "显存查询失败（fail-closed，S-2：不误放行）"
     reserve = vram_reserve_gb
     if _inproc_engine_ready():
         reserve += inproc_tts_reserve_gb

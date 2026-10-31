@@ -113,6 +113,13 @@ _RETIRED_CONFIG_KEYS: list = [
     (("abnormal_alarm", "svc"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
     (("abnormal_alarm", "visual_body"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
     (("abnormal_alarm", "other"), "旧六类报警配置已退役（2026-10-26 重构：报警改为 abnormal_alarm.modules 开关 + webhook 通告），可删除"),
+    # 念弹幕审查批次（2026-10-31）：周期触发退役（即时入队取代定时回放）+ 变声死键
+    (("read_comment", "periodic_trigger"), "read_comment.periodic_trigger 已退役（念弹幕审查批次 2026-10-31：系统已有限入/去重/优先级队列，弹幕处理时即时入队，定时回放机制删除），可删除"),
+    (("read_comment", "voice_change"), "read_comment.voice_change 已退役（变声随主流程退役 2026-10-22 批次 A-6，此键后端从未消费），可删除"),
+    # 答谢审查批次（2026-10-31）：三通道周期触发退役（即时分发+E-2 限流取代定时回放）
+    (("thanks", "entrance", "periodic_trigger"), "thanks.entrance.periodic_trigger 已退役（答谢审查批次 2026-10-31：系统已有限入/去重/优先级队列，答谢即时分发+每分钟限流兜底，定时回放机制删除），可删除"),
+    (("thanks", "gift", "periodic_trigger"), "thanks.gift.periodic_trigger 已退役（答谢审查批次 2026-10-31：系统已有限入/去重/优先级队列，答谢即时分发+每分钟限流兜底，定时回放机制删除），可删除"),
+    (("thanks", "follow", "periodic_trigger"), "thanks.follow.periodic_trigger 已退役（答谢审查批次 2026-10-31：系统已有限入/去重/优先级队列，答谢即时分发+每分钟限流兜底，定时回放机制删除），可删除"),
     # 数字人配置面清理（2026-10-26）：reaction_segment 弹幕触发切段已被
     # choreography 编排规则全面取代（触发类型 gift/keyword/song + 序列编排），
     # 逻辑消费方为零——UI 控件与默认值已删，存量键一次性告知后可手动删除。
@@ -129,6 +136,14 @@ _RETIRED_CONFIG_KEYS: list = [
     (("edtalk_realtime", "api_ip_port"), "edtalk_realtime.api_ip_port 已退役（控制面基址由运行时文件自动解析），可删除"),
     (("edtalk_realtime", "interpreter_path"), "edtalk_realtime.interpreter_path 已退役（解释器自动探测并记忆上次使用的环境），可删除"),
     (("edtalk_realtime", "segments"), "edtalk_realtime.segments 已退役（默认全部素材轮播，画面接管走『动作编排』页），可删除"),
+    # 角色素材目录退役（2026-10-31 画面设置批次）：素材增删/清单由『动作编排』页
+    # 全面接管，目录本身为内部量（默认 wy，materials.resolve_character_dir 与
+    # 启动参数同源兜底）——UI 配置项已删，存量键一次性告知后可手动删除
+    (("edtalk_realtime", "character_dir"), "edtalk_realtime.character_dir 已退役（素材管理由『动作编排』页接管，目录为内部量默认 wy；删除后未配置时自动用 wy），可删除"),
+    # 训练起始阶段键退役（2026-10-31 训练主播审查批次）：流程选择改由训练页
+    # 阶段按钮多选承担，该键现版本不被读取（TrainPipeline.start_stage 仅构造
+    # 参数默认值，不从 config 读取）
+    (("train_streamer", "start_stage"), "train_streamer.start_stage 已退役（流程选择改由训练页阶段按钮多选，该键现版本不读取），可删除"),
     # 提示词前缀/后缀弃用（通用配置精简批次）：LLM 服务需单独设置提示词与回复
     # 规则，前后缀无意义；build_llm_input 不再读取，存量键一次性告知后可手动删除
     (("before_prompt",), "提示词前缀已弃用移除（LLM 服务需单独设置提示词与回复规则），可删除"),
@@ -142,6 +157,36 @@ _RETIRED_CONFIG_KEYS: list = [
     (("filter", "before_must_str_for_llm"), "LLM触发前缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
     (("filter", "after_must_str_for_llm"), "LLM触发后缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
     (("reread",), "reread 复读触发配置组已退役（2026-10-30 过滤审查批次：弹幕关键词触发复读移除；聊天页手动直接复读不受影响），可删除"),
+    # 限入审查批次（2026-10-31）：聊天/定时任务/闲时任务限流选项退役（系统
+    # 交互/系统生成消息不参与弹幕处理流程限流，process_data 三类直通分发）
+    (("filter", "talk_forget_duration"), "聊天遗忘间隔已退役（2026-10-31 限入审查批次：聊天消息不走限流窗口），可删除"),
+    (("filter", "talk_forget_reserve_num"), "聊天保留数已退役（2026-10-31 限入审查批次：聊天消息不走限流窗口），可删除"),
+    (("filter", "schedule_forget_duration"), "定时任务遗忘间隔已退役（2026-10-31 限入审查批次：系统生成消息不走限流窗口），可删除"),
+    (("filter", "schedule_forget_reserve_num"), "定时任务保留数已退役（2026-10-31 限入审查批次：系统生成消息不走限流窗口），可删除"),
+    (("filter", "idle_time_task_forget_duration"), "闲时任务遗忘间隔已退役（2026-10-31 限入审查批次：系统生成消息不走限流窗口），可删除"),
+    # 数据分析审查批次（2026-10-31）：礼物榜单整体移除（用户裁决：与积分统计
+    # -金额榜重复展示——integral.total_price 已含礼物价值口径）
+    (("data_analysis", "gift"), "data_analysis.gift 已退役（2026-10-31 数据分析审查批次：礼物榜单移除，金额榜在积分统计卡已有），可删除"),
+    # 本地问答审查批次（2026-10-31）：周期性触发退役（task_data 缓冲自始零写入点
+    # ——回放永远取空列表的死机制，命中即时合成）；问答数据迁移 config 内嵌
+    # （前端 textarea 实时保存，本地问答与助播知识库同构）
+    (("local_qa", "periodic_trigger"), "local_qa.periodic_trigger 已退役（2026-10-31 本地问答审查批次：缓冲零写入的死机制，本地问答命中即时合成播放），可删除"),
+    (("local_qa", "text", "file_path"), "local_qa.text.file_path 已退役（2026-10-31 本地问答审查批次：问答数据迁移 config 内嵌 local_qa.text.data，前端直编实时保存），可删除"),
+    (("local_qa", "text", "username_max_len"), "local_qa.text.username_max_len 已退役（2026-10-31 本地问答审查批次：后端零消费死键），可删除"),
+    (("assistant_anchor", "local_qa", "text", "file_path"), "assistant_anchor.local_qa.text.file_path 已退役（2026-10-31 本地问答审查批次：助播知识库问答数据迁移 config 内嵌 .text.data，前端直编实时保存），可删除"),
+    (("filter", "idle_time_task_forget_reserve_num"), "闲时任务保留数已退役（2026-10-31 限入审查批次：系统生成消息不走限流窗口），可删除"),
+    # 闲时任务审查批次（2026-10-31）：「等待播放音频数量阈值+闲时计时减小到」
+    # 动态降时机制退役（用户裁决：冗余——后端零消费仅 UI 存在）
+    (("idle_time_task", "wait_play_audio_num_threshold"), "等待播放音频数量阈值已退役（2026-10-31 闲时任务审查批次：动态降低闲时等待机制冗余，后端零消费），可删除"),
+    (("idle_time_task", "idle_time_reduce_to"), "闲时计时减小到已退役（2026-10-31 闲时任务审查批次：动态降低闲时等待机制冗余，后端零消费），可删除"),
+    # 点歌审查批次（2026-10-31）：同歌冷却/回应节流/准备文案退役（系统已有限入/
+    # 去重/优先级队列防刷屏；无成品场景=播匹配成功文案后静默入队翻唱，准备文案冗余）
+    (("choose_song", "song_cooldown_s"), "choose_song.song_cooldown_s 已退役（2026-10-31 点歌审查批次：系统已有限入/去重/优先级队列，同歌冷却防刷屏机制冗余），可删除"),
+    (("choose_song", "reply_cooldown_s"), "choose_song.reply_cooldown_s 已退役（2026-10-31 点歌审查批次：点歌回应即时处理，节流机制冗余），可删除"),
+    (("choose_song", "prepare_copy"), "choose_song.prepare_copy 已退役（2026-10-31 点歌审查批次：无成品场景播报匹配成功文案后静默入队翻唱，准备文案冗余），可删除"),
+    # 动作编排审查批次（2026-10-31）：计数窗口退役（任务书弃用移除——触发计次
+    # 不再随时间衰减，清零仅剩他键触发打断；UI 控件删除，存量键兼容读取一代）
+    (("choreography", "reset_after_s"), "choreography.reset_after_s 计数窗口已退役（2026-10-31 动作编排审查批次：触发计次不再随时间衰减，他键触发清零语义保留），可删除"),
 ]
 
 
@@ -492,6 +537,31 @@ class AutoliveApp:
             )
             return False, "EDTalk 解释器未找到（runtime312 缺失）", "请运行 scripts/copy_edtalk.py 或安装 EDTalk"
 
+        # 虚拟摄像头启动检测（2026-10-31 画面设置批次，任务书：进入系统后检测
+        # 是否安装摄像头——画面输出的基本支持，若没有安装则执行安装）。
+        # 未安装→编程化安装（UAC 弹窗用户确认，与『画面设置』页同一共享函数）；
+        # 失败不阻断拉起（服务可运行，仅画面输出不可用），告警给出去处。
+        from utils.edtalk_realtime.helpers import install_unity_capture, query_unity_capture
+        cam_ok, cam_name = query_unity_capture()
+        if not cam_ok:
+            ui.notify(position="top", type="warning",
+                      message="未检测到虚拟摄像头——正在执行安装（请在弹出的 UAC 窗口确认）……")
+            try:
+                install_unity_capture("AUTOlive 数字人", str(get_base_path()))
+            except Exception as e:
+                logger.error(f"虚拟摄像头自动安装失败: {e}")
+                ui.notify(position="top", type="negative", timeout=10,
+                          message="虚拟摄像头安装失败，数字人画面无法输出：" + str(e))
+            else:
+                cam_ok, cam_name = query_unity_capture()
+                if cam_ok:
+                    ui.notify(position="top", type="positive",
+                              message="虚拟摄像头 " + cam_name + " 安装完成")
+                else:
+                    ui.notify(position="top", type="warning", timeout=10,
+                              message="虚拟摄像头安装命令已执行但未检测到设备（可能需重启系统）"
+                                      "——在此之前数字人画面无法输出；可在『画面设置』页重试")
+
         # 训练进行中检测（双向显存防护，16GB 卡训练与推理不可并存）
         try:
             from utils.train_streamer import pipeline as _train_pipeline
@@ -541,11 +611,29 @@ class AutoliveApp:
         # identity == "free"（连接失败 = 端口空闲）→ 直接用 preferred
 
         # 参数映射（config.edtalk_realtime → RUNBOOK 启动参数表）
+        # 帧参数预检（2026-10-31 画面设置批次 F3）：服务端 config.py 对越界值
+        # 直接 ValueError（拉起即崩）——启动链先 clamp 到合法域并告知
+        # （buffer∈[1,300]，preroll∈[0,buffer]；任务书"预填充帧数需小于缓冲帧数"）。
+        def _int_cfg(key, default):
+            try:
+                return int(str(ed_cfg.get(key, default)).strip())
+            except (TypeError, ValueError):
+                return default
+        raw_buffer = _int_cfg("buffer_frames", 16)
+        raw_preroll = _int_cfg("preroll_frames", 8)
+        buffer_frames = min(max(raw_buffer, 1), 300)
+        preroll_frames = min(max(raw_preroll, 0), buffer_frames)
+        if (buffer_frames, preroll_frames) != (raw_buffer, raw_preroll):
+            ui.notify(position="top", type="warning",
+                      message=f"帧参数越界已自动修正：缓冲={buffer_frames}（1-300），"
+                              f"预填充={preroll_frames}（须≤缓冲）；可在『画面设置』页调整")
         cmd = [interpreter, "-m", "realtime_serve.main"]
+        # character_dir 已退役为内部量（2026-10-31 画面设置批次）：UI 配置项移除，
+        # 默认 wy；存量自定义值仍生效（materials.resolve_character_dir 同源读取）
         cmd += ["--character-dir", str(ed_cfg.get("character_dir", "wy"))]
-        cmd += ["--target-fps", str(ed_cfg.get("target_fps", 25))]
-        cmd += ["--buffer-frames", str(ed_cfg.get("buffer_frames", 16))]
-        cmd += ["--preroll-frames", str(ed_cfg.get("preroll_frames", 8))]
+        cmd += ["--target-fps", str(_int_cfg("target_fps", 25))]
+        cmd += ["--buffer-frames", str(buffer_frames)]
+        cmd += ["--preroll-frames", str(preroll_frames)]
         face_repair = ed_cfg.get("face_repair", "adaptive")
         if face_repair and face_repair != "off":
             cmd += ["--face-repair", face_repair]
@@ -1235,10 +1323,30 @@ class AutoliveApp:
         """注册API端点（与原文件 webui-bak.py L602-925 一致）"""
         from starlette.requests import Request
 
+        def _http_auth_ok(request) -> bool:
+            """HTTP 控制面鉴权门（T2 /set_config 加固交付包，F-sec-1/F-arch-1）。
+
+            login.enable=true 时：会话 cookie（浏览器）或 X-Auth-Token 头（非浏览器
+            调用方）须命中内存令牌表，否则 401——登录开启即同时锁 HTTP 控制端。
+            login.enable=false（缺省，本地单用户场景）放行，暴露面由绑定默认
+            127.0.0.1 + 0.0.0.0 启动告警（run() 内 C6 批）承担。异常 fail-closed。"""
+            try:
+                if not get_nested_value(self.config._config, "login", "enable"):
+                    return True
+                token = request.cookies.get(self._AUTH_COOKIE)
+                if not token:
+                    token = request.headers.get("X-Auth-Token")
+                return bool(token) and token in AutoliveApp._shared_sessions
+            except Exception:
+                return False
+
         @app.post('/set_config')
         async def api_set_config(request: Request):
-            """远程设置配置"""
+            """远程设置配置（T2 加固：路径白名单锚定 config.json + 鉴权门 + 原子写）"""
             try:
+                if not _http_auth_ok(request):
+                    return {"code": 401, "message": "未登录或会话已失效（login.enable=true 后控制端点须携带登录会话 cookie 或 X-Auth-Token）"}
+
                 data_json = await request.json()
                 logger.info(f'set_config接口 收到数据：{data_json}')
 
@@ -1248,28 +1356,36 @@ class AutoliveApp:
                 if not config_path:
                     return {"code": -1, "message": "config_path不能为空"}
 
+                # T2 路径白名单（F-arch-1）：config_path 锚定本 webui 的 config.json——
+                # 原实现零校验可篡改任意既有 JSON 文件（关黑名单/改 WEBHOOK 指向）。
+                # normcase+normpath 归一（Windows 大小写/分隔符/相对路径全部对齐）。
+                import os as _os
+                wanted = _os.path.normcase(_os.path.normpath(_os.path.abspath(str(get_config_path()))))
+                given = _os.path.normcase(_os.path.normpath(_os.path.abspath(config_path)))
+                if given != wanted:
+                    logger.warning(f"set_config拒绝越权路径：{config_path}")
+                    return {"code": -1, "message": "config_path 仅允许本系统 config.json（安全白名单，T2 批次）"}
+
                 # 读取现有配置
                 import json
                 try:
-                    with open(config_path, 'r', encoding="utf-8") as config_file:
+                    with open(given, 'r', encoding="utf-8") as config_file:
                         existing_data = json.load(config_file)
                 except Exception as e:
-                    logger.error(f"无法读取配置文件！\n{e}")
+                    logger.error(f"无法读取配置文件！{e}")
                     return {"code": -1, "message": f"无法读取配置文件！{e}"}
 
                 # 合并字典
                 existing_data.update(config_data)
 
-                # 写入配置到配置文件
+                # 原子写入（S-1 根修：临时文件+os.replace——中断只留完整旧/新文件）
                 try:
-                    with open(config_path, 'w', encoding="utf-8") as config_file:
-                        json.dump(existing_data, config_file, indent=2, ensure_ascii=False)
-                        config_file.flush()
-
+                    from utils.config import atomic_write_json
+                    atomic_write_json(given, existing_data, indent=2)
                     logger.info("配置数据已成功写入文件！")
                     return {"code": 200, "message": "配置数据已成功写入文件！"}
                 except Exception as e:
-                    logger.error(f"无法写入配置文件！\n{str(e)}")
+                    logger.error(f"无法写入配置文件！{str(e)}")
                     return {"code": -1, "message": f"无法写入配置文件！{e}"}
             except Exception as e:
                 logger.error(f"set_config处理失败: {e}")
@@ -1277,8 +1393,10 @@ class AutoliveApp:
 
         @app.post('/sys_cmd')
         async def api_sys_cmd(request: Request):
-            """系统命令（run/stop/restart/factory）"""
+            """系统命令（run/stop/restart/factory；T2：login.enable=true 时须登录会话）"""
             try:
+                if not _http_auth_ok(request):
+                    return {"code": 401, "message": "未登录或会话已失效（login.enable=true 后控制端点须携带登录会话 cookie 或 X-Auth-Token）"}
                 data_json = await request.json()
                 logger.info(f'sys_cmd接口 收到数据：{data_json}')
                 cmd_type = data_json.get('type', '')
