@@ -172,6 +172,48 @@ def test_synthesize_rejects_when_not_ready():
         eng.synthesize("x", {}, "out.wav")
 
 
+def test_synthesize_waits_for_loading_engine():
+    """启动竞态守卫（2026-10-28 修复）：loading 态的合成请求等待就绪后执行，
+    而非直接抛 EngineNotReadyError（启动初期模型加载分钟级、直播消息全失败的根因）。"""
+    import time as _t
+    import numpy as np
+    from utils.gpt_sovits_inproc import ST_LOADING
+    eng = _make_engine()
+
+    class _FakeTTS:
+        def run(self, params):
+            yield (32000, np.zeros(160, dtype=np.int16))
+
+    with eng._state_lock:
+        eng._state = ST_LOADING
+    # 模拟异步加载：300ms 后置 READY（复刻 _load 线程）
+    def _late_load():
+        _t.sleep(0.3)
+        eng._tts = _FakeTTS()
+        with eng._state_lock:
+            eng._state = ST_READY
+    threading.Thread(target=_late_load, daemon=True).start()
+    t0 = _t.monotonic()
+    out = os.path.join("音频输出", "test_wait_ready.wav")
+    eng.synthesize("测试", {}, out)
+    assert _t.monotonic() - t0 >= 0.25, "合成应等待加载完成而非立即失败"
+    os.path.exists(out) and os.remove(out)
+
+
+def test_wait_ready_gives_up_on_error_state():
+    """error 态提前失败（不空等超时上限）；loading 态超时返回 False。"""
+    import time as _t
+    eng = _make_engine()
+    with eng._state_lock:
+        eng._state = "error"
+    assert eng._wait_ready(timeout_s=2) is False
+    with eng._state_lock:
+        eng._state = "loading"
+    t0 = _t.monotonic()
+    assert eng._wait_ready(timeout_s=0.6) is False  # 持续 loading → 超时
+    assert _t.monotonic() - t0 >= 0.5
+
+
 def test_synthesize_critical_section_and_chunks():
     """互斥临界区：并发合成串行执行（R-1 验收），on_chunk 逐块回调。"""
     eng = _make_engine()

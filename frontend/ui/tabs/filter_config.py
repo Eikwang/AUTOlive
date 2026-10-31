@@ -10,7 +10,6 @@
 from nicegui import ui
 from typing import Dict, Any, Callable
 from frontend.ui.components.config_helper import get_nested_value
-from frontend.utils.common import textarea_data_change
 
 
 def create_filter_config_tab(
@@ -36,19 +35,12 @@ def create_filter_config_tab(
         # 键名与消费语义（关闭后本页全部过滤逻辑失效含违禁词过滤）保持不变。
 
         ui.separator()
-        # 弹幕/LLM 前后缀过滤（3列网格）
-        with ui.grid(columns=3):
-            _auto_save(ui.textarea(label='弹幕触发前缀', placeholder='前缀必须携带其中任一字符串才能触发\n例如：配置#，那么这个会触发：#你好', value=textarea_data_change(get_nested_value(config, "filter", "before_must_str"))).style("width:100%;").tooltip("前缀必须携带其中任一字符串才能触发\n例如：配置#，那么这个会触发：#你好"), keys=("filter", "before_must_str"))
-            _auto_save(ui.textarea(label='弹幕触发后缀', placeholder='后缀必须携带其中任一字符串才能触发\n例如：配置。那么这个会触发：你好。', value=textarea_data_change(get_nested_value(config, "filter", "after_must_str"))).style("width:100%;").tooltip("后缀必须携带其中任一字符串才能触发\n例如：配置。那么这个会触发：你好。"), keys=("filter", "after_must_str"))
-            _auto_save(ui.textarea(label='弹幕过滤前缀', placeholder='当前缀为其中任一字符串时，弹幕会被过滤\n例如：配置#，那么这个会被过滤：#你好', value=textarea_data_change(get_nested_value(config, "filter", "before_filter_str"))).style("width:100%;").tooltip("当前缀为其中任一字符串时，弹幕会被过滤\n例如：配置#，那么这个会被过滤：#你好"), keys=("filter", "before_filter_str"))
-            _auto_save(ui.textarea(label='弹幕过滤后缀', placeholder='当后缀为其中任一字符串时，弹幕会被过滤\n例如：配置#，那么这个会被过滤：你好#', value=textarea_data_change(get_nested_value(config, "filter", "after_filter_str"))).style("width:100%;").tooltip("当后缀为其中任一字符串时，弹幕会被过滤\n例如：配置#，那么这个会被过滤：你好#"), keys=("filter", "after_filter_str"))
-            _auto_save(ui.textarea(label='LLM触发前缀', placeholder='前缀必须携带其中任一字符串才能触发LLM\n例如：配置#，那么这个会触发：#你好', value=textarea_data_change(get_nested_value(config, "filter", "before_must_str_for_llm"))).style("width:100%;").tooltip("前缀必须携带其中任一字符串才能触发LLM\n例如：配置#，那么这个会触发：#你好"), keys=("filter", "before_must_str_for_llm"))
-            _auto_save(ui.textarea(label='LLM触发后缀', placeholder='后缀必须携带其中任一字符串才能触发LLM\n例如：配置。那么这个会触发：你好。', value=textarea_data_change(get_nested_value(config, "filter", "after_must_str_for_llm"))).style("width:100%;").tooltip('后缀必须携带其中任一字符串才能触发LLM\n例如：配置。那么这个会触发：你好。'), keys=("filter", "after_must_str_for_llm"))
-
-        # 长度限制（UI-16 二轮验收任务 16：两个独立开关移至下方违禁词组同排）
+        # 长度限制（UI-16 二轮验收任务 16：两个独立开关移至下方违禁词组同排；
+        # 2026-10-30 过滤审查批次：六前缀后缀配置（弹幕/LLM 触发与过滤前后缀）
+        # 退役移除——后端零消费点，语义由词表/违禁/语言过滤承担）
         with ui.grid(columns=2):
-            _auto_save(ui.input(label='最大单词数', placeholder='最长阅读的英文单词数（空格分隔）', value=get_nested_value(config, "filter", "max_len")).style("width:100%;").tooltip('最长阅读的英文单词数（空格分隔）'), keys=("filter", "max_len"))
-            _auto_save(ui.input(label='最大字符数', placeholder='最长阅读的字符数，双重过滤，避免溢出', value=get_nested_value(config, "filter", "max_char_len")).style("width:100%;").tooltip('最长阅读的字符数，双重过滤，避免溢出'), keys=("filter", "max_char_len"))
+            _auto_save(ui.input(label='最大单词数', placeholder='最长阅读的英文单词数（空格分隔）', value=get_nested_value(config, "filter", "max_len")).style("width:100%;").tooltip('最长阅读的英文单词数（空格分隔），超限自动截断只保留设定值'), keys=("filter", "max_len"))
+            _auto_save(ui.input(label='最大字符数', placeholder='最长阅读的字符数，双重过滤，避免溢出', value=get_nested_value(config, "filter", "max_char_len")).style("width:100%;").tooltip('最长阅读的字符数，超限自动截断只保留设定值，双重过滤避免溢出'), keys=("filter", "max_char_len"))
 
         # 违禁词过滤组（四开关同一行并列——违禁词过滤/违禁语句丢弃/数字转中文/表情过滤；
         # 关联参数在开关行下方）
@@ -56,16 +48,8 @@ def create_filter_config_tab(
             _auto_save(ui.switch('违禁词过滤', value=get_nested_value(config, "filter", "badwords", "enable")).style(switch_internal_css), keys=("filter", "badwords", "enable"))
             _auto_save(ui.switch('违禁语句丢弃', value=get_nested_value(config, "filter", "badwords", "discard")).style(switch_internal_css), keys=("filter", "badwords", "discard"))
             _auto_save(ui.switch('用户名中的数字转中文', value=get_nested_value(config, "filter", "username_convert_digits_to_chinese")).style(switch_internal_css).tooltip('用户名中的数字转中文'), keys=("filter", "username_convert_digits_to_chinese"))
-            _auto_save(ui.switch('弹幕表情过滤', value=get_nested_value(config, "filter", "emoji")).style(switch_internal_css), keys=("filter", "emoji"))
+            _auto_save(ui.switch('弹幕表情过滤', value=get_nested_value(config, "filter", "emoji")).style(switch_internal_css).tooltip('过滤弹幕与用户名中的表情（[爱心]、emoji）及特殊字符，只保留文字'), keys=("filter", "emoji"))
         with ui.grid(columns=3):
-            _auto_save(ui.input(label='违禁词路径', value=get_nested_value(config, "filter", "badwords", "path"), placeholder='本地违禁词数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁词数据路径（你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "path"))
-            _auto_save(ui.input(label='违禁拼音路径', value=get_nested_value(config, "filter", "badwords", "bad_pinyin_path"), placeholder='本地违禁拼音数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁拼音数据路径（你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "bad_pinyin_path"))
+            _auto_save(ui.input(label='违禁词路径', value=get_nested_value(config, "filter", "badwords", "path"), placeholder='本地违禁词数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁词数据路径（txt，UTF-8 编码；你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "path"))
+            _auto_save(ui.input(label='违禁拼音路径', value=get_nested_value(config, "filter", "badwords", "bad_pinyin_path"), placeholder='本地违禁拼音数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁拼音数据路径（txt，UTF-8 编码；同音变体检测，仅「违禁语句丢弃」开启时生效）'), keys=("filter", "badwords", "bad_pinyin_path"))
             _auto_save(ui.input(label='违禁词替换', value=get_nested_value(config, "filter", "badwords", "replace"), placeholder='在不丢弃违禁语句的前提下，将违禁词替换成此项的文本').style("width:100%;").tooltip('在不丢弃违禁语句的前提下，将违禁词替换成此项的文本'), keys=("filter", "badwords", "replace"))
-
-        # ---------- 复读触发（T10 同期：reread 节生产端接线——此前无 UI 无默认节，复读死链） ----------
-        with ui.card().style(card_css):
-            ui.label('复读触发')
-            with ui.row().style("align-items:center; gap:16px; flex-wrap:wrap;"):
-                _auto_save(ui.switch('启用复读', value=bool(get_nested_value(config, "reread", "enable"))).style(switch_internal_css).tooltip('启用后，弹幕命中复读词表将触发原文复读（普通=正常队列；最高优先级=999 插队首）'), keys=("reread", "enable"))
-            _auto_save(ui.textarea(label='复读关键词', value=textarea_data_change(get_nested_value(config, "reread", "keywords")), placeholder='命中即触发原文复读（换行分隔）').props('input-style="min-height: 6rem"').style("width:100%;"), keys=("reread", "keywords"), split_lines=True)
-            _auto_save(ui.textarea(label='最高优先级关键词', value=textarea_data_change(get_nested_value(config, "reread", "top_priority_keywords")), placeholder='命中即触发 999 插队首复读（换行分隔）').props('input-style="min-height: 6rem"').style("width:100%;").tooltip('最高优先级：暂停当前播放，复读完续播（A7 时序链路）'), keys=("reread", "top_priority_keywords"), split_lines=True)

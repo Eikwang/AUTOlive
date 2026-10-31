@@ -3,9 +3,6 @@
 """
 
 import asyncio
-import copy
-import math
-import random
 import shutil
 import threading
 import traceback
@@ -13,10 +10,6 @@ import os
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from utils.web_captions import get_captions_manager
-
-# 在役播放器分派值集合（义务 C2/Eng A2：模块级单一事实源——playback_manager
-# 两处分派判断与测试矩阵枚举共用，防字面量共同漂移；audio_player_v2 为活值）
-PLAYER_KEYS = ["audio_player", "audio_player_v2", "builtin"]
 
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
@@ -44,39 +37,6 @@ def routes_to_edtalk(data_json, config) -> bool:
     if data_json.get("type") in ASSISTANT_PLAYBACK_TYPES:
         return False
     return is_edtalk_active(config)
-
-
-def _coerce_interval(value, default):
-    """播放间隔读侧类型归一化（2026-10-24 实测修复）。
-
-    前端 ui.input 文本框把数字落盘为字符串（实测 play_audio.play_interval_max
-    ='0.8'），原始值直传 get_random_value 抛 TypeError（float 与 str 比较）——
-    出队后的待播条目被 only_play_audio 的 except 吞掉丢弃：合成成功但 EDTalk
-    无推送、本地无声。str/None/非有限值一律归一化，非法回退 default（对齐
-    builtin _post_play_interval 的 float() 读侧归一化既定模式）。
-    """
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(result):
-        return default
-    return result
-
-
-def _resolve_play_interval(config):
-    """A4 新旧键回退 + 读侧类型归一化（2026-10-24 实测修复，见 _coerce_interval）。
-
-    回退链：play_interval_min/max（新键）→ normal_interval_min/max（旧键，
-    A4 一次性兼容）→ 默认 0.3/0.5（config.example.json 默认域）。
-    """
-    interval_min = config.get("play_audio", "play_interval_min")
-    if interval_min is None:
-        interval_min = config.get("play_audio", "normal_interval_min")
-    interval_max = config.get("play_audio", "play_interval_max")
-    if interval_max is None:
-        interval_max = config.get("play_audio", "normal_interval_max")
-    return _coerce_interval(interval_min, 0.3), _coerce_interval(interval_max, 0.5)
 
 
 def _play_backing_local(backing_path: str, volume: float):
@@ -140,34 +100,9 @@ class PlaybackMixin:
             shutil.rmtree(seg_dir, ignore_errors=True)
             logger.info(f"[song] 切片目录已清理：{seg_dir}")
 
-    def stop_audio(self, type: str="pygame", mixer_normal: bool=True, mixer_copywriting: bool=True):
-        """停止音频播放
-
-        A3（2026-10-22 审查批次）：mixer_copywriting 分支退役移除（文案模块已弃用，
-        copywriting mixer 与 normal 同为 pygame.mixer 副本、双停本就冗余）；参数保留
-        兼容既有调用方（conversation_manager/audio_processor 均传 True,True）。
-        """
-        try:
-            if type == "pygame":
-                if mixer_normal:
-                    self.mixer_normal.music.stop()
-                    logger.info("停止普通音频播放")
-                return True
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f"停止音频播放失败：{e}")
-            return False
-
     async def only_play_audio(self):
         """只进行普通音频播放"""
         try:
-            try:
-                if self.config.get("play_audio", "player") in ["pygame"]:
-                    self.mixer_normal.init()
-            except Exception as e:
-                logger.error(traceback.format_exc())
-                logger.error("pygame mixer_normal初始化失败，普通音频将无法正常播放，请检查声卡是否正常！")
-
             while True:
                 try:
                     # 获取线程锁，避免同时操作
@@ -177,13 +112,16 @@ class PlaybackMixin:
                             self.voice_tmp_path_queue_not_empty.wait()  # 阻塞直到列表非空
                         data_json = self.voice_tmp_path_queue.pop(0)
 
-                    logger.debug(f"普通音频播放队列 即将播放音频 data_json={data_json}")
+                    # 精简日志（2026-10-28）：整包 dict 倾倒退役——只留 type+content
+                    # 摘要（完整字段可按需在合成/路由链路排查时临时加回）
+                    logger.debug(f"待播放队列出队 type={data_json.get('type')} "
+                                 f"content={str(data_json.get('content', ''))[:50]}")
 
                     voice_tmp_path = data_json["voice_path"]
 
                     # A7/T1（2026-10-22 审查批次）：999 单实例 active 标记——条目离开
-                    # 待播放队列即视为进入播放系统；完成/跳过/清空时释放（pygame/EDTalk
-                    # 在本函数释放，builtin 经 release hook 在播放器线程释放）。
+                    # 待播放队列即视为进入播放系统；完成/跳过/清空时释放（EDTalk 在
+                    # 本函数释放，builtin 经 release hook 在播放器线程释放）。
                     _was_999 = False
                     try:
                         _p = self.config.get("filter", "priority_mapping").get(data_json.get("type"))
@@ -193,37 +131,16 @@ class PlaybackMixin:
                     if _was_999:
                         self.active_reread_top_999 = True
 
-                    # 字幕推送时序对齐（2026-10-25 用户实测批次）：原出队公共段 push
-                    # 已退役——EDTalk 音频尚需播放间隔 + 编排静默窗口等待（可达分钟级）
-                    # 才进数字人服务器，字幕系统性超前。现推送点=三个开播精确位：
-                    # EDTalk→push_full 前（_captions_push）；外部播放器→play 前
-                    # （builtin 除外）；pygame→music.play 前。builtin 仍由 F3 开播
-                    # 回调在真实起播时刻推送（audio_core 接线，最精确）。
+                    # 字幕推送时序对齐（2026-10-25 用户实测批次）：出队公共段 push 已
+                    # 退役——推送点=开播精确位：EDTalk→push_full 返回后（_captions_push）；
+                    # builtin 由 F3 开播回调在真实起播时刻推送（audio_core 接线，最精确）。
 
-                    # A4（2026-10-22 审查批次，义务 R2-A4/R7）：播放间隔改名——新键
-                    # play_interval_min/max，旧键 normal_interval_min/max 读侧一次性
-                    # 兼容回退（不静默回落默认；旧键保留不删=回滚友好，前端保存侧写新键）。
-                    # A3（设计项3+义务 R2-A3/E5）：interval_num 重复次数参数退役——
-                    # 间隔=单次随机取值；默认值域下节奏由 0.3~1.0s 变为 0.3~0.5s
-                    # （F-10，已入发布说明与回归声明）。
-                    # 2026-10-24 实测修复：回退后做读侧类型归一化（_resolve_play_interval）
-                    # ——前端文本框落盘字符串（实测 play_interval_max='0.8'）直传比较
-                    # 抛 TypeError，出队条目被下方 except 吞掉丢弃：合成成功但 EDTalk
-                    # 无推送、本地无声（口型与声音全无的根因）。
-                    interval_min, interval_max = _resolve_play_interval(self.config)
-                    normal_interval = self.common.get_random_value(interval_min, interval_max)
-
-                    # 不仅仅是说话间隔，还是等待文本捕获刷新数据
-                    await asyncio.sleep(normal_interval)
-
-                    # A2（2026-10-22 审查批次）：pydub 随机变速路径已退役删除（义务 R2-A2，
-                    # 不留开关）——随机语速源迁移至合成侧（synthesis_manager
-                    # ._resolve_random_synth_speed，经 TTS 引擎参数 rate/pitch/speed_factor
-                    # 生效），条目经 synth_speed 标记识别。变速仅适用 TTS 合成音频；
-                    # 本地音频/点歌（tts_type=none）不经合成侧，天然不再变速（边界声明）。
-                    # （P26 双路径过渡态终结：实测确认 inproc speed_factor 生效后退役回退路径）
-
-                    # print(voice_tmp_path)
+                    # 消费回传机制（2026-10-30 审查批次）：播放完成回执驱动下一条
+                    # 取用（builtin 完成回调/EDTalk push_full 返回=消费完成点），无需
+                    # 冗余的间隔等待——「播放间隔min/max」配置随本批次退役移除
+                    # （原 A4 改名键 play_interval_min/max 与旧键 normal_interval_min/max
+                    # 一并清理；A2 pydub 随机变速路径已于 2026-10-22 退役删除，变速
+                    # 在合成侧经 TTS 引擎参数生效，见 synthesis_manager）。
 
                     # 根据接入的虚拟身体类型执行不同逻辑（2026-10-22：metahuman_stream 驱动退役，EDTalk 分流为唯一特殊路径）
                     # EDTalk 实时推理模式（EDTalk功能集成计划 §4.3.3）：跳过本地播放——
@@ -271,9 +188,6 @@ class PlaybackMixin:
                                 logger.warning(
                                     f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
                                     f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
-                        # 字幕时序对齐：推送点=音频进入数字人服务器前一刻
-                        # （历经播放间隔与编排静默窗口等待后）——数字人开口即出字。
-                        await self._captions_push(data_json)
                         # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
                         # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
                         # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
@@ -311,19 +225,19 @@ class PlaybackMixin:
                         await self.edtalk_client.push_full(
                             voice_tmp_path, content=data_json.get("content", "")
                         )
+                        # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
+                        # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
+                        # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
+                        # （时长×1.2 + buffer_depth 回落，edtalk_client
+                        # ._wait_flight_complete），字幕系统性超前一句（字幕N 显示时
+                        # 数字人正在播 N-1）。
+                        await self._captions_push(data_json)
                         # 动作编排完成回调（/autoplan 2026-10-21 批次，义务 CL-2/D-2）：
                         # EDTalk push 路径每条目完成处（push_full 返回=单飞行句完成判定）。
                         # G1（2026-10-28）：builtin 播放器的完成回传已由 audio_core 注册
                         # 完成回调补齐（_fire_completion 携带条目 type/content）——两路
                         # 互斥不双报（EDTalk 激活走本路径，未激活走 builtin 播放回调）。
-                        try:
-                            from utils.orchestration import get_choreographer
-                            _choreo = get_choreographer()
-                            if _choreo is not None:
-                                _choreo.on_audio_complete(
-                                    data_json.get("type", ""), data_json.get("content", ""))
-                        except Exception as _choreo_err:
-                            logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{_choreo_err}")
+                        self._notify_choreo_complete(data_json)
                         # G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执
                         # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
                         self.report_consumed(
@@ -335,7 +249,11 @@ class PlaybackMixin:
                         # A7/F-5 短路声明：EDTalk 激活时 999 暂停-续播链路显式不可达——
                         # 本分支不进 builtin 播放器（push_full 帧锁定播放），999 按队列
                         # 优先级自然排序推送；999 单实例约束仍由 queue_manager 层保证。
-                    elif self.config.get("play_audio", "player") in PLAYER_KEYS:
+                    else:
+                        # 本地播放统一 builtin 进程内播放器（2026-10-30 审查批次）：
+                        # 「音频播放器」选择配置退役移除——外部 AUDIO_PLAYER HTTP 客户端
+                        # 与 pygame 直播分支随配置一并删除（消费回传/999 暂停-续播/
+                        # F3 开播字幕均由 builtin 承接）。
                         if "insert_index" in data_json:
                             data_json = {
                                 "type": data_json["type"],
@@ -361,44 +279,39 @@ class PlaybackMixin:
                                 },
                                 "speed": 1
                             }
-                        # 外部播放器：play() 即近似开播点；builtin 的字幕由 F3 开播
-                        # 回调在真实起播时刻推送（play()=入队非同步播放，此处推会
-                        # 随队列积压超前），跳过。
-                        if self.config.get("play_audio", "player") != "builtin":
-                            await self._captions_push(data_json)
+                        # 字幕由 F3 开播回调在真实起播时刻推送（play()=入队非同步
+                        # 播放，此处推会随队列积压超前）——builtin 播放器专属接线。
                         self.audio_player.play(data_json)
-                    else:
-                        logger.debug(f"voice_tmp_path={voice_tmp_path}")
-                        import pygame
-
-                        try:
-                            # 使用pygame播放音频
-                            self.mixer_normal.music.load(voice_tmp_path)
-                            # 字幕时序对齐：本地播放起点（load 成功后、开播前一刻）
-                            await self._captions_push(data_json)
-                            self.mixer_normal.music.play()
-                            while self.mixer_normal.music.get_busy():
-                                pygame.time.Clock().tick(10)
-                            self.mixer_normal.music.stop()
-                            # A3：send_audio_play_info_to_callback 回调随 info_to_callback
-                            # 参数退役移除（回路死链，2026-10-22 审查批次）
-                        except pygame.error as e:
-                            logger.error(traceback.format_exc())
-                            # 如果发生 pygame.error 异常，则捕获并处理它
-                            logger.error(f"无法加载音频文件:{voice_tmp_path}。请确保文件格式正确且文件未损坏。可能原因是TTS配置有误或者TTS服务端有问题，可以去服务端排查一下问题")
-                        finally:
-                            if _was_999:
-                                # A7/T1：pygame 路径 999 完成释放（builtin 走 release hook）
-                                self.active_reread_top_999 = False
-                        # ② 点歌切片末段清理（pygame 路径即时清）
-                        self._cleanup_song_segment_if_last(data_json)
+                        # M3（2026-10-28 消费批次）：本地播放器路径消费回传——以移交点
+                        # （play() 返回=条目脱离本队列）为近似消费完成点：Sort 侧回执 +
+                        # 编排实例匹配（保证编排序列可推进，对齐推进语义优先于精确播放
+                        # 时点）；builtin 的真实完成点经完成回调二次回执（G1，互斥不双报
+                        # 由回调注册点保证——playback_manager 侧仅移交回执）。
+                        self.report_consumed(data_json.get("type", ""), data_json.get("content", ""))
+                        self._notify_choreo_complete(data_json)
+                        # ② 点歌切片末段清理：builtin play()=异步入队非播放完成判定，
+                        # 末段清理依赖合成侧 _purge_stale_song_segments 清扫兜底。
 
                 except Exception as e:
                     logger.error(traceback.format_exc())
-            self.mixer_normal.quit()
         except Exception as e:
             logger.error(traceback.format_exc())
 
+
+    def _notify_choreo_complete(self, data_json):
+        """编排播完回调（M3 提取，2026-10-28 消费批次：EDTalk/builtin 两路共用）。
+        O6：choreo_step_id 随条目透传——按实例序号精确匹配（同内容重复入队不误配），
+        未透传路径编排侧退回 (type,content) 匹配。异常隔离（失败退编排 F1 超时
+        兜底，不影响播放循环）。"""
+        try:
+            from utils.orchestration import get_choreographer
+            _choreo = get_choreographer()
+            if _choreo is not None:
+                _choreo.on_audio_complete(
+                    data_json.get("type", ""), data_json.get("content", ""),
+                    data_json.get("choreo_step_id") or None)
+        except Exception as e:
+            logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{e}")
 
     async def _captions_push(self, data_json):
         """字幕推送（时序对齐版，2026-10-25 用户实测批次）：调用点=音频进
@@ -423,7 +336,4 @@ class PlaybackMixin:
         if is_edtalk_active(self.config):
             # EDTalk 契约无音频 flush 端点——静默跳过（保持既有调用方兼容）
             return
-        if self.config.get("play_audio", "player") in PLAYER_KEYS:
-            self.audio_player.skip_current_stream()
-        else:
-            self.mixer_normal.music.fadeout(1000)
+        self.audio_player.skip_current_stream()

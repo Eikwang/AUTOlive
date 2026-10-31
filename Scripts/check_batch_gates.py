@@ -46,8 +46,18 @@ AUDIO_RETIRED_CODE_PATTERNS = [
     "self.mixer_copywriting",                 # A3：文案 mixer 属性
     "my_global.wait_play_audio_num",          # A3：死全局消费
     "interval_num_min",                       # A4/A3：重复次数参数（键与消费）
-    # A5：退役优先级节读取（豁免：audio_core 迁移读取器为 A5 交付物本身）
-    ("audio_player\", \"priority_mapping", {"utils/audio/audio_core.py"}),
+    # A5：退役优先级节读取（豁免：audio_core 迁移读取器与 frontend/main.py
+    # 退役键扫描通知清单为合法引用——前者执行迁移，后者做可见面提示；
+    # test_ui16_batch 对该清单的源级守卫断言同属合法文本引用）
+    ("audio_player\", \"priority_mapping",
+     {"utils/audio/audio_core.py", "frontend/main.py",
+      "tests/features/test_ui16_batch.py"}),
+    # 2026-10-30 审查批次：播放间隔/播放器选择退役
+    "def _resolve_play_interval",             # 播放间隔读侧 helper 定义（退役）
+    "def stop_audio(",                        # pygame stop_audio 链退役
+    "from utils.audio_handle.audio_player import",  # 外部播放器客户端 import
+    "self.mixer_normal.music",                # pygame.mixer 直播分支（活跃使用级——
+                                              # 守卫断言的裸串文本不含 self. 前缀）
 ]
 AUDIO_RETIRED_CONFIG_KEYS = [
     ("play_audio", "info_to_callback"),
@@ -55,9 +65,13 @@ AUDIO_RETIRED_CONFIG_KEYS = [
     ("play_audio", "interval_num_max"),
     ("audio_random_speed", "copywriting"),
     ("audio_player", "priority_mapping"),
+    ("play_audio", "play_interval_min"),      # 2026-10-30：播放间隔退役
+    ("play_audio", "play_interval_max"),
+    ("play_audio", "normal_interval_min"),    # A4 旧键一并退役
+    ("play_audio", "normal_interval_max"),
+    ("play_audio", "player"),                 # 2026-10-30：播放器选择退役
 ]
 AUDIO_CONFIG_FILES = ["config.example.json", "config/tts/tts.json"]
-AUDIO_NEW_KEYS_REQUIRED = [("play_audio", "play_interval_min"), ("play_audio", "play_interval_max")]
 
 
 def run(cmd, **kw):
@@ -170,11 +184,6 @@ def gate6_audio_retired():
             node = cfg.get(section)
             if isinstance(node, dict) and key in node:
                 print(f"  FAIL {cfg_file} 退役键仍在：{section}.{key}")
-                ok = False
-        for section, key in AUDIO_NEW_KEYS_REQUIRED:
-            node = cfg.get(section) or {}
-            if cfg_file == AUDIO_CONFIG_FILES[0] and key not in node:
-                print(f"  FAIL {cfg_file} 新键缺席：{section}.{key}")
                 ok = False
     print(f"门6 {'PASS' if ok else 'FAIL'}")
     return ok

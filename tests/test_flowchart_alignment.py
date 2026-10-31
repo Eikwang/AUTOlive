@@ -84,7 +84,7 @@ class TestGraphAnchors:
     ANCHOR_REGISTRY = {
         "playback_manager.py": (
             "utils/audio/playback_manager.py",
-            ["is_edtalk_active", "_captions_push", "PLAYER_KEYS",
+            ["is_edtalk_active", "_captions_push",
              "_play_backing_local", "backing_path", "push_full",
              "_CHOREO_MUTE_MAX_WAIT"],
         ),
@@ -165,10 +165,19 @@ class TestChoreoTopology:
             assert not re.search(pattern, _graph_text(), re.M), f"编排拓扑歧义边回归——{why}"
 
     def test_keyword_hub_trigger_chain(self):
-        """代码侧镜像断言：中枢识别即触发编排，talk 源纳入编排订阅。"""
+        """代码侧镜像断言：中枢识别即触发编排，talk 源纳入编排订阅。
+
+        （2026-10-30 过滤审查批次更新镜像：旧功能门控死结构 _TEXT_FEATURES
+        "talk": (False, True) 随复读字段退役一并移除——2026-10-27 起 talk 与
+        comment 同走 _recognize_text 无条件编排订阅，运行时行为由
+        test_keyword_hub.py::test_talk_choreo_enabled 锁定。）"""
         hub = (REPO / "utils" / "keyword_hub.py").read_text(encoding="utf-8")
         assert "_match_choreo_keyword" in hub, "关键词中枢缺少编排匹配器"
-        assert '"talk": (False, True)' in hub, (
+        # talk 源（TEXT_SOURCES 含 talk）路由到 _recognize_text，其编排订阅无门控
+        assert 'TEXT_SOURCES = ("comment", "talk")' in hub, "talk 源不在全量识别源"
+        assert "_recognize_text(data, source)" in hub, "文本源未统一路由 _recognize_text"
+        rt = hub[hub.index("def _recognize_text"):hub.index("def _recognize_gift")]
+        assert "self._match_choreo_keyword(content)" in rt and "(False, True)" not in rt, (
             "talk 源功能集编排订阅被关闭——违背 v2.5 终版 Capture→Keyword→Compile 统一识别语义")
 
     def test_choreo_queue_mode_implemented(self):
@@ -183,11 +192,11 @@ class TestChoreoTopology:
 
 class TestGraphHeader:
     """C7 图头断言：元数据两行在位（restore 回滚曾静默丢失图头，native Eng F2；
-    2026-10-28 消费逻辑审查批次用户终版手改覆盖（回传边改指 AudioList）后随批次
-    重落盘，版本升至 v2.7）。"""
+    2026-10-28 消费批次 P3（O8 撤音频/M3 回传补齐/M1 满载驱逐/O9 容差匹配）
+    落码后随批次重落盘，版本升至 v2.9）。"""
 
     def test_version_line_present(self):
-        assert "v2.7" in _graph_text(), "图头版本行（v2.7）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.9" in _graph_text(), "图头版本行（v2.9）缺失——疑 restore 回滚，须随批次重落盘"
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"

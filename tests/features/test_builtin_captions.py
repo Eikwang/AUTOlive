@@ -211,9 +211,11 @@ def test_captions_push_disabled_and_empty():
         assert m.message_queue.empty(), "空内容不推字幕"
 
 
-# ---------- F6：stop_current_audio 三模式分发 ----------
+# ---------- F6：stop_current_audio 分发（2026-10-30 审查批次收敛） ----------
 
 def test_stop_current_audio_dispatch():
+    """本地播放统一 builtin——stop_current_audio 仅剩 builtin skip 与 EDTalk 门卫
+    （player 键选择/pygame fadeout 分支随「音频播放器」配置退役移除）。"""
     from utils.audio.playback_manager import PlaybackMixin
     calls = []
 
@@ -223,30 +225,21 @@ def test_stop_current_audio_dispatch():
 
     mixin = types.SimpleNamespace()
     mixin.audio_player = StubPlayer()
-    for mode in ("builtin", "audio_player", "audio_player_v2"):
-        mixin.config = types.SimpleNamespace(
-            get=lambda *keys, _m=mode: _m if keys == ("play_audio", "player") else None)
-        PlaybackMixin.stop_current_audio(mixin)
-    assert calls == ["skip", "skip", "skip"], "三模式都应走 skip_current_stream（F6/E 修订）"
+    mixin.config = types.SimpleNamespace(get=lambda *keys: None)
+    PlaybackMixin.stop_current_audio(mixin)
+    assert calls == ["skip"], "builtin 常驻：应走 skip_current_stream"
 
     # EDTalk 激活：静默跳过
-    mixin.config = types.SimpleNamespace(
-        get=lambda *keys: (True if keys == ("visual_body",) else
-                           (True if keys == ("edtalk_realtime", "enable") else
-                            ("builtin" if keys == ("play_audio", "player") else None))))
-    # is_edtalk_active(config) 需要 config.get 支持双键形态
     class Cfg:
         def get(self, *keys):
             if keys == ("visual_body",):
                 return "edtalk_realtime"
             if keys == ("edtalk_realtime", "enable"):
                 return True
-            if keys == ("play_audio", "player"):
-                return "builtin"
             return None
     mixin.config = Cfg()
     PlaybackMixin.stop_current_audio(mixin)
-    assert calls == ["skip", "skip", "skip"], "EDTalk 激活时不追加调用"
+    assert calls == ["skip"], "EDTalk 激活时不追加调用"
 
 
 # ---------- E-10-6：ensure-default 迁移 ----------
@@ -307,35 +300,31 @@ def test_captions_push_helper_contract():
 
 
 def test_captions_push_exact_points_source():
-    """推送点位源级守卫：出队公共段推送已退役，仅存三个开播精确位——
-    ① EDTalk：push_full 前（历经播放间隔+编排静默窗口等待后）；
-    ② 外部播放器：audio_player.play 前（builtin 除外，F3 开播回调接管）；
-    ③ pygame：music.load 成功后、music.play 前。
-    防回归：任何"图省事"挪回公共段都会让字幕重新系统性超前。"""
+    """推送点位源级守卫（2026-10-30 审查批次收敛：本地播放统一 builtin）——
+    仅存两个推送位：
+    ① EDTalk：push_full 返回后（音频已被数字人受理、即将出声）；
+    ② builtin：F3 开播回调在真实起播时刻推送（audio_core 接线，play()=入队
+       非同步播放，出队段推送会随队列积压超前——已退役）。
+    防回归：2026-10-28 修复——原 EDTalk 点位在 push_full 之前，未计入其内部
+    上一句飞行等待（时长×1.2+buffer 回落），字幕系统性超前一句；任何挪回
+    push_full 之前都会复发。"""
     src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))), "utils", "audio", "playback_manager.py")
     with open(src_path, "r", encoding="utf-8") as f:
         src = f.read()
-    # 公共段推送与旧门控谓词退役
+    # 公共段推送与旧门控谓词退役；pygame/外部播放器点位随之退役
     assert "await _captions_manager.push(" not in src
     assert "_captions_builtin_skip" not in src
-    # 恰好三个推送点
-    assert src.count("await self._captions_push(data_json)") == 3
-    # ① EDTalk 点：紧邻 push_full 之前（等待结束→出字→进数字人服务器）
-    edtalk_pos = src.index("await self._captions_push(data_json)")
+    assert 'if self.config.get("play_audio", "player") != "builtin":' not in src
+    assert "mixer_normal.music" not in src
+    # 恰好一个推送点（EDTalk）
+    assert src.count("await self._captions_push(data_json)") == 1
+    # EDTalk 点：push_full 返回之后（音频受理即将出声→出字）
     push_full_pos = src.index("await self.edtalk_client.push_full(")
-    assert edtalk_pos < push_full_pos
-    assert "编排静默窗口" in src[edtalk_pos - 200:edtalk_pos], \
-        "EDTalk 推送点必须位于静默窗口等待之后（注释锚定）"
-    # ② 外部播放器点：play 前 + builtin 跳过门卫
-    assert 'if self.config.get("play_audio", "player") != "builtin":' in src
-    assert src.index("self.audio_player.play(data_json)") > \
-        src.index('if self.config.get("play_audio", "player") != "builtin":')
-    # ③ pygame 点：load 之后、play 之前
-    load_pos = src.index("self.mixer_normal.music.load(voice_tmp_path)")
-    pygame_push_pos = src.rindex("await self._captions_push(data_json)")
-    play_pos = src.index("self.mixer_normal.music.play()")
-    assert load_pos < pygame_push_pos < play_pos
+    edtalk_pos = src.index("await self._captions_push(data_json)")
+    assert push_full_pos < edtalk_pos
+    assert "字幕时序对齐" in src[edtalk_pos - 400:edtalk_pos], \
+        "EDTalk 推送点必须位于 push_full 返回之后（修复注释锚定）"
 
 
 # ---------- F3：开播回调（义务 Eng T1 通道隔离+载荷三键，2026-10-22） ----------

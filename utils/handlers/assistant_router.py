@@ -67,6 +67,12 @@ def assistant_route(config, producer_type, source=None):
         bool: True=该消息改走助播流程
     """
     try:
+        # 总开关门控（2026-10-28 BUG 修复）：assistant_anchor.enable=false 时助播
+        # 整体停用（frontend enable_paths.py 语义：关=跳过该功能逻辑），一切消息
+        # 维持原路。原实现只查 type 勾选集——总开关关闭但勾选残留时，答谢/闲时/
+        # 念弹幕等全部被误路由为助播条目（edge_tts 合成 + 绕过数字人本地外放）。
+        if not config.get("assistant_anchor", "enable"):
+            return False
         mapping = ROUTE_TABLE.get(producer_type)
         if not mapping:
             return False

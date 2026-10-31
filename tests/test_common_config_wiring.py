@@ -7,7 +7,7 @@
 - 接线契约测试（native F1：8 个前端配置键的运行时消费点断言）
 - LLM 熔断（native F3/ENG E-3：开路/half-open 原子探测/per-channel/Lock 并发）
 - Fastrag_LLM mock HTTP 四态失败（DX CAP6-1/2/3：错误 log 契约）
-- build_llm_input（G4/G5/native F2：模板→前后缀→语言指令）
+- build_llm_input（G5/native F2：模板→语言指令；提示词前后缀已弃用移除）
 - apply_reply_template（G6/G7：多模板随机/截断/双形态/降级）
 - llm_handle 托底降级链（A2/spec C1：前置拦截仅 local_qa/托底命中/未命中/禁用三态 ENG E-6）
 - local_qa_match/local_qa_render（ENG E-2：变量替换+[1|2] 语法）
@@ -228,28 +228,27 @@ class TestBuildLlmInput:
 
     def test_template_applied(self):
         mh = self._mh({"comment_template": {"enable": True, "copywriting": "{username}生气地说：{comment}"},
-                       "before_prompt": "请简要回复:", "after_prompt": "", "need_lang": "none"})
+                       "need_lang": "none"})
         out = My_handle.build_llm_input(mh, "用户A", "怎么还不发货")
-        assert out == "请简要回复:用户A生气地说：怎么还不发货"
+        assert out == "用户A生气地说：怎么还不发货"
 
     def test_template_disabled_raw(self):
         mh = self._mh({"comment_template": {"enable": False, "copywriting": "{username}说：{comment}"},
-                       "before_prompt": "", "after_prompt": "", "need_lang": "none"})
+                       "need_lang": "none"})
         out = My_handle.build_llm_input(mh, "用户A", "你好")
         assert out == "你好"
 
     def test_template_bad_placeholder_degrades(self):
         """占位符拼错降级原文+warning（DX CAP6-9）。"""
         mh = self._mh({"comment_template": {"enable": True, "copywriting": "{usernme}说：{comment}"},
-                       "before_prompt": "", "after_prompt": "", "need_lang": "none"})
+                       "need_lang": "none"})
         out = My_handle.build_llm_input(mh, "用户A", "你好")
         assert out == "你好", "format 异常降级原始弹幕"
 
     def test_lang_instruction_yue_ko(self):
         """语言回复指令（native F2）：yue/ko 追加，zh/none 不追加。"""
         for lang, expect in [("yue", True), ("ko", True), ("zh", False), ("none", False), ("en", False)]:
-            mh = self._mh({"comment_template": {"enable": False}, "before_prompt": "",
-                           "after_prompt": "", "need_lang": lang})
+            mh = self._mh({"comment_template": {"enable": False}, "need_lang": lang})
             out = My_handle.build_llm_input(mh, "u", "hi")
             assert ("请用粤语回复" in out) == expect or ("请用韩语回复" in out) == expect, f"need_lang={lang}"
 
@@ -452,9 +451,12 @@ class TestWiringContract:
         src2 = open("utils/audio/synthesis_manager.py", encoding="utf-8").read()
         assert "_need_to_text_lang" in src2, "need_lang→text_lang 映射存在"
 
-    def test_contract_before_after_prompt(self):
-        src = open("utils/my_handle.py", encoding="utf-8").read()
-        assert "before_prompt" in src and "after_prompt" in src, "前后缀消费点：build_llm_input"
+    def test_contract_before_after_prompt_retired(self):
+        """提示词前缀/后缀已弃用移除（通用配置精简批次）——运行时零消费。"""
+        for f in ["utils/my_handle.py", "frontend/ui/tabs/common_config.py"]:
+            src = open(f, encoding="utf-8").read()
+            assert "before_prompt" not in src and "after_prompt" not in src, \
+                f"{f} 仍引用已弃用的提示词前后缀"
 
     def test_contract_comment_template(self):
         src = open("utils/my_handle.py", encoding="utf-8").read()
@@ -465,7 +467,7 @@ class TestWiringContract:
         assert "def apply_reply_template" in src, "回复模板消费点：apply_reply_template"
 
     def test_single_assembly_point(self):
-        """单一拼接点（native F6）：前后缀/模板仅在 build_llm_input 拼装
+        """单一拼接点（native F6）：模板仅在 build_llm_input 拼装
         （作用域=弹幕→LLM 输入构建；task_scheduler 动态文案为独立系统侧拼装，不在管辖）。"""
         for f in ["utils/handlers/chat_handler.py", "utils/handlers/comment_handler.py"]:
             src = open(f, encoding="utf-8").read()

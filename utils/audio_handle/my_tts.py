@@ -110,6 +110,8 @@ class MY_TTS:
 
     # P25 降级一次性告警标记（多参考/ref_free 降级单参考时 log+notify 一次，防刷屏）
     _ref_fallback_warned = False
+    # 串档防护一次性告警标记（2026-10-29：旧版 prompt_text 与多参考主音频不匹配）
+    _legacy_prompt_mismatch_warned = False
 
     async def _gpt_sovits_inproc(self, data):
         """R-2：进程内合成。参数装配顺序=gpt_sovits.params（C-1 事实来源）>
@@ -127,18 +129,20 @@ class MY_TTS:
         """
         import asyncio
         from utils.gpt_sovits_inproc import get_engine
-        from utils.audio_handle.tts_params import normalize_ref_paths, build_inproc_refs
+        from utils.audio_handle.tts_params import (
+            normalize_ref_paths, normalize_prompt_texts, build_inproc_refs,
+            apply_text_fixes)
         engine = get_engine()
         if engine is None:
             logger.error("[TTS-inproc] 引擎未初始化（仅 main.py 核心进程可用）。"
-                         "若在错误进程调用属缺陷；可临时设 gpt_sovits.backend=api 走自备外部服务兜底")
+                         "若在错误进程调用属缺陷——请检查启动流程")
             return None
         if engine.state == "red":  # 胶囊词汇=error
             logger.error("[TTS-inproc] 引擎 error 态——problem: 模型加载/推理失败；"
-                         "cause: 见胶囊日志；fix: 工作台胶囊『重新加载模型』或设 backend=api 兜底")
+                         "cause: 见胶囊日志；fix: 工作台胶囊『重新加载模型』")
             return None
         if not engine.ready:
-            logger.warning(f"[TTS-inproc] 引擎 {engine.raw_state()} 态，本次请求等待加载完成后执行")
+            logger.info(f"[TTS-inproc] 引擎 {engine.raw_state()} 态，本次请求等待加载完成后执行")
         gs = self.config.get("gpt_sovits") or {}
         params_cfg = dict(gs.get("params") or {})
         merged = {k: params_cfg.get(k) for k in self._INPROC_PARAM_KEYS
@@ -152,8 +156,28 @@ class MY_TTS:
             ref_paths = [merged["ref_audio_path"]]
         # ref_free 默认开（任务书：原系统支持无参考文本模式，直接使用该模式）
         ref_free = bool(params_cfg.get("ref_free", True))
+        # 2026-10-29 批次：参考文本与多音频逐行对应（prompt_texts[i] ↔ ref_audio_paths[i]）
+        prompt_texts = normalize_prompt_texts(params_cfg.get("prompt_texts"))
+        # 串档防护（2026-10-29 实测修复）：旧版单值 prompt_text 是旧版单值
+        # ref_audio_path 的逐字转写。主参考实际来自 ref_audio_paths（多参考装配
+        # ref_paths[0]）且 ≠ 旧版 ref_audio_path 时，旧转写与主参考非同一音频——
+        # 禁止回落注入（实测：降级重试打出旧参考文本"マスター…"且音色错乱），
+        # 宁可维持无参考文本语义。比较实际路径，旧单值与多参考首行相同时仍放行。
+        legacy_prompt_text = merged.get("prompt_text") or ""
+        if (legacy_prompt_text and ref_paths and merged.get("ref_audio_path")
+                and ref_paths[0] != merged.get("ref_audio_path")):
+            if not MY_TTS._legacy_prompt_mismatch_warned:
+                MY_TTS._legacy_prompt_mismatch_warned = True
+                logger.warning(
+                    "[TTS-inproc] 旧版 prompt_text 与多参考主音频不匹配（该转写对应旧音频 "
+                    f"{merged.get('ref_audio_path')}），已忽略——主参考转写请在 TTS 页参考文本首行填写")
+            legacy_prompt_text = ""
+            # 白名单合并已把旧 prompt_text 带入 merged——错配时须同步剥除，
+            # 否则 fragments 省略 prompt_text 时 merged 残值仍透传引擎（S4 实证）
+            merged.pop("prompt_text", None)
         ref_fragments = build_inproc_refs(
-            ref_paths, ref_free, merged.get("prompt_text") or "")
+            ref_paths, ref_free, legacy_prompt_text,
+            prompt_texts=prompt_texts)
         merged.update(ref_fragments)
         if not ref_paths and "ref_audio_path" not in merged:
             logger.error("[TTS-inproc] 参考音频未配置——problem: ref_audio_path/ref_audio_paths 均缺失；"
@@ -168,9 +192,53 @@ class MY_TTS:
             except (TypeError, ValueError):
                 pass
 
-        text = data.get("content") or ""
+        # 2026-10-30 审查批次：念法纠正文本前端（TTS 页即时配置，合成时现读）。
+        # 多音字拼写改写（polyphone_map）同批退役——多音字统一走 GPT-SoVITS 引擎
+        # 词典 多音字.txt（g2p 层改发音不改正文，发音精确；前端 TTS 页直读直写
+        # 该文件），文本前端不再二次改写（防拼写串污染 g2p 输入）。
+        from utils.audio_handle.tts_params import apply_text_fixes
+        text = apply_text_fixes(
+            data.get("content") or "",
+            params_cfg.get("pronunciation_fix") or {},
+            {})
+
         file_name = 'gpt_sovits_inproc_' + self.common.get_bj_time(4) + '.wav'
         voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
+
+        # 流式分段（2026-10-30 审查批次，任务书"流式输出"）：sink=逐段落盘回调
+        # （tts_handle 注入，合成线程内同步调用）。每个回调块=TTS.run 一个切分
+        # 片段的完整音频（streaming_mode=False 语义），独立落盘即推下游——
+        # 首段落盘即入播放队列（不等全文合成完），响应速度显著提升；数字人
+        # 对接=每段独立 push_full（Audio2Lip 异步推理，单飞行句背压保序）。
+        sink = data.get("_on_segment")
+        if callable(sink):
+            import numpy as _np
+            import soundfile as _sf
+            out_dir = os.path.dirname(voice_tmp_path) or "."
+            stem = os.path.splitext(os.path.basename(voice_tmp_path))[0] + "_seg"
+            _seg_state = {"i": 0, "first": None}
+
+            def _seg_writer(sr, chunk):
+                idx = _seg_state["i"]
+                _seg_state["i"] = idx + 1
+                arr = _np.asarray(chunk, dtype=_np.int16)
+                seg_path = os.path.join(out_dir, f"{stem}{idx}.wav")
+                _sf.write(seg_path, arr, sr or 32000, subtype="PCM_16")
+                if _seg_state["first"] is None:
+                    _seg_state["first"] = seg_path
+                try:
+                    sink(seg_path, idx)
+                except Exception:
+                    logger.warning("[TTS-inproc] 流式分段回调异常（该段跳过）", exc_info=True)
+
+            try:
+                await asyncio.to_thread(
+                    engine.synthesize, text, merged, voice_tmp_path, _seg_writer)
+                return _seg_state["first"]
+            except Exception:
+                logger.error("[TTS-inproc] 流式分段合成失败", exc_info=True)
+                return None
+
         try:
             return await asyncio.to_thread(engine.synthesize, text, merged, voice_tmp_path)
         except Exception as first_err:
@@ -181,7 +249,11 @@ class MY_TTS:
                 degraded.pop("aux_ref_audio_paths", None)
                 fallback_used = True
             if ref_free:
-                legacy_prompt = params_cfg.get("prompt_text") or ""
+                # 降级恢复参考文本：prompt_texts 首行（主参考转写）> 旧版单值
+                # prompt_text（已过串档防护——仅当主参考=旧版单值 ref_audio_path
+                # 时才非空，见上方装配段）
+                legacy_prompt = ((prompt_texts[0] if prompt_texts else "")
+                                 or legacy_prompt_text)
                 if legacy_prompt:
                     degraded["prompt_text"] = legacy_prompt
                     fallback_used = True
@@ -200,15 +272,17 @@ class MY_TTS:
                     logger.error(traceback.format_exc())
             logger.error(f"[TTS-inproc] 合成失败——problem: {first_err}; "
                          f"cause: 引擎态/模型/参数（详见 gsv-inproc 日志）; "
-                         f"fix: 检查胶囊状态与 ref_audio 配置，或 backend=api 兜底")
+                         f"fix: 检查胶囊状态与 ref_audio 配置")
             return None
 
     async def edge_tts_api(self, data):
         """edge-tts 合成（切片 3 静态部分：WebTTS 退役，改用 EDGE-TTS——任务书）。
 
-        配置：edge_tts 节（voice/rate/extra_args_json）；
+        配置：edge_tts 节（voice/rate）；
         P26：data["speed"] 运行时语速经 speed_to_edge_rate 映射为 rate（优先于配置 rate）。
-        高级参数 JSON 透传（escape hatch）：默认空=全默认，解析失败仅告警不阻塞。
+        2026-10-30：高级参数 JSON 透传（extra_args_json）退役移除——pitch 恒由
+        随机语速联动接管（A2：speed_to_edge_pitch，+1.2x→"+10Hz"/0.9x→"-5Hz"，
+        ±50Hz 截断），用户显式覆盖通道删除。
         spike（需运行环境实测）：edge-tts 网络出网与音色可用性（P26/P27 批次外）。
         """
         try:
@@ -218,7 +292,7 @@ class MY_TTS:
             return None
         from utils.audio_handle.tts_params import (
             EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
-            speed_to_edge_rate, speed_to_edge_pitch, parse_edge_extra_args, normalize_edge_rate)
+            speed_to_edge_rate, speed_to_edge_pitch, normalize_edge_rate)
 
         text = data.get("content") or ""
         if not text:
@@ -234,14 +308,10 @@ class MY_TTS:
             # 配置路径 rate 规范化：存量裸 "100%" 换算 "+0%"（edge-tts 7.x 拒收裸值）
             rate = normalize_edge_rate(edge_cfg.get("rate")) or EDGE_TTS_DEFAULT_RATE
 
-        extra_args, extra_err = parse_edge_extra_args(edge_cfg.get("extra_args_json"))
-        if extra_err:
-            logger.warning(f"[TTS-edge] 高级参数 JSON 无效（已忽略，走全默认）——{extra_err}")
-
         # A2 pitch 联动（2026-10-22 批次，义务 R2-A2）：运行时语速同步调 pitch 保持音高
-        # 一致——pitch_hz=(factor-1)*50 即 +1.2 倍→"+10Hz"，±50Hz 截断（speed_to_edge_pitch）。
-        # 仅语速驱动时联动（speed=None 走配置 rate 不调 pitch）；用户 extra_args 显式
-        # pitch 优先（escape hatch 覆盖自动联动）。d1a 裁决：试听不过则此联动一行禁用。
+        # 一致——pitch_hz=(factor-1)*50 即 +1.2 倍→"+10Hz"、0.9 倍→"-5Hz"，±50Hz 截断
+        # （speed_to_edge_pitch）。仅语速驱动时联动（speed=None 走配置 rate 不调 pitch）。
+        # d1a 裁决：试听不过则此联动一行禁用。
         synth_kwargs = {"rate": rate}
         if speed is not None:
             synth_kwargs["pitch"] = speed_to_edge_pitch(speed)
@@ -249,7 +319,7 @@ class MY_TTS:
         file_name = 'edge_tts_' + self.common.get_bj_time(4) + '.mp3'
         voice_tmp_path = self.common.get_new_audio_path(self.audio_out_path, file_name)
         try:
-            communicate = edge_tts.Communicate(text, voice, **synth_kwargs, **extra_args)
+            communicate = edge_tts.Communicate(text, voice, **synth_kwargs)
             await communicate.save(voice_tmp_path)
             logger.info(f"[TTS-edge] 合成成功 voice={voice} rate={rate}"
                         f"{' pitch=' + synth_kwargs['pitch'] if 'pitch' in synth_kwargs else ''} → {voice_tmp_path}")
@@ -261,57 +331,11 @@ class MY_TTS:
             return None
 
     async def gpt_sovits_api(self, data):
-        # R-2：backend=inproc（默认）走进程内引擎——executor 线程+引擎互斥锁，零 HTTP；
-        # backend=api 走既有 HTTP 兜底（用户自备外部 api_v2，F11 挂状态条）
-        backend = (self.config.get("gpt_sovits", "backend") or "inproc")
-        if backend == "inproc":
-            return await self._gpt_sovits_inproc(data)
-        # v2 兜底单通道（TODOS 基础功能 2026-10-22 节 #10 评估落地：inproc 为主后
-        # 旧六分支数据链为死功能——UI 参数卡（v2_api_0821/WebTTS 等）已随切片 3
-        # 退役且 config gpt_sovits 节无任何旧 API 子节存量，data[data["type"]]
-        # 必 KeyError。兜底开关语义保留（inproc 异常逃逸口+回滚通道），数据链随
-        # 键迁移重建：参数源=gpt_sovits.params 白名单（UI 唯一存活参数面）+
-        # data 运行时值，与 _gpt_sovits_inproc 装配同源；上游未白名单化的 v2
-        # 推理参数（top_k/temperature 等）取 v2 api 默认值。
-        try:
-            _params = data.get("params") or {}
-            if not _params:
-                # 测试链（audio_synthesis_use_local_config）data 无 params 键——
-                # 直读 config（与 _gpt_sovits_inproc 装配同源，C-1 事实来源）
-                _gs = self.config.get("gpt_sovits") or {}
-                _params = _gs.get("params") or {}
-            try:
-                _speed = float(data.get("speed")) if data.get("speed") is not \
-                    None else float(_params.get("speed_factor", 1.0))
-            except (TypeError, ValueError):
-                _speed = 1.0
-            data_json = {
-                "text": data.get("content", ""),
-                "text_lang": _params.get("text_lang") or data.get("language") or "zh",
-                "ref_audio_path": _params.get("ref_audio_path") or data.get("ref_audio_path", ""),
-                "aux_ref_audio_paths": _params.get("aux_ref_audio_paths") or [],
-                "prompt_text": _params.get("prompt_text") or data.get("prompt_text", ""),
-                "prompt_lang": _params.get("prompt_lang") or data.get("prompt_language", "zh"),
-                "top_k": 15,
-                "top_p": 1.0,
-                "temperature": 1.0,
-                "text_split_method": _params.get("text_split_method") or data.get("cut", "cut3"),
-                "batch_size": 1,
-                "split_bucket": False,
-                "speed_factor": _speed,
-                "fragment_interval": 1.0,
-                "repetition_penalty": 1.35,
-                "media_type": "wav",
-                "streaming_mode": False,
-            }
-            API_URL = urljoin(data.get("api_ip_port", ""), '/tts')
-            return await self.download_audio("gpt_sovits", API_URL, self.timeout, "post", None, data_json)
-        except aiohttp.ClientError as e:
-            logger.error(traceback.format_exc())
-            logger.error(f'gpt_sovits请求失败: {e}')
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            logger.error(f'gpt_sovits未知错误: {e}')
+        """GPT-SoVITS 合成（2026-10-30 审查批次：本地合成统一进程内引擎）。
 
-        return None
+        「合成引擎（backend）」与「外部 API 地址」配置项退役移除——backend=api
+        外部 HTTP 兜底通道（用户自备 api_v2 服务）随之删除，本方法恒走
+        _gpt_sovits_inproc（进程内引擎，调用点/返回语义不变）。
+        """
+        return await self._gpt_sovits_inproc(data)
 

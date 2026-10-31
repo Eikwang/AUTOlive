@@ -111,7 +111,7 @@ def create_svc_tab(
     # ---------- D-6：双写工具（config 持久化+/params 热更；E-1 服务端真值） ----------
     def _apply_param(key, value, cast=None, rebuild_hint=False):
         v = cast(value) if cast else value
-        set_config_callback("rvc_vc", key, v)
+        set_config_callback("rvc_vc", key, value=v)
         try:
             client.update_params({key: v})
             _rebuild_dirty.discard(key)
@@ -144,8 +144,12 @@ def create_svc_tab(
                      once=True)
 
     def _update_rebuild_badge():
+        # 2026-10-30 修复：_rebuild_badge 是 list 容器（同 _error_label[0] 模式），
+        # 此前漏写 [0] 直接对 list 调 set_visibility → AttributeError——启动成功
+        # 路径调用此函数后异常被 _start except 捕获，误报「启动失败」（实际变声
+        # 已成功，用户实测现象）。
         if _rebuild_badge:
-            _rebuild_badge.set_visibility(bool(_rebuild_dirty))
+            _rebuild_badge[0].set_visibility(bool(_rebuild_dirty))
 
     _rebuild_badge: list = []
 
@@ -174,18 +178,25 @@ def create_svc_tab(
         _ok_label.append(ok)
 
         # ---- D-3：设备选择（E-9：持久化 name，空态禁用启动）----
+        # 2026-10-30 修复（页面加载即「加载配置失败: Invalid value」）：select 构建
+        # 时 options 为空列表，value 设上次会话保存的设备名 → 不在 options 中，
+        # Quasar 抛 Invalid value 中断整个 tab 构建（外层 layout 兜底只剩错误卡）。
+        # 修复：构建时不设 value（同 common_config chat_type 漏列教训），保存值在
+        # _refresh_devices 填充 options 后校验回填。
+        _saved_in_dev = get_nested_value(config, "rvc_vc", "input_device")
+        _saved_out_dev = get_nested_value(config, "rvc_vc", "output_device")
         with ui.row().style("width:100%;align-items:center;gap:8px;flex-wrap:wrap"):
             ui.label("输入麦克风").style("min-width:80px;font-size:12px")
-            in_sel = ui.select([], value=get_nested_value(config, "rvc_vc", "input_device"),
+            in_sel = ui.select([],
                                label="选择输入麦克风",
                                on_change=lambda e: set_config_callback(
-                                   "rvc_vc", "input_device", e.value),
+                                   "rvc_vc", "input_device", value=e.value),
                                ).style("min-width:220px")
             ui.label("输出设备").style("min-width:80px;font-size:12px")
-            out_sel = ui.select([], value=get_nested_value(config, "rvc_vc", "output_device"),
+            out_sel = ui.select([],
                                 label="选择输出设备",
                                 on_change=lambda e: set_config_callback(
-                                    "rvc_vc", "output_device", e.value),
+                                    "rvc_vc", "output_device", value=e.value),
                                 ).style("min-width:220px")
             ui.button("刷新设备", on_click=lambda: _refresh_devices()).props(
                 "dense unelevated no-caps")
@@ -236,6 +247,15 @@ def create_svc_tab(
             in_sel.options = sorted(set(devs["input"]))
             out_sel.options = sorted(set(devs["output"]))
             in_sel.update(); out_sel.update()
+            # 2026-10-30：保存值校验回填（options 就绪后才设 value——构建时设
+            # 空表外 value 会抛 Invalid value 中断 tab 构建）。保存设备已拔出
+            # → 输入侧回落第一个可用设备（启动即用），输出侧留空由系统默认。
+            if _saved_in_dev and _saved_in_dev in in_sel.options:
+                in_sel.value = _saved_in_dev
+            elif in_sel.options:
+                in_sel.value = in_sel.options[0]
+            if _saved_out_dev and _saved_out_dev in out_sel.options:
+                out_sel.value = _saved_out_dev
             empty = not in_sel.options
             no_device_label.set_text("未检测到输入设备（请检查麦克风连接）")
             no_device_label.set_visibility(empty)
@@ -273,17 +293,44 @@ def create_svc_tab(
             _set_btn("starting"); _clear_error()
             in_name = in_sel.value or get_nested_value(config, "rvc_vc", "input_device")
             out_name = out_sel.value or get_nested_value(config, "rvc_vc", "output_device")
+            # 2026-10-30 修复：启动线程必须在点击时创建（此前错位到函数体层级，
+            # 页面加载即跑且 in_name/out_name 未定义 → NameError 静默失败）；
+            # 设备名显式传参（消除闭包时序依赖）。
+            threading.Thread(target=_start, args=(in_name, out_name), daemon=True).start()
 
-            def _start():
-                try:
-                    client.start_stream(input_device=in_name, output_device=out_name)
-                    _stream_state["error"] = None
-                    _set_btn("running"); _clear_error()
-                    _rebuild_dirty.clear(); _update_rebuild_badge()
-                except Exception as e:
-                    _set_btn("error")
-                    _show_error(f"启动失败：{str(e)[:160]}（修正后可直接再点启动）")
-            threading.Thread(target=_start, daemon=True).start()
+        def _pick_default_model():
+            """启动预切默认模型（2026-10-30 修复启动 500「先 /switch 再 /start」）：
+            RVC 管线档案优先（任务书：声音模型使用 RVC 训练结果）→ 目录扫描序。"""
+            for pid, p in load_profiles().items():
+                if p.get("rvc_model"):
+                    return {"name": pid, "pth": p["rvc_model"],
+                            "index": p.get("rvc_index")}
+            return models[0] if models else None
+
+        def _start(in_name, out_name):
+            try:
+                # 修复：服务端 /start 前置条件=模型已加载（未加载时 HTTP 500）。
+                # 首启（状态 model.pth 空）自动预切第一个可用 RVC 模型再开流；
+                # 无模型时给出行动指引而非裸 500。
+                st = client.status()
+                if not (st.get("model") or {}).get("pth"):
+                    picked = _pick_default_model()
+                    if not picked:
+                        _set_btn("error")
+                        _show_error("无可用 RVC 模型——先在【数字人-训练声音】完成 RVC 训练，"
+                                    "或将 .pth+.index 放入 models/rvc/ 后刷新页面")
+                        return
+                    client.switch_model(
+                        picked["pth"], picked["index"],
+                        _as_float(get_nested_value(
+                            config, "rvc_vc", "index_rate") or 0.75))
+                client.start_stream(input_device=in_name, output_device=out_name)
+                _stream_state["error"] = None
+                _set_btn("running"); _clear_error()
+                _rebuild_dirty.clear(); _update_rebuild_badge()
+            except Exception as e:
+                _set_btn("error")
+                _show_error(f"启动失败：{str(e)[:160]}（修正后可直接再点启动）")
 
         # ---- A-7 修复：单 timer + async 回调（io_bound 卸载）----
         model_label_cache = {"pth": None}
@@ -294,8 +341,14 @@ def create_svc_tab(
                     if False else await run.io_bound(client.status)
             except Exception:
                 _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
-                status_label.set_text(
-                    "○ 服务未就绪——点侧边栏「启动系统」后约 10-20 秒自动就绪")
+                # 2026-10-30 变声独立化：服务由前端进程托管（enabled=true 时进入
+                # 前端即拉起），提示不再指向「启动系统」
+                if bool(get_nested_value(config, "rvc_vc", "enabled")):
+                    status_label.set_text(
+                        "○ 变声服务启动中...（前端已托管拉起，约 10 秒就绪；拉起失败见 webui 日志 [rvc-vc]）")
+                else:
+                    status_label.set_text(
+                        "○ 变声未启用——打开左侧二级菜单「变声」开关并重启前端即自动拉起服务；页面配置仍可用")
                 return
             running = st.get("state") == "running"
             model = (st.get("model") or {}).get("pth", "")
@@ -361,7 +414,7 @@ def create_svc_tab(
                                  ).style("font-size:11px;color:var(--text-secondary)")
                         switch_btn = ui.button(
                             "切换",
-                            on_click=lambda m=m: _do_switch(config, m),
+                            on_click=lambda m=m: _do_switch(m),
                         ).props("dense unelevated no-caps")
                         # E-12：按钮态并入单 timer 轮询（不再每行一个 ui.timer）
 
@@ -387,6 +440,10 @@ def create_svc_tab(
             threading.Thread(target=_work, daemon=True).start()
             ui.notify(position="top", type="info",
                       message=f"正在切换到 {model['name']} ...")
+            # 点击上下文有 slot 栈——渲染/交互期捕获 client 供后台协程显式进入
+            # （NiceGUI 约束：background_tasks 协程无默认 slot，裸调 ui.notify 崩）
+            from nicegui import context as _ng_context
+            _switch_client = _ng_context.client
             # busy 态消费并入主 timer（A-10 高亮由 status.model 驱动）
             async def _notify_done():
                 while _switch_state["busy"]:
@@ -394,7 +451,12 @@ def create_svc_tab(
                 if _switch_state["error"]:
                     _show_error(f"切换失败（旧模型继续服务）：{_switch_state['error'][:120]}")
                 else:
-                    ui.notify(position="top", type="positive", message="切换成功")
+                    # 客户端已断开则静默跳过（错误面本就走 _show_error 状态行）
+                    try:
+                        with _switch_client:
+                            ui.notify(position="top", type="positive", message="切换成功")
+                    except Exception:
+                        pass
             background_tasks.create(_notify_done())
 
     # ============ 参数段 ============

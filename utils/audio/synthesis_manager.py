@@ -15,10 +15,31 @@ from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from ..audio_handle.tts_params import clamp_speed_factor
 from .. import alarm_notifier
+from ..config import Config
 
 
 class SynthesisMixin:
     """音频合成管理Mixin类"""
+
+    # 配置热同步（2026-10-29 实测修复）：webui 与 main 各持内存副本且互不同步
+    # （config_watcher 未接线，platform_config.py 同款结论）——用户在 TTS 页改
+    # 参考文本/关闭无参考文本模式/换参考音频后，弹幕链永远读进程启动快照，合成
+    # 仍用旧参考音频+旧转写（实测：降级重试打出旧参考文本"マスター…"）。
+    # mtime 门控惰性重载：文件未变仅 os.stat 零开销；变化才 Config.reload
+    # （类缓存刷新，进程内全部 Config 实例可见，与测试链 reload_config 同语义）。
+    _disk_config_mtime_seen = 0.0
+
+    def _sync_config_from_disk(self):
+        """弹幕链合成入口的配置热同步（mtime 门控，未变化零开销）。"""
+        try:
+            mtime = os.path.getmtime(self.config_path)
+        except OSError:
+            return
+        if mtime == SynthesisMixin._disk_config_mtime_seen:
+            return
+        SynthesisMixin._disk_config_mtime_seen = mtime
+        if Config.reload(str(self.config_path)):
+            logger.info("[config] 检测到 config.json 变化，合成链已热重载")
     
     async def message_queue_thread(self):
         """音频合成消息队列线程"""
@@ -31,7 +52,6 @@ class SynthesisMixin:
                         # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
                         self.message_queue_not_empty.wait()  # 阻塞直到列表非空
                     message = self.message_queue.pop(0)
-                logger.debug(message)
 
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处
@@ -148,11 +168,18 @@ class SynthesisMixin:
     def audio_synthesis(self, message):
         """音频合成（edge-tts / vits_fast等）并播放"""
         try:
-            logger.debug(message)
-
             # TTS类型为 none 时不合成音频
             if self.config.get("audio_synthesis_type") == "none":
                 return
+
+            # 用户名表情/特殊字符过滤（filter.emoji 同开关，2026-10-31 过滤
+            # 优化批次）：合成念用户名前的最终关口——弹幕链已过滤，语音对话/
+            # 念弹幕回放/答谢等其余来源的 username 在此兜底；先清洁后数字转
+            # 中文（共同构成用户名合成前处理链）。清理为空保留原文兜底。
+            if self.config.get("filter", "emoji"):
+                if message.get("username"):
+                    message["username"] = (self.common.clean_username(message["username"])
+                                           or message["username"])
 
             # 将用户名字符串中的数字转换成中文
             if self.config.get("filter", "username_convert_digits_to_chinese"):
@@ -163,6 +190,10 @@ class SynthesisMixin:
             if message['type'] == "song":
                 voice_path = message['content']
                 _backing = message.get("backing_path") or ""
+                # O6/O7（2026-10-28 消费批次）：编排实例序号+插队权重随歌曲
+                # 直通链透传（整曲与切片两种 data_json 都要带，切片每片同 ID）
+                _choreo_keys = {k: message[k] for k in ("choreo_step_id", "priority_override")
+                                if message.get(k) is not None}
                 # ② 点歌切片插播（2026-10-27）：无伴奏轨且切片开启（>0）时按
                 # N 秒切片分条目入队——回复等更高优先级音频经优先级排序插播到
                 # 片段之间，点歌不再独占播放数分钟。带伴奏轨走原语义（R6 双轨
@@ -182,6 +213,7 @@ class SynthesisMixin:
                                 "seg_dir": s["seg_dir"],
                             },
                         }
+                        data_json.update(_choreo_keys)
                         # 是否开启了音频播放
                         if self.config.get("play_audio", "enable"):
                             self.data_priority_insert("等待合成消息", data_json)
@@ -196,6 +228,7 @@ class SynthesisMixin:
                     "backing_path": _backing,
                     "backing_volume": message.get("backing_volume", 0.8),
                 }
+                data_json.update(_choreo_keys)
 
                 # 是否开启了音频播放
                 if self.config.get("play_audio", "enable"):
@@ -232,9 +265,11 @@ class SynthesisMixin:
 
             # 闲时任务
             elif message['type'] == "idle_time_task":
-                if message['content_type'] in ["comment", "reread"]:
-                    pass
-                elif message['content_type'] == "local_audio":
+                # content_type 安全取值（2026-10-30 过滤审查批次）：text 类闲时消息
+                # 无 content_type 键，原直接索引 KeyError 中断播报；["comment","reread"]
+                # 分支为无生产者的死引用（复读退役）——仅保留 local_audio 分支，
+                # 其余（text/TTS 类）照常落入下方合成链路
+                if message.get('content_type') == "local_audio":
                     # A11（2026-10-22 审查批次，义务 R2-A11/E4）：本地音频类维持 enable
                     # 门控（原分支漏检直接入队，关闭态仍会播出——审查发现 R1(7)）；
                     # 本地音频不走 EDTalk 豁免（F-7：闲时音效不应推给数字人端）。
@@ -332,6 +367,40 @@ class SynthesisMixin:
             logger.error(traceback.format_exc())
             return None
 
+    def _build_play_entry(self, message, voice_tmp_path, synth_speed=None):
+        """拼接播放条目 json（put_to_queue/流式分段 sink 共用，2026-10-30
+        审查批次提取——分段入队与单文件入队键面同源，防漂移）。"""
+        data_json = {
+            "type": message['type'],
+            "voice_path": voice_tmp_path,
+            "content": message["content"]
+        }
+
+        # 任务 12 根修：切分段组绑定透传（音频队列丢段可见面，queue_manager 消费）
+        if message.get("split_group"):
+            data_json["split_group"] = message["split_group"]
+
+        # D-22：流式回复分句标记透传（queue_manager 连续对话待播舍弃豁免判定）
+        if message.get("talk_stream"):
+            data_json["talk_stream"] = True
+
+        # P26：合成侧已应用语速时随条目透传（playback_manager 据此跳过 pydub 变速）
+        if synth_speed is not None:
+            data_json["synth_speed"] = synth_speed
+
+        # O6/O7（2026-10-28 消费批次）：编排实例序号+插队权重透传到播放条目——
+        # 播放完成回执按 choreo_step_id 精确关联（同内容重复入队不误配），
+        # data_priority_insert 按 priority_override 插队（高于常规语音域）
+        if message.get("choreo_step_id"):
+            data_json["choreo_step_id"] = message["choreo_step_id"]
+        if message.get("priority_override") is not None:
+            data_json["priority_override"] = message["priority_override"]
+
+        if "insert_index" in message:
+            data_json["insert_index"] = message["insert_index"]
+
+        return data_json
+
     async def tts_handle(self, message):
         """根据本地配置，使用TTS进行音频合成，返回相关数据
 
@@ -343,8 +412,13 @@ class SynthesisMixin:
         """
 
         try:
+            # 配置热同步（2026-10-29）：webui 改键落盘后无需重启即生效（mtime 门控，
+            # 未变化零开销）；置于本链所有 config 读取之前（need_lang/params 装配）
+            self._sync_config_from_disk()
             # A2：随机语速源合成侧解析（enable=false → None=系统默认；本地音频不经此路径）
             _random_speed = self._resolve_random_synth_speed()
+            # 流式分段清单（2026-10-30 审查批次）：仅 gpt_sovits 分支填充
+            seg_paths_collector: list = []
 
             if message["tts_type"] == "gpt_sovits":
                 # P25 键面重构（实测修复）：旧 data.language/api_0322/api_0706/v2_api_0821/webtts
@@ -383,6 +457,23 @@ class SynthesisMixin:
                 # 旧六分支退役为 v2 单通道（params 装配）——本构造同步清理死键
                 # （type/gradio_ip_port/api_0322/api_0706/v2_api_0821/webtts，UI 侧
                 # 已无参数卡+config 无存量，透传键无消费端）。
+                # 流式分段（2026-10-30 审查批次，TTS 页"流式输出"开关）：引擎逐段
+                # 产出即独立入队（首段不等全文合成完）——sink 在合成线程内同步执行，
+                # data_priority_insert 持锁安全；条目键面与 put_to_queue 同源
+                # （_build_play_entry）。段清单经 data 回传（gpt_sovits_api 返回值
+                # 保持 audio_path str 契约不变），tts_handle 尾段收进 result。
+                _stream_on = bool((self.config.get("gpt_sovits", "stream_reply") or {}).get("enable", False)
+                                  if isinstance(self.config.get("gpt_sovits", "stream_reply"), dict)
+                                  else self.config.get("gpt_sovits", "stream_reply", False))
+
+                def _on_segment(seg_path, idx, _m=message, _speed=_random_speed,
+                                _collector=seg_paths_collector):
+                    _collector.append(seg_path)
+                    _entry = self._build_play_entry(_m, seg_path, synth_speed=_speed)
+                    if (self.config.get("play_audio", "enable")
+                            or is_edtalk_active(self.config)):
+                        self.data_priority_insert("待播放音频列表", _entry)
+
                 data = {
                     "api_ip_port": _gdata.get("api_ip_port", ""),
                     "params": _params,
@@ -395,6 +486,8 @@ class SynthesisMixin:
                     "speed": _random_speed,
                     "content": message["content"]
                 }
+                if _stream_on:
+                    data["_on_segment"] = _on_segment
 
                 voice_tmp_path = await self.my_tts.gpt_sovits_api(data)
             elif message["tts_type"] == "edge_tts":
@@ -412,6 +505,10 @@ class SynthesisMixin:
                 "msg": "合成成功",
                 "audio_path": voice_tmp_path
             }
+            # 流式分段清单回收（2026-10-30 审查批次）：非空=流式模式（audio_synthesis
+            # 据此跳过 put_to_queue 防首段双播）
+            if seg_paths_collector:
+                message["result"]["segment_paths"] = list(seg_paths_collector)
             # P26/A2：合成侧已应用语速时随结果透传（播放侧据此识别；pydub 回退路径已退役）
             if voice_tmp_path and _random_speed is not None:
                 try:
@@ -482,8 +579,6 @@ class SynthesisMixin:
         Returns:
             bool: 合成情况
         """
-        logger.debug(message)
-
         try:
             # 如果是tts类型为none，暂时这类为直接播放音频，所以就丢给路径队列
             if message["tts_type"] == "none":
@@ -511,23 +606,8 @@ class SynthesisMixin:
         # 封装数据发到队列（/autoplan 2026-10-22 批次 A-6：变声已退役为独立
         # rvc-vc 流程，主流程音频直通入队——reply/read_comment 不再经变声环节）
         async def put_to_queue(message, voice_tmp_path, synth_speed=None):
-            # 拼接json数据，存入队列
-            data_json = {
-                "type": message['type'],
-                "voice_path": voice_tmp_path,
-                "content": message["content"]
-            }
-
-            # 任务 12 根修：切分段组绑定透传（音频队列丢段可见面，queue_manager 消费）
-            if message.get("split_group"):
-                data_json["split_group"] = message["split_group"]
-
-            # P26：合成侧已应用语速时随条目透传（playback_manager 据此跳过 pydub 变速）
-            if synth_speed is not None:
-                data_json["synth_speed"] = synth_speed
-
-            if "insert_index" in message:
-                data_json["insert_index"] = message["insert_index"]
+            # 拼接json数据，存入队列（键面构造提取 _build_play_entry，流式分段共用）
+            data_json = self._build_play_entry(message, voice_tmp_path, synth_speed)
 
             # A11（2026-10-22 审查批次，义务 R2-A11/E4）：EDTalk 推送链豁免 enable——
             # 数字人服务的音频不受 play_audio.enable 影响（设计开关行为条款）；
@@ -546,7 +626,7 @@ class SynthesisMixin:
             voice_tmp_path = resp_json["result"]["audio_path"]
         else:
             voice_tmp_path = None
-        
+
         if voice_tmp_path is None:
             logger.error(f"{message['tts_type']}合成失败，请排查服务端是否启动、是否正常，配置、网络等问题。如果排查后都没有问题，可能是接口改动导致的兼容性问题，可以前往官方仓库提交issue，传送门：https://github.com/Ikaros-521/AI-Vtuber/issues\n如果是GSV 400错误，请确认参考音频和参考文本是否正确，或替换参考音频进行尝试")
             # 报警重构（2026-10-26）：旧 abnormal_alarm_handle("tts")（错误计数+本地音频）
@@ -557,11 +637,19 @@ class SynthesisMixin:
                 fix_hint="排查 TTS 服务是否启动、配置与网络；GSV 400 请核对参考音频/文本")
 
             return False
-        
+
+        # 流式分段（2026-10-30 审查批次）：引擎逐段产出时 my_tts 在 sink 回调里
+        # 已对每段（含首段）独立入队（首段即播、保序）——本层跳过 put_to_queue
+        # 防首段双播，仅补记完整段集日志；单文件路径（流式关闭）走原路径。
+        seg_paths = resp_json["result"].get("segment_paths") or []
+
         logger.info(f"[{message['tts_type']}]合成成功，合成内容：【{message['content']}】，音频存储在 {voice_tmp_path}")
 
-        await put_to_queue(
-            message, voice_tmp_path,
-            synth_speed=resp_json.get("result", {}).get("synth_speed"))
+        if seg_paths:
+            logger.info(f"[{message['tts_type']}]流式分段完成：{len(seg_paths)} 段（首段 {os.path.basename(seg_paths[0])} 已随产出逐段入队）")
+        else:
+            await put_to_queue(
+                message, voice_tmp_path,
+                synth_speed=resp_json.get("result", {}).get("synth_speed"))
 
         return True

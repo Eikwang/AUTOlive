@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from utils.orchestration.choreographer import (ActionChoreographer,
-                                               ChoreoEngine, EnqueueFile,
+                                               ChoreoEngine, CancelAudio, EnqueueFile,
                                                LogCmd, RestoreDefault,
                                                SwitchSegment, TtsThanks,
                                                _DottedNode, _normalize_text,
@@ -90,10 +90,11 @@ class EngineHarness:
     边界测试用 advance(周期 - 0.01) 后断言不推进，再 advance(0.02) 断言推进。
     """
 
-    def __init__(self, rules=None, ready=True, **over):
+    def __init__(self, rules=None, ready=True, priority_mapping=None, **over):
         self.cfg = load_choreography_config(make_cfg(rules=rules, **over))
         self.now = 1000.0
-        self.engine = ChoreoEngine(self.cfg, clock=lambda: self.now)
+        self.engine = ChoreoEngine(self.cfg, clock=lambda: self.now,
+                                   priority_mapping=priority_mapping)
         if ready:
             self.engine.on_edtalk_ready(AVAILABLE)
 
@@ -562,17 +563,30 @@ class TestCompletionPredicate:
         assert [p["data"]["user"] for p in h.engine.pending_queue] == ["u1", "u2"]
         assert h.engine.get_state()["pending_depth"] == 2
 
-    def test_queue_overflow_drops_oldest(self):
-        """多槽上限（G3）：排满 PENDING_QUEUE_MAX 后新触发挤掉最旧（最新触发保留）。"""
+    def test_queue_overflow_evicts_lowest(self):
+        """多槽上限（G3+O2 消费批次）：满额挤最低优；新触发权重不高于最低优则舍弃。"""
         q = make_rule(rule_id="q", match="", trigger_type="song",
                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
         q["interrupt"] = "queue"
-        h = EngineHarness(rules=[make_rule(), q])
+        kw = make_rule(rule_id="kw", match="魔法词", trigger_type="keyword",
+                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        kw["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), q, kw],
+                          priority_mapping={"song": 10, "comment": 20, "gift": 30})
         h.trigger_gift()
-        for i in range(ChoreoEngine.PENDING_QUEUE_MAX + 1):
+        for i in range(ChoreoEngine.PENDING_QUEUE_MAX):
             h.engine.decide_trigger("song", "", {"user": f"u{i}"})
         assert [p["data"]["user"] for p in h.engine.pending_queue] == \
-            [f"u{i}" for i in range(1, ChoreoEngine.PENDING_QUEUE_MAX + 1)]
+            [f"u{i}" for i in range(ChoreoEngine.PENDING_QUEUE_MAX)]
+        # 同权重再触发：不高于最低优 → 舍弃（对齐音频队列规则4）
+        res = h.engine.decide_trigger("song", "", {"user": "ulow"})
+        assert res["reason"] == "queued_full"
+        assert [p["data"]["user"] for p in h.engine.pending_queue] == \
+            [f"u{i}" for i in range(ChoreoEngine.PENDING_QUEUE_MAX)]
+        # 更高权重触发：挤掉最低优组最旧条目 u0，新条目插队首
+        h.engine.decide_trigger("keyword", "魔法词", {})
+        assert [p["data"].get("user") for p in h.engine.pending_queue] == \
+            [None] + [f"u{i}" for i in range(1, ChoreoEngine.PENDING_QUEUE_MAX)]
 
     def test_queue_mode_default_state_starts_directly(self):
         """DEFAULT 态 queue 规则照常直接启动（排队仅作用于序列执行中）。"""
@@ -734,7 +748,9 @@ class TestChoreographerFacade:
         self._drain(ch)
         assert client.switch_segment.call_count == 1  # enter 已切
         self.tick_to(ch, 4.01)  # enter 完成 → main 切段 + file 入队
-        ch._audio_enqueue.assert_called_once_with({"type": "song", "content": "music/a.mp3"})
+        ch._audio_enqueue.assert_called_once_with(
+            {"type": "song", "content": "music/a.mp3",
+             "choreo_step_id": "girl_A:main#1", "priority_override": 500})
         assert client.switch_segment.call_count == 2  # main 等待完成回调，不推进
         # 完成回调（playback 路径）→ main 完成 → exit 切换
         ch.on_audio_complete("song", "music/a.mp3")
@@ -832,6 +848,183 @@ class TestBuiltinCompletionForward:
             "完成回调必须转发编排 on_audio_complete（外放/助播真实消费驱动）"
         assert "item_type" in src and "item_content" in src, \
             "转发必须取载荷 item_type/item_content"
+
+    def test_completion_payload_carries_step_id(self):
+        import inspect
+        from utils.audio import builtin_play_center
+        src = inspect.getsource(builtin_play_center)
+        assert "item_step_id" in src, \
+            "builtin 完成回调载荷必须携带 item_step_id（O6 实例序号精确匹配）"
+
+
+# ---------- 消费批次 O1/O3/O6（2026-10-28 权重联动 + 实例匹配） ----------
+
+class TestPriorityLinkage:
+    """O1/O3：编排排队位次与 standard 打断接入 filter.priority_mapping 权重。"""
+
+    def test_queue_priority_order(self):
+        # 序列执行中：先排低权 song（10），再排高权 keyword（20）→ 高权插队首
+        rule_low = make_rule(rule_id="rB", match="", trigger_type="song",
+                             sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        rule_high = make_rule(rule_id="rA", match="魔法词", trigger_type="keyword",
+                              sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        rule_low["interrupt"] = rule_high["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), rule_low, rule_high],
+                          priority_mapping={"gift": 30, "song": 10, "comment": 20})
+        h.trigger_gift()
+        d1 = h.engine.decide_trigger("song", "", {"user": "u1"})
+        d2 = h.engine.decide_trigger("keyword", "魔法词", {})
+        assert d1["reason"] == "queued" and d2["reason"] == "queued"
+        assert [e["priority"] for e in h.engine.pending_queue] == [20, 10]
+        assert [e["rule_id"] for e in h.engine.pending_queue] == ["rA", "rB"]
+        # 同权重保持 FIFO（song 组尾追加）
+        h.engine.decide_trigger("song", "", {"user": "u2"})
+        assert [e["rule_id"] for e in h.engine.pending_queue] == ["rA", "rB", "rB"]
+
+    def test_standard_interrupt_weight_gate(self):
+        # O3：低权 standard 触发不得打断高权序列（改排队）；同权保持抢占。
+        # 权重按触发类型取映射表——活动序列 keyword(comment=20)，低权 song(10)
+        # 让位排队，同权 keyword(20) 保持抢占。
+        act_k = make_rule(rule_id="act_k", match="启动词", trigger_type="keyword",
+                          sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        low_s = make_rule(rule_id="low_s", match="", trigger_type="song",
+                          sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        eq_k = make_rule(rule_id="eq_k", match="同权词", trigger_type="keyword",
+                         sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        h = EngineHarness(rules=[act_k, low_s, eq_k],
+                          priority_mapping={"gift": 30, "song": 10, "comment": 20})
+        d = h.engine.decide_trigger("keyword", "启动词", {})
+        assert d["reason"] == "accepted" and h.engine.seq["rule_id"] == "act_k"
+        res = h.engine.decide_trigger("song", "", {})
+        assert res["reason"] == "queued"
+        assert h.engine.seq["rule_id"] == "act_k"  # 序列未被打断
+        # 同权重 standard 触发仍抢占（既有语义保持）
+        res2 = h.engine.decide_trigger("keyword", "同权词", {})
+        assert res2["reason"] == "interrupted"
+        assert h.engine.seq["rule_id"] == "eq_k"
+
+
+class TestCompletionStepIdMatching:
+    """O6：完成回调按 choreo_step_id 实例序号精确匹配；未携带时退回 (type,content)。"""
+
+    def _tts_inflight(self, h):
+        """推进到 main tts 步并注册 inflight（编排音轨入队等价物）。
+
+        时序：切换接受→enter 计时→on_tick 完成 enter 返回 main 切段→
+        切换接受后 tts 指令才发出（义务：音频在切换被接受后入队）。"""
+        d = h.trigger_gift()
+        h.engine.on_switch_result(switch_cmd(d["commands"]).step_id, True, h.now)
+        h.advance(4.02)
+        cmds = h.engine.on_tick(h.now)
+        tts_cmds = h.engine.on_switch_result(switch_cmd(cmds).step_id, True, h.now)
+        tts = next(c for c in tts_cmds if isinstance(c, TtsThanks))
+        h.engine.on_audio_enqueued(tts.step_id, "gift", "谢谢", True, h.now)
+        return tts
+
+    def _harness(self):
+        """gift 规则 main tts 步 + exit 步（main 完成回调后返回 exit 切段命令）。"""
+        gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                   "main": {"segment": "A_跳舞", "duration_s": 30,
+                                            "audio": {"mode": "tts"}},
+                                   "exit": {"segment": "A_离场", "duration_s": 3}})
+        return EngineHarness(rules=[gift])
+
+    def test_wrong_step_id_ignored(self):
+        h = self._harness()
+        tts = self._tts_inflight(h)
+        # 同内容旧实例完成回调（stale step_id）→ 不推进（O6 根修的错配场景）
+        assert h.engine.on_audio_complete("gift", "谢谢", h.now,
+                                          step_id="girl_A:main#0") == []
+        # 当前实例完成 → 推进（exit 切换命令）
+        out = h.engine.on_audio_complete("gift", "谢谢", h.now, step_id=tts.step_id)
+        assert any(isinstance(c, SwitchSegment) for c in out)
+
+    def test_legacy_content_match_fallback(self):
+        h = self._harness()
+        self._tts_inflight(h)
+        # 未携带 step_id（未透传路径）→ 退回 (type,content)+晚于入队时间 匹配
+        out = h.engine.on_audio_complete("gift", "谢谢", h.now + 1)
+        assert any(isinstance(c, SwitchSegment) for c in out)
+
+    def test_legacy_content_match_normalized(self):
+        """O9（消费批次）：回退路径 content 归一化比较——下游改写（换行→句号、
+        首尾空白、点缀词裁剪变短）不再误失配。"""
+        h = self._harness()
+        self._tts_inflight(h)
+        # 改写形态1：换行替换为句号+首尾空白（synthesis_manager \n→。）
+        out = h.engine.on_audio_complete("gift", " 谢谢。 ", h.now + 1)
+        assert any(isinstance(c, SwitchSegment) for c in out)
+
+    def test_empty_normalized_key_not_matched(self):
+        """O9 空键守卫（P3 审查批次）：纯标点/空白内容归一化为空串不匹配——
+        空串是任意字符串的子串，放行=任意空内容回调无条件误配。"""
+        h = self._harness()
+        self._tts_inflight(h)
+        assert h.engine.on_audio_complete("gift", "。。。，、 ！", h.now + 1) == []
+        assert h.engine.seq["inflight"] is not None  # 未被误推进
+
+    def test_interrupt_cancels_old_inflight(self):
+        """O8（消费批次）：standard 打断旧序列时撤销未消费 inflight（CancelAudio）。"""
+        gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                   "main": {"segment": "A_跳舞", "duration_s": 30,
+                                            "audio": {"mode": "tts"}},
+                                   "exit": {"segment": "A_离场", "duration_s": 3}})
+        kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",
+                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        h = EngineHarness(rules=[gift, kw])  # 无权重表：同权（0）保持抢占语义
+        self._tts_inflight(h)
+        d = h.engine.decide_trigger("keyword", "抢词", {"user": "u"})
+        cancels = [c for c in d["commands"] if isinstance(c, CancelAudio)]
+        assert len(cancels) == 1
+        assert cancels[0].step_id == "girl_A:main#1"
+        # 旧音频完成回调到达：inflight 已重置 → 不推进新序列（O8 与 O6 联动）
+        out = h.engine.on_audio_complete("gift", "谢谢", h.now + 1)
+        assert out == []
+        assert h.engine.seq["rule_id"] == "girl_B"
+
+    def test_interrupt_before_tts_no_cancel_but_orphan_gate(self):
+        """O8 收口（P3 审查批次）：打断发生在旧 TtsThanks 尚未执行完时（inflight
+        为空）→ 无先行 CancelAudio；旧步骤音频入队回执迟到由 is_active_step
+        门判定为孤儿（门面层撤销）。"""
+        gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                   "main": {"segment": "A_跳舞", "duration_s": 30,
+                                            "audio": {"mode": "tts"}},
+                                   "exit": {"segment": "A_离场", "duration_s": 3}})
+        kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",
+                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        h = EngineHarness(rules=[gift, kw])
+        d = h.trigger_gift()
+        h.engine.on_switch_result(switch_cmd(d["commands"]).step_id, True, h.now)
+        h.advance(4.02)
+        h.engine.on_tick(h.now)  # main 切段命令（未接受——TtsThanks 尚未发出）
+        # 此刻打断：inflight 为空 → 不产生 CancelAudio（无可撤）
+        d2 = h.engine.decide_trigger("keyword", "抢词", {"user": "u"})
+        assert not [c for c in d2["commands"] if isinstance(c, CancelAudio)]
+        # 旧 main 步骤已不属于新序列（is_active_step 门判定）→ 迟到回执将被门面撤销
+        assert not h.engine.is_active_step("girl_A:main#1")
+        assert h.engine.is_active_step(switch_cmd(d2["commands"]).step_id)
+
+    def test_stale_orphan_audio_cancelled(self):
+        """O8 收口（门面层）：非当前序列步骤的 audio_enqueued 回执 → 撤销该
+        step_id 队列条目；活动步骤回执正常注册不撤。"""
+        client = MagicMock()
+        client.get_status.return_value = {}
+        cancel = MagicMock()
+        ch = ActionChoreographer(make_cfg(), client, audio_enqueue=MagicMock(),
+                                 thanks_generate=MagicMock(return_value=None),
+                                 audio_cancel=cancel, clock=lambda: 1000.0)
+        ch.engine.on_edtalk_ready(AVAILABLE)
+        d = ch.engine.decide_trigger("gift", "小心心", gift_data())
+        active_id = switch_cmd(d["commands"]).step_id
+        # 活动步骤回执：正常注册 inflight，不撤
+        ch._handle_event(("audio_enqueued", active_id, "gift", "谢谢", True))
+        cancel.assert_not_called()
+        assert ch.engine.seq["inflight"]["step_id"] == active_id
+        # 旧/孤儿步骤回执（打断滞留 TtsThanks 迟到入队）：撤销队列条目
+        ch._handle_event(("audio_enqueued", "girl_A:main#999", "gift", "旧答谢", True))
+        cancel.assert_called_once_with("girl_A:main#999")
+        assert ch.engine.seq["inflight"]["step_id"] == active_id  # 不误注册
+        ch.shutdown()
 
     def test_builtin_play_center_payload_contract(self):
         import inspect

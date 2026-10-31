@@ -20,6 +20,21 @@ from utils.service_orchestrator import DEFAULT_POLICIES, ManagedProcess, Service
 HTTP_PORT_DEFAULT = 9391
 
 
+def rvc_vc_alive(config: Config, paths: AutolivePaths, timeout: float = 2.0) -> bool:
+    """控制面探活（2026-10-30 变声独立化）：GET /status 短超时，在线返回 True。
+
+    用途：变声服务独立于系统主流程——前端进程（进前端即托管）与 main.py 核心
+    （启动系统时按 rvc_vc.enabled 拉起）都可能拉起，双方拉起前先探活防端口
+    冲突/双实例。"""
+    try:
+        http_port = int(config.get("rvc_vc", "http_port") or HTTP_PORT_DEFAULT)
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{http_port}/status", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
     """变声服务解释器（S-1/R-1 收敛，/autoplan 2026-10-14）：优先 paths.rvc_python
     （runtime312 基准），rvc_vc.runtime_python 覆盖，最后 py39 外部树兜底——

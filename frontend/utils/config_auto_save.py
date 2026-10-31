@@ -41,11 +41,11 @@ def _container_get(container, key):
 
 def _coerce_like(old_value, new_value):
     """数字保型归一化（2026-10-24 实测修复）：ui.input 的 e.value 恒为字符串，
-    直存 config 会把数字键污染成 str（实测 play_audio.play_interval_max 落盘
-    '0.8'，后端读侧 float/str 比较抛 TypeError，出队待播音频被异常吞掉丢弃
-    ——合成成功但数字人无推送、本地无声）。旧值为 int/float（bool 除外）时
-    把新值转回同型；转换失败保留原值（消费侧归一化兜底）。旧值缺失或为
-    str/list 等非数字形态时不猜类型，原样落盘。
+    直存 config 会把数字键污染成 str（实测案例：文本框落盘 '0.8' 到数字键，
+    后端读侧 float/str 比较抛 TypeError，出队待播音频被异常吞掉丢弃——合成
+    成功但数字人无推送、本地无声）。旧值为 int/float（bool 除外）时把新值
+    转回同型；转换失败保留原值（消费侧归一化兜底）。旧值缺失或为 str/list
+    等非数字形态时不猜类型，原样落盘。
     """
     if (
         isinstance(new_value, str)

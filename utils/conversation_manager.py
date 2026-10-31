@@ -1,8 +1,21 @@
 """
 对话管理模块
 提供对话处理、唤醒检查、对话运行等功能
+
+2026-10-30 聊天功能审查批次：
+- 对话打断接线（任务书）：打断关键词命中→按 clean_type 清队/停播，本句不进对话链
+- 唤醒/睡眠提示语消费（任务书）：唤醒词/睡眠词触发时播报对应提示语（直接合成入
+  播放列表，不走 AI 对话流程）+ 聊天区系统反馈（D-10）
+- 唤醒模式对齐（任务书）：「单次唤醒」=每完成一次对话自动进入睡眠（旧值
+  「临时唤醒」作别名兼容）；「长期唤醒」保持原语义
+- 双重翻转修复：do_listen_and_comment 不再预检唤醒（原实现先查一次再在
+  talk_handle 内查一次，状态翻两次——唤醒词句会被二次放行发给 LLM）
+- 连续对话最新优先（D-22 输入侧）：新输入到来时舍弃未回复/未合成的 talk 消息，
+  处理最新信息；被舍弃输入在聊天区给轻量反馈（D-10）
 """
 
+import random
+import re
 import threading
 import time
 from typing import Dict, Optional, Tuple
@@ -37,28 +50,159 @@ class ConversationManager:
         self.stop_do_listen_and_comment_thread_event = threading.Event()
         
         logger.info("对话管理器初始化完成")
-    
+
+    # ===== 系统反馈与提示语播报（2026-10-30 聊天审查批次） =====
+
+    def _system_feedback(self, text: str):
+        """D-10：系统事件（唤醒/睡眠/打断/舍弃）写入聊天区灰字反馈。
+
+        经 webui_show_chat_log_callback 网关（chat_source=system，白名单
+        已扩展）POST 到前端 /callback → chat_log_buffer → talk 页轮询渲染。
+        """
+        if not text or self.my_handle is None:
+            return
+        try:
+            self.my_handle.webui_show_chat_log_callback(
+                "系统",
+                {"username": "系统", "content": text, "chat_source": "system"},
+                text, content_type="answer")
+        except Exception as e:
+            logger.warning(f"聊天区系统反馈发送失败（不影响主流程）：{e}")
+
+    def _speak_prompt(self, text: str):
+        """提示语直接播报：构建 reread 型消息直接合成入播放列表
+        （不走 AI 对话流程；绕过 reread.enable 弹幕复读开关——提示语是
+        聊天功能自身语义，与弹幕复读功能无关）。"""
+        if not text or self.my_handle is None:
+            return
+        try:
+            message = {
+                "type": "reread",
+                "tts_type": self.config.get("audio_synthesis_type"),
+                "data": self.config.get(self.config.get("audio_synthesis_type")),
+                "config": self.config.get("filter"),
+                "username": "系统",
+                "content": text,
+            }
+            self.my_handle.audio_synthesis_handle(message)
+        except Exception as e:
+            logger.error(f"提示语播报失败：{e}")
+
+    @staticmethod
+    def _pick_from_config(config: Config, *keys) -> str:
+        """安全读取文案列表并随机取一条（缺键/空列表返回空串）。"""
+        try:
+            arr = config.get(*keys) or []
+        except Exception:
+            arr = []
+        if isinstance(arr, str):
+            arr = [arr]
+        return random.choice(arr) if arr else ""
+
+    @staticmethod
+    def _strip_words(content: str, words) -> str:
+        """去除内容中的全部指定词与标点/空白，判断唤醒句是否无对话内容。"""
+        rest = content or ""
+        for w in words or []:
+            if w:
+                rest = rest.replace(w, "")
+        return re.sub(r"[\s，。！？、,.!?~—…\-：:；;]+", "", rest)
+
+    # ===== 对话打断（任务书：对话打断节） =====
+
+    def _check_interrupt(self, content: str) -> bool:
+        """对话打断检测：命中打断关键词时中断播放、按清除类型舍弃队列。
+
+        无论唤醒状态均生效（应急停播——用户说「住嘴」不该要求先唤醒）；
+        触发后本句不再进入对话链。
+        D-10：触发后在聊天区给可见反馈（可配提示语 interrupt_talk.copywriting，
+        复用唤醒/睡眠提示语模式；未配置时仅灰字提示）。
+        """
+        try:
+            if not self.config.get("talk", "interrupt_talk", "enable"):
+                return False
+            keywords = self.config.get("talk", "interrupt_talk", "keywords") or []
+        except Exception:
+            return False
+        if not any(k and k in content for k in keywords):
+            return False
+
+        logger.info(f"[对话打断] 命中打断关键词：{content}")
+        try:
+            clean = self.config.get("talk", "interrupt_talk", "clean_type") or []
+        except Exception:
+            clean = []
+        self.clear_queue_and_stop_audio_play(
+            message_queue="message_queue" in clean,
+            voice_tmp_path_queue="voice_tmp_path_queue" in clean,
+            stop_audio_play="audio_play" in clean,
+        )
+        copywriting = self._pick_from_config(
+            self.config, "talk", "interrupt_talk", "copywriting")
+        self._system_feedback(copywriting or "（已打断播放）")
+        if copywriting:
+            self._speak_prompt(copywriting)
+        return True
+
+    # ===== 连续对话最新优先（D-22 输入侧） =====
+
+    def _discard_stale_talk_inputs(self):
+        """连续对话开启时，新输入到来前舍弃未回复/未合成的 talk 消息
+        （处理最新的信息），并在聊天区给轻量反馈（D-10）。"""
+        if not self.config.get("talk", "continuous_talk") or self.my_handle is None:
+            return
+        try:
+            removed = self.my_handle.audio.purge_talk_inputs()
+        except AttributeError:
+            return  # 音频组件未初始化（webui 轻量进程等）
+        except Exception as e:
+            logger.warning(f"舍弃未合成消息失败（忽略）：{e}")
+            return
+        if removed:
+            logger.info(f"[连续对话] 舍弃 {removed} 条未回复/未合成消息，处理最新信息")
+            self._system_feedback(f"已舍弃 {removed} 条未处理消息")
+
     def talk_handle(self, content: str) -> Dict:
         """
         处理聊天逻辑
-        
+
         Args:
             content: 聊天内容
-            
+
         Returns:
             Dict: 处理结果
         """
-        # 检查唤醒状态
+        # 0、对话打断检测（最高优先级——无论唤醒状态，命中即清队停播）
+        if self._check_interrupt(content):
+            return {"success": True, "interrupted": True}
+
+        # 1、唤醒检查与状态切换（提示语播报在此处依据返回的事件标记承接）
         awake_result = self.check_talk_awake(content)
-        
+
         if awake_result["ret"] == -1:
             # 不需要触发
             return {"success": False, "reason": "未唤醒"}
-        
+
+        # 2、唤醒/睡眠切换句承接：提示语播报 + 是否进入对话
+        if awake_result.get("first"):
+            prompt = awake_result.get("prompt") or ""
+            if prompt:
+                self._speak_prompt(prompt)
+                self._system_feedback(prompt)
+            event = awake_result.get("event")
+            # 睡眠词句 / 纯唤醒词句（去除唤醒词后无内容）不发给 LLM；
+            # 带内容的唤醒句继续走对话（如「管家，今天天气怎么样」）
+            if event == "sleep" or awake_result.get("wake_only"):
+                # 单次唤醒模式：纯唤醒词触发后即刻回睡（本就没有对话发生）
+                if event == "wakeup" and awake_result.get("single_mode"):
+                    self.is_talk_awake = False
+                    logger.info("[聊天睡眠] 单次唤醒模式：纯唤醒词触发，回睡等待下次唤醒")
+                return {"success": True, "awake_result": awake_result}
+
         if self.my_handle is None:
             logger.error("处理器未初始化，无法处理对话")
             return {"success": False, "reason": "处理器未初始化"}
-        
+
         try:
             # 处理聊天内容：走 talk 通道（chat_handler.talk_handle 聊天处理链），
             # 传与弹幕路径同构的 dict——此前传 (content, "comment") 会让 str 进入
@@ -70,6 +214,11 @@ class ConversationManager:
                  "chat_source": "voice"},
                 "talk",
             )
+            # 单次唤醒模式：每完成一次对话自动进入睡眠（任务书）——
+            # 带内容的唤醒句也算一次对话，完成后同样回睡
+            if awake_result.get("single_mode"):
+                self.is_talk_awake = False
+                logger.info("[聊天睡眠] 单次唤醒模式：对话完成，自动进入睡眠")
             return {"success": True, "awake_result": awake_result}
         except Exception as e:
             logger.error(f"处理聊天内容失败: {e}")
@@ -78,16 +227,20 @@ class ConversationManager:
     def check_talk_awake(self, content: str) -> Dict:
         """
         检查并切换聊天唤醒状态
-        
+
         Args:
             content: 聊天内容
-            
+
         Returns:
             Dict: {
                 ret: 是否需要触发（0: 需要, -1: 不需要）
                 is_talk_awake: 当前唤醒状态
                 first: 是否是第一次触发唤醒or睡眠
                 trigger_word: 触发词（如果有）
+                event: 事件标记（wakeup=唤醒触发 / sleep=睡眠触发，无切换为 None）
+                prompt: 本次触发应播报的提示语（无则空串）
+                wake_only: 唤醒句去除唤醒词后无对话内容（纯唤醒词句）
+                single_mode: 是否单次唤醒模式（每完成一次对话自动睡眠）
             }
         """
         # 判断是否启动了唤醒词功能
@@ -98,14 +251,20 @@ class ConversationManager:
                 "is_talk_awake": self.is_talk_awake,
                 "first": False,
                 "trigger_word": None,
+                "event": None,
+                "prompt": "",
+                "wake_only": False,
+                "single_mode": False,
             }
-        
+
         mode = self.config.get("talk", "wakeup_sleep", "mode")
-        
+
         if mode == "长期唤醒":
             return self._check_long_term_awake(content)
-        elif mode == "临时唤醒":
-            return self._check_temporary_awake(content)
+        # 单次唤醒（旧值「临时唤醒」别名兼容——唤醒模式下拉曾用名，语义同：
+        # 每次对话需携带唤醒词；任务书定名「单次唤醒」并补充自动睡眠语义）
+        elif mode in ("单次唤醒", "临时唤醒"):
+            return self._check_single_awake(content)
         else:
             logger.warning(f"未知的唤醒模式: {mode}")
             return {
@@ -113,15 +272,19 @@ class ConversationManager:
                 "is_talk_awake": self.is_talk_awake,
                 "first": False,
                 "trigger_word": None,
+                "event": None,
+                "prompt": "",
+                "wake_only": False,
+                "single_mode": False,
             }
     
     def _check_long_term_awake(self, content: str) -> Dict:
         """
         检查长期唤醒模式
-        
+
         Args:
             content: 聊天内容
-            
+
         Returns:
             Dict: 唤醒检查结果
         """
@@ -139,11 +302,23 @@ class ConversationManager:
                     "is_talk_awake": self.is_talk_awake,
                     "first": True,
                     "trigger_word": trigger_word,
+                    "event": "wakeup",
+                    "prompt": self._pick_from_config(
+                        self.config, "talk", "wakeup_sleep", "wakeup_copywriting"),
+                    "wake_only": self._strip_words(
+                        content,
+                        self.config.get("talk", "wakeup_sleep", "wakeup_word") or [],
+                    ) == "",
+                    "single_mode": False,
                 }
             return {
                 "ret": -1,
                 "is_talk_awake": self.is_talk_awake,
                 "first": False,
+                "event": None,
+                "prompt": "",
+                "wake_only": False,
+                "single_mode": False,
             }
         else:
             # 判断文本内容是否包含睡眠词
@@ -158,40 +333,62 @@ class ConversationManager:
                     "is_talk_awake": self.is_talk_awake,
                     "first": True,
                     "trigger_word": trigger_word,
+                    "event": "sleep",
+                    "prompt": self._pick_from_config(
+                        self.config, "talk", "wakeup_sleep", "sleep_copywriting"),
+                    "wake_only": False,
+                    "single_mode": False,
                 }
             return {
                 "ret": 0,
                 "is_talk_awake": self.is_talk_awake,
                 "first": False,
+                "event": None,
+                "prompt": "",
+                "wake_only": False,
+                "single_mode": False,
             }
-    
-    def _check_temporary_awake(self, content: str) -> Dict:
+
+    def _check_single_awake(self, content: str) -> Dict:
         """
-        检查临时唤醒模式
-        
+        检查单次唤醒模式（每完成一次对话自动进入睡眠，直到下次唤醒；
+        旧值「临时唤醒」同语义别名）
+
         Args:
             content: 聊天内容
-            
+
         Returns:
             Dict: 唤醒检查结果
         """
-        # 临时唤醒模式：每次都需要唤醒词
+        # 单次唤醒模式：每次都需要唤醒词（唤醒句可带对话内容，对话完成后自动回睡）
         trigger_word = self.common.find_substring_in_list(
             content, self.config.get("talk", "wakeup_sleep", "wakeup_word")
         )
         if trigger_word:
             self.is_talk_awake = True
-            logger.info("[临时唤醒成功]")
+            logger.info("[聊天唤醒成功]（单次唤醒）")
             return {
                 "ret": 0,
                 "is_talk_awake": self.is_talk_awake,
                 "first": True,
                 "trigger_word": trigger_word,
+                "event": "wakeup",
+                "prompt": self._pick_from_config(
+                    self.config, "talk", "wakeup_sleep", "wakeup_copywriting"),
+                "wake_only": self._strip_words(
+                    content,
+                    self.config.get("talk", "wakeup_sleep", "wakeup_word") or [],
+                ) == "",
+                "single_mode": True,
             }
         return {
             "ret": -1,
             "is_talk_awake": self.is_talk_awake,
             "first": False,
+            "event": None,
+            "prompt": "",
+            "wake_only": False,
+            "single_mode": True,
         }
     
     def clear_queue_and_stop_audio_play(self, message_queue: bool = True, 
@@ -224,7 +421,10 @@ class ConversationManager:
                 logger.error("清空待播放音频队列失败！")
         
         if stop_audio_play:
-            ret = self.my_handle.stop_audio("pygame", True, True)
+            # 2026-10-30 审查批次：stop_audio("pygame",...) 链随 pygame 播放分支
+            # 退役——本地播放统一 builtin，清队后打断当前流（EDTalk 激活时内部
+            # 静默跳过，契约无 flush 端点）
+            self.my_handle.audio.stop_current_audio()
     
     def do_listen_and_comment(self, continuous: bool = False):
         """VAD 连续对话循环——T10 语音对话链接通（2026-10-24 框架填充）。
@@ -276,10 +476,12 @@ class ConversationManager:
                     logger.info(f"[t10] 连续对话第 {round_no} 轮：识别无文字，跳过")
                     continue
                 logger.info(f"[t10] 连续对话第 {round_no} 轮识别：{text}")
-                awake = self.check_talk_awake(text)
-                if awake.get("ret") == -1:
-                    logger.info("[t10] 未唤醒，忽略本句")
-                    continue
+                # 唤醒检查统一在 talk_handle 内完成（2026-10-30 双重翻转修复：
+                # 原此处预检一次 + talk_handle 内再查一次，唤醒状态翻两次——
+                # 唤醒词句被二次放行发给 LLM）
+                # D-22 输入侧：连续对话时新输入到来，舍弃未回复/未合成的旧
+                # 消息处理最新信息（含聊天区轻量反馈 D-10）
+                self._discard_stale_talk_inputs()
                 self.talk_handle(text)
                 if not continuous:
                     break

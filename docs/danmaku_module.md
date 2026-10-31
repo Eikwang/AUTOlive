@@ -86,7 +86,7 @@ D:\AI\EDTalk\runtime312\python.exe -X utf8 tests\smoke_danmaku.py
 | `stall_threshold_seconds` | int | 60 | 收流停滞判定阈值 |
 | `cookie_dir` | str | cookie | 登录态目录（**必须落在 danmaku_listener/ 之外**；可指向外部目录复用登录态） |
 | `platforms` | map | 6 true | 12 平台启用开关（持久；关闭联动 stop 该平台运行中房间） |
-| `rooms` | list | [] | 房间权威源 `[{platform, room_id, enabled, active}]`（**active 至多一个**——互动房间显式指定） |
+| `rooms` | list | [] | 房间权威源 `[{platform, room_id, enabled}]`（enabled=true 添加即启用；active 字段已退役） |
 | `keywords` | list | [] | 屏蔽关键词（持久；仅过滤弹幕内容） |
 | `keyword_filter_enabled` | bool | true | 关键词过滤总开关 |
 

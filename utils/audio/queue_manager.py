@@ -54,6 +54,36 @@ class QueueMixin:
             logger.error(f"清空{type}队列失败：{e}")
             return False
 
+    def cancel_choreo_audio(self, step_id: str):
+        """O8（2026-10-28 消费批次）：编排打断撤旧音轨——从两队列移除匹配
+        choreo_step_id 的未消费条目（[:] 原地替换保对象身份，与锁外读者兼容）。
+
+        已被消费者取出（合成中/播放中）的条目无法撤销：其完成回调因编排
+        inflight 已重置被静默忽略（无错配副作用）。
+
+        Returns:
+            int: 撤销条数（两队列合计）
+        """
+        if not step_id:
+            return 0
+        removed = 0
+        try:
+            with self.message_queue_lock:
+                keep = [d for d in self.message_queue
+                        if not (isinstance(d, dict) and d.get("choreo_step_id") == step_id)]
+                removed += len(self.message_queue) - len(keep)
+                self.message_queue[:] = keep
+            with self.voice_tmp_path_queue_lock:
+                keep = [d for d in self.voice_tmp_path_queue
+                        if not (isinstance(d, dict) and d.get("choreo_step_id") == step_id)]
+                removed += len(self.voice_tmp_path_queue) - len(keep)
+                self.voice_tmp_path_queue[:] = keep
+            if removed:
+                logger.info(f"编排打断撤销未消费音轨 {removed} 条（step_id={step_id}）")
+        except Exception:
+            logger.error(f"撤销编排音轨异常（忽略）：{traceback.format_exc()}")
+        return removed
+
     def is_queue_less_or_greater_than(self, type: str="message_queue", less: int=None, greater: int=None):
         """判断 等待合成消息队列|待播放音频队列 数是否小于或大于某个值，就返回True"""
         if less:
@@ -176,15 +206,16 @@ class QueueMixin:
     def is_audio_queue_empty(self):
         """判断等待合成和已经合成的队列是否为空
 
-        A3（2026-10-22 审查批次）：mixer_copywriting 位退役（文案模块已弃用）——
-        位编码由 16 态收缩为 8 态：0 都不空 | 1 message_queue 空 | 2 voice_tmp_path_queue 空 |
-        3 双队列空 | 4 mixer_normal 播放中…（原 8-15 位删除）；"全空"判定值 15→7
-        （audio_processor 语音对话链调用点已同步）。
+        A3（2026-10-22 审查批次）：mixer_copywriting 位退役（文案模块已弃用）。
+        2026-10-30 审查批次：「音频播放器」配置退役——mixer_normal 位4随之移除
+        （pygame.mixer 播放态探测不再存在，本地播放统一 builtin 播放器），位编码
+        收缩为 4 态：0 都不空 | 1 message_queue 空 | 2 voice_tmp_path_queue 空 |
+        3 双队列空（全空闲）；"全空"判定值 7→3（audio_processor 语音对话链调用点
+        已同步）。
 
         Returns:
-            int: 0 都不为空 | 1 message_queue 为空 | 2 voice_tmp_path_queue 为空 | 3 双队列空 |
-                 4 mixer_normal 不在播放 | 5 message_queue 空+mixer 不播 | 6 voice_tmp_path_queue 空+mixer 不播 |
-                 7 双队列空+mixer 不播（全空闲）
+            int: 0 都不为空 | 1 message_queue 为空 | 2 voice_tmp_path_queue 为空 |
+                 3 双队列空（全空闲）
         """
 
         flag = 0
@@ -196,13 +227,72 @@ class QueueMixin:
         if len(self.voice_tmp_path_queue) == 0:
             flag += 2
 
-        # TODO: 这一块仅在pygame播放下有效，但会对其他播放器模式下的功能造成影响，待优化
-        if self.config.get("play_audio", "player") in ["pygame"]:
-            # 检查mixer_normal是否正在播放
-            if not self.mixer_normal.music.get_busy():
-                flag += 4
-
         return flag
+
+    def purge_talk_inputs(self):
+        """清除待合成队列中 talk 类型条目（连续对话最新优先，D-22 输入侧）。
+
+        连续对话开启时新输入到来前调用——舍弃未回复/未合成的旧对话消息，
+        处理最新的信息；只清 talk，不影响点歌/助播等其它类型。
+
+        Returns:
+            int: 清除条数
+        """
+        try:
+            with self.message_queue_lock:
+                keep = [m for m in self.message_queue
+                        if not (isinstance(m, dict) and m.get("type") == "talk")]
+                removed = len(self.message_queue) - len(keep)
+                if removed:
+                    self.message_queue[:] = keep
+            return removed
+        except Exception as e:
+            logger.warning(f"purge_talk_inputs 异常（忽略）：{e}")
+            return 0
+
+    def _continuous_talk_discard_notify(self, count: int):
+        """D-10：待播音频被舍弃的聊天区灰字反馈（webui /callback system 源，
+        经后台队列投递——沿 utils_handler 聊天记录回调同款通道）。"""
+        try:
+            from ..common import Common
+            from ..background_tasks import submit
+            webui_ip = self.config.get("webui", "ip")
+            webui_ip = "127.0.0.1" if webui_ip == "0.0.0.0" else webui_ip
+            payload = {"type": "llm", "data": {
+                "type": "系统", "chat_source": "system", "username": "系统",
+                "content_type": "answer",
+                "content": f"已舍弃 {count} 条待播音频（连续对话，仅播放最新一条）",
+                "timestamp": Common().get_bj_time(0)}}
+            submit(Common().send_request,
+                   f'http://{webui_ip}:{self.config.get("webui", "port")}/callback',
+                   "POST", payload, timeout=10)
+        except Exception as e:
+            logger.debug(f"舍弃反馈发送失败（忽略）：{e}")
+
+    def _maybe_discard_pending_for_talk(self, data_json):
+        """D-22（连续对话最新优先，2026-10-30 聊天审查批次）：talk 整段音频
+        入待播放队列时若待播放 ≥2（=2 与 >2 同规则，消除边界缺口），舍弃
+        等待播放音频只播最新一条，判断条件为待播放列表数量。
+
+        豁免：切分段（split_group）与流式回复分句（talk_stream）——同一次
+        回复的分段/分句必须完整排队，不受新输入淘汰影响。
+        """
+        try:
+            if not (isinstance(data_json, dict) and data_json.get("type") == "talk"):
+                return
+            if data_json.get("split_group") or data_json.get("talk_stream"):
+                return
+            if not bool(self.config.get("talk", "continuous_talk")):
+                return
+            with self.voice_tmp_path_queue_lock:
+                pending = len(self.voice_tmp_path_queue)
+                if pending >= 2:
+                    self.voice_tmp_path_queue.clear()
+            if pending >= 2:
+                logger.info(f"[连续对话] 待播放 {pending} 条 ≥2，舍弃等待播放音频只播最新一条")
+                self._continuous_talk_discard_notify(pending)
+        except Exception as e:
+            logger.warning(f"连续对话待播舍弃判断异常（忽略）：{e}")
 
     def _maybe_interrupt_999_for(self, data_json):
         """A7（design 情况1）：非 999 新音频入队成功后，若 999 正在播放则请求让位暂停。
@@ -242,9 +332,6 @@ class QueueMixin:
             assistant_anchor_text 助播-文本
             assistant_anchor_audio 助播-音频
         """
-        logger.debug(f"message_queue: {self.message_queue}")
-        logger.debug(f"data_json: {data_json}")
-
         # 定义 type 到优先级的映射，相同优先级的 type 映射到相同的值，值越大优先级越高
         priority_mapping = self.config.get("filter", "priority_mapping")
         
@@ -254,43 +341,79 @@ class QueueMixin:
             audio_type = data_json.get("type")
             return priority_mapping.get(audio_type, None)
 
+        def _entry_priority(item):
+            """条目有效权重（O7，2026-10-28 消费批次）：条目自带 priority_override
+            （编排插队音轨，choreographer 注入固定 500）优先于类型映射表——
+            既有条目权重比较、同权重组定位、最低优驱逐都必须按插队权重判定，
+            否则 500 插队条目会被误当映射权重参与排序/驱逐。"""
+            ov = item.get("priority_override") if isinstance(item, dict) else None
+            if ov is not None:
+                try:
+                    return int(ov)
+                except (TypeError, ValueError):
+                    pass
+            return get_priority_level(item)
+
         # 查找插入位置
         new_data_priority = get_priority_level(data_json)
+
+        # O7：新条目显式插队权重优先于类型映射表（固定 500，高于常规语音域
+        # 10~30、低于 999 复读专线，不触发 999 单实例约束）
+        _override = data_json.get("priority_override") if isinstance(data_json, dict) else None
+        if _override is not None:
+            try:
+                new_data_priority = int(_override)
+            except (TypeError, ValueError):
+                pass
 
         if type == "等待合成消息":
             logger.info(f"{type} 优先级: {new_data_priority} 内容：【{data_json['content']}】")
 
-            # 如果新数据没有 'type' 键或其类型不在 priority_mapping 中，直接插入到末尾
-            if new_data_priority is None:
-                insert_position = len(self.message_queue)
-            else:
-                insert_position = 0  # 默认插入到列表开头
-                # 从列表的最后一个元素开始，向前遍历列表，直到第一个元素
-                for i in range(len(self.message_queue) - 1, -1, -1):
-                    priority_level = get_priority_level(self.message_queue[i])
-                    if priority_level is not None:
-                        item_priority = int(priority_level)
-                        # 确保比较时排除未定义类型的元素
-                        if item_priority is not None and item_priority >= new_data_priority:
-                            # 如果找到一个元素，其优先级小于或等于新数据，则将新数据插入到此元素之后
-                            insert_position = i + 1
-                            break
-            
-            logger.debug(f"insert_position={insert_position}")
-
-            # 数据队列数据量超长判断，插入位置索引大于最大数，则说明优先级低与队列中已存在数据，丢弃数据
-            if insert_position >= int(self.config.get("filter", "message_queue_max_len")):
-                # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
-                logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
-                return {"code": 1, "msg": f"message_queue 已满，数据丢弃：【{data_json['content']}】"}
-
-            # 获取线程锁，避免同时操作
+            # M1/M2（2026-10-28 消费批次）：扫描/满载判定/插入全部锁内完成——
+            # 消除"锁外算位、锁内插入"的多生产者竞态超长窗口；满载时高优先级
+            # 插入改为"插队+驱逐队尾"（净长度不变，队尾=最低优组 FIFO 尾），
+            # 根治满载高优插入无界超长
             with self.message_queue_lock:
+                # 如果新数据没有 'type' 键或其类型不在 priority_mapping 中，直接插入到末尾
+                if new_data_priority is None:
+                    insert_position = len(self.message_queue)
+                else:
+                    insert_position = 0  # 默认插入到列表开头
+                    # 从列表的最后一个元素开始，向前遍历列表，直到第一个元素
+                    for i in range(len(self.message_queue) - 1, -1, -1):
+                        priority_level = _entry_priority(self.message_queue[i])
+                        if priority_level is not None:
+                            item_priority = int(priority_level)
+                            # 确保比较时排除未定义类型的元素
+                            if item_priority is not None and item_priority >= new_data_priority:
+                                # 如果找到一个元素，其优先级小于或等于新数据，则将新数据插入到此元素之后
+                                insert_position = i + 1
+                                break
+
+                logger.debug(f"insert_position={insert_position}")
+                max_len = int(self.config.get("filter", "message_queue_max_len"))
+
+                # 数据队列数据量超长判断：队满且插入位次在末尾（低优/未识别类型）→ 丢弃
+                if len(self.message_queue) >= max_len and insert_position >= len(self.message_queue):
+                    # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
+                    logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
+                    return {"code": 1, "msg": f"message_queue 已满，数据丢弃：【{data_json['content']}】"}
+
+                # 队满且插队位次有效（新数据优先级高于队内既有条目）→ 插队并驱逐队尾
+                evicted = None
+                if len(self.message_queue) >= max_len and insert_position < len(self.message_queue):
+                    evicted = self.message_queue.pop()
+
                 # 在计算出的位置插入新数据
                 self.message_queue.insert(insert_position, data_json)
                 # 生产者通过notify()通知消费者列表中有新的消息
                 self.message_queue_not_empty.notify()
 
+            if evicted is not None:
+                logger.warning(
+                    f"message_queue 已满，高优数据插队并驱逐队尾（最低优）："
+                    f"被驱逐【{evicted.get('content', '')}】{_split_group_note(evicted)}，"
+                    f"新数据【{data_json['content']}】{_split_group_note(data_json)}")
             return {"code": 200, "msg": f"数据已插入到位置 {insert_position}"}
         else:
             logger.info(f"{type} 优先级: {new_data_priority} 音频={data_json['voice_path']}")
@@ -309,7 +432,7 @@ class QueueMixin:
             max_len = int(self.config.get("filter", "voice_tmp_path_queue_max_len"))
 
             def _priority_of(item):
-                p = get_priority_level(item)
+                p = _entry_priority(item)
                 return int(p) if p is not None else None
 
             # 999 单实例约束（R2-A1，优先于四规则）
@@ -321,6 +444,10 @@ class QueueMixin:
                         f"999 单实例约束：系统中已存在 999 权重音频"
                         f"（{'播放器持有' if active_999 else '队列中'}），舍弃新 999：【{data_json.get('voice_path')}】")
                     return {"code": 1, "msg": "999 单实例约束，舍弃新 999 音频"}
+
+            # D-22（连续对话最新优先）：talk 整段音频入待播放队列前，待播放 ≥2
+            # 即舍弃等待播放音频只播最新一条（=2 与 >2 同规则）
+            self._maybe_discard_pending_for_talk(data_json)
 
             def _insert_and_notify(pos, item):
                 """锁内插入并执行首次播放阈值/唤醒逻辑（原语义保真）"""

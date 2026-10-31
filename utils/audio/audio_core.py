@@ -18,7 +18,6 @@ from ..common import Common
 from ..my_log import logger
 from ..config import Config
 from utils.audio_handle.my_tts import MY_TTS
-from utils.audio_handle.audio_player import AUDIO_PLAYER
 from utils.audio import builtin_play_center as builtin_play_center_mod
 from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER as BUILTIN_PLAY_CENTER
 from utils.web_captions import register_captions_manager
@@ -38,9 +37,6 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
     音频处理主类 - 通过Mixin模式组合各个功能模块
     """
     
-    # pygame.mixer实例
-    mixer_normal = None
-
     audio_player = None
 
     # 消息列表，存储待合成音频的json数据
@@ -72,11 +68,8 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
             logger.info("轻量模式Audio初始化（webui进程）...")
             return
 
-        if self.config.get("play_audio", "player") in ["pygame"]:
-            import pygame
-
-            # 初始化多个pygame.mixer实例
-            Audio.mixer_normal = pygame.mixer
+        # 2026-10-30 审查批次：「音频播放器」选择配置退役——pygame.mixer 初始化块
+        # 随之移除，本地播放统一 builtin 进程内播放器（audio_player）。
 
         # A5/F-4/F-6（2026-10-22 审查批次）：双优先级映射一次性合并迁移（禁纯静默）——
         # audio_player.priority_mapping（退役节）中的独有键（如 thanks）与冲突键
@@ -98,24 +91,21 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         # 音频合成单独一个线程排队播放
         threading.Thread(target=lambda: asyncio.run(self.only_play_audio())).start()
 
-        # 播放后端分流（整合计划 §4.2）：builtin=内置播放器（进程内队列），
-        # 其余=既有 AUDIO_PLAYER HTTP 客户端（外部服务模式，兼容保留）。
-        # 调用点（playback_manager 两处 play/stop_current_audio）零逻辑改动。
-        if self.config.get("play_audio", "player") == "builtin":
-            Audio.audio_player = BUILTIN_PLAY_CENTER(
-                self.config.get("audio_player") or {}, config_path=self.config_path)
-            # A3（2026-10-22 审查批次）：完成回调注册随 play_audio.info_to_callback
-            # 参数退役移除（回路死链；_fire_completion 对 None 回调自检跳过）。
-            # A7/T1：999 离开播放系统时清除 active 标记（完成/跳过/清空/停止均触发，
-            # 保证 999 单实例约束在条目释放后恢复放行）
-            Audio.audio_player.set_999_release_hook(
-                lambda: setattr(self, "active_reread_top_999", False))
-            # A5：权威优先级表读取器（Config 内存视图——合并迁移即时可见，不等落盘）
-            Audio.audio_player.set_priority_provider(
-                lambda: self.config.get("filter", "priority_mapping") or {})
-            builtin_play_center_mod.register_builtin_player(Audio.audio_player)
-        else:
-            Audio.audio_player = AUDIO_PLAYER(self.config.get("audio_player"))
+        # 2026-10-30 审查批次：本地播放统一 builtin 进程内播放器——「音频播放器」
+        # 选择配置（play_audio.player）与外部 AUDIO_PLAYER HTTP 客户端一并退役。
+        # 调用点（playback_manager play/stop_current_audio）零逻辑改动。
+        Audio.audio_player = BUILTIN_PLAY_CENTER(
+            self.config.get("audio_player") or {}, config_path=self.config_path)
+        # A3（2026-10-22 审查批次）：完成回调注册随 play_audio.info_to_callback
+        # 参数退役移除（回路死链；_fire_completion 对 None 回调自检跳过）。
+        # A7/T1：999 离开播放系统时清除 active 标记（完成/跳过/清空/停止均触发，
+        # 保证 999 单实例约束在条目释放后恢复放行）
+        Audio.audio_player.set_999_release_hook(
+            lambda: setattr(self, "active_reread_top_999", False))
+        # A5：权威优先级表读取器（Config 内存视图——合并迁移即时可见，不等落盘）
+        Audio.audio_player.set_priority_provider(
+            lambda: self.config.get("filter", "priority_mapping") or {})
+        builtin_play_center_mod.register_builtin_player(Audio.audio_player)
 
         # 内置字幕打印机（修复 playback_manager.py:74-75 断链：原
         # send_to_web_captions_printer 方法不存在，enable=true 即 AttributeError）。
@@ -126,9 +116,9 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         self.captions_manager.set_error_notifier(self._captions_error_to_player)
         # F3（义务 Eng T1：独立注册点，不复用 set_completion_callback——其载荷固定
         # 且被 A7 999 续播复用）：builtin 开播时推送字幕，时点=实际播放时点，
-        # 载荷 content/type/voice_path 三键。仅 builtin 播放器有此回调；EDTalk/
-        # pygame/外部模式字幕走 playback_manager 公共段推送（F2 门控）。
-        if self.config.get("play_audio", "player") == "builtin" and Audio.audio_player is not None and hasattr(Audio.audio_player, "set_started_callback"):
+        # 载荷 content/type/voice_path 三键。EDTalk 模式字幕走 playback_manager
+        # 公共段推送（push_full 返回后）。
+        if Audio.audio_player is not None and hasattr(Audio.audio_player, "set_started_callback"):
             Audio.audio_player.set_started_callback(
                 lambda data: self.captions_manager.push(data))
             # G1（2026-10-28 消费回传补齐，A3 死链清理后的重新注册）：builtin 完成
@@ -140,10 +130,13 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
                 try:
                     _item = (data or {}).get("data") or {}
                     _type, _content = _item.get("item_type", ""), _item.get("item_content", "")
+                    # O6（2026-10-28 消费批次）：item_step_id=choreo_step_id 全链
+                    # 透传值——非空时编排按实例序号精确匹配（同内容重复入队不误配）
+                    _step_id = _item.get("item_step_id") or None
                     from utils.orchestration import get_choreographer
                     _choreo = get_choreographer()
                     if _choreo is not None:
-                        _choreo.on_audio_complete(_type, _content)
+                        _choreo.on_audio_complete(_type, _content, _step_id)
                     self.report_consumed(_type, _content)  # G2：Sort 侧消费回执（完成点②）
                 except Exception:
                     pass  # 编排异常不回传播放器线程（沿 playback_manager 隔离惯例）

@@ -942,19 +942,6 @@
       "local_audio_path": "data/异常报警"
     }
   },
-  "trends_config": {
-    "enable": false,
-    "path": [
-      {
-        "online_num": "0-99999",
-        "path": "config.json"
-      },
-      {
-        "online_num": "100000-999999999",
-        "path": "config.json"
-      }
-    ]
-  },
   "coordination_program": [
     {
       "enable": false,
@@ -1103,8 +1090,7 @@
   "login": {
     "enable": false,
     "username": "admin",
-    "password": "123456",
-    "ums_api": "http://127.0.0.1:1119"
+    "password": "123456"
   },
   "comment_template": {
     "enable": false,

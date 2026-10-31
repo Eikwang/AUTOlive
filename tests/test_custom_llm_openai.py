@@ -93,6 +93,7 @@ class TestMigration:
             "api_key": "sk-x",
             "max_tokens": "1024",
             "temperature": "0.7",
+            "system_prompt": "人设",
         }
         new_cfg, changed = migrate_legacy_config(base)
         assert changed is False
@@ -167,6 +168,46 @@ class TestRequestBody:
         llm = Custom_LLM(LEGACY_CONFIG)
         assert llm._build_prompt({"content": "弹幕文本", "username": "u"}) == "弹幕文本"
         assert llm._build_prompt({"prompt": "脚本直调"}) == "脚本直调"
+
+
+class TestSystemPrompt:
+    """system 人设配置项（2026-10-30 审查批次：对齐各平台 cURL 通用结构）。
+
+    deepseek/kimi/GLM/讯飞/方舟 cURL 示例的 messages 均含可选首条
+    {"role":"system","content":...}——非空注入首位，留空不发送。
+    """
+
+    def test_empty_system_prompt_not_sent(self):
+        llm = Custom_LLM(LEGACY_CONFIG)
+        body = llm._build_body("hi")
+        assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+    def test_whitespace_only_treated_as_empty(self):
+        llm = Custom_LLM(LEGACY_CONFIG)
+        llm.config_data["system_prompt"] = "  \n  "
+        body = llm._build_body("hi")
+        assert [m["role"] for m in body["messages"]] == ["user"]
+
+    def test_system_prompt_injected_first(self):
+        llm = Custom_LLM(LEGACY_CONFIG)
+        llm.config_data["system_prompt"] = "你是一位专业、友好的线上销售。"
+        body = llm._build_body("早上好")
+        assert body["messages"] == [
+            {"role": "system", "content": "你是一位专业、友好的线上销售。"},
+            {"role": "user", "content": "早上好"},
+        ]
+
+    def test_system_prompt_flows_into_request(self):
+        llm = _make_llm()
+        llm.config_data["system_prompt"] = "人设X"
+        asyncio.run(llm.get_resp({"content": "hi"}))
+        body = llm.send_request.call_args.kwargs["body"]
+        assert body["messages"][0] == {"role": "system", "content": "人设X"}
+        assert body["messages"][1]["content"] == "hi"
+
+    def test_migrate_fills_system_prompt_default(self):
+        new_cfg, _ = migrate_legacy_config({"base_url": "http://x/v1"})
+        assert new_cfg["system_prompt"] == ""
 
 
 class TestResponseParsing:

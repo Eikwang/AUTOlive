@@ -13,104 +13,180 @@ from ..base import logger
 
 class CommentHandler:
     """弹幕处理器"""
-    
+
+    # 违禁词/拼音词表缓存：path -> (mtime, words, pinyin_words)。
+    # 词表每弹幕现读+逐词转拼音开销不可接受（拼音表数百词 × pypinyin 每条弹幕
+    # 重算 = 秒级卡顿），按文件 mtime 惰性缓存，文件变更自动重载。
+    _BADWORDS_CACHE: dict = {}
+
     def __init__(self, my_handle):
         """
         初始化弹幕处理器
-        
+
         Args:
             my_handle: My_handle 实例
         """
         self.my_handle = my_handle
-    
+
+    def _load_badwords(self, path):
+        """读取违禁词表（mtime 缓存）。
+
+        Args:
+            path: 词表文件路径（badwords.path / badwords.bad_pinyin_path）
+
+        Returns:
+            tuple[list, list]: (原词列表, 各词对应拼音列表)；路径为空/文件缺失/
+            解码失败返回 ([], [])——解码失败时 read_sensitive_word_file 已显式
+            ERROR 告警（E4：静默空表=过滤失效），此处按 mtime 缓存失败态防每条
+            弹幕重复刷日志。
+        """
+        if not path:
+            return [], []
+        path = str(path)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return [], []
+        cached = CommentHandler._BADWORDS_CACHE.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1], cached[2]
+        try:
+            words = [w for w in self.my_handle.common.read_sensitive_word_file(path) if w]
+        except Exception as e:
+            logger.error(f"违禁词表加载失败，违禁词过滤失效：{path}：{e}")
+            words = []
+        pinyin_words = []
+        if words:
+            try:
+                pinyin_words = [self.my_handle.common.text2pinyin(w) for w in words]
+            except Exception as e:
+                logger.error(f"违禁词表拼音转换失败：{path}：{e}")
+                pinyin_words = []
+        CommentHandler._BADWORDS_CACHE[path] = (mtime, words, pinyin_words)
+        return words, pinyin_words
+
     def comment_check_and_replace(self, content):
         """
-        弹幕检查和替换
-        
+        弹幕格式检查：长度截断 + 表情过滤
+
+        语义（2026-10-30 过滤审查批次）：
+        - 最大单词数/最大字符数：超限自动截断，只保留设定值（原实现超 max_len
+          整条丢弃，与参数语义"自动截断"不符——丢弃改截断）；截断统一走
+          remove_extra_words（合成侧 my_play_voice 同函数再截一次，幂等）
+        - 弹幕表情过滤：移除平台表情标签 [xx] 与 Unicode emoji 字符
+        - 原 prohibitions 死键检查与 replace_chars 死键替换移除（违禁处理统一
+          归 prohibitions_handle 的 badwords 配置组，二者均为模板外死键）
+
         Args:
             content (str): 弹幕内容
-            
+
         Returns:
             str: 处理后的弹幕内容，None表示被过滤
         """
         try:
             # 获取配置
-            filter_config = self.my_handle.config.get("filter")
-            
+            filter_config = self.my_handle.config.get("filter") or {}
+
             # 检查是否启用过滤
             if not filter_config.get("enable"):
                 return content
-            
-            # 检查弹幕长度
-            if len(content) > filter_config.get("max_len", 100):
-                logger.debug(f"弹幕长度超过限制：{len(content)} > {filter_config.get('max_len', 100)}")
-                return None
-            
-            # 检查是否包含违禁词
-            prohibitions = filter_config.get("prohibitions", [])
-            for word in prohibitions:
-                if word in content:
-                    logger.debug(f"弹幕包含违禁词：{word}")
-                    return None
-            
-            # 特殊字符替换
-            replace_chars = filter_config.get("replace_chars", {})
-            for old_char, new_char in replace_chars.items():
-                content = content.replace(old_char, new_char)
 
-            # （2026-10-22 批次清理，spec C3）原 filter.lang_filter 死 TODO 分支已移除——
-            # 语言过滤由顶层 need_lang 键驱动（my_handle.lang_filter_pass），与此处 filter 节无关
+            # 长度截断（最大单词数/最大字符数，超限自动截断只保留设定值）
+            try:
+                max_len = int(filter_config.get("max_len") or 30)
+                max_char_len = int(filter_config.get("max_char_len") or 50)
+            except (TypeError, ValueError):
+                max_len, max_char_len = 30, 50
+            content = self.my_handle.common.remove_extra_words(content, max_len, max_char_len)
+
+            # 弹幕表情过滤（开启后移除表情，只保留文字）
+            if filter_config.get("emoji"):
+                content = self.my_handle.common.remove_emoji(content)
 
             return content
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
             logger.error(f"弹幕检查失败：{e}")
             return content
-    
+
     def prohibitions_handle(self, content):
         """
-        违禁处理
-        
+        违禁处理（badwords 配置组接线，2026-10-30 过滤审查批次）
+
+        此前读取 filter.prohibitions 死键恒空表——违禁词过滤整组（UI/模板/词表
+        文件齐备）后端零消费，属断链；本批次按 UI 参数语义接线：
+        - filter.enable 总开关关闭 或 badwords.enable 关闭 → 原样返回
+        - 命中违禁词（badwords.path 词表，精确包含匹配）：
+          - badwords.discard 开 → None（整条丢弃）
+          - 否则 → 命中词替换为 badwords.replace
+        - 命中违禁拼音（bad_pinyin_path 同音变体，整句转拼音比对，无法定位原文
+          具体词）：discard 开 → None；否则不处理（拼音变体只支持丢弃模式）
+        - 词表文件缺失/解码失败 → 过滤失效（显式告警，原样返回）
+
+        消费点：弹幕链/语音链用户名与内容、LLM 回复全文、流式分句（chat_handler）。
+
         Args:
             content (str): 内容
-            
+
         Returns:
             str: 处理后的内容，None表示被过滤
         """
         try:
             # 获取配置
-            filter_config = self.my_handle.config.get("filter")
-            
-            # 检查是否启用过滤
+            filter_config = self.my_handle.config.get("filter") or {}
+
+            # 检查是否启用过滤（总开关 + badwords 开关）
             if not filter_config.get("enable"):
                 return content
-            
-            # 检查是否包含违禁词
-            prohibitions = filter_config.get("prohibitions", [])
-            for word in prohibitions:
-                if word in content:
-                    logger.debug(f"内容包含违禁词：{word}")
-                    return None
-            
+            badwords = filter_config.get("badwords") or {}
+            if not badwords.get("enable"):
+                return content
+
+            discard = bool(badwords.get("discard"))
+            replace = str(badwords.get("replace") or "*")
+
+            # 违禁词精确匹配：discard 开=整条丢弃，否则逐词替换
+            words, _ = self._load_badwords(badwords.get("path"))
+            if words:
+                for word in words:
+                    if word in content:
+                        if discard:
+                            logger.info(f"违禁词命中，丢弃：{word}")
+                            return None
+                        content = content.replace(word, replace)
+                        logger.debug(f"违禁词命中，已替换：{word} → {replace}")
+
+            # 违禁拼音匹配（同音变体）：仅丢弃模式生效（无法定位原文词做替换）
+            _, pinyin_words = self._load_badwords(badwords.get("bad_pinyin_path"))
+            if pinyin_words and discard:
+                text_py = self.my_handle.common.text2pinyin(content)
+                for pword in pinyin_words:
+                    import re as _re
+                    if _re.search(r'\b' + _re.escape(pword) + r'\b', text_py):
+                        logger.info(f"违禁拼音命中，丢弃：{pword}")
+                        return None
+
             return content
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"违禁处理失败：{e}")
             return content
     
-    def reread_handle(self, data, type=None, hub_result=None):
+    def reread_handle(self, data, type=None):
         """
-        复读处理
+        直接复读处理（手动直通通道）
+
+        2026-10-30 过滤审查批次：弹幕关键词触发复读（「复读触发」配置组：
+        reread.enable/keywords/top_priority_keywords + 识别中枢 _match_reread）
+        已整体退役；本函数收口为手动直通——消费点=聊天页「直接复读/直接复读-插队首」
+        按钮与 HTTP /send（web_server），语义=「直接合成文字并加入播放音频列表，
+        不走 AI 对话系统流程」（原 direct 标记语义恒成立，enable/词表匹配随退役删除）。
 
         Args:
-            data (dict): 数据
-            type (str, optional): 复读类型（reread | reread_top_priority）。
-                A6 修复（2026-10-22 批次）：原签名无此参数，web_server /send 带
-                type= 调用即 TypeError。type 原样透传进消息——reread_top_priority
-                经 priority_mapping 取 999 权重（999 映射保持不变，见审查记录
-                R6(a)）；业务层复读去重逻辑不区分类型。
-            hub_result (KeywordResult | None): 识别中枢结果。非 None=中枢已判定
-                词命中（调用由 hub_result.reread_type 驱动，跳过内部词表重复匹配）。
+            data (dict): 数据（username/content）
+            type (str, optional): 消息类型（reread | reread_top_priority）。
+                reread_top_priority 经 priority_mapping 取 999 权重（999 暂停-续播
+                链路语义保持，见审查记录 R6(a)）。
 
         Returns:
             bool: 是否触发并处理
@@ -119,29 +195,9 @@ class CommentHandler:
             username = data["username"]
             content = data["content"]
 
-            # 检查是否启用复读
-            if not self.my_handle.config.get("reread", "enable"):
-                return False
+            logger.info(f"[{username}]直接复读：{content}")
 
-            if hub_result is None:
-                # 检查是否匹配复读关键词
-                # A6（2026-10-22 审查批次）：原 3 参 get("reread","keywords",[]) 在 Config
-                # 遍历语义下对 list 再 .get 会 AttributeError（/send reread 二次断点），
-                # 改安全形式。
-                keywords = self.my_handle.config.get("reread", "keywords") or []
-                # str/list 双形态（G7 先例；split_lines 归一化前存量可为 str/逗号串）
-                if isinstance(keywords, str):
-                    keywords = ([k.strip() for k in keywords.split("\n") if k.strip()]
-                                or [k.strip() for k in keywords.split(",") if k.strip()])
-                for keyword in keywords:
-                    if keyword in content:
-                        break
-                else:
-                    return False
-
-            logger.info(f"[{username}]触发复读：{content}")
-
-            # 复读归拢"聊天"（D2 终门 uc1a，十生产端接线之复读）：聊天 勾选→助播
+            # 复读归拢"聊天"（D2 终门 uc1a）：聊天 勾选→助播
             # 消息（外放绕行，不再抢占数字人——E-A4 声明的语义变更）；未勾选→原
             # reread/reread_top_priority 消息（999 暂停-续播链路语义保持）。
             from .assistant_router import assistant_route, assistant_copy_message
@@ -168,7 +224,7 @@ class CommentHandler:
             return True
         except Exception as e:
             logger.error(traceback.format_exc())
-            logger.error(f"复读处理失败：{e}")
+            logger.error(f"直接复读处理失败：{e}")
             return False
     
     def tuning_handle(self, data):
@@ -270,13 +326,25 @@ class CommentHandler:
             if username is None:
                 return
 
+            # 用户名表情/特殊字符过滤（filter.emoji 与弹幕内容同开关，
+            # 2026-10-31 过滤优化批次）：用户名含表情（[爱心]/emoji）或特殊
+            # 字符时，语音合成念用户名会产生大量错误语音；先清洁后（合成侧
+            # 恒有）数字转中文。纯表情用户名过滤后为空 → 保留原文兜底。
+            # 写库/念弹幕缓冲/聊天记录（ori_username 留原文）/LLM 输入统一
+            # 使用清理后用户名；黑名单/积分在上方已用原始 data 判定，不受影响。
+            if self.my_handle.config.get("filter", "emoji"):
+                username = self.my_handle.common.clean_username(username) or username
+
             content = self.prohibitions_handle(content)
             if content is None:
                 return
 
-            # 弹幕格式检查和特殊字符替换和指定语言过滤
+            # 弹幕格式检查（长度截断+表情过滤）
             content = self.comment_check_and_replace(content)
             if content is None:
+                return
+            # 表情过滤后可能内容为空（纯表情弹幕）
+            if not content:
                 return
 
             # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
@@ -320,7 +388,12 @@ class CommentHandler:
                 insert_data_sql = '''
                 INSERT INTO danmu (username, content, ts) VALUES (?, ?, ?)
                 '''
-                self.my_handle.db.execute(insert_data_sql, (username, content, datetime.now()))
+                # 2026-10-28 优化批次（模块 2）：写库投后台队列——SQLite 连接池
+                # （db.py check_same_thread=False + WAL）跨线程安全；过滤后弹幕
+                # 不入库的风险由 background_tasks 满队降级同步兜底
+                from ..background_tasks import submit
+                submit(self.my_handle.db.execute, insert_data_sql,
+                       (username, content, datetime.now()))
 
             # 0、积分机制运转（中枢已判定命令词命中，消费侧跳过重复匹配）
             if rec.integral_sign and self.my_handle.integral_handle("comment", data, hub_result=rec):
@@ -333,13 +406,6 @@ class CommentHandler:
             # （无答谢/拦截语义）。行为差异说明：原实现在积分之后（积分命中 return
             # 即不触发编排），中枢化后识别先行——签到/查询弹幕同时命中编排词表
             # 也会触发画面序列（统一识别语义，flowchartTD Keyword 先于各模块）。
-
-            # 复读触发（TODOS 2026-10-22 音频批次节 #1 生产端接线；中枢已判定词命中
-            # 类型：top_priority→reread_top_priority（999 权重·暂停续播链路）、普通词
-            # →reread。命中即 return（复读内容直接进 TTS，不再走 LLM——复读语义=
-            # 原文重读非二次回答）。
-            if rec.reread_type:
-                return self.reread_handle(data, type=rec.reread_type, hub_result=rec)
 
             # 判断按键映射触发类型（弹幕型：中枢已匹配命中组直接分派；type 显式门卫
             # 与原实现等价——中枢侧 ktype 路由为第一道闸，此处保留链侧显式闸）
@@ -393,7 +459,14 @@ class CommentHandler:
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 构建数据（prompt 走共享构建器：弹幕模板→前后缀→语言指令，ENG E-1）
+                # 用户名数字转中文（filter.username_convert_digits_to_chinese）：
+                # 参数语义=「数字转换为中文再发送给 LLM」——仅重绑本局部变量供
+                # LLM 输入使用（写库/聊天记录/黑名单均不受影响；合成侧同名转换
+                # 幂等，播报不受影响）
+                if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                    username = self.my_handle.common.convert_digits_to_chinese(username) or username
+
+                # 构建数据（prompt 走共享构建器：弹幕模板→语言指令，ENG E-1）
                 data_json = {
                     "username": username,
                     "content": content,
@@ -445,8 +518,6 @@ class CommentHandler:
                 return
             elif chat_type == "none":
                 return
-            elif chat_type == "reread":
-                resp_content = self.my_handle.llm_handle(chat_type, data_json)
             else:
                 resp_content = content
 

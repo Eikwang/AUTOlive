@@ -47,10 +47,15 @@ class LoginForm:
         Returns:
             登录表单列
         """
-        self.login_column = ui.column().style("width:100%;text-align: center;")
-        
+        # 登录页为全屏 fixed 覆盖层：水平+垂直居中（运行时主题不再提供 login_card
+        # 样式键，居中在此自治实现）；离开登录页时经 goto_func_page 整体删除。
+        self.login_column = ui.column().style(
+            "width:100vw;height:100vh;display:flex;justify-content:center;align-items:center;"
+            "text-align:center;position:fixed;left:0;top:0;background:var(--bg-page);z-index:100;"
+        )
+
         with self.login_column:
-            self.login_card = ui.card().style(self.login_card_css)
+            self.login_card = ui.card().style(self.login_card_css or "min-width:300px;")
             
             with self.login_card:
                 self.label_login = ui.label('AUTOlive').style(

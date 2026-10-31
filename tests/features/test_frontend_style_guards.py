@@ -14,8 +14,8 @@ F-1b 配置参数唯一渲染断言：跨 tab 的 _auto_save 字面量 keys 元�
   SHARED_BINDING_WHITELIST）。只读引用（get_nested_value）不属渲染绑定。
 
 历史三修复点的防回退断言在 tests/features/test_ui16_batch.py
-（test_web_captions_param_switch_removed / test_thanks_single_lowest_price
- / test_trends_config_layout_and_delete），本文件不重复。
+（test_web_captions_param_switch_removed / test_thanks_single_lowest_price；
+test_trends_config_layout_and_delete 已随动态配置退役移除），本文件不重复。
 """
 import ast
 import io

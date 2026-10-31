@@ -1729,7 +1729,6 @@ class DrawerLayout:
             # 系统设置
             'webui_config': lambda: system_settings.create_webui_config_tab(self.config, theme_config, set_cb),
             'account_manage': lambda: system_settings.create_account_manage_tab(self.config, theme_config, set_cb),
-            'trends_config': lambda: system_settings.create_trends_config_tab(self.config, theme_config, set_cb),
             'abnormal_alarm': lambda: system_settings.create_abnormal_alarm_tab(self.config, theme_config, set_cb),
         }
 

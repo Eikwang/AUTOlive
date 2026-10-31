@@ -87,14 +87,16 @@ class MainApplication:
     
     def _init_modules(self):
         """初始化各个功能模块"""
-        # 获取平台标识（整合计划 P2-4：活跃房间平台优先，平滑替代旧架构单平台选择；
-        # TaskScheduler 以此作为定时任务/闲时任务消息的 platform 语境）
+        # 获取平台标识（整合计划 P2-4：启用房间平台优先，平滑替代旧架构单平台选择；
+        # TaskScheduler 以此作为定时任务/闲时任务消息的 platform 语境。
+        # active 字段已退役（前端添加即启用，写 enabled）——改按 enabled 判定，
+        # 否则永远落 "talk" 兜底，房间平台语境断裂）
         try:
             _dl_rooms = (self.config.get("danmaku_listener") or {}).get("rooms", []) or []
         except Exception:
             _dl_rooms = []
         platform = next((str(r.get("platform")) for r in _dl_rooms
-                         if isinstance(r, dict) and r.get("active")), "")
+                         if isinstance(r, dict) and r.get("enabled")), "")
         if not platform:
             platform = "talk"  # 旧 config.platform 键已退役（P3-3）——定时任务语境缺省聊天模式
         
@@ -149,12 +151,21 @@ class MainApplication:
             else:
                 logger.info("gpt_sovits.backend=api：使用用户自备外部 api_v2（"
                             f"{self.config.get('gpt_sovits', 'api_ip_port')}），AUTOlive 不拉起不托管")
-            # RVC 变声服务（P2-1）：控制面常驻，音频流按需经前端启停
-            from utils.rvc_service import build_rvc_vc_service
-            rvc_svc = build_rvc_vc_service(self.config, self.autolive_paths)
-            if rvc_svc is not None:
-                threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
-                logger.info("RVC 变声服务拉起已后台启动")
+            # RVC 变声服务（P2-1）：控制面常驻，音频流按需经前端启停。
+            # 2026-10-30 变声独立化（用户裁决）：rvc_vc.enabled（二级菜单「变声」
+            # 开关，enable_paths.svc 映射）=true 时启动系统同时启动变声；false 不启动。
+            # 且变声服务可由前端进程独立托管（进入前端即拉起）——拉起前探活防双实例。
+            from utils.rvc_service import build_rvc_vc_service, rvc_vc_alive
+            if bool(self.config.get("rvc_vc", "enabled")):
+                if rvc_vc_alive(self.config, self.autolive_paths):
+                    logger.info("RVC 变声服务已在线（前端进程托管），主系统不重复拉起")
+                else:
+                    rvc_svc = build_rvc_vc_service(self.config, self.autolive_paths)
+                    if rvc_svc is not None:
+                        threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
+                        logger.info("RVC 变声服务拉起已后台启动（rvc_vc.enabled=true）")
+            else:
+                logger.info("rvc_vc.enabled=false：启动系统不同时启动变声（变声页仍可配置）")
             # DanmakuListener 弹幕监听（整合计划第二阶段·进程内化）：enabled=true 时进程内启动
             from utils.danmaku_consumer import build_danmaku_listener_service
             self.danmaku_svc = build_danmaku_listener_service(self.config)
@@ -165,10 +176,11 @@ class MainApplication:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     
     def send_chat_message(self, msg_type: str, content: str) -> bool:
-        """聊天页按钮统一发送（T10 同期：复读生产端接线——前端按钮此前无 on_click）。
+        """聊天页按钮统一发送。
 
         POST core /send（webui /send 同构 payload）——reread/reread_top_priority
-        走 reread_handle（999 链路），comment 走弹幕链（chat_source=chatbox）。
+        走 reread_handle（手动直通，999 链路），comment 走弹幕链
+        （chat_source=chatbox）。
         Returns: 是否成功（失败 notify 由调用方承接）。
         """
         import json as _json

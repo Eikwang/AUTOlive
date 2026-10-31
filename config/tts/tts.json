@@ -2,15 +2,7 @@
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
-    "normal_interval_min": 0.3,
-    "normal_interval_max": 0.5,
-    "out_path": "out",
-    "player": "pygame",
-    "play_interval_min": 0.3,
-    "play_interval_max": 0.5
-  },
-  "audio_player": {
-    "api_ip_port": "http://127.0.0.1:5600"
+    "out_path": "out"
   },
   "audio_synthesis_type": "gpt_sovits",
   "audio_random_speed": {

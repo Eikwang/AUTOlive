@@ -84,8 +84,16 @@ class EventHandler:
             return
         self.my_handle.audio_synthesis_handle(message)
 
-    def _thanks_generate(self, type2: str, data: dict, variables: dict):
-        """通用答谢文案生成与分发。开关 thanks.<type2>_enable，返回 message 或 None。"""
+    def _thanks_generate(self, type2: str, data: dict, variables: dict,
+                         extra_fields: dict = None):
+        """通用答谢文案生成与分发。开关 thanks.<type2>_enable，返回 message 或 None。
+
+        extra_fields（O6/O7，2026-10-28 消费批次）：动作编排注入的附加键
+        （choreo_step_id 实例序号 / priority_override 插队权重），在即时与周期
+        双通道分发前合并进 message，随合成链透传到播放条目——编排完成回调
+        精确匹配与音轨插队的数据源。即时通道直传同一 dict；周期通道缓存回放
+        的 message 已含附加键（同键覆盖，幂等）。
+        """
         try:
             if not self.my_handle.config.get("thanks", f"{type2}_enable"):
                 return None
@@ -115,6 +123,8 @@ class EventHandler:
                     "username": username,
                     "content": resp_content,
                 }
+            if isinstance(extra_fields, dict) and extra_fields:
+                message.update(extra_fields)
             self._thanks_dispatch(type2, message, username)
             return message
         except Exception as e:

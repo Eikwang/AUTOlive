@@ -76,7 +76,7 @@ class TestEnableSwitchMigration:
 
     def test_enable_paths_importable(self):
         from frontend.config.enable_paths import ENABLE_PATHS
-        assert len(ENABLE_PATHS) == 16  # 2026-10-26 动作编排总开关迁二级菜单（+choreography）
+        assert len(ENABLE_PATHS) == 15  # 2026-10-28 动态配置退役（-trends_config）；2026-10-26 动作编排总开关迁二级菜单（+choreography）
 
     def test_enable_paths_resolve(self):
         """E-B2 前置：全部路径可在出货 config.json 解析"""
@@ -96,7 +96,7 @@ class TestDriftGuard:
     断言语义钉死（Eng F1，禁用集合相等于 ENABLE_PATHS）：
     (a) ENABLE_PATHS ⊆ tab_mapping（单向——mapping 中无启用开关的 tab 按设计
         不入 ENABLE_PATHS，见 enable_paths.py:10 文档串）；
-    (b) len(ENABLE_PATHS) == 16；
+    (b) len(ENABLE_PATHS) == 15；
     (c) function_groups ↔ tab_mapping 真双向（集合相等）。
 
     fixture=磁盘 config.json 全节（与 test_enable_paths_resolve 同源，
@@ -158,7 +158,7 @@ class TestDriftGuard:
     def test_enable_paths_count(self):
         """(b) ENABLE_PATHS 计数守卫（随模块增删更新本断言）"""
         from frontend.config.enable_paths import ENABLE_PATHS
-        assert len(ENABLE_PATHS) == 16
+        assert len(ENABLE_PATHS) == 15
 
     def test_function_groups_tabs_render(self):
         """渲染健康扫描：磁盘 config 全部 fg tab 渲染不落"暂无配置页面"占位。
@@ -196,3 +196,35 @@ class TestDriftGuard:
             '以下 tab 渲染失败（若确属无头环境不兼容，登记入 RENDER_DEGRADE_WHITELIST '
             f'并附原因；否则为真实回归）: {failures}'
         )
+
+
+class TestUmsApiNotPreconfigured:
+    """随附配置不得预置 ums_api（2026-10-28 登录修复批收尾）。
+
+    UMS 账号到期服务为本仓库之外的可选集成，任何随附配置预置其端点都会让
+    每次登录先打一次注定失败的外部请求（连接拒绝）并落 WARNING 日志。
+    handle_login 语义：ums_api 未配置（缺键/空串）→ 直接本地账号校验。
+    守卫三份随附 JSON（运行时/example/features 模板），防缺省值复活。
+    """
+
+    def test_shipped_configs_do_not_preconfigure_ums_api(self):
+        import json
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        shipped = [
+            root / 'config.json',
+            root / 'config.example.json',
+            root / 'config' / 'features' / 'features.json',
+        ]
+        for path in shipped:
+            with open(path, encoding='utf-8') as f:
+                cfg = json.load(f)
+            login_cfg = cfg.get('login') or {}
+            assert 'ums_api' not in login_cfg, (
+                f'{path.name} 预置了 login.ums_api——每次登录会先请求不可达的 '
+                'UMS 服务（连接拒绝 WARNING）。UMS 为可选集成，仅在使用方显式'
+                '配置时启用；如需恢复请同步删除本守卫并确认服务可达。'
+            )
+            assert isinstance(login_cfg.get('username', ''), str)
+            assert isinstance(login_cfg.get('password', ''), str)

@@ -21,7 +21,6 @@ import types
 import pytest
 
 from utils.audio.queue_manager import QueueMixin
-from utils.audio.playback_manager import _resolve_play_interval
 from utils.audio.synthesis_manager import SynthesisMixin
 from utils.audio_handle.tts_params import clamp_speed_factor, speed_to_edge_pitch, speed_to_edge_rate
 from utils.common.time_mixin import TimeMixin
@@ -247,12 +246,14 @@ class _RereadConfig:
 
 
 class TestRereadTypePassthrough:
+    """A6：reread type 透传（999 映射保持）。2026-10-30 过滤审查批次：
+    reread_handle 收口为手动直通——无 enable/词表门控，内容原文直通合成。"""
+
     def _handler(self, captured):
         from utils.handlers.comment_handler import CommentHandler
 
         class _MH:
             config = _RereadConfig({
-                "reread": {"enable": True, "keywords": ["复读"]},
                 "audio_synthesis_type": "edge_tts",
                 "edge_tts": {"voice": "x"},
                 "filter": {},
@@ -277,10 +278,18 @@ class TestRereadTypePassthrough:
         assert h.reread_handle({"username": "u", "content": "复读这段"}) is True
         assert captured[0]["type"] == "reread"
 
-    def test_no_keyword_noop(self):
+    def test_manual_direct_no_keyword_gate(self):
+        """手动直通：词表外的任意内容同样直通（enable/词表门控已退役）。"""
         captured = []
         h = self._handler(captured)
-        assert h.reread_handle({"username": "u", "content": "普通弹幕"}, type="reread") is False
+        assert h.reread_handle({"username": "u", "content": "与词表无关"}, type="reread") is True
+        assert captured[0]["content"] == "与词表无关"
+
+    def test_missing_content_noop(self):
+        """缺 content 字段（异常路径）返回 False 且不进入合成。"""
+        captured = []
+        h = self._handler(captured)
+        assert h.reread_handle({"username": "u"}) is False
         assert captured == []
 
 
@@ -663,58 +672,14 @@ class TestPrioritySingleSource:
 
 
 # ---------------------------------------------------------------------------
-# 播放间隔读侧归一化（2026-10-24 实测修复）
+# 播放间隔读侧归一化
 # ---------------------------------------------------------------------------
 
-class TestPlayIntervalResolve:
-    """播放间隔新旧键回退 + 读侧类型归一化。
-
-    背景：前端 ui.input 文本框把 play_audio.play_interval_max 落盘为字符串
-    '0.8'，原实现直传 get_random_value 抛 TypeError（float 与 str 比较），
-    出队后的待播条目被 only_play_audio 的 except 吞掉丢弃——合成成功但
-    EDTalk 无推送、本地无声（无口型无声音根因）。
-    """
-
-    def test_wild_corruption_shape_coerced(self):
-        """实测损坏形态：min 新键缺失回退旧键，max 为 UI 文本框字符串"""
-        cfg = _FakeConfig(extra={
-            ("play_audio", "normal_interval_min"): 0.3,
-            ("play_audio", "normal_interval_max"): 0.5,
-            ("play_audio", "play_interval_max"): "0.8",
-        })
-        lo, hi = _resolve_play_interval(cfg)
-        assert lo == 0.3 and hi == 0.8
-        assert isinstance(lo, float) and isinstance(hi, float)
-        # 回归断言：归一化后原崩溃调用可正常取值（修复前此处 TypeError）
-        assert 0.3 <= TimeMixin().get_random_value(lo, hi) <= 0.8
-
-    def test_string_keys_coerced(self):
-        """两个键均为字符串时归一化为 float"""
-        cfg = _FakeConfig(extra={
-            ("play_audio", "play_interval_min"): "0.2",
-            ("play_audio", "play_interval_max"): "1.5",
-        })
-        assert _resolve_play_interval(cfg) == (0.2, 1.5)
-
-    def test_garbage_falls_back_to_defaults(self):
-        """非法值（不可转换）回退默认域 0.3/0.5"""
-        cfg = _FakeConfig(extra={
-            ("play_audio", "play_interval_min"): "abc",
-            ("play_audio", "play_interval_max"): object(),
-        })
-        assert _resolve_play_interval(cfg) == (0.3, 0.5)
-
-    def test_missing_keys_fall_back_to_defaults(self):
-        """新旧键全缺失回退默认域（None 经归一化兜底）"""
-        assert _resolve_play_interval(_FakeConfig()) == (0.3, 0.5)
-
-    def test_non_finite_falls_back(self):
-        """'nan'/'inf' 可 float 转换但非有限值——同样回退默认，防 uniform/sleep 炸"""
-        cfg = _FakeConfig(extra={
-            ("play_audio", "play_interval_min"): "nan",
-            ("play_audio", "play_interval_max"): "inf",
-        })
-        assert _resolve_play_interval(cfg) == (0.3, 0.5)
+# 2026-10-30 审查批次：TestPlayIntervalResolve 整类退役——「播放间隔min/max」
+# 配置随消费回传机制退役移除（播放完成回执驱动下一条取用，无间隔等待），
+# _resolve_play_interval/_coerce_interval helper 已从 playback_manager 删除，
+# 归一化测试对象不复存在。间隔职责由 builtin 播放器可选
+# audio_player.random_audio_interval 承接（_post_play_interval，默认 0）。
 
 
 # ---------------------------------------------------------------------------
@@ -874,3 +839,149 @@ class TestConsumptionReceipt:
         host.voice_tmp_path_queue = [{"a": 1}]
         host.message_queue = []
         assert host.get_audio_info()["wait_play_audio_num"] == 1
+
+
+# ---------------------------------------------------------------------------
+# O7（2026-10-28 消费批次）：编排音轨插队（priority_override）双队列识别
+# ---------------------------------------------------------------------------
+
+class TestOverridePriority:
+    """O7：条目显式 priority_override 优先于类型映射表（编排固定 500）。
+
+    插队权重必须同时作用于两队列的排序/取代/驱逐判定——否则 500 条目被
+    误按映射权重（如 gift=30）参与比较，插队失效或被误驱逐。
+    """
+
+    def _fixture(self, max_len=100):
+        mapping = {t: int(t[1:]) for t in
+                   ("w999", "w200", "w150", "w80", "w20", "w10", "w50", "w90", "w60", "w120", "w100", "w30", "w40", "w70")}
+        return _QueueFixture(config=_FakeConfig(
+            priority_mapping=mapping, max_len=max_len, min_start_play=0,
+            extra={("filter", "message_queue_max_len"): 100}))
+
+    def _override_item(self, label):
+        return {"type": "w10", "voice_path": f"w10-{label}.wav", "priority_override": 500}
+
+    def test_audio_queue_inserts_head(self):
+        """音频队列：override 条目插到队首（高于全部映射权重）。"""
+        fx = self._fixture()
+        self._build_like(fx)
+        r = fx.data_priority_insert("待播放音频列表", self._override_item("choreo"))
+        assert r["code"] == 200
+        assert fx.voice_tmp_path_queue[0]["voice_path"] == "w10-choreo.wav"
+        assert fx.voice_tmp_path_queue[0]["priority_override"] == 500
+
+    def _build_like(self, fx):
+        for i, w in enumerate(("w120", "w90", "w80", "w50", "w30", "w10")):
+            assert fx.data_priority_insert("待播放音频列表", _item(w, f"old{i}"))["code"] == 200
+
+    def test_audio_queue_eviction_keeps_override(self):
+        """音频队列满载：override 入队驱逐最低优映射条目，不驱逐既有 override。"""
+        fx = self._fixture(max_len=4)
+        for i, w in enumerate(("w80", "w50", "w30", "w10")):
+            fx.data_priority_insert("待播放音频列表", _item(w, f"old{i}"))
+        fx.data_priority_insert("待播放音频列表", self._override_item("keep"))
+        assert fx.voice_tmp_path_queue[0]["voice_path"] == "w10-keep.wav"
+        # 再来一个 override：同权（500）组取代组首（keep 让位），满载驱逐最低优 w10-old3
+        fx.data_priority_insert("待播放音频列表", self._override_item("next"))
+        labels = [d["voice_path"] for d in fx.voice_tmp_path_queue]
+        assert labels == ["w10-next.wav", "w80-old0.wav", "w50-old1.wav", "w30-old2.wav"]
+
+    def test_message_queue_inserts_head(self):
+        """消息队列：override 条目插到队首。"""
+        fx = self._fixture()
+        for i, w in enumerate(("w120", "w90", "w50")):
+            fx.data_priority_insert("等待合成消息", {"type": w, "content": f"old{i}"})
+        fx.data_priority_insert("等待合成消息",
+                                {"type": "w10", "content": "choreo", "priority_override": 500})
+        assert fx.message_queue[0]["content"] == "choreo"
+        assert [d["type"] for d in fx.message_queue] == ["w10", "w120", "w90", "w50"]
+
+    def test_override_unparseable_falls_back(self):
+        """非法 override 值回退类型映射权重（不崩溃、不插队）。"""
+        fx = self._fixture()
+        for w in ("w90", "w50"):
+            fx.data_priority_insert("待播放音频列表", _item(w, "old"))
+        bad = {"type": "w10", "voice_path": "w10-bad.wav", "priority_override": "abc"}
+        assert fx.data_priority_insert("待播放音频列表", bad)["code"] == 200
+        labels = [d["voice_path"] for d in fx.voice_tmp_path_queue]
+        assert labels == ["w90-old.wav", "w50-old.wav", "w10-bad.wav"]
+
+
+class TestMessageQueueOverflowEvict:
+    """M1/M2（消费批次）：消息队列满载高优插入=插队+驱逐队尾（净长度不变）；
+    低优/未识别类型队满仍丢弃。扫描/判定/插入锁内化（M2 竞态根修）。"""
+
+    def _fixture(self, max_len=3):
+        mapping = {"w90": 90, "w50": 50, "w10": 10}
+        return _QueueFixture(config=_FakeConfig(
+            priority_mapping=mapping, max_len=max_len, min_start_play=0,
+            extra={("filter", "message_queue_max_len"): max_len}))
+
+    def _msg(self, t, content):
+        return {"type": t, "content": content}
+
+    def test_full_low_priority_dropped(self):
+        """队满+低优插入位次在末尾 → 丢弃（原语义保持）。"""
+        fx = self._fixture()
+        for i, w in enumerate(("w90", "w50", "w10")):
+            fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
+        r = fx.data_priority_insert("等待合成消息", self._msg("w10", "new"))
+        assert r["code"] == 1
+        assert [d["content"] for d in fx.message_queue] == ["old0", "old1", "old2"]
+
+    def test_full_high_priority_evicts_tail(self):
+        """M1：队满+高优插队 → 插队（同权组首之后）并驱逐队尾（最低优），净长度不变。"""
+        fx = self._fixture()
+        for i, w in enumerate(("w90", "w50", "w10")):
+            fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
+        r = fx.data_priority_insert("等待合成消息", self._msg("w90", "new"))
+        assert r["code"] == 200
+        assert len(fx.message_queue) == 3  # 净长度不变（无界超长根修）
+        # 插在 w90 组首（old0）之后；被驱逐的是队尾 w10-old2（最低优组 FIFO 尾）
+        assert [d["content"] for d in fx.message_queue] == ["old0", "new", "old1"]
+
+    def test_full_unknown_type_dropped(self):
+        """队满+未识别类型（插入末尾）→ 丢弃。"""
+        fx = self._fixture()
+        for i, w in enumerate(("w90", "w50", "w10")):
+            fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
+        r = fx.data_priority_insert("等待合成消息", {"content": "no-type"})
+        assert r["code"] == 1
+
+    def test_cancel_choreo_audio(self):
+        """O8：cancel_choreo_audio 从两队列移除匹配 step_id 条目，其余保留。"""
+        fx = self._fixture(max_len=100)
+        fx.message_queue.extend([
+            {"type": "gift", "content": "a", "choreo_step_id": "s1"},
+            {"type": "gift", "content": "b"},
+        ])
+        fx.voice_tmp_path_queue.extend([
+            {"type": "song", "voice_path": "c.wav", "choreo_step_id": "s1"},
+            {"type": "song", "voice_path": "d.wav", "choreo_step_id": "s2"},
+        ])
+        removed = fx.cancel_choreo_audio("s1")
+        assert removed == 2
+        assert [d["content"] for d in fx.message_queue] == ["b"]
+        assert [d["voice_path"] for d in fx.voice_tmp_path_queue] == ["d.wav"]
+        assert fx.cancel_choreo_audio("") == 0  # 空步防呆
+
+
+class TestPlaybackConsumptionHooks:
+    """M3（消费批次）：播放路径消费回传（report_consumed+编排回调），
+    EDTalk/builtin 两路共用 _notify_choreo_complete 提取。
+
+    2026-10-30 审查批次：本地播放统一 builtin——原 外部/pygame 路径随
+    「音频播放器」配置退役删除，三路收敛为两路；builtin 真实完成点经
+    audio_core 注册的完成回调二次回执（G1，互斥不双报由回调注册点保证）。
+    """
+
+    def test_source_wiring(self):
+        import inspect
+        from utils.audio import playback_manager
+        src = inspect.getsource(playback_manager)
+        assert src.count("report_consumed(") >= 2, \
+            "EDTalk/builtin 两路均须调用 report_consumed（M3 断链补齐）"
+        assert "_notify_choreo_complete" in src
+        # 两路完成回传统一走 helper（既有 mute 守卫/song 直通另有 2 处合法调用点）
+        assert src.count("get_choreographer()") <= 3

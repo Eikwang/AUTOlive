@@ -503,7 +503,9 @@ def create_platform_config_tab(
     # ---------- 卡②：关键词屏蔽（J2 固定文案；运行期热生效 M-1 ③） ----------
 
     with ui.card().style(card_css):
-        with ui.row().classes("w-full items-center justify-between"):
+        # 过滤开关紧邻标题（用户优化裁定：原 justify-between 把开关推到卡片右缘，
+        # 与标题分离——改左邻排列，语义归属一目了然）
+        with ui.row().classes("w-full items-center gap-3"):
             ui.label("关键词屏蔽").style("font-size:var(--font-size-card-title,16px);font-weight:600")
             kw_switch = ui.switch("过滤开关", value=True)
 

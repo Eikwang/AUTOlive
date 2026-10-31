@@ -75,10 +75,15 @@ class AudioProcessor:
             rate = int(self.config.get("talk", "RATE"))
         except (TypeError, ValueError):
             rate = self.rate
+        # CHANNELS 与 audio_listen 同源（talk.CHANNELS 配置，默认 1 单声道）
+        try:
+            channels = int(self.config.get("talk", "CHANNELS"))
+        except (TypeError, ValueError):
+            channels = self.channels
         try:
             stream = p.open(
                 format=self.format,
-                channels=self.channels,
+                channels=channels,
                 rate=rate,
                 input=True,
                 frames_per_buffer=self.chunk,
@@ -111,7 +116,7 @@ class AudioProcessor:
             return ""
 
         wf = wave.open(output_path, "wb")
-        wf.setnchannels(self.channels)
+        wf.setnchannels(channels)
         wf.setsampwidth(p.get_sample_size(self.format))
         wf.setframerate(rate)
         wf.writeframes(b"".join(frames))
@@ -156,12 +161,24 @@ class AudioProcessor:
             List[bytes]: 录制的音频帧
         """
         audio = pyaudio.PyAudio()
-        
-        # 设置音频参数
-        channels = self.config.get("talk", "CHANNELS")
-        rate = self.config.get("talk", "RATE")
-        device_index = int(self.config.get("talk", "device_index"))
-        
+
+        # 设置音频参数（2026-10-30 聊天审查批次：容错解析——device_index 空/
+        # 无效时不炸录音线程，input_device_index=None 回落系统默认输入设备
+        # （即第一个麦克风设备，任务书语义）；CHANNELS/RATE 与手动录音链
+        # （record_with_stream）同源 int() 解析，UI 字符串值安全）
+        try:
+            channels = int(self.config.get("talk", "CHANNELS"))
+        except (TypeError, ValueError):
+            channels = self.channels
+        try:
+            rate = int(self.config.get("talk", "RATE"))
+        except (TypeError, ValueError):
+            rate = self.rate
+        try:
+            device_index = int(self.config.get("talk", "device_index"))
+        except (TypeError, ValueError):
+            device_index = None  # pyaudio None=系统默认输入设备
+
         stream = audio.open(
             format=self.format,
             channels=channels,
@@ -179,19 +196,18 @@ class AudioProcessor:
         logger.info("[即将开始录音……]")
         
         while True:
-            # 播放中不录音
-            if self.config.get("talk", "no_recording_during_playback"):
-                # 存在待合成音频 或 已合成音频还未播放 或 播放中
-                # （位掩码 7=全空闲；旧链 is_handle_empty「数据处理中」旗标在重构版
-                # 已不存在，队列位掩码已覆盖全部忙态——2026-10-25 修复 AttributeError）
-                if self.my_handle.is_audio_queue_empty() != 7:
-                    time.sleep(
-                        float(
-                            self.config.get(
-                                "talk", "no_recording_during_playback_sleep_interval"
-                            )
-                        )
-                    )
+            # 播放中不录音（2026-10-30 聊天审查批次重构）：
+            # - 判断逻辑改为「待播放音频列表为 0」才进行录音检测（任务书裁决，
+            #   is_audio_queue_empty 位2=待播放队列空）；等待期固定 0.1s 轮询，
+            #   no_recording_during_playback_sleep_interval 参数随检测间隔机制
+            #   一并退役（登记于 docs/参数生效语义矩阵.md）。
+            # - 连续对话开启时本守卫让位：用户可在 AI 回答-合成-播放期间再次
+            #   对话（最新优先舍弃由 conversation_manager/queue_manager 承接，
+            #   D-22）；连续对话关闭时守卫照常生效。
+            if (self.config.get("talk", "no_recording_during_playback")
+                    and not self.config.get("talk", "continuous_talk")):
+                if not (self.my_handle.is_audio_queue_empty() & 2):
+                    time.sleep(0.1)
                     continue
             
             # 读取音频数据
@@ -289,7 +305,10 @@ class AudioProcessor:
                 logger.error("清空待播放音频队列失败！")
         
         if stop_audio_play:
-            ret = self.my_handle.stop_audio("pygame", True, True)
+            # 2026-10-30 审查批次：stop_audio("pygame",...) 链随 pygame 播放分支
+            # 退役——本地播放统一 builtin，清队后打断当前流（EDTalk 激活时内部
+            # 静默跳过，契约无 flush 端点）
+            self.my_handle.audio.stop_current_audio()
     
     def get_audio_devices(self) -> List[dict]:
         """

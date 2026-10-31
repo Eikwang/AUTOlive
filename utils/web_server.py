@@ -312,6 +312,9 @@ class WebServer:
                     raise HTTPException(status_code=500, detail="处理器未初始化")
                 
                 if data_json["type"] in ["reread", "reread_top_priority"]:
+                    # 直接复读/插队首（2026-10-30 过滤审查批次：弹幕触发复读退役，
+                    # reread_handle 收口为手动直通通道——/send 显式 reread 请求即
+                    # 手动语义，直接合成文字并入播放列表，不再读取 reread 配置）
                     self.my_handle.reread_handle(data_json, type=data_json["type"])
                 elif data_json["type"] == "comment":
                     # UI-16 二轮验收（任务 14 语义修正）：聊天框发送来源标记——

@@ -2,15 +2,12 @@
   "login": {
     "enable": false,
     "username": "admin",
-    "password": "123456",
-    "ums_api": "http://127.0.0.1:1119"
+    "password": "123456"
   },
   "api_ip": "127.0.0.1",
   "api_port": 8082,
   "chat_type": "custom_llm",
   "need_lang": "none",
-  "before_prompt": "请简要回复:",
-  "after_prompt": "",
   "comment_template": {
     "enable": true,
     "copywriting": "{username}说：{comment}"
@@ -24,12 +21,7 @@
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
-    "normal_interval_min": 0.3,
-    "normal_interval_max": 0.5,
-    "out_path": "out",
-    "player": "pygame",
-    "play_interval_min": 0.3,
-    "play_interval_max": 0.5
+    "out_path": "out"
   },
   "audio_player": {
     "device_index": -1,
@@ -60,16 +52,6 @@
     }
   },
   "filter": {
-    "before_must_str": [],
-    "after_must_str": [],
-    "before_filter_str": [
-      "#"
-    ],
-    "after_filter_str": [
-      "#"
-    ],
-    "before_must_str_for_llm": [],
-    "after_must_str_for_llm": [],
     "badwords": {
       "enable": true,
       "discard": false,
@@ -239,7 +221,8 @@
     "model": "deepseek-flash",
     "api_key": "",
     "max_tokens": "",
-    "temperature": ""
+    "temperature": "",
+    "system_prompt": ""
   },
   "local_qa": {
     "periodic_trigger": {
@@ -271,8 +254,9 @@
     }
   },
   "gpt_sovits": {
-    "backend": "inproc",
-    "api_ip_port": "http://127.0.0.1:9880",
+    "stream_reply": {
+      "enable": false
+    },
     "params": {
       "version": "v2ProPlus",
       "device": "cuda",
@@ -341,7 +325,6 @@
     "direct_run_talk": false,
     "device_index": "1",
     "no_recording_during_playback": true,
-    "no_recording_during_playback_sleep_interval": 1.0,
     "username": "主人",
     "type": "faster_whisper",
     "continuous_talk": false,
@@ -350,7 +333,7 @@
     "volume_threshold": 800.0,
     "silence_threshold": "5",
     "CHANNELS": 1,
-    "RATE": 16000,
+    "RATE": 22050,
     "asr_streaming": true,
     "interrupt_talk": {
       "enable": false,
@@ -365,6 +348,9 @@
         "message_queue",
         "voice_tmp_path_queue",
         "audio_play"
+      ],
+      "copywriting": [
+        "好的，我停下了"
       ]
     },
     "baidu": {
@@ -893,19 +879,6 @@
       "dingtalk_secret": ""
     }
   },
-  "trends_config": {
-    "enable": false,
-    "path": [
-      {
-        "online_num": "0-99999",
-        "path": "config.json"
-      },
-      {
-        "online_num": "100000-999999999",
-        "path": "config.json"
-      }
-    ]
-  },
   "assistant_anchor": {
     "enable": false,
     "username": "助播",
@@ -1410,11 +1383,6 @@
             "enabled": true
           },
           {
-            "name": "动态配置",
-            "tab_key": "trends_config",
-            "enabled": true
-          },
-          {
             "name": "异常报警",
             "tab_key": "abnormal_alarm",
             "enabled": true
@@ -1506,7 +1474,15 @@
   "fastrag": {
     "enable": true,
     "port": 11420,
-    "host": "localhost"
+    "host": "localhost",
+    "template": {
+      "system_role": "你是一位专业、友好的线上销售，现在正在进行直播。",
+      "answer_rules": "",
+      "temperature": 0.3,
+      "top_p": 0.9,
+      "max_new_tokens": 128,
+      "max_answer_length": 80
+    }
   },
   "paths": {
     "autolive_home": "",
@@ -1656,8 +1632,7 @@
   },
   "edge_tts": {
     "voice": "zh-HK-HiuMaanNeural",
-    "rate": "100%",
-    "extra_args_json": ""
+    "rate": "100%"
   },
   "schedule_groups": []
 }

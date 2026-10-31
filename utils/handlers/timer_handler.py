@@ -22,6 +22,8 @@ class TimerHandler:
             my_handle: My_handle 实例
         """
         self.my_handle = my_handle
+        # 每类型分发锁（防遗忘窗口重构：立即分发与窗口末补发按类型串行）
+        self._dispatch_locks = {}
     
     def periodic_trigger_data_handle(self):
         """周期性触发数据处理，每秒执行一次，进行计时"""
@@ -283,74 +285,79 @@ class TimerHandler:
                 logger.debug(f"[{timer_flag}] 限定时间内重复数据丢弃：{data.get('username')}/{str(data.get('content'))[:30]}")
                 return
 
-            if timer_flag not in self.my_handle.timers or not self.my_handle.timers[timer_flag].is_alive():
-                self.my_handle.timers[timer_flag] = threading.Timer(self.get_interval(timer_flag), self.process_last_data, args=(timer_flag,))
-                self.my_handle.timers[timer_flag].start()
+            timer = self.my_handle.timers.get(timer_flag)
+            window_open = (timer is not None and timer.is_alive()
+                           and hasattr(timer, "last_data"))
+            immediate_data = None
+            if not window_open:
+                # 防遗忘窗口重构（2026-10-28 优化批次）：首条消息立即分发下游处理，
+                # 遗忘窗口仅用于合并窗口期内后续同类消息——窗口到期时补发最新
+                # reserve_num-1 条（首条已处理，不重复）。单条消息延迟从
+                # 「固定遗忘间隔」降为 0（首条即处理）。
+                new_timer = threading.Timer(self.get_interval(timer_flag), self.process_last_data, args=(timer_flag,))
+                new_timer.last_data = []
+                self.my_handle.timers[timer_flag] = new_timer
+                new_timer.start()
+                immediate_data = [data]
 
-            # self.my_handle.timers[timer_flag].last_data = data
-            if hasattr(self.my_handle.timers[timer_flag], 'last_data'):
-                self.my_handle.timers[timer_flag].last_data.append(data)
+            if not window_open:
+                # /send 为 async 路由：立即分发必须脱离事件循环线程（LLM/TTS 为秒级
+                # 阻塞调用，inline 执行会卡死 HTTP 服务）；窗口末路径由 Timer 线程执行
+                threading.Thread(target=self._dispatch, args=(timer_flag, immediate_data),
+                                 name=f"immediate-dispatch-{timer_flag}", daemon=True).start()
+            else:
+                timer.last_data.append(data)
                 # 这里需要注意配置命名!!!
                 # 保留数据数量（缺键/非法值容错默认 1——存量用户 config 可能缺新键）
                 try:
                     reserve_num = int(self.my_handle.config.get("filter", timer_flag + "_forget_reserve_num"))
                 except (TypeError, ValueError):
                     reserve_num = 1
-                if len(self.my_handle.timers[timer_flag].last_data) > reserve_num:
-                    self.my_handle.timers[timer_flag].last_data.pop(0)
-            else:
-                self.my_handle.timers[timer_flag].last_data = [data]
+                # 首条已立即处理，窗口末最多补发 reserve_num-1 条（保留最新）。
+                # 语义示例：comment 间隔 10s+保留数 2 → 首条"666"立即处理，
+                # 10s 窗口内再来的在窗口末补发最新 1 条；保留数 1 → 窗口末不补发。
+                tail_keep = max(0, reserve_num - 1)
+                if len(timer.last_data) > tail_keep:
+                    timer.last_data = timer.last_data[-tail_keep:] if tail_keep else []
 
     def process_last_data(self, timer_flag):
         with self.my_handle.data_lock:
             timer = self.my_handle.timers.get(timer_flag)
-            if timer and timer.last_data is not None and timer.last_data != []:
-                logger.debug(f"预处理定时器触发 type={timer_flag}，data={timer.last_data}")
+            if not timer or not hasattr(timer, "last_data"):
+                return
+            data_list = list(timer.last_data)
+            # 清空数据
+            timer.last_data = []
+        self._dispatch(timer_flag, data_list)
 
-                self.my_handle.is_handleing = 1
+    def _dispatch(self, timer_flag, data_list):
+        """统一分发出口：按类型串行处理（立即分发与窗口末补发不并发）。"""
+        if not data_list:
+            return
+        # 每类型一把锁：同类型消息严格串行（保持 is_handleing 语义与处理顺序），
+        # 不同类型互不阻塞；setdefault 取锁（CPython 原子，免额外守卫锁）
+        with self._dispatch_locks.setdefault(timer_flag, threading.Lock()):
+            logger.debug(f"预处理定时器触发 type={timer_flag}，data={data_list}")
 
-                if timer_flag == "comment":
-                    for data in timer.last_data:
-                        self.my_handle.comment_handle(data)
-                elif timer_flag == "gift":
-                    for data in timer.last_data:
-                        self.my_handle.gift_handle(data)
-                    #self.my_handle.gift_handle(timer.last_data)
-                elif timer_flag == "entrance":
-                    for data in timer.last_data:
-                        self.my_handle.entrance_handle(data)
-                    #self.my_handle.entrance_handle(timer.last_data)
-                elif timer_flag == "follow":
-                    for data in timer.last_data:
-                        self.my_handle.follow_handle(data)
-                elif timer_flag == "talk":
-                    # 聊天暂时共用弹幕处理逻辑
-                    for data in timer.last_data:
-                        self.my_handle.talk_handle(data)
-                    #self.my_handle.comment_handle(timer.last_data)
-                elif timer_flag == "schedule":
-                    # 定时任务处理
-                    for data in timer.last_data:
-                        self.my_handle.schedule_handle(data)
-                    #self.my_handle.schedule_handle(timer.last_data)
-                elif timer_flag == "idle_time_task":
-                    # 定时任务处理
-                    for data in timer.last_data:
-                        self.my_handle.idle_time_task_handle(data)
-                    #self.my_handle.idle_time_task_handle(timer.last_data)
-                elif timer_flag == "like":
-                    # 点赞处理（仅计数不播报，2026-10-24 审查批次）
-                    for data in timer.last_data:
-                        self.my_handle.like_handle(data)
-                elif timer_flag == "room_stats":
-                    # 房间信息处理（更新内部人气数据，不播报）
-                    for data in timer.last_data:
-                        self.my_handle.room_stats_handle(data)
-
+            self.my_handle.is_handleing = 1
+            try:
+                handler_names = {
+                    "comment": "comment_handle",
+                    "gift": "gift_handle",
+                    "entrance": "entrance_handle",
+                    "follow": "follow_handle",
+                    "talk": "talk_handle",  # 聊天暂时共用弹幕处理逻辑
+                    "schedule": "schedule_handle",  # 定时任务处理
+                    "idle_time_task": "idle_time_task_handle",  # 定时任务处理
+                    "like": "like_handle",  # 点赞处理（仅计数不播报，2026-10-24 审查批次）
+                    "room_stats": "room_stats_handle",  # 房间信息处理（更新内部人气数据，不播报）
+                }
+                handler = getattr(self.my_handle, handler_names.get(timer_flag, ""), None)
+                if handler is not None:
+                    for data in data_list:
+                        handler(data)
+            finally:
                 self.my_handle.is_handleing = 0
-
-                # 清空数据
-                timer.last_data = []
 
     def get_interval(self, timer_flag):
         # 根据标志定义不同计时器的间隔

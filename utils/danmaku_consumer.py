@@ -467,11 +467,8 @@ class DanmakuListenerService:
         except Exception:
             return False
 
-    # ---------- 活跃房间裁定（P1-3：显式 active 字段） ----------
-
-    # ---------- 消费线程（队列 → 聚合 → _dispatch；用户裁定多房间全互动） ----------
-
-    # ---------- 消费线程（队列 → 活跃路由 → 聚合 → _dispatch） ----------
+    # ---------- 消费线程（队列 → 聚合 → _dispatch；用户裁定多房间全互动，
+    # ---------- active 活跃路由已退役） ----------
 
     def _worker_loop(self) -> None:
         agg = _DanmuAggregator(on_flush=lambda m: self._dispatch("DANMU", m))

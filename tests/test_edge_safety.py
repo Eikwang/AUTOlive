@@ -199,14 +199,44 @@ class _MyHandleStub:
 
 
 class TestS4ReplySideFilter:
-    def test_reply_side_prohibitions_discard(self):
+    """S4 回复侧违禁词过滤（2026-10-30 过滤审查批次改写为 badwords 接线：
+    filter.badwords.{enable,discard,path,replace} 树，prohibitions 死键退役）。"""
+
+    @staticmethod
+    def _make_handler(filter_config):
+        stub = _MyHandleStub(filter_config)
+        stub.common = Common()
+        return CommentHandler(stub)
+
+    @staticmethod
+    def _word_file(tmp_path):
+        f = tmp_path / "badwords.txt"
+        f.write_text("违禁词\n", encoding="utf-8")
+        return str(f)
+
+    def test_reply_side_prohibitions_discard(self, tmp_path):
         """S4 行为锚：LLM 回复进 TTS 前经 prohibitions_handle 丢弃式过滤
-        （comment_handler 回复路径 / chat_handler.py 回复路径，注释已标注登记点）"""
-        handler = CommentHandler(_MyHandleStub({"enable": True, "prohibitions": ["违禁词"]}))
+        （badwords.discard 开 → None 整条丢弃；comment_handler 回复路径 /
+        chat_handler.py 回复路径，注释已标注登记点）"""
+        handler = self._make_handler({
+            "enable": True,
+            "badwords": {"enable": True, "discard": True,
+                         "path": self._word_file(tmp_path), "replace": "*"}})
         assert handler.prohibitions_handle("包含违禁词的回复") is None
         assert handler.prohibitions_handle("正常回复内容") == "正常回复内容"
 
+    def test_reply_side_prohibitions_replace(self, tmp_path):
+        """替换模式：命中词替换为 badwords.replace，消息保留"""
+        handler = self._make_handler({
+            "enable": True,
+            "badwords": {"enable": True, "discard": False,
+                         "path": self._word_file(tmp_path), "replace": "**"}})
+        assert handler.prohibitions_handle("包含违禁词的回复") == "包含**的回复"
+
     def test_reply_side_filter_disabled_passthrough(self):
-        """过滤总开关关闭时原样透传（既有语义）"""
-        handler = CommentHandler(_MyHandleStub({"enable": False, "prohibitions": ["违禁词"]}))
-        assert handler.prohibitions_handle("包含违禁词的回复") == "包含违禁词的回复"
+        """过滤总开关或 badwords 开关关闭时原样透传（既有语义）"""
+        handler = self._make_handler({"enable": False})
+        assert handler.prohibitions_handle("任意回复") == "任意回复"
+        handler = self._make_handler({
+            "enable": True, "badwords": {"enable": False}})
+        assert handler.prohibitions_handle("任意回复") == "任意回复"

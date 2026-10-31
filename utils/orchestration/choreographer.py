@@ -45,6 +45,25 @@ class _DottedNode:
             cur = cur[k]
         return cur
 
+
+def _load_priority_mapping(config) -> dict:
+    """读取 filter.priority_mapping（O1/O3，2026-10-28 消费批次）。
+
+    兼容形态：Config 实例（get 两参）/ dict（点式取 filter.priority_mapping）。
+    异常或非 dict 一律返回空表——引擎侧权重全 0 档退化（排队 FIFO、standard
+    打断不受限），行为与改造前一致，安全。
+    """
+    try:
+        node = None
+        get = getattr(config, "get", None)
+        if get is not None:
+            node = get("filter", "priority_mapping")
+        elif isinstance(config, dict):
+            node = _DottedNode(config).get("filter", "priority_mapping")
+        return dict(node) if isinstance(node, dict) else {}
+    except Exception:
+        return {}
+
 # 事件队列轮询间隔上限（秒）——无近期 deadline 时的最大等待粒度
 TICK_CAP_S = 1.0
 # 恢复默认轮播重试参数（义务：恢复是回默认唯一路径，失败重试）
@@ -52,6 +71,12 @@ RESTORE_RETRY_MAX = 3
 RESTORE_RETRY_INTERVAL_S = 5.0
 # EDTalk 就绪探测间隔（秒）
 READY_PROBE_INTERVAL_S = 5.0
+
+# O7（2026-10-28 消费批次）：编排音轨插队权重（data_json.priority_override）——
+# 高于常规语音权重域（config priority_mapping 实测 10~30），低于 999 复读专线；
+# 固定值不占配置面。编排音轨与画面同程（先切段后入队），积压时插队是
+# 画面-音频对齐的核心手段，故不开放配置避免用户误设低于常规语音
+CHOREO_AUDIO_PRIORITY = 500
 
 
 # ---------- 命令（引擎产出，执行器消费） ----------
@@ -96,10 +121,25 @@ class LogCmd:
     msg: str
 
 
+@dataclass
+class CancelAudio:
+    """O8（2026-10-28 消费批次）：打断撤旧音频——撤销旧序列未消费的 inflight
+    音轨（message_queue/voice_tmp_path_queue 中匹配 choreo_step_id 的条目）。
+    已在播/已消费的无法撤销：其完成回调因 inflight 已重置被静默忽略。"""
+    step_id: str
+
+
 def _normalize_text(text: str) -> str:
     """S-2 规范化思路的独立实现：NFKC + 去空白 + casefold（义务 CL-3）。"""
     import unicodedata
     return "".join(unicodedata.normalize("NFKC", str(text or "")).split()).casefold()
+
+
+def _completion_key(text: str) -> str:
+    """完成匹配回退路径的归一化键（O9，2026-10-28 消费批次）：S-2 去空白后再
+    剥标点（isalnum 过滤）——下游改写形态（换行→句号、remove_extra_words
+    点缀词裁剪、首尾空白）容差匹配，改写不再造成回退路径误失配。"""
+    return "".join(ch for ch in _normalize_text(text) if ch.isalnum())
 
 
 def select_tier(rule: RuleCfg, count: int) -> Optional[object]:
@@ -153,22 +193,43 @@ class ChoreoEngine:
     状态：default（默认轮播，承载=上游 SegmentScheduler）| sequence（片段序列执行中）。
     """
 
-    PENDING_QUEUE_MAX = 5  # queue 模式多槽上限（2026-10-28 G3：满额挤最旧）
+    PENDING_QUEUE_MAX = 5  # queue 模式多槽上限（2026-10-28 G3；O2：满额挤最低优）
 
-    def __init__(self, cfg: ChoreographyConfig, clock: Callable[[], float] = time.monotonic):
+    # 触发类型 → filter.priority_mapping 权重键映射（O1/O3，2026-10-28 消费批次）：
+    # keyword 触发源=弹幕（语义同 comment 权重）；gift/song 与映射表同名直取
+    _TRIGGER_PRIORITY_KEY = {"gift": "gift", "song": "song", "keyword": "comment"}
+
+    def __init__(self, cfg: ChoreographyConfig, clock: Callable[[], float] = time.monotonic,
+                 priority_mapping: Optional[dict] = None):
         self.cfg = cfg
         self.clock = clock
+        self.priority_mapping: dict = dict(priority_mapping or {})  # O1/O3：全局权重表快照
         self.state = "default"
         self.ready = False
         self.enabled_rules: List[RuleCfg] = list(cfg.rules)
         self.counters: dict = {}          # rule_id -> consecutive_count
         self.key_last: dict = {}          # rule_id -> 上次触发尝试时刻（节流窗口）
-        self.pending_queue: list = []     # queue 模式待播多槽 FIFO（2026-10-28 G3：排序联动）
+        self.pending_queue: list = []     # queue 模式待播多槽（O1：权重降序插入）
         self.degrade_total = 0
         self._seq_counter = 0
         self._restore_attempts = 0
         # 活动序列状态（state == "sequence" 时非 None）
         self.seq: Optional[dict] = None
+
+    def _rule_priority(self, rule: Optional[RuleCfg]) -> int:
+        """规则权重（O1/O3）：按触发类型映射 filter.priority_mapping 取值。
+
+        未配置/未知类型/非法值=0（最低档）——权重表缺省时排队退化为既有 FIFO、
+        打断不受限，行为安全（0 低于映射表常规域 10~30，仅影响排队位次与
+        standard 让位方向，不产生新异常路径）。"""
+        if rule is None:
+            return 0
+        key = self._TRIGGER_PRIORITY_KEY.get(getattr(rule, "trigger_type", ""))
+        p = self.priority_mapping.get(key) if key else None
+        try:
+            return int(p) if p is not None else 0
+        except (TypeError, ValueError):
+            return 0
 
     # ---------- 触发判定（同步纯内存，on_gift/on_keyword/on_song 路径） ----------
 
@@ -226,22 +287,24 @@ class ChoreoEngine:
                 return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands,
                         "reason": "requeued", "retry_after_s": None}
             # 条件3（他键触发，beyond hold）
-            # queue 模式（2026-10-27 批次：优先级排序联动；2026-10-28 G3 多槽化）：
-            # 低权重触发不打断当前序列——入多槽 FIFO 待播队列（先到先出；满
-            # PENDING_QUEUE_MAX 挤最旧），当前序列播完（exit 完成）后依次出队
-            # 重放。消息/音频侧照常入链（Sort 排序消费），本排队仅作用于画面序列。
+            # queue 模式（2026-10-27 批次；2026-10-28 O1/O2：权重降序排队+满额挤低优）：
+            # 低权重触发不打断当前序列——入待播队列按 priority_mapping 权重降序
+            # 插入（同权重保持 FIFO），当前序列播完（exit 完成）后自队首（最高
+            # 权重）出队重放。消息/音频侧照常入链（Sort 排序消费），本排队仅作用
+            # 于画面序列。
             if rule.interrupt == "queue":
-                if len(self.pending_queue) >= self.PENDING_QUEUE_MAX:
-                    dropped = self.pending_queue.pop(0)
-                    commands.append(LogCmd(
-                        "warning", f"[编排] 排队已满（{self.PENDING_QUEUE_MAX}），"
-                                   f"丢弃最旧触发 {dropped['rule_id']}"))
-                self.pending_queue.append({
-                    "trigger_type": trigger_type, "match_value": match_value,
-                    "data": dict(data or {}), "rule_id": rule.rule_id})
+                reason = self._enqueue_pending(rule, trigger_type, match_value, data, commands)
+                return {"accepted": False, "takeover": False, "rule": rule,
+                        "commands": commands, "reason": reason, "retry_after_s": None}
+            # O3（2026-10-28 消费批次）：standard 打断权重门——低权重触发不得打断
+            # 高权重序列（改走排队），同权重保持既有抢占语义（含打断清零 D-4）。
+            cur_p = self._rule_priority(self.cfg.rule_by_id(seq["rule_id"]))
+            new_p = self._rule_priority(rule)
+            if new_p < cur_p:
+                self._enqueue_pending(rule, trigger_type, match_value, data, commands)
                 commands.append(LogCmd(
-                    "info", f"[编排] 规则 {rule.rule_id} 排队等待（第 {len(self.pending_queue)} 位，"
-                            f"interrupt=queue，当前序列 {seq['rule_id']} 播完后依次执行）"))
+                    "info", f"[编排] 规则 {rule.rule_id}（p={new_p}）权重低于当前序列 "
+                            f"{seq['rule_id']}（p={cur_p}），standard 打断让位改排队"))
                 return {"accepted": False, "takeover": False, "rule": rule,
                         "commands": commands, "reason": "queued", "retry_after_s": None}
             result = self._interrupt_sequence(rule, data, now, commands)
@@ -282,6 +345,45 @@ class ChoreoEngine:
                     return rule, None
         return None, ("below_min_price" if price_gate_hit else "no_match")
 
+    def _enqueue_pending(self, rule: RuleCfg, trigger_type: str, match_value: str,
+                         data: dict, commands: List) -> str:
+        """queue 模式入队（O1 权重降序 + O2 满额挤低优，2026-10-28 消费批次）。
+
+        排序语义对齐音频队列（queue_manager 规则1/2/4）：按 priority_mapping
+        权重降序找位插入（同权重保持 FIFO 即插到同权重组尾）；满额时挤掉最低
+        优组中最旧条目（对齐音频队列"取代同权重组首"让位语义），新触发权重不
+        高于最低优时直接舍弃（对齐规则4 低优丢弃）。
+
+        Returns:
+            "queued"（已入队）| "queued_full"（满额且权重不足被舍弃）
+        """
+        entry = {"trigger_type": trigger_type, "match_value": match_value,
+                 "data": dict(data or {}), "rule_id": rule.rule_id,
+                 "priority": self._rule_priority(rule)}
+        if len(self.pending_queue) >= self.PENDING_QUEUE_MAX:
+            min_p = min(e.get("priority", 0) for e in self.pending_queue)
+            if entry["priority"] <= min_p:
+                commands.append(LogCmd(
+                    "warning", f"[编排] 排队已满（{self.PENDING_QUEUE_MAX}）且新触发权重 "
+                               f"{entry['priority']} 不高于最低优 {min_p}，舍弃 {rule.rule_id}"))
+                return "queued_full"
+            evict_idx = next(i for i, e in enumerate(self.pending_queue)
+                             if e.get("priority", 0) == min_p)
+            dropped = self.pending_queue.pop(evict_idx)
+            commands.append(LogCmd(
+                "warning", f"[编排] 排队已满（{self.PENDING_QUEUE_MAX}），挤掉最低优触发 "
+                           f"{dropped['rule_id']}（p={min_p}），让位 {rule.rule_id}（p={entry['priority']}）"))
+        pos = len(self.pending_queue)
+        for i, e in enumerate(self.pending_queue):
+            if e.get("priority", 0) < entry["priority"]:
+                pos = i
+                break
+        self.pending_queue.insert(pos, entry)
+        commands.append(LogCmd(
+            "info", f"[编排] 规则 {rule.rule_id} 排队等待（第 {pos + 1}/{len(self.pending_queue)} 位，"
+                    f"p={entry['priority']}，interrupt=queue，当前序列 {self.seq['rule_id']} 播完后按权重序出队）"))
+        return "queued"
+
     def _start_sequence(self, rule: RuleCfg, data: dict, now: float, commands: List) -> dict:
         """DEFAULT→SEQUENCE：计数+1、按档位物化三步、发出 enter 切换。"""
         self.counters[rule.rule_id] = self.counters.get(rule.rule_id, 0) + 1
@@ -313,6 +415,12 @@ class ChoreoEngine:
         """条件3：旧键序列立即终止，队列替换 [旧 exit?, 新 enter, 新 main, 新 exit]（CP-3）。"""
         seq = self.seq
         old_rule_id = seq["rule_id"]
+        # O8（2026-10-28 消费批次）：旧序列未消费的 inflight 音轨随打断撤销——
+        # 否则新序列画面期间播出旧规则答谢（画面/音频错配）。已在播/已消费的
+        # 无法撤销，其完成回调因 inflight 重置被静默忽略（无副作用）。
+        old_inflight = seq.get("inflight")
+        if old_inflight and old_inflight.get("step_id"):
+            commands.append(CancelAudio(old_inflight["step_id"]))
         self.counters[old_rule_id] = 0  # 他键触发清零（D-4）
         self.counters[rule.rule_id] = self.counters.get(rule.rule_id, 0) + 1
         self._seq_counter += 1
@@ -436,6 +544,18 @@ class ChoreoEngine:
                                 "content": content, "enqueued_at": now}
         return []
 
+    def is_active_step(self, step_id: str) -> bool:
+        """step_id 是否属于当前活动序列（O8 收口判定，2026-10-28 P3 审查批次）。
+
+        打断/同键重排/回默认后，worker 队列中滞留的旧步骤 IO 命令仍会执行完
+        并入队音频（_execute 锁外无原子性——打断无法中止正在执行的 TtsThanks）；
+        其 audio_enqueued 回执到达时以此为门：非当前序列步骤=孤儿音轨，门面层
+        撤销队列条目（封死「打断后旧答谢以 500 插队权重播出」的错配窗口）。
+        """
+        if self.state != "sequence" or self.seq is None or not step_id:
+            return False
+        return any(s["step_id"] == step_id for s in self.seq["steps"])
+
     def current_step_lip_need(self) -> Optional[bool]:
         """当前步素材口型标志（T6/R-eng5：None=无需联动——legacy 步不动 lip_mode）。
 
@@ -483,17 +603,40 @@ class ChoreoEngine:
             f"（锚点+{remaining:.1f}s，R-eng1 预排程权威信号）"))
         return commands
 
-    def on_audio_complete(self, qtype: str, content: str, now: float) -> List:
-        """播放完成回调关联（CL-2：(type,content)+晚于入队时间；误匹配忽略）。"""
+    def on_audio_complete(self, qtype: str, content: str, now: float,
+                          step_id: Optional[str] = None) -> List:
+        """播放完成回调关联（CL-2 + O6 实例序号，2026-10-28 消费批次）。
+
+        匹配规则：回调携带 step_id（choreo_step_id 全链透传，非空）时按实例
+        序号精确匹配——同内容重复入队（同关键词重复触发/同模板答谢/同曲重点）
+        不再误配（频繁触发错配根修）；未携带（旧链路/未透传路径）退回
+        (type,content)+晚于入队时间 匹配（既有 CL-2 语义）。换序列清空 inflight
+        后，旧音频的完成回调两种匹配路径均不推进新序列——F1 竞态根修保持。
+        """
         if self.seq is None or self.state != "sequence":
             return []
         inflight = self.seq.get("inflight")
         if not inflight:
             return []
-        if inflight["qtype"] != qtype or inflight["content"] != content:
-            return []  # 他链路音频，忽略（RUNBOOK 局限声明）
-        if now < inflight["enqueued_at"]:
-            return []
+        if step_id:
+            if inflight["step_id"] != step_id:
+                return []  # 他步/他序列/旧实例音频（O6 精确匹配）
+        else:
+            # O9（2026-10-28 消费批次）：回退路径 content 归一化（去空白+剥标点）
+            # +双向包含比较——下游 remove_extra_words 点缀词裁剪（改写后更短）、
+            # 换行替换为句号等改写不再误失配。回退路径本有 now>=enqueued_at+
+            # inflight 单槽约束，包含匹配的误配面可控（仅未透传 step_id 的旧路径）。
+            inflight_norm = _completion_key(inflight["content"])
+            content_norm = _completion_key(content)
+            # O9 空键守卫（P3 审查批次）：任一归一化键为空（纯标点/空白内容）不
+            # 匹配——空串是任意字符串的子串，放行=任意空内容回调无条件误配，
+            # 宁可 F1 超时兜底也不误推进
+            if inflight["qtype"] != qtype or not inflight_norm or not content_norm:
+                return []  # 他链路音频，忽略（RUNBOOK 局限声明）
+            if not (inflight_norm in content_norm or content_norm in inflight_norm):
+                return []
+            if now < inflight["enqueued_at"]:
+                return []
         self.seq["inflight"] = None
         return self._complete_step(now, timeout_degrade=False)
 
@@ -561,9 +704,10 @@ class ChoreoEngine:
                                    "[编排] 默认段池为空，无法恢复轮播；problem=default_segments 校验后为空；"
                                    "cause=段名不在 EDTalk available_segments；fix=修正 default_segments"))
         self.seq = None
-        # queue 模式出队（2026-10-27 批次；2026-10-28 G3 FIFO 化）：当前序列播完
-        # → 取队首待播触发重放（余下保留，下一序列播完继续出队）。state 已回
-        # default，走正常 _start_sequence；出队失败不回滚——日志留痕
+        # queue 模式出队（2026-10-27 批次；2026-10-28 O1 权重序化）：当前序列播完
+        # → 取队首（最高权重，O1 降序插入保证）待播触发重放（余下保留，下一
+        # 序列播完继续出队）。state 已回 default，走正常 _start_sequence；出队
+        # 失败不回滚——日志留痕
         pending = self.pending_queue.pop(0) if self.pending_queue else None
         if pending:
             remaining = len(self.pending_queue)
@@ -728,14 +872,22 @@ class ActionChoreographer:
     """编排器门面：同步判定 API（handler 线程调用）+ 单工作线程执行。"""
 
     def __init__(self, config, edtalk_client, audio_enqueue: Callable,
-                 thanks_generate: Callable, clock: Callable[[], float] = time.monotonic):
+                 thanks_generate: Callable, clock: Callable[[], float] = time.monotonic,
+                 audio_cancel: Optional[Callable] = None):
         self.cfg: ChoreographyConfig = load_choreography_config(config)
         self._config = config                    # 原始配置引用（avatar 联动读初值用）
         self.edtalk_client = edtalk_client
         self._audio_enqueue = audio_enqueue      # my_handle.audio_synthesis_handle
         self._thanks_generate = thanks_generate  # event_handler._thanks_generate
+        # O8：打断撤旧音轨（QueueMixin.cancel_choreo_audio）；缺省 no-op（测试/
+        # 装配降级不打断主链）
+        self._audio_cancel = audio_cancel or (lambda step_id: None)
         self._clock = clock
-        self.engine = ChoreoEngine(self.cfg, clock=clock)
+        # O1/O3（2026-10-28 消费批次）：全局权重表快照注入引擎——编排排队位次、
+        # standard 打断权重门与消息队列/音频队列同源 filter.priority_mapping
+        self._priority_mapping = _load_priority_mapping(config)
+        self.engine = ChoreoEngine(self.cfg, clock=clock,
+                                   priority_mapping=self._priority_mapping)
         self._lock = threading.RLock()
         self._events: "queue.Queue" = queue.Queue()
         self._worker: Optional[threading.Thread] = None
@@ -826,11 +978,17 @@ class ActionChoreographer:
             logger.error(f"[编排] on_song 异常（忽略）：problem=编排判定异常；cause={type(e).__name__}: {e}；fix=已降级忽略")
             return False
 
-    def on_audio_complete(self, qtype: str, content: str) -> None:
-        """播放完成回调（playback_manager EDTalk push 路径每条目完成处，asyncio 线程）。"""
+    def on_audio_complete(self, qtype: str, content: str,
+                          step_id: Optional[str] = None) -> None:
+        """播放完成回调（playback_manager EDTalk push 路径每条目完成处，asyncio 线程）。
+
+        O6（2026-10-28 消费批次）：回调携带 choreo_step_id（非空）时按实例序号
+        精确匹配，同内容重复入队不再误配。
+        """
         try:
             with self._lock:
-                commands = self.engine.on_audio_complete(qtype, str(content or ""), self._clock())
+                commands = self.engine.on_audio_complete(qtype, str(content or ""),
+                                                         self._clock(), step_id)
             self._dispatch(commands)
         except Exception as e:
             logger.error(f"[编排] 完成回调异常：problem=完成关联异常；cause={type(e).__name__}: {e}；fix=依赖 F1 超时兜底推进")
@@ -879,6 +1037,8 @@ class ActionChoreographer:
         "in_progress": "同规则序列 main 未完成，忽略不计数",
         "disabled": "编排器未启用（enable=false）或 worker 未运行",
         "requeued": "已排队：当前 exit 播完后重排完整序列",
+        "queued": "已排队：当前序列播完后按权重序出队执行",
+        "queued_full": "排队已满且触发权重不高于最低优，已舍弃",
         "interrupted": "已打断当前序列并启动新序列",
         "accepted": "已启动新序列",
     }
@@ -890,6 +1050,8 @@ class ActionChoreographer:
         "in_progress": "等待 main 步完成（exit 步中再触发会重排）",
         "disabled": "打开 choreography.enable 并应用，或检查 worker 启动日志",
         "requeued": "观察状态条 pending_requeue，exit 完成后自动重排",
+        "queued": "观察状态条 pending_depth，序列播完后按权重序自动执行",
+        "queued_full": "调整规则 interrupt 或提高对应类型的 priority_mapping 权重",
         "interrupted": "观察状态条活动序列",
         "accepted": "观察状态条活动序列与画面切换",
     }
@@ -1031,7 +1193,8 @@ class ActionChoreographer:
             # EDTalk 不可达时本段已在上方 503 返回（C5-1），此处必有 sidecar 可读。
             self._resolve_new_rule_material_props(new_cfg)
             # 换装：cfg/enabled_rules 替换；计数保留同名键（规则语义可能已变）
-            new_engine = ChoreoEngine(new_cfg, clock=self._clock)
+            new_engine = ChoreoEngine(new_cfg, clock=self._clock,
+                                      priority_mapping=self._priority_mapping)
             new_engine.ready = self.engine.ready
             new_engine.enabled_rules = [r for r in new_cfg.rules if r.rule_id in enabled_ids]
             new_engine.counters = {k: v for k, v in self.engine.counters.items()
@@ -1129,6 +1292,8 @@ class ActionChoreographer:
     def _handle_event(self, event) -> None:
         """单事件处理（锁内引擎变更，锁外 IO）。"""
         kind = event[0]
+        commands: List = []
+        stale_orphan = None
         with self._lock:
             if kind == "tick":
                 commands = self.engine.on_tick(self._clock())
@@ -1136,11 +1301,19 @@ class ActionChoreographer:
                 _, step_id, ok = event
                 commands = self.engine.on_switch_result(step_id, ok, self._clock())
             elif kind == "audio_complete":
-                _, qtype, content = event
-                commands = self.engine.on_audio_complete(qtype, content, self._clock())
+                _, qtype, content, step_id = event
+                commands = self.engine.on_audio_complete(qtype, content, self._clock(), step_id)
             elif kind == "audio_enqueued":
                 _, step_id, qtype, content, ok = event
-                commands = self.engine.on_audio_enqueued(step_id, qtype, content, ok, self._clock())
+                if self.engine.is_active_step(step_id):
+                    commands = self.engine.on_audio_enqueued(step_id, qtype, content, ok,
+                                                             self._clock())
+                elif ok:
+                    # O8 收口（P3 审查批次）：打断/序列更替后迟到的旧步骤音频入队
+                    # 回执——条目已成孤儿（不注册 inflight、完成回调也匹配不上），
+                    # 锁外撤销队列条目（先行 CancelAudio 只覆盖 inflight 已注册
+                    # 情形；worker 队列滞留/正在执行的旧 TtsThanks 在此兜住）
+                    stale_orphan = step_id
             elif kind == "restore_result":
                 _, ok = event
                 commands = self.engine.on_restore_result(ok, self._clock())
@@ -1150,6 +1323,11 @@ class ActionChoreographer:
                                                        self._clock())
             else:
                 commands = []
+        if stale_orphan:
+            try:
+                self._audio_cancel(stale_orphan)
+            except Exception as e:
+                logger.debug(f"[编排] 孤儿音轨撤销异常（忽略）：{type(e).__name__}: {e}")
         self._execute(commands)
 
     # ---------- lip 联动（T6/R-eng5：性能层；失败=debug 日志，off→on 方向读回重试） ----------
@@ -1282,13 +1460,30 @@ class ActionChoreographer:
                                 args=(cmd.segment, _lip_need, cmd.step_id),
                                 daemon=True, name="lip-linkage").start()
                 elif isinstance(cmd, TtsThanks):
-                    # 经注入引用复用原生答谢链（E-2 限流+周期通道全复用，WP-3）
+                    # 经注入引用复用原生答谢链（E-2 限流+周期通道全复用，WP-3）。
+                    # O6/O7：choreo_step_id 实例序号（完成回调精确匹配）+
+                    # priority_override 插队权重，经答谢链原路透传到播放条目
                     try:
-                        message = self._thanks_generate("gift", cmd.data, cmd.variables)
+                        message = self._thanks_generate(
+                            "gift", cmd.data, cmd.variables,
+                            extra_fields={"choreo_step_id": cmd.step_id,
+                                          "priority_override": CHOREO_AUDIO_PRIORITY})
                     except Exception as e:
                         logger.error(f"[编排] tts 步骤答谢生成异常：{type(e).__name__}: {e}")
                         message = None
                     if message and isinstance(message, dict):
+                        if not message.get("choreo_step_id"):
+                            # O9（2026-10-28 消费批次）：透传链断裂可见化——答谢链
+                            # 丢失实例序号时完成匹配退回 content 路径（F1 兜底仍在），
+                            # 但须告警暴露断裂点，防静默超时
+                            logger.error(
+                                "[编排] tts 音轨 choreo_step_id 透传断裂（答谢链丢键）——"
+                                "完成匹配退回 content 路径；problem=实例序号未随 message 透传；"
+                                "cause=答谢/助播/周期通道重构丢键；fix=检查 _thanks_generate 链路")
+                            alarm_notifier.alarm_error(
+                                alarm_notifier.MODULE_ORCHESTRATION,
+                                "编排 tts 音轨实例序号透传断裂，完成匹配退回 content 匹配",
+                                fix_hint="检查 _thanks_generate 至播放条目的 choreo_step_id 透传链")
                         self._events.put(("audio_enqueued", cmd.step_id, message.get("type", "gift"),
                                           message.get("content", ""), True))
                     else:
@@ -1296,13 +1491,22 @@ class ActionChoreographer:
                         self._events.put(("audio_enqueued", cmd.step_id, "gift", "", False))
                 elif isinstance(cmd, EnqueueFile):
                     try:
-                        self._audio_enqueue({"type": "song", "content": cmd.audio_path})
+                        # O6/O7：同 TtsThanks——实例序号+插队权重透传（song 直通道）
+                        self._audio_enqueue({"type": "song", "content": cmd.audio_path,
+                                             "choreo_step_id": cmd.step_id,
+                                             "priority_override": CHOREO_AUDIO_PRIORITY})
                         ok = True
                     except Exception as e:
                         logger.error(f"[编排] file 音轨入队异常：problem=本地音频未入队；cause={type(e).__name__}: {e}；fix=检查文件路径与 play_audio.enable")
                         ok = False
                     # 关联键=(type,content)：song 直通 data_json 的 content=路径（synthesis_manager :153 同构）
                     self._events.put(("audio_enqueued", cmd.step_id, "song", cmd.audio_path, ok))
+                elif isinstance(cmd, CancelAudio):
+                    # O8：撤销旧序列未消费音轨（队列级移除；注入缺失时静默跳过）
+                    try:
+                        self._audio_cancel(cmd.step_id)
+                    except Exception as e:
+                        logger.debug(f"[编排] 撤销旧音轨异常（忽略）：{type(e).__name__}: {e}")
                 elif isinstance(cmd, RestoreDefault):
                     result = self.edtalk_client.schedule(cmd.sequence, align=True,
                                                          loop=cmd.loop)

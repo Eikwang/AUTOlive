@@ -414,20 +414,38 @@ class TaskScheduler:
                         llm_type = self.config.get("trends_copywriting", "llm_type") or "custom_llm"
                         if llm_type not in ("custom_llm", "fastrag"):
                             llm_type = "custom_llm"
-                        rewrite_prompt = f"{prompt_change_content}\n原文案：{resp_content}"
-                        try:
-                            if self.my_handle is not None and llm_type in (self.my_handle.chat_type_list or []):
-                                rewritten = self.my_handle.chat_handler.llm_handle(
-                                    llm_type, {"username": "系统", "content": rewrite_prompt}
-                                )
-                                if rewritten:
-                                    resp_content = str(rewritten)[:500]
+                        prompt_change_content = str(prompt_change_content or "").strip()
+                        if not prompt_change_content:
+                            # 转换内容为空=无有效人设可替换，跳过改写播放原文案
+                            # （防裸文案请求退化——原实现拼接空串同样退化）
+                            logger.warning("动态文案：提示词转换已开启但内容为空，跳过改写播放原文案")
+                        else:
+                            # 2026-10-30 审查修复（任务书「提示词转换」语义）：
+                            # 转换内容=本次请求的人设提示词，**替换**系统设定的
+                            # 人设（custom_llm 的 system 人设提示词 /
+                            # fastrag 的 system_role 人设提示词）——原实现拼进
+                            # user 消息且系统人设照旧注入，替换语义未落实。
+                            # 用户消息=文案原文；失败降级播放原文案（语义不变）。
+                            override_key = ("system_prompt" if llm_type == "custom_llm"
+                                            else "system_role")
+                            rewrite_data = {
+                                "username": "系统",
+                                "content": resp_content,
+                                override_key: prompt_change_content,
+                            }
+                            try:
+                                if self.my_handle is not None and llm_type in (self.my_handle.chat_type_list or []):
+                                    rewritten = self.my_handle.chat_handler.llm_handle(
+                                        llm_type, rewrite_data
+                                    )
+                                    if rewritten:
+                                        resp_content = str(rewritten)[:500]
+                                    else:
+                                        logger.warning("动态文案 LLM 改写无返回，降级播放原文案")
                                 else:
-                                    logger.warning("动态文案 LLM 改写无返回，降级播放原文案")
-                            else:
-                                logger.warning(f"动态文案 LLM {llm_type} 不可用，降级播放原文案")
-                        except Exception as llm_e:
-                            logger.warning(f"动态文案 LLM 改写失败，降级播放原文案：{llm_e}")
+                                    logger.warning(f"动态文案 LLM {llm_type} 不可用，降级播放原文案")
+                            except Exception as llm_e:
+                                logger.warning(f"动态文案 LLM 改写失败，降级播放原文案：{llm_e}")
 
                     # S-3 注入安全声明：此处 resp_content 的唯一来源是本地文案文件
                     # （+ 可选 LLM 对该文件的改写），不存在弹幕/观众输入注入点
@@ -453,12 +471,14 @@ class TaskScheduler:
                     else:
                         logger.warning("动态文案：my_handle 未就绪，本轮跳过播放")
 
-                    # 文案播放间隔（单位：秒，任务书口径）
+                    # 文案播放间隔（单位：秒，任务书口径：完成一次文案生成后，
+                    # 进行下次文案生成的间隔时间）——尊重用户设定值；下限 1s
+                    # 仅防 0/负值忙转（原 10s 暗置下限覆盖用户配置，语义修正）
                     try:
                         interval = int(self.config.get("trends_copywriting", "play_interval") or 60)
                     except (TypeError, ValueError):
                         interval = 60
-                    sleep_total = max(interval, 10)
+                    sleep_total = max(interval, 1)
                     # 分片睡眠保证 is_running 停止信号响应
                     for _ in range(sleep_total):
                         if not self.is_running:

@@ -40,20 +40,16 @@ class AudioHandler:
             logger.error(f"清空{type}队列失败：{e}")
             return False
     
-    def stop_audio(self, type: str = "pygame", mixer_normal: bool = True, mixer_copywriting: bool = True):
+    def stop_current_audio(self):
         """
-        停止音频播放
-        
-        Args:
-            type (str): 播放器类型
-            mixer_normal (bool): 是否停止普通混音器
-            mixer_copywriting (bool): 是否停止文案混音器
-            
+        停止当前播放的音频（2026-10-30 审查批次：stop_audio("pygame",...) 链
+        随 pygame 播放分支退役——本地播放统一 builtin 播放器）
+
         Returns:
-            bool: 停止结果
+            停止结果（builtin skip_current_stream）
         """
         try:
-            return self.my_handle.audio.stop_audio(type, mixer_normal, mixer_copywriting)
+            return self.my_handle.audio.stop_current_audio()
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"停止音频播放失败：{e}")
@@ -110,8 +106,6 @@ class AudioHandler:
         else:
             # 音频合成（edge-tts / vits_fast）并播放
             self.my_handle.audio.audio_synthesis(data_json)
-
-            logger.debug(f'data_json={data_json}')
     
     def get_audio_info(self):
         """

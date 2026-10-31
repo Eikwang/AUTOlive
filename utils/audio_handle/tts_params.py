@@ -195,14 +195,39 @@ def normalize_ref_paths(paths_input) -> List[str]:
     return result
 
 
+def normalize_prompt_texts(texts_input) -> List[str]:
+    """参考文本归一化（2026-10-29 批次：与 ref_audio_paths 逐行对应）。
+
+    接受 list / 多行字符串，返回逐行文本列表：
+    - 仅按换行切分（转写文本天然含逗号/分号，不可复用 normalize_ref_paths 的分隔符集）
+    - 保留中间空行（对齐语义：第 i 行文本=第 i 行参考音频），仅裁掉尾部空行
+    """
+    if texts_input is None:
+        return []
+    if isinstance(texts_input, str):
+        lines = texts_input.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    elif isinstance(texts_input, (list, tuple)):
+        lines = []
+        for item in texts_input:
+            lines.extend(str(item or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+    else:
+        lines = [str(texts_input)]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return [ln.strip() for ln in lines]
+
+
 def build_inproc_refs(ref_paths: List[str], ref_free: bool,
-                      prompt_text: str) -> Dict:
-    """inproc 参考装配（P25 静态部分）。
+                      prompt_text: str, prompt_texts=None) -> Dict:
+    """inproc 参考装配（P25 静态部分；2026-10-29 扩展逐音频参考文本）。
 
     上游 API 文档形态（GPT-SoVITS TTS_infer_pack/TTS.py run inputs 清单）：
     - aux_ref_audio_paths：list，辅助参考音频（多音色融合），上游原生支持
     - 无参考文本模式 = 不填参考文本（prompt_text 空串）——上游无 ref_free 键，
       ref_free 标志在装配层消化，不透传给引擎
+    - prompt_texts：与 ref_audio_paths 逐行对应的参考文本列表（2026-10-29）；
+      GPT-SoVITS 语义仅主参考（第一行）文本参与合成，其余行存档匹配——
+      主参考更换/重排后转写跟随对应音频，不再串档
     - P25 spike：prompt_text 空 + aux 列表在 inproc 通道的生效性需 GPU 环境实测；
       失败时由 my_tts._gpt_sovits_inproc 降级单参考（回退预案）
 
@@ -217,23 +242,129 @@ def build_inproc_refs(ref_paths: List[str], ref_free: bool,
     if ref_free:
         # 无参考文本模式：显式空串（不使用参考文本）
         fragments["prompt_text"] = ""
-    elif prompt_text:
-        fragments["prompt_text"] = prompt_text
+    else:
+        # 主参考文本：prompt_texts 第一行 > 旧版单值 prompt_text 兼容回退
+        main_text = ""
+        if prompt_texts:
+            pt_lines = normalize_prompt_texts(prompt_texts)
+            if pt_lines and pt_lines[0]:
+                main_text = pt_lines[0]
+        main_text = main_text or (prompt_text or "")
+        if main_text:
+            fragments["prompt_text"] = main_text
     return fragments
 
 
-def parse_edge_extra_args(json_str: Optional[str]) -> Tuple[Dict, Optional[str]]:
-    """edge-tts 高级参数 JSON 透传解析（escape hatch，默认空=全默认）。
+def parse_fix_pairs(raw) -> List[Tuple[str, str]]:
+    """念法纠正映射解析（2026-10-30 审查批次，TTS 页即时配置）。
 
-    返回 (args_dict, error)。空/空白 → ({}, None)；非法 JSON 或非对象 → ({}, 错误标记)。
-    """
-    text = (json_str or "").strip()
+    输入 dict（config 直接存储形态，逐对键值）或多行字符串（每行 `原文=读音`，
+    支持中文冒号/全角等号/箭头（→、->、=>）/空格分隔——空格兜底兼容
+    apps/gpt-sovits/念法纠正.txt 旧词库直贴形态；分号可单行多对）；坏行
+    （无任何分隔符或空键）跳过不报错。
+    返回 [(原文, 读音), ...]，按原文长度降序排序（最长匹配优先——
+    "重庆"须先于"重"命中）。
+
+    注：多音字（polyphone_map）拼写改写已退役（2026-10-30 用户裁决）——多音字
+    统一走 GPT-SoVITS 引擎词典 多音字.txt（g2p 层改发音不改正文，见
+    parse_polyphone_lines）；本函数仅服务念法纠正（整词改写）。"""
+    pairs: List[Tuple[str, str]] = []
+    if not raw:
+        return pairs
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        items = []
+        for line in re.split(r"[\n;；]+", str(raw)):
+            line = line.strip()
+            if not line:
+                continue
+            # 分隔符优先级：多字符箭头（->/=>）> =/全角等号/冒号/→ > 空格兜底
+            m = re.split(r"->|=>", line, maxsplit=1)
+            if len(m) == 2:
+                k, v = m
+            elif "=" in line:
+                k, _, v = line.partition("=")
+            else:
+                m = re.split(r"[:：＝]|→", line, maxsplit=1)
+                if len(m) == 2:
+                    k, v = m
+                else:
+                    # 空格兜底（旧词库形态：`AI 人工智能`）——首个空白切二
+                    sp = re.split(r"\s+", line, maxsplit=1)
+                    if len(sp) == 2:
+                        k, v = sp
+                    else:
+                        continue
+            items.append((k, v))
+    for k, v in items:
+        k = str(k or "").strip()
+        v = str(v or "").strip()
+        if k and v and k != v:
+            pairs.append((k, v))
+    pairs.sort(key=lambda kv: len(kv[0]), reverse=True)
+    return pairs
+
+
+def apply_text_fixes(text: str, pronunciation_fix=None, polyphone_map=None) -> str:
+    """TTS 前文本纠正（2026-10-30 审查批次）：念法纠正（pronunciation_fix，
+    整词改写如 缩写→SOGOU 拼读）先应用；多音字替换（polyphone_map，同字异音
+    标注如 长→chang）后应用。两级均可选（空=原样返回）。
+
+    说明：GPT-SoVITS 逐字读音由其 g2p 决定，本层为纯文本前端——polyphone_map
+    以"多音字+注音"形态改写文本（如 长江→chang江）交由模型按拼写朗读；
+    edge-tts 通道同样受益（SSML 层前文本已修正）。"""
     if not text:
-        return {}, None
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError) as e:
-        return {}, f"JSON 解析失败: {e}"
-    if not isinstance(data, dict):
-        return {}, "JSON 顶层必须是对象（{...}）"
-    return data, None
+        return text
+    for src, dst in parse_fix_pairs(pronunciation_fix):
+        if src in text:
+            text = text.replace(src, dst)
+    for src, dst in parse_fix_pairs(polyphone_map):
+        if src in text:
+            text = text.replace(src, dst)
+    return text
+
+
+# ==================== GPT-SoVITS 引擎多音字词典（多音字.txt 直读直写） ====================
+# 2026-10-30 用户裁决：多音字统一走引擎词典（g2p 层改发音不改正文，发音精确），
+# 前端「多音字」textarea 直读直写仓库根 多音字.txt——UI 拼写改写（polyphone_map）退役。
+
+POLYPHONE_FILENAME = "多音字.txt"
+
+_POLYPHONE_LINE_RE = re.compile(r'^(?P<word>\S+)\s+(?P<phones>\[.*\])\s*$')
+
+
+def parse_polyphone_lines(text: str) -> Tuple[List[Tuple[str, List[str]]], List[str]]:
+    """引擎词典行解析：`一行 ["yi4","hang2"]` → (词, [拼音...])。
+
+    返回 (合法条目列表, 坏行列表)——坏行原样返回供 UI 警告（词缺读音数组/
+    拼音非字符串/空词）；注释行（# 开头）与空行忽略。"""
+    entries: List[Tuple[str, List[str]]] = []
+    bad: List[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _POLYPHONE_LINE_RE.match(line)
+        if not m:
+            bad.append(raw_line.rstrip())
+            continue
+        word = m.group("word").strip()
+        try:
+            phones = json.loads(m.group("phones"))
+        except (ValueError, TypeError):
+            bad.append(raw_line.rstrip())
+            continue
+        if not word or not isinstance(phones, list) or not phones or \
+                not all(isinstance(p, str) and p.strip() for p in phones):
+            bad.append(raw_line.rstrip())
+            continue
+        entries.append((word, [p.strip() for p in phones]))
+    return entries, bad
+
+
+def build_polyphone_lines(entries) -> str:
+    """引擎词典行构建（引擎原生格式：`词 ["p1","p2"]`）。"""
+    return "\n".join(
+        f"{word} {json.dumps(phones, ensure_ascii=False)}"
+        for word, phones in entries)

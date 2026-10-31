@@ -1,5 +1,7 @@
 ```mermaid
 flowchart TD
+    %% 图头 v2.9（2026-10-28 消费批次 P3）：打断撤旧音频（standard 打断撤销旧序列未消费编排音轨 CancelAudio→两队列按 choreo_step_id 移除）；消费回传补齐 pygame/外部播放器路径（三路共用 _notify_choreo_complete，M3 断链修复）；消息队列满载高优插入=插队+驱逐队尾净长度不变（M1）；完成匹配回退路径 content 归一化容差（O9）。拓扑与 v2.8 一致
+    %% 图头 v2.8（2026-10-28 消费批次 O1/O3/O6/O7）：编排接入 Sort 权重表——queue 排队按 filter.priority_mapping 权重降序出队、standard 打断加权重门（低权让位排队）、满额挤最低优；消费回传携带编排实例序号 choreo_step_id（同内容重复触发按实例精确匹配，未透传路径退回 type+content）；编排音轨（tts 答谢/file 歌曲）注入 priority_override=500 于两级队列插队（低于 999 专线）。拓扑与 v2.7 一致
     %% 图头 v2.7（2026-10-28 消费逻辑审查批次，用户终版手改定稿）：已消费回传子图回传目标 Sort→AudioList——消费完成回执落音频队列模块（QueueMixin.report_consumed 消费回执+播放循环完成点后串行取下一条，G1/G2 两路消费点互斥不双报）；其余拓扑与 v2.6 一致（Keyword 中枢→Compile 双出边、Sort 权重边、NoDM/Listenoff 闲时任务调度）
     %% 图例：{菱形}=判断/路由节点 | ([圆角])=起止节点 | :::listenNode=监听交互 | :::subLogicNode=子逻辑 | :::logicNode=核心处理 | 无箭头依赖=并行支路
     %% 纪律：改链必改图——任何链路代码变更须同步本图并升级版本号；守卫 tests/test_flowchart_alignment.py 断言图头与编排拓扑边
@@ -79,6 +81,8 @@ flowchart TD
 
     %% 核心处理流程
     subgraph 信息处理模块
+        %% v2.9 消息队列满载语义（M1/M2）：扫描/判定/插入锁内化（多生产者竞态根修）；
+        %% 满载高优插入=插队+驱逐队尾（最低优组 FIFO 尾）净长度不变，低优/未识别类型仍丢弃
         Queue{待处理<br>消息队列}:::logicNode
         look --> Queue
         SendPort --> Queue
@@ -122,6 +126,13 @@ flowchart TD
     end
     %% 画面输出模块
     subgraph 画面播放模块  
+        %% v2.8 权重联动落码：Compile 排队按 filter.priority_mapping 权重降序出队（O1，
+        %% keyword→comment/gift/song 同名映射）、standard 打断权重门低权让位改排队（O3）、
+        %% 满额挤最低优组最旧（O2）；编排音轨（tts 答谢/file 歌曲）注入 priority_override=500
+        %% 于两级队列插队（O7，低于 999 复读专线）
+        %% v2.9 补齐：standard 打断撤销旧序列未消费音轨（O8，CancelAudio→按 choreo_step_id
+        %% 移除两队列条目）；完成回传按 choreo_step_id 实例精确匹配（O6，同内容重复触发不误配），
+        %% 未透传路径退回 type+content 归一化容差匹配（O9）
         Keyword --> |关键词|Compile{动作编排}:::logicNode
         Sort --> |权重&队列信息|Compile
         Frame(输出<br>画面&音频&字幕):::logicNode      
@@ -132,7 +143,9 @@ flowchart TD
         Sync --> Frame
     end    
 
-    %% 消费完成
+    %% 消费完成（v2.9：消费回传三路全覆盖互斥不双报——EDTalk push 完成点/builtin
+    %% 完成回调由 audio_core 转发/pygame get_busy 结束点/外部播放器移交点；
+    %% 回传同时落 QueueMixin.report_consumed 消费回执+编排实例匹配）
     subgraph 已消费信息回传 
         Frame --> lineout{已消费信息}:::logicNode
         lineout --> |回传|AudioList

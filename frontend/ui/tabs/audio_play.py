@@ -1,18 +1,22 @@
 # -*- coding: UTF-8 -*-
 """
-音频播放标签页模块（audio_player/captions_printer 整合：builtin 内置播放器）
+音频播放标签页模块（2026-10-30 审查批次：本地播放统一 builtin 内置播放器）
 
 布局规范：
-- 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
+- 设置项用最多 2 列网格排布，组件宽度跟随列宽（width:100%）
 - 开关+关联参数 为上下结构单元：开关在上，输入框在下
 
-整合义务（计划 §6.1）：
-- builtin 选项 + 设备下拉（异步枚举，loading/空态 D8）+ 播放间隔 + 只读
-  优先级映射折叠区（D4，含 config 手改逃生门注明 dx7）+ queue_max
+2026-10-30 审查批次：
+- 「音频播放器」选择（play_audio.player）与外部 audio_player 服务模式退役——
+  builtin 进程内播放器为唯一本地播放后端，页面常驻无需切换
+- 「播放间隔min/max」（play_audio.play_interval_min/max）退役移除——消费回传
+  机制下由播放完成回执驱动下一条取用，无需间隔等待
+- 「启用文本切分」改名「文本切分」；「普通音频变速」改名「随机变速」；两列布局
+
+整合义务（计划 §6.1，沿用）：
+- 设备下拉（异步枚举，loading/空态 D8）+ 只读优先级映射折叠区（D4，含 config
+  手改逃生门注明 dx7）+ queue_max
 - 控制区（D5/D6/D7/D9）：状态回显行 + 四按钮 + 1s 轮询 + 错误条
-- EDTalk 激活：播放器 select 禁用（D3）+ 常驻提示（预期管理 F1）
-- 外部 API 地址：选 builtin/pygame 时隐藏（0G cherry-pick #4）
-- 生效时机标注（D11）：播放器选择修改后重启主系统生效
 """
 import json
 
@@ -21,8 +25,6 @@ from nicegui import ui
 from typing import Dict, Any, Callable
 
 from frontend.ui.components.config_helper import get_nested_value
-from frontend.utils.common import is_url_check
-from utils.edtalk_realtime.helpers import is_edtalk_active
 
 
 def _main_api_base(config: Dict[str, Any]) -> str:
@@ -32,15 +34,6 @@ def _main_api_base(config: Dict[str, Any]) -> str:
         api_ip = "127.0.0.1"
     api_port = get_nested_value(config, "api_port", default=8082)
     return f"http://{api_ip}:{api_port}"
-
-
-def _interval_number(value, default):
-    """播放间隔 UI 初始值归一化（2026-10-24 实测修复）：存量配置可能为字符串
-    （文本框时代落盘），ui.number 需要 float 初始值；非法值回退默认。"""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def create_audio_play_tab(
@@ -57,51 +50,21 @@ def create_audio_play_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="audio_play")
 
     api_base = _main_api_base(config)
-    edtalk_active = is_edtalk_active(config)
 
     with ui.card().style(card_css):
         ui.label('音频播放')
-        with ui.grid(columns=3):
-            _auto_save(ui.switch('启用文本切分', value=get_nested_value(config, "play_audio", "text_split_enable")).style(switch_internal_css).tooltip('启用后会将LLM等待合成音频的消息按四句一切的方式分段（每段最多四句），以便TTS快速合成'), ("play_audio", "text_split_enable"))
-            # A3（2026-10-22 审查批次）：「音频信息回传给内部接口」参数退役移除——
-            # 外接 audio_player 已弃用，且回路接收端（/callback）本就仅打日志（死链）。
-            # 闲时清零如需数据走进程内 get_audio_info 直查，不经 HTTP 回调。
+        with ui.grid(columns=2):
+            _auto_save(ui.switch('文本切分', value=get_nested_value(config, "play_audio", "text_split_enable")).style(switch_internal_css).tooltip('启用后会将LLM等待合成音频的消息按四句一切的方式分段（每段最多四句），以便TTS快速合成'), ("play_audio", "text_split_enable"))
+            _auto_save(ui.switch('随机变速', value=get_nested_value(config, "audio_random_speed", "normal", "enable")).style(switch_internal_css).tooltip('启用后针对弹幕回复、助播等 TTS 合成音频，在语速上下限之间随机取值，于 TTS 合成时调整语速参数（gpt-sovits speed_factor / edge-tts rate+pitch 联动），无失真。本地音频与点歌歌曲不变速'), ("audio_random_speed", "normal", "enable"))
+            _auto_save(ui.input(label='速度下限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_min")).style("width:100%;").tooltip('语速倍率下限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_min"))
+            _auto_save(ui.input(label='速度上限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_max")).style("width:100%;").tooltip('语速倍率上限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_max"))
+            # 2026-10-30 审查批次：「播放间隔min/max」与「音频播放器」选择随
+            # 消费回传机制/统一 builtin 播放器退役移除（见模块 docstring）。
+            # UC2a（2026-10-22 终门裁决）：「音频输出路径」用户可配置性移除——
+            # out_path 保留为系统内部透明临时目录（TTS 产物落盘必需）。
 
-        with ui.grid(columns=3):
-            # A3：「间隔时间重复次数最小值/最大值」退役移除（设计项3）——播放间隔改为
-            # 单次随机取值；节奏变化（默认值域 0.3~1.0s → 0.3~0.5s）已入发布说明。
-            # A4（设计项4）：参数名改为「播放间隔min/max」，新键 play_interval_min/max，
-            # 旧键 normal_interval_min/max 读侧一次性兼容（值不丢，旧键保留）。
-            # 数字控件（2026-10-24 实测修复）：ui.input 文本框 e.value 恒为字符串，
-            # 落盘污染数字键（实测 play_interval_max='0.8' → 读侧 TypeError 丢全部
-            # 待播音频）。改 ui.number（e.value 为 float）+ 初始值归一化，重存即把
-            # 存量 str 键修复回数字。
-            _auto_save(ui.number(label='播放间隔min', value=_interval_number(get_nested_value(config, "play_audio", "play_interval_min", default=get_nested_value(config, "play_audio", "normal_interval_min")), 0.3), min=0, step=0.1).style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间下限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_min"))
-            _auto_save(ui.number(label='播放间隔max', value=_interval_number(get_nested_value(config, "play_audio", "play_interval_max", default=get_nested_value(config, "play_audio", "normal_interval_max")), 0.5), min=0, step=0.1).style("width:100%;").tooltip('每条音频播放结束后到播放下一条之间的间隔时间上限，单位：秒。实际间隔在 min 与 max 之间随机取值'), ("play_audio", "play_interval_max"))
-            # UC2a（2026-10-22 终门裁决）：「音频输出路径」用户可配置性移除——out_path
-            # 保留为系统内部透明临时目录（TTS 产物落盘必需），不再暴露给用户配置。
-            player_select = _auto_save(ui.select(
-                label='音频播放器',
-                options={
-                    'pygame': 'pygame（系统自带默认）',
-                    'builtin': '内置播放器（进程内队列：插队/暂停/续播）',
-                    'audio_player_v2': 'audio_player_v2（外部服务模式）',
-                    'audio_player': 'audio_player（外部服务模式）',
-                },
-                value=get_nested_value(config, "play_audio", "player", default='pygame')
-            ).style("width:100%;").tooltip('选用的音频播放器，默认pygame不需要再安装其他程序。'
-                '内置播放器=系统进程内队列播放（插队仅重排待播顺序，不打断当前播放——native F1 预期管理）。'
-                'audio_player(_v2)=外部服务模式（需自行启动外部项目；兼容保留，builtin 稳定一个版本后移除——sunset 判据登记 TODOS，native F4）。'
-                '修改后重启主系统生效（D11）'), ("play_audio", "player"))
-
-        # D3：EDTalk 激活时播放器选择视觉锁死 + 常驻提示（可改但无效=认知失调路径）
-        if edtalk_active:
-            player_select.disable()
-            ui.label('数字人模式下音频由 EDTalk 播放，播放器选择不生效').style(
-                f'color: var(--color-warning, #d97706); font-size: var(--font-size-assist, 12px);')
-
-    # ---------- 内置播放器卡（选 builtin 时相关） ----------
-    with ui.card().style(card_css) as builtin_card:
+    # ---------- 内置播放器卡（唯一本地播放后端，常驻） ----------
+    with ui.card().style(card_css):
         ui.label('内置播放器')
         with ui.grid(columns=3):
             device_select = ui.select(
@@ -109,7 +72,7 @@ def create_audio_play_tab(
             ).style("width:100%;").tooltip('枚举系统输出声卡；打开失败时自动回退系统默认设备并报错（R1）')
             _auto_save(ui.input(label='待播队列上限', value=str(get_nested_value(config, "audio_player", "queue_max", default=50) or 50)).style("width:100%;").tooltip('满载后新音频阻塞等待消费（背压，不丢弃台词）'), ("audio_player", "queue_max"))
             with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('播放后随机间隔', value=get_nested_value(config, "audio_player", "random_audio_interval", "enable", default=False)).style(switch_internal_css).tooltip('每条播放完后在上下限之间随机休眠（秒）。默认关闭：播放间隔由上方"普通音频播放间隔"负责，避免双重间隔'), ("audio_player", "random_audio_interval", "enable"))
+                _auto_save(ui.switch('播放后随机间隔', value=get_nested_value(config, "audio_player", "random_audio_interval", "enable", default=False)).style(switch_internal_css).tooltip('每条播放完后在上下限之间随机休眠（秒）。默认关闭：下一条音频由播放完成回执驱动立即取用'), ("audio_player", "random_audio_interval", "enable"))
                 _auto_save(ui.input(label='随机间隔下限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "min", default=0.1)).style("width:100%;"), ("audio_player", "random_audio_interval", "min"))
                 _auto_save(ui.input(label='随机间隔上限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "max", default=3)).style("width:100%;"), ("audio_player", "random_audio_interval", "max"))
 
@@ -128,19 +91,6 @@ def create_audio_play_tab(
             ui.label('数值越大越先播；未识别类型排队尾。在「互动设置-优先级配置」页调整（单源：filter.priority_mapping）。').style(
                 'font-size: var(--font-size-assist, 12px);')
 
-    # ---------- 外部服务 API 地址卡（仅外部模式显示；0G cherry-pick #4 动态显隐） ----------
-    with ui.card().style(card_css) as external_card:
-        ui.label('audio_player（外部服务模式）')
-        with ui.grid(columns=3):
-            _auto_save(ui.input(
-                label='API地址',
-                value=get_nested_value(config, "audio_player", "api_ip_port"),
-                placeholder='audio_player的API地址，只需要 http://ip:端口 即可',
-                validation={
-                    '请输入正确格式的URL': lambda value: is_url_check(value),
-                }
-            ).style("width:100%;").tooltip('仅在 音频播放器：audio_player/audio_player_v2 情况下填写'), ("audio_player", "api_ip_port"))
-
     # ---------- 控制区（D5/D6/D7/D9：状态行+四按钮+1s轮询+错误条） ----------
     with ui.card().style(card_css) as control_card:
         ui.label('播放控制')
@@ -156,26 +106,12 @@ def create_audio_play_tab(
         for b in (btn_pause, btn_resume, btn_skip, btn_clear):
             b.props('dense outline')
 
-    # ---------- 音频随机变速卡（A2 后语义：合成侧 TTS 语速；A3 移除文案变速列） ----------
-    with ui.card().style(card_css):
-        ui.label('音频随机变速')
-        with ui.grid(columns=3):
-            _auto_save(ui.switch('普通音频变速', value=get_nested_value(config, "audio_random_speed", "normal", "enable")).style(switch_internal_css).tooltip('启用后针对弹幕回复、助播等 TTS 合成音频，在语速上下限之间随机取值，于 TTS 合成时调整语速参数（gpt-sovits speed_factor / edge-tts rate+pitch 联动），无失真。本地音频与点歌歌曲不变速'), ("audio_random_speed", "normal", "enable"))
-            _auto_save(ui.input(label='速度下限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_min")).style("width:100%;").tooltip('语速倍率下限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_min"))
-            _auto_save(ui.input(label='速度上限', value=get_nested_value(config, "audio_random_speed", "normal", "speed_max")).style("width:100%;").tooltip('语速倍率上限（1.0=正常语速），最终语速在上下限之间随机取值；合法域 [0.25, 4.0]，非法值自动回落 1.0'), ("audio_random_speed", "normal", "speed_max"))
-            # A3（2026-10-22 审查批次）：「文案音频变速」参数列退役移除——文案模块已
-            # 弃用，变速功能仅需普通音频一条逻辑（设计项7）。
-
     # ---------- 行为逻辑 ----------
     def _refresh_visibility():
-        player_value = player_select.value
-        is_builtin = player_value == 'builtin'
-        is_external = player_value in ('audio_player', 'audio_player_v2')
-        builtin_card.visible = is_builtin
-        external_card.visible = is_external
-        control_card.visible = is_builtin
-        if is_builtin:
-            _load_devices_once()
+        # 2026-10-30 审查批次：builtin 为唯一本地播放后端——播放器显隐切换退役，
+        # 控制区/设备区常驻，仅保留设备枚举触发
+        control_card.visible = True
+        _load_devices_once()
 
     def _load_devices_once():
         """设备枚举（D8：loading 态→空态/列表；只在打开页面首次枚举）"""
@@ -223,9 +159,7 @@ def create_audio_play_tab(
             pass  # 失败由 1s 轮询的状态/错误条反映，不打断 UI 线程
 
     def _poll_status():
-        """1s 轮询（D7：仅 builtin 时有意义；轻量摘要，不持锁全量拷贝）"""
-        if player_select.value != 'builtin':
-            return
+        """1s 轮询（D7：轻量摘要，不持锁全量拷贝；builtin 常驻）"""
         try:
             resp = requests.get(f"{api_base}/builtin_status", timeout=1.5)
             data = resp.json()
@@ -271,6 +205,5 @@ def create_audio_play_tab(
             pass
     device_select.on_value_change(_on_device_change)
 
-    player_select.on('update:value', lambda e: _refresh_visibility())
     _refresh_visibility()
     ui.timer(1.0, _poll_status)

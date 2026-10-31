@@ -199,6 +199,9 @@ class AUDIO_PLAY_CENTER:
                     "wait_play_audio_num": len(self.audio_json_list),
                     "item_type": (data_json or {}).get("type", ""),
                     "item_content": (data_json or {}).get("content", ""),
+                    # O6（2026-10-28 消费批次）：编排实例序号（未透传条目为空串，
+                    # audio_core 转 None→编排侧退回 (type,content) 匹配）
+                    "item_step_id": (data_json or {}).get("choreo_step_id", ""),
                 },
             }
             if not self._cb_loop.submit(self._completion_cb(data)):

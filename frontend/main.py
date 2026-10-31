@@ -96,6 +96,7 @@ _RETIRED_CONFIG_KEYS: list = [
     (("audio_player", "priority_mapping"), "audio_player.priority_mapping 已收敛至 filter.priority_mapping（运行时自动合并迁移），可删除"),
     (("filter", "lang_filter"), "filter.lang_filter 已退役（语言过滤由顶层 need_lang 键驱动），可删除"),
     (("talk", "show_chat_log"), "talk.show_chat_log 已退役（2026-10-25 批次：聊天记录固定记录弹幕与聊天互动，不再需要开关），可删除"),
+    (("talk", "no_recording_during_playback_sleep_interval"), "talk.no_recording_during_playback_sleep_interval 已退役（2026-10-30 聊天审查批次：待播放音频列表为 0 才进行录音检测，不再需要间隔参数），可删除"),
     (("key_mapping", "copywriting_trigger_type"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "copywriting_single_sentence_trigger_once"), "key_mapping 文案触发已移除（2026-10-24 精简批次），可删除"),
     (("key_mapping", "local_audio_trigger_type"), "key_mapping 本地音频触发已移除（2026-10-24 精简批次），可删除"),
@@ -128,6 +129,19 @@ _RETIRED_CONFIG_KEYS: list = [
     (("edtalk_realtime", "api_ip_port"), "edtalk_realtime.api_ip_port 已退役（控制面基址由运行时文件自动解析），可删除"),
     (("edtalk_realtime", "interpreter_path"), "edtalk_realtime.interpreter_path 已退役（解释器自动探测并记忆上次使用的环境），可删除"),
     (("edtalk_realtime", "segments"), "edtalk_realtime.segments 已退役（默认全部素材轮播，画面接管走『动作编排』页），可删除"),
+    # 提示词前缀/后缀弃用（通用配置精简批次）：LLM 服务需单独设置提示词与回复
+    # 规则，前后缀无意义；build_llm_input 不再读取，存量键一次性告知后可手动删除
+    (("before_prompt",), "提示词前缀已弃用移除（LLM 服务需单独设置提示词与回复规则），可删除"),
+    (("after_prompt",), "提示词后缀已弃用移除（LLM 服务需单独设置提示词与回复规则），可删除"),
+    # 过滤审查批次（2026-10-30）：六前缀后缀配置退役（后端零消费点）+
+    # 复读触发配置组退役（弹幕关键词触发复读功能整体移除；手动直接复读保留）
+    (("filter", "before_must_str"), "弹幕触发前缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("filter", "after_must_str"), "弹幕触发后缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("filter", "before_filter_str"), "弹幕过滤前缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("filter", "after_filter_str"), "弹幕过滤后缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("filter", "before_must_str_for_llm"), "LLM触发前缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("filter", "after_must_str_for_llm"), "LLM触发后缀已退役（2026-10-30 过滤审查批次：后端零消费点），可删除"),
+    (("reread",), "reread 复读触发配置组已退役（2026-10-30 过滤审查批次：弹幕关键词触发复读移除；聊天页手动直接复读不受影响），可删除"),
 ]
 
 
@@ -224,8 +238,8 @@ class AutoliveApp:
         chat_send_callback=None，聊天框/直接复读恒报"发送失败——请确认系统已启动"）。
 
         语义与主进程 main.py send_chat_message 同构：POST core /send（webui
-        /send 同构 payload）——reread/reread_top_priority 走 reread_handle（999
-        链路），comment 走弹幕链（chat_source=chatbox 进聊天记录）。
+        /send 同构 payload）——reread/reread_top_priority 走 reread_handle
+        （手动直通，999 链路），comment 走弹幕链（chat_source=chatbox 进聊天记录）。
         Returns: 是否成功（失败 notify 由调用方 talk 页承接）。
         """
         import json as _json
@@ -319,6 +333,29 @@ class AutoliveApp:
             except Exception as e:
                 logger.warning(f"数据分析模块初始化失败: {e}")
                 self.data_analysis = None
+
+        # 变声服务前端托管（2026-10-30 变声独立化，用户裁决）：变声是独立流程，
+        # 不应依赖系统主进程——进入前端即可配置/使用。rvc_vc.enabled（二级菜单
+        # 「变声」开关）=true 时 webui 进程直接托管拉起 rvc-vc 子进程（独立
+        # HTTP 服务），不等「启动系统」。探活防双实例（主系统启动时同样探活）。
+        try:
+            if bool(get_nested_value(self.config._config, "rvc_vc", "enabled")):
+                from utils.autolive_paths import AutolivePaths
+                from utils.rvc_service import build_rvc_vc_service, rvc_vc_alive
+                _paths = AutolivePaths(self.config)
+                if rvc_vc_alive(self.config, _paths):
+                    logger.info("[rvc-vc] 服务已在线（主系统托管），前端不重复拉起")
+                else:
+                    self.rvc_vc_svc = build_rvc_vc_service(self.config, _paths)
+                    if self.rvc_vc_svc is not None:
+                        threading.Thread(
+                            target=self.rvc_vc_svc.start,
+                            name="webui-rvc-vc", daemon=True).start()
+                        logger.info("[rvc-vc] 前端托管拉起已后台启动（进入前端即可用变声）")
+        except Exception:
+            logger.warning(
+                "[rvc-vc] 前端托管拉起失败（不阻断 webui，启动系统后仍可随主流程拉起）: "
+                + traceback.format_exc())
 
         logger.info("AUTOlive 应用程序初始化完成")
     
@@ -1308,7 +1345,8 @@ class AutoliveApp:
                 # 2026-10-25 重构：白名单——聊天记录收聊天功能互动
                 # （voice=语音对话/chatbox=聊天框发送/comment=弹幕监听问答），
                 # 点歌/积分/本地问答等其余来源（无标记/其它标记）在此丢弃
-                if payload and payload.get("chat_source") in ("voice", "chatbox", "comment"):
+                # 2026-10-30 聊天审查批次：system=唤醒/睡眠/打断/舍弃系统反馈（D-10）
+                if payload and payload.get("chat_source") in ("voice", "chatbox", "comment", "system"):
                     from frontend.utils.chat_log_buffer import append_chat
                     append_chat(payload)
                 return {"code": 200, "message": "成功"}

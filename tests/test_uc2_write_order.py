@@ -13,9 +13,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.handlers.comment_handler import CommentHandler  # noqa: E402
 from utils.handlers.chat_handler import ChatHandler  # noqa: E402
+from utils.background_tasks import wait_all  # noqa: E402
 
 
 _UNSET = object()
+
+
+def _drain():
+    """写库已改投后台队列（2026-10-28 优化批次）——断言前排空，保序语义不变。"""
+    assert wait_all(5.0), "后台写库队列未在超时内排空"
 
 
 def _make_chain(handler_cls, filtered_content=_UNSET, blocked=False):
@@ -69,23 +75,27 @@ class TestCommentHandlerWriteOrder:
     def test_benign_inserted_filtered(self):
         h, inserts = _make_chain(CommentHandler, filtered_content="主播好厉害(已替换)")
         h.comment_handle(dict(BENIGN))
+        _drain()
         assert len(inserts) == 1
         assert inserts[0][1] == "主播好厉害(已替换)"  # 写库内容=过滤后
 
     def test_blocked_not_inserted(self):
         h, inserts = _make_chain(CommentHandler, blocked=True)
         h.comment_handle(dict(BENIGN))
+        _drain()
         assert inserts == []  # 违禁弹幕不入库（UC-2 核心断言）
 
     def test_filtered_none_not_inserted(self):
         h, inserts = _make_chain(CommentHandler, filtered_content=None)
         h.comment_handle(dict(BENIGN))
+        _drain()
         assert inserts == []
 
     def test_punctuation_only_not_inserted(self):
         h, inserts = _make_chain(CommentHandler)
         h.my_handle.common.is_punctuation_string = lambda c: True
         h.comment_handle(dict(BENIGN))
+        _drain()
         assert inserts == []
 
 
@@ -93,17 +103,20 @@ class TestChatHandlerWriteOrder:
     def test_benign_inserted_filtered(self):
         h, inserts = _make_chain(ChatHandler, filtered_content="主播好厉害(已替换)")
         h.talk_handle(dict(BENIGN))
+        _drain()
         assert len(inserts) == 1
         assert inserts[0][1] == "主播好厉害(已替换)"
 
     def test_blocked_not_inserted(self):
         h, inserts = _make_chain(ChatHandler, blocked=True)
         h.talk_handle(dict(BENIGN))
+        _drain()
         assert inserts == []
 
     def test_punctuation_only_not_inserted(self):
         h, inserts = _make_chain(ChatHandler)
         h.my_handle.common.is_punctuation_string = lambda c: True
         h.talk_handle(dict(BENIGN))
+        _drain()
         assert inserts == []
 

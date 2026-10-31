@@ -7,7 +7,8 @@ UI-16 批次守卫测试（WebUI 功能调整与修复 16 项，终门 rec 批�
 (a) R10 念弹幕触发周期键迁移（periodic_time 单值/max 回填/旧键退役/分支隔离）
 (b) R5 动态文案存量迁移（成功导入/不可读非破坏保留/合并去重幂等/体量上限）
 (c) R3 过滤总开关迁移（ENABLE_PATHS 注册+per-path 确认注册表+persistent 全关闭路径）
-(d) R8 页面移除清理（双页函数/导航注册/enable_paths 注册清零+config_templates 红线）
+(d) R8 页面移除清理（双页函数/导航注册/enable_paths 注册清零）+ 动态配置退役守卫
+    （2026-10-28 批次：config_templates 红线随功能退役一并移除）
 (e) E4 talk 页渲染 smoke（P1 password 参数修复+两列布局防回退）
 """
 from pathlib import Path
@@ -19,7 +20,6 @@ REPO = Path(__file__).resolve().parents[2]
 
 def _src(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
-
 
 class _FakeSettings:
     """settings._ensure_defaults 的最小替身（只提供 .save() 与 _config）。"""
@@ -165,8 +165,18 @@ class TestR5CopyMigration:
         src = _src("frontend/ui/tabs/trends_copywriting.py")
         assert "background_tasks.create(_migrate_folder_paths())" in src
         assert "dict.fromkeys(existing + imported)" in src  # 幂等去重
-        assert 'set_config_callback("trends_copywriting", "copywriting", value=remaining)' in src
+        assert ('set_config_callback("trends_copywriting", "copywriting", value=remaining, _notify=False)' in src)
         assert "恢复该目录可读后重新进入本页即自动回填" in src  # 失败指引文案
+
+    def test_background_notify_slot_safe(self):
+        """2026-10-30：background_tasks 协程无默认 slot——裸调 ui.notify 崩
+        （slot stack empty，中断后续配置落盘，用户实测 traceback）。trends 迁移
+        与 svc 变声切换两处均须渲染/交互期捕获 client 并显式进入。"""
+        trends = _src("frontend/ui/tabs/trends_copywriting.py")
+        assert "with _migrate_client:" in trends
+        assert "value=merged, _notify=False" in trends  # 后台落盘不 toast
+        svc = _src("frontend/ui/tabs/svc.py")
+        assert "with _switch_client:" in svc
 
     def test_task_scheduler_dual_chain_and_fastrag(self):
         """源级：消费链双链（copy 优先/旧链回退）+fastrag 放行+未知降级+S-3 截断。"""
@@ -227,11 +237,27 @@ class TestR8PageRemoval:
         src = _src("frontend/main.py")
         assert "local_dir_to_endpoint" not in src
 
-    def test_config_templates_directory_untouched(self):
-        """红线（EV-1d）：config_templates/ 目录=动态模板活体存储，目录必须仍存在
-        （文件内容/数量为用户数据随实播增删，不做断言——2026-10-24 用户清理测试模板）。"""
-        d = REPO / "config_templates"
-        assert d.is_dir()
+
+# ---------------------------------------------------------------------------
+# 动态配置退役守卫（2026-10-28：审查裁定——人数自动切换执行器缺失，整功能退役）
+# ---------------------------------------------------------------------------
+
+class TestTrendsConfigRetired:
+    def test_tab_and_bindings_removed(self):
+        """页面函数/导航注册/启用开关映射清零（防回归复活）。"""
+        assert "create_trends_config_tab" not in _src("frontend/ui/tabs/system_settings.py")
+        assert "trends_config" not in _src("frontend/ui/layout.py")
+        from frontend.config.enable_paths import ENABLE_PATHS
+        assert "trends_config" not in ENABLE_PATHS
+
+    def test_config_keys_removed(self):
+        """配置键已删：example 文本断言 + features.json 解析断言（仿 choose_song 退役先例）。"""
+        import json
+        example = _src("config.example.json")
+        assert '"trends_config"' not in example
+        assert "动态配置" not in example
+        with open(REPO / "config" / "features" / "features.json", encoding="utf-8") as f:
+            assert "trends_config" not in json.load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -335,14 +361,6 @@ class TestBatchMisc:
         assert "降序编号降序" not in src
         assert "统一列表按当前优先级降序编号，修改数值后刷新页面会重排" in src
 
-    def test_trends_config_layout_and_delete(self):
-        """R6/D-5/DV-1c：动态模板布局顺序+条目删除+去重+空态。"""
-        src = _src("frontend/ui/tabs/system_settings.py")
-        assert "with ui.grid(columns=2).style(\"width:100%;\")" in src
-        assert "_delete_entry" in src
-        assert "已清理" in src  # 存量重复清理
-        assert "暂无人数段绑定" in src  # 空态提示
-
 
 class TestRound2Fixes:
     """二轮验收修复守卫（2026-10-24：7 项任务）。"""
@@ -388,7 +406,7 @@ class TestRound2Fixes:
         conv = _src("utils/conversation_manager.py")
         assert '"chat_source": "voice"' in conv  # 语音对话打标
         uh = _src("utils/handlers/utils_handler.py")
-        assert 'chat_source not in ("voice", "chatbox", "comment")' in uh  # core 网关白名单
+        assert 'chat_source not in ("voice", "chatbox", "comment", "system")' in uh  # core 网关白名单（2026-10-30 批次扩展 system）
         assert 'return  # 点歌/积分等非聊天互动来源不进聊天记录' in uh
         # 开关退役：发送侧不再读 show_chat_log 配置（键已从 example 移除；
         # 注意方法名 webui_show_chat_log_callback 含子串，断言须锚定配置门卫）
@@ -396,7 +414,7 @@ class TestRound2Fixes:
         assert 'config.get("talk", "show_chat_log")' not in _src("utils/handlers/chat_handler.py")
         assert 'config.get("talk", "show_chat_log")' not in _src("utils/handlers/comment_handler.py")
         fm = _src("frontend/main.py")
-        assert 'payload.get("chat_source") in ("voice", "chatbox", "comment")' in fm  # webui 白名单
+        assert 'payload.get("chat_source") in ("voice", "chatbox", "comment", "system")' in fm  # webui 白名单（2026-10-30 批次扩展 system）
         # 发送对：语音输入 question（talk_handle）+语音回复 answer（补发）
         chat = _src("utils/handlers/chat_handler.py")
         assert '"type": "语音对话"' in chat
@@ -536,11 +554,22 @@ class TestT10VoiceTalkChain:
         assert "self.conversation_manager.talk_handle(text)" in src
 
     def test_do_listen_filled(self):
-        """连续对话循环填充：VAD→ASR→唤醒→对话链（空框架退役）。"""
+        """连续对话循环填充：VAD→ASR→对话链（空框架退役）。
+
+        2026-10-30 双重翻转修复：唤醒检查统一收敛到 talk_handle——
+        do_listen_and_comment 不再预检（原预检+内部再查，状态翻两次，
+        唤醒词句被二次放行发给 LLM）。"""
         src = _src("utils/conversation_manager.py")
         assert "这里需要集成音频处理器的功能" not in src
         assert "ap.audio_listen(" in src
-        assert "self.check_talk_awake(text)" in src
+        # 双重翻转修复：连续循环内不再直接调用 check_talk_awake
+        import inspect
+        from utils.conversation_manager import ConversationManager
+        do_listen_src = inspect.getsource(ConversationManager.do_listen_and_comment)
+        assert "check_talk_awake" not in do_listen_src
+        # 唤醒检查仍在 talk_handle 内（单点收敛）
+        talk_handle_src = inspect.getsource(ConversationManager.talk_handle)
+        assert "check_talk_awake" in talk_handle_src
         assert "self.talk_handle(text)" in src
 
     def test_filter_four_switches_one_row(self):
@@ -558,41 +587,35 @@ class TestT10VoiceTalkChain:
 
 
 class TestRereadProductionChain:
-    """reread 生产端接线守卫（TODOS 2026-10-22 音频批次节 #1）：弹幕词表→
-    reread/reread_top_priority 生产→999 暂停-续播链路真实触发。"""
+    """reread 通道守卫（2026-10-30 过滤审查批次改写）：弹幕词表触发「复读」
+    功能已整体退役；reread/reread_top_priority 收口为聊天页手动直通通道
+    （999 暂停-续播链路保留）。"""
 
-    def test_comment_handler_keyword_trigger(self):
-        """comment_handle 弹幕链复读触发（2026-10-25 识别中枢批次上收）：
-        词表匹配（高优→reread_top_priority / 普通→reread，str/list 双形态）
-        移入识别中枢 KeywordHub._match_reread；弹幕链凭 rec.reread_type 分发，
-        内联词表扫描不得回归。"""
+    def test_comment_handler_keyword_trigger_retired(self):
+        """comment_handle 弹幕链复读分发退役守卫：不得凭 rec.reread_type
+        分发，内联词表扫描不得回归；KeywordHub._match_reread 不得复活。"""
         src = _src("utils/handlers/comment_handler.py")
-        assert "if rec.reread_type:" in src
-        assert "return self.reread_handle(data, type=rec.reread_type, hub_result=rec)" in src
+        assert "if rec.reread_type:" not in src
+        assert "reread_handle(data, type=rec" not in src
         assert "_top_kws" not in src and "_rd_kws" not in src
-        # 高优/普通词表匹配语义在中枢内保持
         hub_src = _src("utils/keyword_hub.py")
-        assert '"reread_top_priority"' in hub_src
-        assert 'reread_top_priority" if' in hub_src or "top_priority_keywords" in hub_src
+        assert "def _match_reread" not in hub_src
+        assert "top_priority_keywords" not in hub_src
 
-    def test_reread_section_defaults(self):
-        """settings _ensure_defaults：reread 节 defaults（此前 config 无此节，
-        reread_handle 的 enable 恒 None→复读整体死链）。"""
-        from frontend.config.settings import _ensure_defaults
+    def test_reread_section_retired(self):
+        """settings reread 节注入已退役；comment_handler 不得再读
+        reread.enable（手动直通无需配置开关）。"""
         src = _src("frontend/config/settings.py")
-        assert 'if "reread" not in cfg:' in src
-        assert '"top_priority_keywords": []' in src
-        # 生产消费语义：reread_handle enable 三参 get 安全形式（A6）
+        assert 'if "reread" not in cfg:' not in src
+        assert '"top_priority_keywords"' not in src
         ch_src = _src("utils/handlers/comment_handler.py")
-        assert 'self.my_handle.config.get("reread", "enable")' in ch_src
+        assert 'self.my_handle.config.get("reread", "enable")' not in ch_src
 
-    def test_filter_config_reread_card(self):
-        """filter_config 复读触发卡：enable 开关+两词表 textarea（split_lines）。"""
+    def test_filter_config_reread_card_retired(self):
+        """filter_config 复读触发卡退役守卫：UI 不得再渲染该卡。"""
         src = _src("frontend/ui/tabs/filter_config.py")
-        assert "复读触发" in src
-        assert 'keys=("reread", "enable")' in src
-        assert 'keys=("reread", "keywords"), split_lines=True' in src
-        assert 'keys=("reread", "top_priority_keywords"), split_lines=True' in src
+        assert "复读触发" not in src
+        assert '"reread"' not in src and "'reread'" not in src
 
     def test_talk_three_buttons_wired(self):
         """talk 页三按钮 on_click 接线（发送/直接复读/直接复读-插队首）。"""
@@ -639,7 +662,12 @@ class TestD15RetiredKeysNotice:
 
 
 class TestV2FallbackSingleChannel:
-    """backend=api 兜底数据链收敛守卫（TODOS 基础功能节 #10 评估落地）。"""
+    """backend=api 兜底数据链收敛守卫（TODOS 基础功能节 #10 评估落地）。
+
+    2026-10-30 审查批次：外部 HTTP 兜底通道随「合成引擎（backend）」「外部 API
+    地址」配置项退役删除——gpt_sovits_api 恒走 _gpt_sovits_inproc（进程内引擎
+    为唯一本地合成通道）；原 v2 兜底装配守卫（本类 test_fallback_single_channel_
+    params_sourced）随通道退役，改为退役反向守卫。"""
 
     def test_dead_branches_removed(self):
         """六死分支退役：gradio_0322/api/api_0322/api_0706/v2_api_0821/webtts。"""
@@ -649,15 +677,16 @@ class TestV2FallbackSingleChannel:
                      'file_to_data_url', 'import websockets'):
             assert dead not in api_src, f"死分支残留：{dead}"
 
-    def test_fallback_single_channel_params_sourced(self):
-        """兜底单通道：v2 请求体从 params 白名单+运行时值装配（与 inproc 同源）。"""
+    def test_external_fallback_channel_retired(self):
+        """外部兜底通道退役反向守卫：gpt_sovits_api 无 HTTP 装配残留，
+        配置面 backend/api_ip_port 无读取点。"""
         src = _src("utils/audio_handle/my_tts.py")
-        api_src = src[src.find("async def gpt_sovits_api"):]
-        assert 'urljoin(data.get("api_ip_port", ""), \'/tts\')' in api_src
-        assert '_params.get("text_lang") or data.get("language")' in api_src
-        assert '"speed_factor": _speed' in api_src
-        # 测试链 config 直读兜底（data 无 params 键时）
-        assert 'self.config.get("gpt_sovits") or {}' in api_src
+        api_src = src[src.find("async def gpt_sovits_api"):src.find("async def edge_tts_api")]
+        assert 'urljoin(' not in api_src, "外部 HTTP 兜底通道应已退役"
+        assert 'download_audio' not in api_src
+        for retired in ('gpt_sovits", "backend"', "gpt_sovits', 'backend'",
+                        'gpt_sovits", "api_ip_port"'):
+            assert retired not in src, f"退役配置读取残留：{retired}"
 
     def test_synthesis_manager_dead_keys_removed(self):
         """弹幕链 data 构造死键清理（透传键无消费端）。"""

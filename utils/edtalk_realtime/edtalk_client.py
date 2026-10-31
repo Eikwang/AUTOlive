@@ -30,8 +30,14 @@ from utils import alarm_notifier
 
 # 16kHz int16 单声道 = 每样本 2 字节
 TARGET_RATE = 16000
-# 单飞行句完成判定：最短飞行时间系数（duration × 1.2）
-FLIGHT_MARGIN = 1.2
+# 单飞行句完成判定：最短飞行时间系数（2026-10-29 优化批次：1.2 过度保守——
+# 7.7s 句白等 ~1.5s/条；收紧至 1.05，截断防护由 buffer_depth 轮询兜底）
+FLIGHT_MARGIN = 1.05
+# buffer_depth 回落轮询（2026-10-29 优化批次：deadline 3.0→1.0——缓冲迟迟
+# 不回落时每条消息固定白等 3s；超时强制放行语义不变，实际防截断由
+# FLIGHT_MARGIN 时间启发式承担）
+_POLL_INTERVAL = 0.2
+_POLL_DEADLINE = 1.0
 
 
 def _resample_pcm(pcm_bytes: bytes, width: int, channels: int, rate: int) -> bytes:
@@ -161,21 +167,36 @@ class EDTalkClient:
         """完成判定启发式（Eng E1）：最短飞行时间 + buffer_depth 回落双条件。
 
         取舍：宁可延迟不截断——启发式超时也强制放行（避免死锁），但记录告警。
+        2026-10-29 优化批次：等待构成观测日志——区分「上一句真在播」（合理
+        串行等待）与「buffer 永不回落导致轮询超时」（系统性白等，需查服务端）。
         """
+        t0 = time.monotonic()
         min_flight = duration_s * FLIGHT_MARGIN
-        remaining = self._flight_until + min_flight - time.monotonic()
+        remaining = self._flight_until + min_flight - t0
         if remaining > 0:
             await asyncio.sleep(remaining)
+        sleep_s = time.monotonic() - t0
         # 双条件：buffer_depth 回落（低于 preroll 视为上一句已被消费）
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + _POLL_DEADLINE
+        buffer_depth = None
+        timed_out = False
+        while True:
             status = await self._get_status(session)
             if not status:
                 break  # /status 不可用：不阻塞推送（降级为仅时间启发式）
             buffer_depth = status.get("buffer_depth")
             if buffer_depth is None or buffer_depth <= status.get("preroll_frames", 8):
                 break
-            await asyncio.sleep(0.2)
+            if time.monotonic() >= deadline:
+                timed_out = True  # 轮询超时强制放行（避免死锁）
+                break
+            await asyncio.sleep(_POLL_INTERVAL)
+        poll_s = time.monotonic() - t0 - sleep_s
+        logger.info(
+            f"[edtalk-wait] 上句时长 {duration_s:.1f}s 飞行等待 {sleep_s:.2f}s "
+            f"轮询 {poll_s:.2f}s buffer_depth={buffer_depth}"
+            + ("（轮询超时放行）" if timed_out else "")
+        )
 
     # ---------- 推送 ----------
 

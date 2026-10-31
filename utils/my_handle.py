@@ -170,6 +170,7 @@ class My_handle(metaclass=SingletonMeta):
                     edtalk_client=getattr(My_handle.audio, "edtalk_client", None),
                     audio_enqueue=self.audio_synthesis_handle,
                     thanks_generate=self.event_handler._thanks_generate,
+                    audio_cancel=self.cancel_choreo_audio,  # O8：打断撤旧音轨
                 )
                 register_choreographer(self.choreographer)
             except Exception as e:
@@ -313,8 +314,8 @@ class My_handle(metaclass=SingletonMeta):
     def clear_queue(self, type: str = "message_queue"):
         return self.audio_handler.clear_queue(type)
     
-    def stop_audio(self, type: str = "pygame", mixer_normal: bool = True, mixer_copywriting: bool = True):
-        return self.audio_handler.stop_audio(type, mixer_normal, mixer_copywriting)
+    def stop_current_audio(self):
+        return self.audio_handler.stop_current_audio()
     
     def audio_synthesis_handle(self, data_json):
         return self.audio_handler.audio_synthesis_handle(data_json)
@@ -347,7 +348,8 @@ class My_handle(metaclass=SingletonMeta):
     # 语言过滤与回复模板——单点实现防双路径行为分裂（dual-code-path 教训）。
 
     def build_llm_input(self, username, content):
-        """共享 LLM 输入构建器：弹幕模板→提示词前后缀→语言回复指令统一拼装。
+        """共享 LLM 输入构建器：弹幕模板→语言回复指令统一拼装。
+        （提示词前缀/后缀已弃用移除——LLM 服务需单独设置提示词与回复规则）
 
         调用点：comment_handle 与 talk_handle 两处 data_json 构建同调（ENG E-1）。
         各环节异常均降级原文（DX CAP6-9：warning 含异常+原模板串+占位符对照）。
@@ -361,7 +363,7 @@ class My_handle(metaclass=SingletonMeta):
         """
         templated = content
         try:
-            # 1. 弹幕模板（G5）
+            # 弹幕模板（G5）
             if self.config.get("comment_template", "enable"):
                 template = self.config.get("comment_template", "copywriting")
                 if template:
@@ -376,16 +378,13 @@ class My_handle(metaclass=SingletonMeta):
             logger.warning(f"弹幕模板处理异常（降级原文）：{e}")
             templated = content
 
-        # 2. 提示词前后缀（G4，空串不拼）
-        before_prompt = self.config.get("before_prompt") or ""
-        after_prompt = self.config.get("after_prompt") or ""
-        prompt = before_prompt + templated + after_prompt
-
-        # 3. 语言回复指令（native F2：yue/ko 需显式指令，防普通话文本经 auto_yue/ko 合成失真）
+        # 语言回复指令（native F2：yue/ko 需显式指令，防普通话文本经 auto_yue/ko 合成失真）
         need_lang = self.config.get("need_lang") or "none"
         lang_instruction = {"yue": "请用粤语回复。", "ko": "请用韩语回复。"}.get(need_lang)
         if lang_instruction:
-            prompt = prompt + lang_instruction
+            prompt = templated + lang_instruction
+        else:
+            prompt = templated
         return prompt
 
     def apply_reply_template(self, resp_content, username):
@@ -480,10 +479,10 @@ class My_handle(metaclass=SingletonMeta):
     def prohibitions_handle(self, content):
         return self.comment_handler.prohibitions_handle(content)
     
-    def reread_handle(self, data, type=None, hub_result=None):
-        # A6 修复（2026-10-22 批次）：透传 type（reread_top_priority→999 权重映射保持）；
-        # 2026-10-25 中枢批次：透传 hub_result（识别中枢已判定时跳过重复匹配）
-        return self.comment_handler.reread_handle(data, type=type, hub_result=hub_result)
+    def reread_handle(self, data, type=None):
+        # 2026-10-30 过滤审查批次：弹幕触发复读退役，收口手动直通（聊天页按钮/
+        # HTTP /send）；透传 type（reread_top_priority→999 权重映射保持）
+        return self.comment_handler.reread_handle(data, type=type)
     
     def tuning_handle(self, data):
         return self.comment_handler.tuning_handle(data)

@@ -45,6 +45,20 @@ class Fastrag_LLM:
             return str(data.get("prompt") or data.get("content") or "")
         return str(data or "")
 
+    def _build_payload(self, data):
+        """构建 /query 请求载荷：question + 可选 system_role。
+
+        2026-10-30 动态文案审查批次：data 可携带 system_role 键（任务书
+        「提示词转换」语义——fastrag 的 system_role 人设提示词替换），非空时
+        随载荷下发由服务端做请求级人设替换；弹幕/语音路径不传该键，行为不变。
+        """
+        payload = {"question": self._build_prompt(data)}
+        if isinstance(data, dict):
+            system_role = str(data.get("system_role") or "").strip()
+            if system_role:
+                payload["system_role"] = system_role
+        return payload
+
     async def get_resp(self, data):
         """异步查询 fastrag /query 并返回文本回答。
 
@@ -55,11 +69,11 @@ class Fastrag_LLM:
             str | None: 知识库回答文本；失败返回 None（上层按失败→托底处理）
         """
         aiohttp = _get_aiohttp()
-        question = self._build_prompt(data)
+        payload = self._build_payload(data)
         try:
             client_timeout = aiohttp.ClientTimeout(total=_QUERY_TIMEOUT)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.post(self.query_url, json={"question": question}) as response:
+                async with session.post(self.query_url, json=payload) as response:
                     status = response.status
                     text = await response.text()
                     if status != 200:
@@ -124,12 +138,12 @@ class Fastrag_LLM:
             Exception: 非 200/网络/错误帧/零产出——调用方按流式失败回退全文链
         """
         aiohttp = _get_aiohttp()
-        question = self._build_prompt(data)
+        payload = self._build_payload(data)
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(
-                        self.query_url_stream, json={"question": question}) as response:
+                        self.query_url_stream, json=payload) as response:
                     if response.status != 200:
                         raise RuntimeError(
                             f"fastrag /query_stream HTTP {response.status}（{self.host}:{self.port}）")

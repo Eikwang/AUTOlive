@@ -194,6 +194,17 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "llm_quant_bits": 16,        # LLM 量化：4=INT4 / 8=INT8 / 16=BF16（启动 env 注入）
     "reranker_quant_bits": 16,   # Reranker 量化：4/8/16（同上）
     "embedder_device": "cpu",    # Embedder 设备：cpu / cuda-fp16 / cuda（同上）
+    # 对话人设与生成参数（2026-10-30 修复回答规则重启丢失：UI『应用并重启』
+    # 时写回此节作为回显真源；服务端运行态真源仍为 fastrag-python
+    # config_override.py——P2 补丁优先级 override > 本默认，语义不变）
+    "template": {
+        "system_role": "你是一位专业、友好的线上销售，现在正在进行直播。",
+        "answer_rules": "",
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "max_new_tokens": 128,
+        "max_answer_length": 80,
+    },
 }
 
 # DanmakuListener 整合（2026-09-27 计划 G6/DX）：弹幕监听组件配置节
@@ -220,7 +231,7 @@ _DANMAKU_LISTENER_DEFAULTS: Dict[str, Any] = {
         "jd": False,
         "wechat_channels": False,
     },
-    "rooms": [],                            # 房间权威源 [{platform, room_id, enabled, active}]——active 至多一个（显式指定）
+    "rooms": [],                            # 房间权威源 [{platform, room_id, enabled}]（active 已退役——添加即启用）
     "keywords": [],                         # 屏蔽关键词权威源（仅过滤 DANMU）
     "keyword_filter_enabled": True,         # 关键词过滤总开关
 }
@@ -361,18 +372,9 @@ def _ensure_defaults(config: "Settings") -> None:
                 del _read_pt[_old_key]
                 changed = True
 
-    # reread 节默认（T10 同期：复读生产端接线——此前 config 无此节，
-    # reread_handle 的 enable 读取恒 None→复读整体死链）
-    if "reread" not in cfg:
-        cfg["reread"] = {"enable": False, "keywords": [],
-                         "top_priority_keywords": []}
-        changed = True
-    else:
-        _rr = cfg["reread"]
-        for _k, _v in (("enable", False), ("keywords", []), ("top_priority_keywords", [])):
-            if _k not in _rr:
-                _rr[_k] = _v
-                changed = True
+    # reread 节默认（2026-10-30 过滤审查批次）：复读触发配置组退役——弹幕关键词
+    # 触发复读整体移除（reread_handle 收口为手动直通，不读配置），默认注入与
+    # 存量节补齐逻辑随退役删除；存量 reread 节由 _RETIRED_CONFIG_KEYS 告知后可删
 
     # 助播触发类型 v2 迁移（/autoplan main-20261026-214845 D3/E-E6，终门 uc1a）：
     # comment→ai_chat（改名）；reread/reread_top_priority→chat（归拢"聊天"，

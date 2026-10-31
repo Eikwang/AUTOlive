@@ -39,10 +39,12 @@ class UtilsHandler:
         丢弃。talk.show_chat_log 开关已退役：固定记录，不再做配置门卫。
         标记由 /send（chatbox）、conversation_manager（voice）与弹幕链发送点
         （comment）打点，经 data 自然透传；本网关只做白名单校验不改写。
+        2026-10-30 聊天审查批次：白名单扩展 system——唤醒/睡眠/打断/舍弃等
+        系统事件反馈（D-10）入聊天区灰字显示。
         """
         try:
             chat_source = (data or {}).get("chat_source", "")
-            if chat_source not in ("voice", "chatbox", "comment"):
+            if chat_source not in ("voice", "chatbox", "comment", "system"):
                 return  # 点歌/积分等非聊天互动来源不进聊天记录
             if "ori_username" not in data:
                 data["ori_username"] = data["username"]
@@ -63,7 +65,12 @@ class UtilsHandler:
             }
 
             webui_ip = "127.0.0.1" if self.my_handle.config.get("webui", "ip") == "0.0.0.0" else self.my_handle.config.get("webui", "ip")
-            tmp_json = self.my_handle.common.send_request(f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback', "POST", return_webui_json, timeout=30)
+            # 2026-10-28 优化批次（模块 2）：HTTP POST 投后台队列——网络抖动
+            # （timeout=30）不再阻塞消息处理热路径；载荷已同步构建，投递零延迟
+            from ..background_tasks import submit
+            submit(self.my_handle.common.send_request,
+                   f'http://{webui_ip}:{self.my_handle.config.get("webui", "port")}/callback',
+                   "POST", return_webui_json, timeout=30)
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
     

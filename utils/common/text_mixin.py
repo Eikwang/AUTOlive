@@ -242,6 +242,72 @@ class TextMixin:
             text = ' '.join(words) + '...'  # 使用join()函数将单词列表重新组合为字符串，并在末尾添加省略号
         return text[:max_char_len]
 
+    # 弹幕表情过滤（filter.emoji，2026-10-30 过滤审查批次接线）：
+    # 移除平台表情标签与 Unicode emoji，只保留文字
+    _EMOJI_TAG_PATTERN = re.compile(r'\[[^\[\]]{1,16}\]')
+    _EMOJI_CHAR_PATTERN = re.compile(
+        "["
+        "\U0001F300-\U0001FAFF"   # 杂项符号与象形文字/扩展（含表情、手势、物件）
+        "\U0001F1E6-\U0001F1FF"   # 区域指示符（国旗）
+        "\U00002700-\U000027BF"   # 装饰符号
+        "\U00002600-\U000026FF"   # 杂项符号（☀☁ 等）
+        "\U00002B00-\U00002BFF"   # 杂项符号与箭头（⭐ 等）
+        "\U0000FE00-\U0000FE0F"   # 变体选择符
+        "\U0000200D"              # 零宽连接符（组合 emoji）
+        "]+"
+    )
+
+    def remove_emoji(self, text=""):
+        """移除弹幕中的表情，只保留文字。
+
+        两级处理：先移除平台表情标签（[爱心][色] 等成对方括号短标签），
+        再移除 Unicode emoji 字符序列（含 ZWJ 组合与变体选择符）。
+
+        Args:
+            text (str): 原始弹幕文本
+
+        Returns:
+            str: 去除表情后的文本（首尾空白收敛）
+        """
+        text = str(text or "")
+        text = self._EMOJI_TAG_PATTERN.sub('', text)
+        text = self._EMOJI_CHAR_PATTERN.sub('', text)
+        return text.strip()
+
+    # 用户名特殊字符清理（2026-10-31 过滤优化批次）：表情之外的噪音字符——
+    # 控制字符/零宽与方向标记/几何图形装饰符/私用区/替换符，进入 TTS 会念出
+    # 错误语音或不可闻停顿
+    _USERNAME_NOISE_PATTERN = re.compile(
+        "["
+        "\U00000000-\U0000001F"   # C0 控制字符
+        "\U0000007F-\U0000009F"   # DEL/C1 控制字符
+        "\U0000200B-\U0000200F"   # 零宽字符与方向标记
+        "\U00002060-\U00002064"   # 不可见运算符/命名符
+        "\U000025A0-\U000025FF"   # 几何图形装饰符（■▲●◆ 等）
+        "\U0000E000-\U0000F8FF"   # 私用区（平台自定义图标）
+        "\U0000FEFF"              # BOM/零宽不换行空格
+        "\uFFFD"                  # 替换符（解码乱码）
+        "]+"
+    )
+
+    def clean_username(self, text=""):
+        """清理用户名：表情（标签+emoji）+ 特殊字符两级过滤，只保留可念文字。
+
+        语义（2026-10-31 过滤优化批次）：用户名与弹幕内容同受「弹幕表情过滤」
+        开关（filter.emoji）约束——用户名含表情/特殊字符时语音合成念用户名会
+        产生大量错误语音。处理顺序=先表情后噪音字符；全部被过滤时返回空串，
+        由调用方以 `or username` 兜底保留原文（用户名不可为空）。
+
+        Args:
+            text (str): 原始用户名
+
+        Returns:
+            str: 清理后的用户名（首尾空白收敛）
+        """
+        text = self.remove_emoji(text)
+        text = self._USERNAME_NOISE_PATTERN.sub('', text)
+        return text.strip()
+
 
     # 读取违禁词/违禁拼音词表文件（E4 编码边界：check_sensitive_words 1/2/3 共用）
     def read_sensitive_word_file(self, file_path):

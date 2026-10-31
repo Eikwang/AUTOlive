@@ -391,3 +391,45 @@ class TestStreamSafetySourceGuards:
         assert "'done': True" in src, "终帧=纯终止信号（Eng A2）"
         assert "text/event-stream" in src
         assert "async def query_stream" in src
+
+
+# ==================== 回答规则保存链守卫（2026-10-30 审查批次） ====================
+
+
+class TestTemplateSaveChain:
+    """回答规则/人设重启丢失修复守卫：apply 必须双写——config_override.py
+    （服务端运行态真源）+ config.fastrag.template.*（UI 回显真源）。此前仅写
+    override，重启后 UI 回显默认、再次应用即真丢失（用户实测报告）。
+
+    源级断言（NiceGUI 闭包函数无法脱离页面实例化）：
+    - _apply_template_and_restart 内含 set_config_callback("fastrag", "template"
+      六参数写回调用；
+    - settings._FASTRAG_DEFAULTS 提供 template 缺省骨架（六键与 _TPL_KEYS 同源）。"""
+
+    def test_apply_writes_back_config_template(self):
+        src = (_REPO / "frontend" / "ui" / "tabs" / "llm.py").read_text(encoding="utf-8")
+        apply_pos = src.index("def _apply_template_and_restart")
+        end_pos = src.index("ui.button(\"应用并重启 fastrag 服务\"", apply_pos)
+        body = src[apply_pos:end_pos]
+        for key in ("system_role", "answer_rules", "temperature", "top_p",
+                    "max_new_tokens", "max_answer_length"):
+            assert f'"template", "{key}"' in body, \
+                f"apply 未写回 config.fastrag.template.{key}——重启丢失回归"
+
+    def test_settings_template_skeleton_exists(self):
+        import frontend.config.settings as settings_module
+        template = settings_module._FASTRAG_DEFAULTS["template"]
+        assert set(template) == {"system_role", "answer_rules", "temperature",
+                                 "top_p", "max_new_tokens", "max_answer_length"}
+        assert template["answer_rules"] == ""
+        assert template["system_role"], "缺省人设不可为空（UI 首开应有参考值）"
+
+    def test_template_inputs_autosave_bound(self):
+        """2026-10-30 二轮修复：模板六参输入即落盘 config.fastrag.template.*
+        （此前 on_change 仅标脏——用户输入后刷新页面值丢失，『应用并重启』是
+        唯一持久化路径，实测反馈）。"""
+        src = (_REPO / "frontend" / "ui" / "tabs" / "llm.py").read_text(encoding="utf-8")
+        assert "def _save_tpl_input" in src
+        assert ('set_config_callback("fastrag", "template", key, value=value, _notify=False)' in src)
+        # k=key 默认参绑定（防循环闭包晚绑定写错键）
+        assert ("lambda e, k=key: (_save_tpl_input(k, e.value), _mark_tpl_dirty())" in src)

@@ -13,7 +13,7 @@ from frontend.utils.common import is_url_check
 from frontend.utils.audio import Audio
 from utils.audio_handle.tts_params import (
     EDGE_TTS_VOICES, EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_DEFAULT_RATE,
-    filter_edge_voices, normalize_ref_paths)
+    filter_edge_voices, normalize_ref_paths, normalize_prompt_texts)
 
 logger = logging.getLogger(__name__)
 
@@ -121,36 +121,23 @@ def create_tts_tab(
                 ui.label("此处显示生成的音频，仅显示最新合成的音频，可以在此操作删除合成的音频")
 
     # GPT-SoVITS配置
-    # GPT-SoVITS 语音引擎（F-2 重做：进程内参数面板 + backend 兜底折叠卡；
-    # 旧六选一 API 类型与四套死子卡退役——终门 D-1/D-3/D-4）
+    # GPT-SoVITS 语音引擎（F-2 重做 → 2026-10-30 审查批次再简化：进程内引擎为唯一
+    # 本地合成通道——「合成引擎（backend）」「外部 API 地址」配置项退役移除；
+    # 「合成语种」退役——text_lang 由通用配置「回复语言」need_lang 映射决定
+    # （synthesis_manager.tts_handle，{none→auto, zh→zh, en→en, jp→ja, ko→ko,
+    # yue→auto_yue}）；新增「流式输出」开关 + 多音字/念法纠正即时配置）
     with ui.card().style(card_css):
         ui.label("语音引擎（GPT-SoVITS 进程内）")
-        # DX-15：首次进入提示一次（旧 API 设置已被进程内引擎替代）
-        import os as _osf
-        _hint_flag = _osf.path.join(_osf.path.dirname(_osf.path.dirname(
-            _osf.path.dirname(_osf.path.abspath(__file__)))), "config", ".tts_inproc_hinted")
-        if not _osf.path.exists(_hint_flag):
-            ui.notify(position="top", type="info", timeout=8,
-                      message="语音合成已切换为进程内引擎（不再需要外部 GPT-SoVITS 服务）；旧 API 设置已折叠为兜底选项")
-            try:
-                open(_hint_flag, "w").close()
-            except OSError:
-                pass
-        with ui.grid(columns=2):
-            FormField.create_select(
-                label='合成引擎（backend）',
-                options={'inproc': '进程内（推荐，无需外部服务）', 'api': '外部 API（自备服务兜底）'},
-                value=get_nested_value(config, "gpt_sovits", "backend") or "inproc",
-                on_change=lambda e: set_config_callback("gpt_sovits", "backend", value=e.value),
-                style="width:100%;"
-            )
-            FormField.create_input(
-                label='外部 API 地址（仅 backend=api 时生效）',
-                value=get_nested_value(config, "gpt_sovits", "api_ip_port"),
-                placeholder='http://127.0.0.1:9880（自备 api_v2 服务）',
-                on_change=lambda e: set_config_callback("gpt_sovits", "api_ip_port", value=e.value),
-                style="width:100%;"
-            )
+        _auto_row = ui.switch(
+            '流式输出',
+            value=bool((get_nested_value(config, "gpt_sovits", "stream_reply") or {}).get("enable", False)
+                       if isinstance(get_nested_value(config, "gpt_sovits", "stream_reply"), dict)
+                       else get_nested_value(config, "gpt_sovits", "stream_reply", False)),
+            on_change=lambda e: set_config_callback(
+                "gpt_sovits", "stream_reply", value={"enable": bool(e.value)}),
+        ).style(switch_internal_css).tooltip(
+            '开启后合成按切分片段逐段产出并即时入队播放（首段不等全文合成完），'
+            '显著降低首响延迟；数字人（EDTalk）逐段推送，单飞行句背压保序。')
 
         # 声音档案选择器（P2-4/D7：身份参数唯一入口——D-4 裁决双路径框退役）
         _render_voice_profile_selector(config, card_css)
@@ -159,10 +146,22 @@ def create_tts_tab(
         # 切分方式四项，其余使用系统默认"——top_k/top_p/temperature/batch_size/
         # speed_factor/fragment_interval/repetition_penalty/seed 等 UI 项移除，
         # 合成时引擎取系统默认值（my_tts 透传白名单同步精简）；
-        # P25：多参考音频（ref_audio_paths）+ 无参考文本模式（ref_free 默认开，
-        # 参考文本输入项随之移除）——inproc 通道生效性 P25 spike 需 GPU 环境实测，
-        # 失败自动降级单参考（my_tts 层回退预案，log warning 一次））
+        # P25：多参考音频（ref_audio_paths）+ 无参考文本模式（ref_free 默认开）；
+        # 2026-10-29 批次：关闭 ref_free 后恢复参考文本输入项，并与多参考音频
+        # 逐行对应（prompt_texts[i] ↔ ref_audio_paths[i]，主参考=第一行参与合成）
         with ui.expansion("合成参数（进程内引擎）").style("width:100%"):
+            _ref_free_val = bool(get_nested_value(config, "gpt_sovits", "params", "ref_free", default=True))
+            _prompt_texts_cfg = normalize_prompt_texts(
+                get_nested_value(config, "gpt_sovits", "params", "prompt_texts"))
+            if not _prompt_texts_cfg:
+                _legacy_pt = get_nested_value(config, "gpt_sovits", "params", "prompt_text")
+                _prompt_texts_cfg = [_legacy_pt] if _legacy_pt else []
+
+            def _on_ref_free_toggle(e):
+                # 开关联动：关闭无参考文本模式 → 显示参考文本输入（2026-10-29）
+                _prompt_area.set_visibility(not e.value)
+                set_config_callback("gpt_sovits", "params", "ref_free", value=e.value)
+
             with ui.grid(columns=2):
                 _ref_paths_cfg = normalize_ref_paths(
                     get_nested_value(config, "gpt_sovits", "params", "ref_audio_paths"))
@@ -179,36 +178,130 @@ def create_tts_tab(
                 ).style("width:100%;")
                 ui.switch(
                     '无参考文本模式（ref_free）',
-                    value=bool(get_nested_value(config, "gpt_sovits", "params", "ref_free", default=True)),
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "ref_free", value=e.value),
+                    value=_ref_free_val,
+                    on_change=_on_ref_free_toggle,
                 ).style(switch_internal_css)
-            with ui.grid(columns=3):
+            # 参考文本（2026-10-29 恢复）：逐行对应参考音频；ref_free 开启时隐藏
+            _prompt_area = ui.textarea(
+                label='参考文本（与参考音频逐行对应）',
+                value="\n".join(_prompt_texts_cfg),
+                placeholder='第 i 行文本 = 第 i 行参考音频的逐字转写（含标点）；第一行为主参考文本参与合成，辅助参考行存档匹配',
+                on_change=lambda e: set_config_callback(
+                    "gpt_sovits", "params", "prompt_texts",
+                    value=normalize_prompt_texts(e.value)),
+            ).style("width:100%;")
+            _prompt_area.set_visibility(not _ref_free_val)
+            with ui.grid(columns=2):
                 FormField.create_select(label='参考语种', options={'zh':'中文', 'ja':'日文', 'en':'英文', 'ko':'韩文', 'yue':'粤语', 'auto':'自动'},
                     value=get_nested_value(config, "gpt_sovits", "params", "prompt_lang") or "zh",
                     on_change=lambda e: set_config_callback("gpt_sovits", "params", "prompt_lang", value=e.value), style="width:100%;")
-                FormField.create_select(label='合成语种', options={
-                        "all_zh": "中文", "all_yue": "粤语", "en": "英文", "all_ja": "日文",
-                        "all_ko": "韩文", "zh": "中英混合", "yue": "粤英混合", "ja": "日英混合",
-                        "ko": "韩英混合", "auto": "多语种混合", "auto_yue": "多语种混合(粤语)",
-                    },
-                    value=get_nested_value(config, "gpt_sovits", "params", "text_lang") or "zh",
-                    on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_lang", value=e.value), style="width:100%;")
                 FormField.create_select(label='切分方式', options={
                         'cut0':'不切', 'cut1':'凑四句一切', 'cut2':'凑50字一切',
                         'cut3':'按中文句号。切', 'cut4':'按英文句号.切', 'cut5':'按标点符号切'
                     },
                     value=get_nested_value(config, "gpt_sovits", "params", "text_split_method") or "cut5",
                     on_change=lambda e: set_config_callback("gpt_sovits", "params", "text_split_method", value=e.value), style="width:100%;")
+
+            # 念法纠正 / 多音字（2026-10-30 用户裁决：多音字统一走 GPT-SoVITS 引擎
+            # 词典——本 textarea 直读直写仓库根 多音字.txt（g2p 层改发音不改正文，
+            # 发音精确）；UI 拼写改写（params.polyphone_map）退役。念法纠正=整词
+            # 改写仍存 config（引擎词典做不了字面改写），即时保存。
+            #
+            # 保存可靠性（刷新丢失修复，同念法纠正）：失焦（blur）保存 + 显式按钮
+            # 兜底 + 解析 0 命中负反馈——on_change 每键 WebSocket 竞态退役。
+            def _pairs_to_text(raw):
+                from utils.audio_handle.tts_params import parse_fix_pairs
+                return "\n".join(f"{k}={v}" for k, v in parse_fix_pairs(raw))
+
+            _repo_root = os.path.abspath(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+            _polyphone_path = os.path.join(_repo_root, "多音字.txt")
+
+            def _read_polyphone_file():
+                try:
+                    with open(_polyphone_path, encoding="utf-8") as f:
+                        return f.read()
+                except FileNotFoundError:
+                    return ""
+
+            def _save_pairs(key, box, label=""):
+                from utils.audio_handle.tts_params import parse_fix_pairs
+                mapping = {}
+                for k, v in parse_fix_pairs(box.value):
+                    mapping[k] = v
+                if not mapping and (box.value or "").strip():
+                    first_bad = next(
+                        (ln.strip() for ln in (box.value or "").splitlines()
+                         if ln.strip()), "")
+                    ui.notify(position="top", type="warning", timeout=8,
+                              message=f"{label}：未识别到有效条目——每行格式「原文=读法」"
+                                      f"（支持 =/冒号/箭头/空格 分隔）。问题行：{first_bad[:30]}")
+                    return False
+                set_config_callback("gpt_sovits", "params", key, value=mapping)
+                return True
+
+            def _save_polyphone_file(box):
+                """多音字.txt 原子写（引擎原生格式逐行校验；坏行警告不落盘）。"""
+                from utils.audio_handle.tts_params import parse_polyphone_lines
+                entries, bad = parse_polyphone_lines(box.value or "")
+                if bad:
+                    ui.notify(position="top", type="warning", timeout=8,
+                              message=f"多音字：{len(bad)} 行格式无效未保存——"
+                                      f"每行格式「词语 [\"拼音1\",\"拼音2\"]」，如：一行 [\"yi4\",\"hang2\"]\n"
+                                      f"首条坏行：{bad[0][:40]}")
+                    return False
+                import tempfile
+                fd, tmp = tempfile.mkstemp(dir=_repo_root, suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(box.value or "")
+                os.replace(tmp, _polyphone_path)
+                ui.notify(position="top", type="positive",
+                          message=f"多音字词典已保存（{len(entries)} 条）——若未生效请点击「重新加载模型」")
+                return True
+
+            with ui.grid(columns=2):
+                _fix_box = ui.textarea(
+                    label='念法纠正（每行：原文=读法）',
+                    value=_pairs_to_text(get_nested_value(config, "gpt_sovits", "params", "pronunciation_fix")),
+                    placeholder='整词改写，如：\nAI=人工智能\nTTS=文本转语音',
+                ).style("width:100%;").tooltip('念法纠正优先于多音字替换；最长原文优先匹配。失焦即保存；合成时即时读取（改完下一条即生效）')
+                _poly_box = ui.textarea(
+                    label='多音字（GPT-SoVITS 引擎词典：多音字.txt）',
+                    value=_read_polyphone_file(),
+                    placeholder='每行一条：词语 ["拼音1","拼音2"]\n如：一行 ["yi4","hang2"]\n说服 ["shui4","fu2"]\n'
+                                '# 开头为注释；引擎 g2p 按上下文选音（改发音不改正文，发音精确）',
+                ).style("width:100%;").tooltip(
+                    '直读直写仓库根「多音字.txt」（GPT-SoVITS 引擎 g2p 词典，编译引擎运行时读取）。'
+                    '失焦即保存；保存后若未生效请点击「重新加载模型」')
+
+            # 失焦保存（blur 在输入完成/点击他处时必触发；on_change 每键高频
+            # 写盘+WebSocket 竞态退役）
+            _fix_box.on('blur', lambda: _save_pairs(
+                "pronunciation_fix", _fix_box, "念法纠正"))
+            _poly_box.on('blur', lambda: _save_polyphone_file(_poly_box))
+
+            def _save_both_fixes():
+                ok1 = _save_pairs("pronunciation_fix", _fix_box, "念法纠正")
+                ok2 = _save_polyphone_file(_poly_box)
+                if ok1 or ok2:
+                    ui.notify(position="top", type="positive",
+                              message="念法纠正/多音字已保存")
+
+            ui.button('保存念法纠正/多音字', on_click=_save_both_fixes,
+                      color=button_internal_color).style(button_internal_css).tooltip(
+                '显式保存兜底：失焦自动保存之外，点击此按钮强制落盘（防刷新竞态丢失）')
+
             ui.button('重新加载模型（按当前参数）', on_click=lambda: _load_gpt_sovits_model(config),
                       color=button_internal_color).style(button_internal_css)
 
         # edge-tts 配置（切片 3：WebTTS 退役改用 EDGE-TTS——任务书；
         # D-18：voice 搜索式下拉（内置常见 zh 声音清单+关键字过滤），默认值写明具体 voice 名；
-        # 语速 rate 对接 P26 音频播放变速改造，默认 100%；其余参数系统默认不设配置项，
-        # 高级参数 JSON 透传字段为 escape hatch（默认空=全默认））
+        # 语速 rate 对接 P26 音频播放变速改造，默认 100%；其余参数系统默认不设配置项。
+        # 2026-10-30：高级参数 JSON 透传（extra_args_json）退役移除——pitch 恒由
+        # 随机语速联动接管（speed_to_edge_pitch），用户显式覆盖通道删除）
         with ui.card().style(card_css):
             ui.label("edge-tts 配置")
-            with ui.grid(columns=3):
+            with ui.grid(columns=2):
                 ui.select(
                     label='音色（voice，输入关键字过滤）',
                     options={v: v for v in EDGE_TTS_VOICES},
@@ -222,14 +315,6 @@ def create_tts_tab(
                     placeholder='加快 1.2 倍填 +20%，减慢 0.9 倍填 -10%',
                     on_change=lambda e: set_config_callback("edge_tts", "rate", value=e.value),
                     style="width:100%;")
-                ui.textarea(
-                    label='高级参数 JSON 透传（默认空=全默认）',
-                    value=get_nested_value(config, "edge_tts", "extra_args_json") or "",
-                    placeholder='{"pitch": "+0Hz", "volume": "+0%"}',
-                    on_change=lambda e: set_config_callback("edge_tts", "extra_args_json", value=e.value),
-                ).style("width:100%;")
-
-            
         # v2_api_0821 配置卡与 WebTTS 配置卡已随切片 3 参数精简移除
         # （任务书：v2_api_0821 旧参数与 WebTTS 相关配置退役，改用 EDGE-TTS；
         # config 残留键由收尾批次键迁移清单处置，此处不再渲染）
@@ -277,24 +362,28 @@ def _load_gpt_sovits_model(config: Dict[str, Any]):
 def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
     """P2-4/D7/D8/B-6：声音档案分组选择器 + 模型对写入 gpt_sovits 节。
 
-    - 分组"我的声音档案/内置音色"（手动配置项即内置）
+    - 2026-10-30 审查批次：仅显示「数字人-声音训练-gpt-sovits」管线训练的档案
+      （gpt_model/sovits_model 非空；RVC 管线档案不显示）+ 每行删除按钮
+      （delete_profile 原子删除；删除当前选用档案时清除选用标记，模型保持不动）
     - 点选档案 → 把 GPT-SoVITS 模型对/参考音频写入 gpt_sovits 节
-      （托管 api_v2 重启托管进程完成切换——R2 降级路径，P2-4 义务）
     - 零档案 → 空态卡片指向训练页
     """
     from nicegui import ui as _ui
     from utils.voice_profiles import load_profiles
 
-    profiles = load_profiles()
+    all_profiles = load_profiles()
+    # 管线过滤：仅 gpt-sovits 训练管线产出的档案（gpt_model 或 sovits_model 非空）
+    profiles = {pid: p for pid, p in all_profiles.items()
+                if p.get("gpt_model") or p.get("sovits_model")}
     if not profiles:
         with _ui.card().style(card_css):
             _ui.label("声音档案").style("font-weight:var(--font-weight-emphasis)")
-            _ui.label("暂无档案——训练完成后自动出现在此处").style(
+            _ui.label("暂无 GPT-SoVITS 档案——「数字人-声音训练」完成后自动出现在此处").style(
                 "font-size:12px;color:var(--text-secondary)")
         return
 
     with _ui.card().style(card_css):
-        _ui.label("声音档案（我的）")
+        _ui.label("声音档案（GPT-SoVITS）")
         with _ui.grid(columns=2):
             current_gpt = get_nested_value(config, "gpt_sovits", "gpt_model_path") or ""
             for pid, prof in profiles.items():
@@ -313,6 +402,37 @@ def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
                                on_click=lambda pid=pid, prof=prof: _apply_profile(
                                    config, pid, prof),
                                ).props("dense unelevated no-caps")
+                    _ui.button(icon="delete", on_click=lambda pid=pid: _delete_profile(
+                        pid, is_current, config)).props("dense flat no-caps").tooltip(
+                        '删除该档案（仅移除档案记录，不删除模型文件）')
+
+
+def _delete_profile(pid: str, is_current: bool, config: Dict[str, Any]):
+    """删除声音档案（2026-10-30 审查批次）：voice_profiles.delete_profile 原子写。
+    当前选用档案被删时清除 gpt_sovits.voice_profile_id 标记（模型文件保持不动，
+    正在使用的模型不受影响）。UI 刷新经 ui.notify + 页面刷新（NiceGUI 局部行
+    移除复杂度高，整卡重绘交由用户刷新或重新进入页面——列表数据源已即时落盘）。"""
+    from nicegui import ui as _ui
+    from utils.voice_profiles import delete_profile
+    if not delete_profile(pid):
+        _ui.notify(position="top", type="negative", message=f"删除失败：档案 {pid} 不存在")
+        return
+    if is_current:
+        # 清除选用标记（直接改 config dict + 落盘，与 _apply_profile 同款机制）
+        import json, tempfile, os as _os
+        from utils.config import Config
+        cfg_path = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))), "config.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+        data.get("gpt_sovits", {}).pop("voice_profile_id", None)
+        fd, tmp = tempfile.mkstemp(dir=_os.path.dirname(cfg_path), suffix=".json")
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        _os.replace(tmp, cfg_path)
+        Config.reload(cfg_path)
+    _ui.notify(position="top", type="positive",
+               message=f"档案已删除：{pid}" + ("（选用标记已清除，模型不受影响）" if is_current else ""))
 
 
 def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
@@ -344,6 +464,12 @@ def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
         data = json.load(f)
     data["gpt_sovits"].update(fields)
     data["gpt_sovits"]["voice_profile_id"] = pid
+    # 2026-10-29 批次：params 节同步（面板读 params.ref_audio_paths/prompt_texts，
+    # 档案只写根节 ref_audio_path/prompt_text 会造成新输入项与档案参考串档）
+    _params_sync = data["gpt_sovits"].setdefault("params", {})
+    if prof.get("ref_audio"):
+        _params_sync["ref_audio_paths"] = [prof["ref_audio"]]
+        _params_sync["prompt_texts"] = [prof.get("prompt_text", "")]
     fd, tmp = tempfile.mkstemp(dir=_os.path.dirname(cfg_path), suffix=".json")
     with _os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)

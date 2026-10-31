@@ -33,11 +33,15 @@ class TestSvcTabServiceRecovery:
         assert "请点侧边栏「启动系统」" in src
 
     def test_poll_unready_message_has_start_guidance(self):
-        """状态轮询未就绪文案同样给行动指引（旧文案无出路提示）"""
+        """状态轮询未就绪文案同样给行动指引（2026-10-30 变声独立化：服务由
+        前端进程托管，提示按 enabled 区分——启动中/未启用，不再指向「启动系统」）"""
         src = _svc_source()
         assert "服务未就绪（rvc-vc 未运行或端口不符）" not in src, \
             "旧文案已退役；若有意回退须同步删除本守卫"
-        assert "「启动系统」后约 10-20 秒自动就绪" in src
+        assert "「启动系统」后约 10-20 秒自动就绪" not in src, \
+            "启动系统指向已退役（前端托管语义，2026-10-30）"
+        assert "前端已托管拉起" in src
+        assert "变声未启用" in src
 
     def test_auto_reenumeration_wiring(self):
         """_poll 成功路径须含补枚举守卫（loaded/pending 双条件），失败路径复位 loaded"""

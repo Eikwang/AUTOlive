@@ -5,11 +5,11 @@
 对照流程图 docs/flowchartTD.md：所有信息源（弹幕/语音聊天 Capture/系统任务
 Idle·Timed·DynamicCopy）经分类处理与过滤后统一进入本中枢，单次完成全部功能
 的关键词识别判断，产出 KeywordResult 分发到各模块消费——消费侧零重复匹配
-（原架构各模块独立扫描文本：积分词表/复读词表/按键映射 difflib/本地问答
+（原架构各模块独立扫描文本：积分词表/按键映射 difflib/本地问答
 全库相似度/点歌曲库 difflib/编排关键词，开启多模块时重复开销线性叠加）。
 
 源路由（recognize）：
-  comment / talk                          → 全量匹配器（积分签到/查询、复读、
+  comment / talk                          → 全量匹配器（积分签到/查询、
                                             按键映射弹幕型、本地问答、点歌意图、
                                             动作编排关键词）
   gift                                    → 礼物匹配器（按键映射礼物组、礼物点歌
@@ -17,6 +17,9 @@ Idle·Timed·DynamicCopy）经分类处理与过滤后统一进入本中枢，�
   schedule / idle_time_task / copywriting → 系统任务匹配器（仅动作编排关键词——
                                             系统文案无互动身份，不触发积分/点歌/
                                             按键映射/本地问答，照常入队播报）
+
+（2026-10-30 过滤审查批次：复读词表识别 _match_reread/reread_type 随「复读触发」
+功能整体退役，识别器不再产出复读字段。）
 
 消费契约（hub_result 通道）：
   各消费函数 hub_result 参数非 None = 中枢已判定（信任结果，跳过内部匹配）；
@@ -44,9 +47,6 @@ class KeywordResult:
     integral_sign: bool = False         # 签到命令词命中
     integral_query: bool = False        # 查询积分命令词命中
 
-    # —— 复读（Interact）——
-    reread_type: str = ""               # "reread_top_priority" | "reread" | ""（未命中）
-
     # —— 按键映射（Keymap→SendPort）——
     # 平铺列表 [(组配置dict, 命中文本)]，保持原语义：同组多词/重复礼物名可多次
     # 触发（once=False 时），消费侧逐条分派
@@ -65,8 +65,8 @@ class KeywordResult:
     choreo_takeover: bool = False       # 礼物编排接管答谢（gift 源）
 
     @property
-    def has_reread(self) -> bool:
-        return bool(self.reread_type)
+    def has_choreo(self) -> bool:
+        return bool(self.choreo_accepted)
 
 
 class KeywordHub:
@@ -118,25 +118,21 @@ class KeywordHub:
             return default
 
     def _recognize_text(self, data, source):
-        """弹幕/语音源全量识别（comment 全功能；talk 复读不开——语音链复读自身
-        无意义，编排订阅 2026-10-27 对齐流程图 Capture→Keyword→动作编排 统一
-        识别语义：识别到关键词即并行触发画面序列）。"""
+        """弹幕/语音源全量识别（comment/talk 同功能集；编排订阅 2026-10-27 对齐
+        流程图 Capture→Keyword→动作编排 统一识别语义：识别到关键词即并行触发
+        画面序列）。"""
         content = str(data.get("content", "") or "")
-        with_reread, with_choreo = self._TEXT_FEATURES.get(
-            source, (True, True))
 
         rec = KeywordResult(source=source, content=content)
         rec.integral_sign, rec.integral_query = self._safe(
             lambda: self._match_integral(content), (False, False))
-        if with_reread:
-            rec.reread_type = self._safe(lambda: self._match_reread(content), "")
         rec.keymap_groups = self._safe(lambda: self._match_keymap_danmu(content), [])
         rec.local_qa_answer = self._safe(lambda: self._match_local_qa(data), "")
         rec.song_verdict = self._safe(lambda: self._match_song(content), None)
         # ③ 自源守卫（2026-10-27）：闲时任务系统源（origin=system-idle）跳过编排
         # 触发——闲时文案/LLM 触发链内容可能含编排关键词，系统自引发画面切换属
         # 非预期行为；LLM 对话触发语义保持（process_data 照常入链）。
-        if with_choreo and not (source == "comment" and data.get("origin") == "system-idle"):
+        if not (source == "comment" and data.get("origin") == "system-idle"):
             rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
         return rec
 
@@ -157,26 +153,7 @@ class KeywordHub:
         rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
         return rec
 
-    # talk 源功能集开关：(复读, 编排)——复读保持关闭（语音链复读自身无意义）；
-    # 编排 2026-10-27 启用（flowchartTD Capture→Keyword→动作编排 统一识别语义）
-    _TEXT_FEATURES = {
-        "comment": (True, True),
-        "talk": (False, True),
-    }
-
     # ==================== 匹配器（严格对照原实现语义） ====================
-
-    @staticmethod
-    def _kw_list(raw, comma_fallback=True):
-        """词表归一化：str/list 双形态。str 先按换行拆，空则按逗号拆
-        （口径=原 reread_handle 的 str 分支——换行分隔词表在原 comment 内联
-        匹配中漏判，中枢统一按消费侧口径修复）。"""
-        if isinstance(raw, str):
-            parts = [k.strip() for k in raw.split("\n") if k.strip()]
-            if not parts and comma_fallback:
-                parts = [k.strip() for k in raw.split(",") if k.strip()]
-            return parts
-        return [str(k).strip() for k in (raw or []) if str(k).strip()]
 
     # —— 积分（原 _integral_sign_handle / _integral_query_handle 的命中判断段）——
 
@@ -212,20 +189,6 @@ class KeywordHub:
         if not cmds:
             cmds = default_cmds
         return content in cmds
-
-    # —— 复读（原 comment_handle 内联词表匹配 + reread_handle）——
-
-    def _match_reread(self, content):
-        """复读命中类型：top_priority 优先于普通词表。"""
-        if not self.my_handle.config.get("reread", "enable"):
-            return ""
-        for kw in self._kw_list(self.my_handle.config.get("reread", "top_priority_keywords")):
-            if kw and kw in content:
-                return "reread_top_priority"
-        for kw in self._kw_list(self.my_handle.config.get("reread", "keywords")):
-            if kw and kw in content:
-                return "reread"
-        return ""
 
     # —— 按键映射·弹幕型（原 key_mapping_handle 文本分支匹配段）——
 

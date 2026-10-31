@@ -40,10 +40,12 @@ class FakeConfig:
 
 def _base_cfg(types=("ai_chat", "chat", "read_comment", "gift", "entrance",
                      "follow", "schedule", "idle_time_task", "integral", "song"),
-              anchor_tts="edge_tts", text_enable=True, audio_enable=True):
+              anchor_tts="edge_tts", text_enable=True, audio_enable=True,
+              anchor_enable=True):
     return FakeConfig({
         "assistant_anchor": {
             "username": "小助",
+            "enable": anchor_enable,
             "audio_synthesis_type": anchor_tts,
             "type": list(types),
             "local_qa": {
@@ -81,6 +83,36 @@ def test_route_matrix_all_checked(producer_type, source, expected):
 def test_route_matrix_unchecked_falls_back(producer_type):
     """未勾选→原路（空勾选集=全原路）。"""
     assert ar.assistant_route(_base_cfg(types=()), producer_type) is False
+
+
+def test_route_master_switch_disabled():
+    """总开关门控（2026-10-28 BUG 修复守卫）：assistant_anchor.enable=false 时
+    助播整体停用——即使 type 勾选残留也全原路（回归场景：关闭助播后答谢/闲时/
+    念弹幕仍被误路由为 assistant_anchor_text → edge_tts 合成 + 绕过数字人）。"""
+    cfg = _base_cfg(anchor_enable=False)
+    for producer_type in ("llm_reply", "main_kb_hit", "reread", "read_comment",
+                          "gift", "entrance", "follow", "schedule",
+                          "idle_time_task", "integral", "song"):
+        assert ar.assistant_route(cfg, producer_type) is False
+    # 带来源查询同样被总开关拦截
+    assert ar.assistant_route(cfg, "llm_reply", "comment") is False
+    assert ar.assistant_route(cfg, "main_kb_hit", "chatbox") is False
+    # KB 匹配链同样被总开关拦截（主 KB 原链照旧）
+    hit, _ = ar.assistant_match_chain(cfg, "comment", "怎么点歌")
+    assert hit == "miss"
+
+
+def test_route_master_switch_missing_key_defaults_off():
+    """enable 键缺失（存量极旧配置）→ falsy=停用，安全默认走主链。"""
+    cfg = _base_cfg()
+    del cfg.d["assistant_anchor"]["enable"]
+    assert ar.assistant_route(cfg, "entrance") is False
+
+
+def test_route_master_switch_enabled_respects_types():
+    """总开关开启时行为不变：勾选判定照常生效。"""
+    assert ar.assistant_route(_base_cfg(types=("entrance",)), "entrance") is True
+    assert ar.assistant_route(_base_cfg(types=("entrance",)), "gift") is False
 
 
 def test_route_llm_reply_by_source():
@@ -365,6 +397,7 @@ _D12_EXPECTED = {
     ("utils_handler.py", "get_a_local_audio_and_audio_play"): ("exempt", "本地音频播放工具（非文案消息）"),
     ("task_scheduler.py", "run_trends_copywriting"): ("exempt", "动态文案独立功能（非本批触发类型）"),
     ("my_handle.py", "audio_synthesis_handle"): ("exempt", "定义委托链（my_handle→audio_handler 包装层，非生产点）"),
+    ("conversation_manager.py", "_speak_prompt"): ("exempt", "唤醒/睡眠/打断提示语直通播报（2026-10-30 聊天审查批次：不走 AI 对话流程，reread 型直通——任务书提示语语义）"),
 }
 
 # 条件站点：在途批次的生产点（树上可能尚不存在——missing 断言对其豁免，

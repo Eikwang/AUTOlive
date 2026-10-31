@@ -7,7 +7,8 @@
    系统任务源（schedule/idle_time_task/copywriting）仅编排关键词
 2. 消费契约：消费函数 hub_result 非 None=信任中枢结果跳过重复匹配；
    None=自行匹配（直调/既有测试兼容不回归）
-3. 匹配语义不回归：签到/查询命令词、复读词表、按键映射 difflib、点歌意图
+3. 匹配语义不回归：签到/查询命令词、按键映射 difflib、点歌意图
+   （复读词表识别已随「复读触发」功能退役，2026-10-30 过滤审查批次）
 4. 词库 mtime 缓存（load_data_from_file 不再每条消息重读文件）
 5. recognize 全兜底：单项异常降级默认值，消息链不中断
 """
@@ -45,7 +46,6 @@ _BASE_TEXT_CFG = {
         "sign": {"enable": True, "cmd": ["签到"]},
         "crud": {"query": {"enable": True, "cmd": ["我的积分"]}},
     },
-    "reread": {"enable": True, "keywords": ["复读"], "top_priority_keywords": ["高优"]},
     "key_mapping": {
         "enable": True, "type": "弹幕", "start_cmd": "",
         "config": [{"keywords": ["上分"], "similarity": 1,
@@ -82,7 +82,6 @@ class TestSourceRouting:
         rec = hub.recognize({"content": "签到", "username": "u"}, "comment")
         assert rec.source == "comment"
         assert rec.integral_sign is True and rec.integral_query is False
-        assert rec.reread_type == ""
         assert rec.song_verdict is None
 
     def test_comment_integral_query(self):
@@ -90,11 +89,15 @@ class TestSourceRouting:
         rec = hub.recognize({"content": "我的积分", "username": "u"}, "comment")
         assert rec.integral_query is True and rec.integral_sign is False
 
-    def test_comment_reread_normal_and_top_priority(self):
+    def test_reread_recognition_retired(self):
+        """复读词表识别已随「复读触发」退役（2026-10-30 过滤审查批次）：
+        识别器不再产出 reread_type，_match_reread 不得回归。"""
         hub = _make_hub()
-        assert hub.recognize({"content": "来复读一下"}, "comment").reread_type == "reread"
-        # top_priority 优先于普通词表
-        assert hub.recognize({"content": "高优复读"}, "comment").reread_type == "reread_top_priority"
+        assert not hasattr(KeywordResult(), "reread_type")
+        assert not hasattr(hub, "_match_reread")
+        # 命中旧复读词样文本不再产生任何复读分发（字段不存在即静默走弹幕链）
+        rec = hub.recognize({"content": "来复读一下"}, "comment")
+        assert rec.choreo_accepted is False and rec.song_verdict is None
 
     def test_comment_keymap_groups(self):
         hub = _make_hub()
@@ -110,16 +113,15 @@ class TestSourceRouting:
         state, song_name, _ratio = rec.song_verdict
         assert state == "matched" and song_name == "孤勇者"
 
-    def test_talk_no_reread_with_choreo(self, monkeypatch):
+    def test_talk_choreo_enabled(self, monkeypatch):
         """talk 源功能集（2026-10-27 对齐 flowchartTD Capture→Keyword→动作编排）：
-        复读保持不开（语音链复读自身无意义）；编排订阅启用——识别到关键词即
-        并行触发画面序列。"""
+        编排订阅启用——识别到关键词即并行触发画面序列；识别器与 comment 同集
+        （复读字段已退役）。"""
         calls = []
         import utils.orchestration as orch
         monkeypatch.setattr(orch, "get_choreographer", lambda: _FakeChoreo(calls))
         hub = _make_hub()
         rec = hub.recognize({"content": "复读", "username": "u"}, "talk")
-        assert rec.reread_type == ""
         assert rec.choreo_accepted is True
         assert calls == [("keyword", "复读")]
         # 积分/按键映射/点歌仍全量识别
@@ -138,32 +140,20 @@ class TestSourceRouting:
         assert rec.keymap_groups == [] and rec.integral_sign is False
 
     def test_system_source_choreo_only(self):
-        """系统任务三源：仅编排关键词，不触发积分/复读/按键映射/点歌。"""
+        """系统任务三源：仅编排关键词，不触发积分/按键映射/点歌。"""
         for source in ("schedule", "idle_time_task", "copywriting"):
             hub = _make_hub()
             rec = hub.recognize({"content": "签到 复读 上分 点歌 孤勇者"}, source)
             assert rec.source == source
             assert rec.integral_sign is False and rec.integral_query is False
-            assert rec.reread_type == "" and rec.keymap_groups == []
+            assert rec.keymap_groups == []
             assert rec.song_verdict is None and rec.local_qa_answer == ""
 
     def test_unknown_source_empty_result(self):
         hub = _make_hub()
         rec = hub.recognize({"content": "签到", "username": "u"}, "like")
         assert rec.source == "like"
-        assert rec.integral_sign is False and rec.reread_type == ""
-
-    def test_reread_str_wordlist_normalization(self):
-        """词表 str 双形态口径与消费侧一致（G7/reread_handle）：换行拆分；
-        单行逗号串按原口径整体为一个关键词（逗号仅为换行拆空的兜底）。"""
-        cfg = {**_BASE_TEXT_CFG, "reread": {"enable": True, "keywords": "词A\n词B"}}
-        hub = _make_hub(cfg)
-        assert hub.recognize({"content": "xx词Bxx"}, "comment").reread_type == "reread"
-        cfg2 = {**_BASE_TEXT_CFG, "reread": {"enable": True, "keywords": "词A,词B"}}
-        hub2 = _make_hub(cfg2)
-        # 单行逗号串=一个整体关键词（原语义，不拆分）
-        assert hub2.recognize({"content": "xx词Axx"}, "comment").reread_type == ""
-        assert hub2.recognize({"content": "xx词A,词Bxx"}, "comment").reread_type == "reread"
+        assert rec.integral_sign is False
 
 
 # ==================== 2. 消费契约：信任中枢结果 ====================
@@ -226,29 +216,25 @@ class TestConsumerTrustsHubResult:
             assert fh.key_mapping_handle("礼物", data, hub_result=rec) is True
             m_press.assert_called_once()
 
-    def test_reread_trusts_hub_type(self):
-        """复读：中枢判定命中类型直接合成（内容无需再过词表）；None 自匹配兼容。"""
+    def test_reread_manual_direct(self):
+        """直接复读手动直通（2026-10-30 过滤审查批次：弹幕触发退役，reread_handle
+        收口手动通道——无需配置开关/词表匹配，内容原文直通合成）。"""
         mh = MagicMock()
-        mh.config = _FakeConfig({"reread": {"enable": True},
-                                 "audio_synthesis_type": "none"})
+        mh.config = _FakeConfig({"audio_synthesis_type": "none"})
         ch = CommentHandler(mh)
-        rec = KeywordResult(source="comment")
-        rec.reread_type = "reread_top_priority"
         data = {"username": "u", "content": "与词表无关"}
-        assert ch.reread_handle(data, type=rec.reread_type, hub_result=rec) is True
+        assert ch.reread_handle(data, type="reread_top_priority") is True
         msg = mh.audio_synthesis_handle.call_args[0][0]
         assert msg["type"] == "reread_top_priority" and msg["content"] == "与词表无关"
 
-    def test_reread_none_self_match_compat(self):
-        """hub_result=None 直调兼容：词表命中→True，未命中→False（原语义）。"""
+    def test_reread_type_passthrough_default(self):
+        """type 缺省/未知值归一为 reread；reread.enable 退役键不再读取。"""
         mh = MagicMock()
-        mh.config = _FakeConfig({"reread": {"enable": True, "keywords": ["复读"]},
-                                 "audio_synthesis_type": "none"})
+        mh.config = _FakeConfig({"audio_synthesis_type": "none"})
         ch = CommentHandler(mh)
-        assert ch.reread_handle({"username": "u", "content": "来复读一下"},
-                                type="reread") is True
-        assert ch.reread_handle({"username": "u", "content": "无关"},
-                                type="reread") is False
+        assert ch.reread_handle({"username": "u", "content": "随便什么"}) is True
+        msg = mh.audio_synthesis_handle.call_args[0][0]
+        assert msg["type"] == "reread"
 
     def test_choose_song_trusts_hub_verdict(self):
         """点歌：中枢判定意图直接走回应分支（内容无需再过触发词/曲库）。"""
@@ -323,16 +309,16 @@ class TestRobustnessAndCache:
         rec = hub.recognize({"content": "签到", "username": "u"}, "comment")
         assert isinstance(rec, KeywordResult)
         assert rec.source == "comment"
-        assert rec.integral_sign is False and rec.reread_type == ""
+        assert rec.integral_sign is False
         assert rec.keymap_groups == [] and rec.song_verdict is None
 
     def test_matcher_isolation_partial_degrade(self):
         """单项匹配器炸裂只损失该项，其它匹配结果保留（_safe 隔离）。"""
         hub = _make_hub()
-        with patch.object(KeywordHub, "_match_reread", side_effect=RuntimeError("boom")):
+        with patch.object(KeywordHub, "_match_keymap_danmu", side_effect=RuntimeError("boom")):
             rec = hub.recognize({"content": "签到", "username": "u"}, "comment")
-        assert rec.integral_sign is True  # 积分匹配不受复读匹配器异常影响
-        assert rec.reread_type == ""
+        assert rec.integral_sign is True  # 积分匹配不受按键映射匹配器异常影响
+        assert rec.keymap_groups == []
 
     def test_load_data_from_file_mtime_cache(self, tmp_path):
         """词库缓存：未变复用同对象；mtime 变化即失效重读（热改词库无需刷新）。"""
@@ -421,9 +407,10 @@ class TestChainWiringSourceGuard:
                      'integral_handle("crud", data, hub_result=rec)',
                      'key_mapping_handle("弹幕", data, hub_result=rec)',
                      'local_qa_handle(data, hub_result=rec)',
-                     'choose_song_handle(data, hub_result=rec)',
-                     'reread_handle(data, type=rec.reread_type, hub_result=rec)'):
+                     'choose_song_handle(data, hub_result=rec)'):
             assert call in src, f"弹幕链消费点缺中枢通道：{call}"
+        # 复读触发已退役（2026-10-30 过滤审查批次）：弹幕链不得再出现复读分发
+        assert 'reread_handle(data, type=rec' not in src
 
     def test_comment_chain_no_legacy_inline_matching(self):
         """原弹幕链内联复读词表扫描已上收中枢（不得回归）。"""
@@ -471,6 +458,6 @@ class TestChainWiringSourceGuard:
                     "def choose_song_gift_trigger(self, data, hub_result=None)",
                     "def integral_handle(self, type, data, hub_result=None)",
                     "def key_mapping_handle(self, type, data, hub_result=None)",
-                    "def reread_handle(self, data, type=None, hub_result=None)",
+                    "def reread_handle(self, data, type=None)",
                     "def keyword_recognize(self, data, source)"):
             assert sig in src, f"My_handle 委托签名缺失：{sig}"

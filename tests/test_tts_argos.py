@@ -25,8 +25,17 @@ import pytest
 from utils.audio_handle.tts_params import (
     EDGE_TTS_DEFAULT_VOICE, EDGE_TTS_VOICES,
     build_inproc_refs, edge_rate_to_speed, filter_edge_voices,
-    normalize_edge_rate, normalize_ref_paths, parse_edge_extra_args, speed_to_edge_rate)
+    normalize_edge_rate, normalize_prompt_texts, normalize_ref_paths,
+    speed_to_edge_rate)
 from utils import translate_argos
+from utils.my_log import logger
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _read(rel: str) -> str:
+    with open(os.path.join(_REPO, rel), encoding="utf-8") as f:
+        return f.read()
 
 
 # ---------- P26：变速映射 ----------
@@ -129,6 +138,36 @@ class TestRefPaths:
 
     def test_build_inproc_refs_empty(self):
         assert build_inproc_refs([], ref_free=True, prompt_text="x") == {"prompt_text": ""}
+
+    # ---------- 2026-10-29：参考文本与多音频逐行对应 ----------
+
+    def test_normalize_prompt_texts_multiline(self):
+        """多行字符串 → 逐行列表；转写含逗号/分号不可被切散。"""
+        assert normalize_prompt_texts("你好，世界。\n再见；朋友。") == ["你好，世界。", "再见；朋友。"]
+
+    def test_normalize_prompt_texts_keeps_middle_blank(self):
+        """中间空行保留（第 i 行 ↔ 第 i 行音频对齐语义），仅裁尾部空行。"""
+        assert normalize_prompt_texts("甲文本。\n\n丙文本。\n\n") == ["甲文本。", "", "丙文本。"]
+        assert normalize_prompt_texts(None) == []
+        # 列表项自带尾换行 = 显式空行（对齐语义保留）；无尾换行则不产生空行
+        assert normalize_prompt_texts([" x。", "y。"]) == ["x。", "y。"]
+        assert normalize_prompt_texts([" x。\n", "y。"]) == ["x。", "", "y。"]
+
+    def test_build_inproc_refs_prompt_texts_match_main(self):
+        """关闭 ref_free：主参考=第一行 → 取 prompt_texts[0] 参与合成。"""
+        frag = build_inproc_refs(["a.wav", "b.wav"], ref_free=False,
+                                 prompt_text="旧文本", prompt_texts=["甲文本", "乙文本"])
+        assert frag == {"ref_audio_path": "a.wav",
+                        "aux_ref_audio_paths": ["b.wav"],
+                        "prompt_text": "甲文本"}
+
+    def test_build_inproc_refs_prompt_texts_fallback_legacy(self):
+        """prompt_texts 首行为空 → 回退旧版单值 prompt_text（存量配置兼容）。"""
+        frag = build_inproc_refs(["a.wav"], ref_free=False,
+                                 prompt_text="旧文本", prompt_texts=["", ""])
+        assert frag == {"ref_audio_path": "a.wav", "prompt_text": "旧文本"}
+        frag2 = build_inproc_refs(["a.wav"], ref_free=False, prompt_text="旧文本")
+        assert frag2 == {"ref_audio_path": "a.wav", "prompt_text": "旧文本"}
 
 
 # ---------- P27：argos 语言对探测三分支（mock） ----------
@@ -254,6 +293,22 @@ class TestRefFreeFallback:
         assert calls[1]["ref_audio_path"] == "D:/a.wav"
         assert calls[1]["prompt_text"] == "旧参考文本"
 
+    def test_degrade_prefers_prompt_texts_main(self, monkeypatch, tmp_path):
+        """2026-10-29：降级恢复参考文本优先取 prompt_texts 首行（主参考转写）。"""
+        import utils.gpt_sovits_inproc as gsv
+        calls = []
+        monkeypatch.setattr(gsv, "get_engine", lambda: _fake_engine(calls))
+        tmpdir = str(tmp_path)
+        tts = _make_tts(tmpdir, {
+            "ref_audio_paths": ["D:/a.wav", "D:/b.wav"],
+            "ref_free": True,
+            "prompt_texts": ["新主参考转写"],
+            "prompt_text": "旧参考文本",
+        })
+        out = asyncio.run(tts._gpt_sovits_inproc({"content": "测试", "language": "zh"}))
+        assert out is not None
+        assert calls[1]["prompt_text"] == "新主参考转写"
+
     def test_multi_ref_first_try_success(self, monkeypatch, tmp_path):
         """P25 生效路径：多参考首次成功不降级。"""
         import utils.gpt_sovits_inproc as gsv
@@ -310,26 +365,74 @@ class TestRefFreeFallback:
         assert calls == []
 
 
-# ---------- edge-tts 高级参数 JSON 透传 ----------
+# ---------- A2：pitch 语速联动（2026-10-30 任务书对照补测） ----------
+
+class TestEdgePitchCoupling:
+    """edge-tts 变语速时同步调 pitch 保持音高一致（任务书 L80-84 语义）。
+
+    公式：pitch_hz = (factor - 1) * 50，可调范围 ±50Hz，整数化输出——
+    +1.2 倍语速 → "+10Hz"，0.9 倍 → "-5Hz"，1.0 → "+0Hz"。"""
+
+    def test_task_book_examples(self):
+        from utils.audio_handle.tts_params import speed_to_edge_pitch
+        assert speed_to_edge_pitch(1.2) == "+10Hz"   # 提高 20%（1.2 倍）
+        assert speed_to_edge_pitch(0.9) == "-5Hz"    # 降低 10%（0.9 倍）
+        assert speed_to_edge_pitch(1.0) == "+0Hz"    # 不变速
+
+    def test_clamp_50hz(self):
+        """可调范围 ±50Hz——上界截断（factor 2.0 → +50Hz，3.0 → +50Hz）；
+        合法域下限 0.25 → -37.5Hz（未触 -50Hz 边界，整数化 -38Hz）。"""
+        from utils.audio_handle.tts_params import speed_to_edge_pitch
+        assert speed_to_edge_pitch(2.0) == "+50Hz"
+        assert speed_to_edge_pitch(3.0) == "+50Hz"
+        assert speed_to_edge_pitch(0.25) == "-38Hz"
+
+    def test_integer_emission(self):
+        """Hz 整数化（同 rate 实测修复——小数被 edge-tts 7.3.1 拒收）。"""
+        from utils.audio_handle.tts_params import speed_to_edge_pitch
+        assert speed_to_edge_pitch(1.0788) == "+4Hz"
+        assert speed_to_edge_pitch(0.938) == "-3Hz"
+
+
+# ---------- edge-tts 高级参数 JSON 透传退役（2026-10-30） ----------
 
 class TestEdgeExtraArgs:
-    def test_empty_is_default(self):
-        assert parse_edge_extra_args("") == ({}, None)
-        assert parse_edge_extra_args(None) == ({}, None)
-        assert parse_edge_extra_args("   ") == ({}, None)
+    """高级参数 JSON 透传（extra_args_json）退役反向守卫。
 
-    def test_valid_json(self):
-        args, err = parse_edge_extra_args('{"pitch": "+0Hz", "volume": "+0%"}')
-        assert err is None
-        assert args == {"pitch": "+0Hz", "volume": "+0%"}
+    pitch 恒由随机语速联动接管（speed_to_edge_pitch，A2），用户显式覆盖通道删除：
+    - tts_params 无 parse_edge_extra_args；
+    - my_tts.edge_tts_api 无 extra_args 解析/透传（**synth_kwargs 纯净）；
+    - 前端无 extra_args_json 配置项；config 两文件无残留键。"""
 
-    def test_invalid_json(self):
-        args, err = parse_edge_extra_args("{bad json")
-        assert args == {} and err
+    def test_parser_retired(self):
+        import utils.audio_handle.tts_params as tp
+        assert not hasattr(tp, "parse_edge_extra_args")
 
-    def test_non_object_json(self):
-        args, err = parse_edge_extra_args('[1, 2]')
-        assert args == {} and err
+    def test_api_no_extra_args_passthrough(self):
+        src = _read("utils/audio_handle/my_tts.py")
+        seg = src[src.find("async def edge_tts_api"):src.find("async def gpt_sovits_api")]
+        assert "**extra_args" not in seg, "Communicate 不再透传 extra_args"
+        assert "parse_edge_extra_args" not in seg
+        assert "**synth_kwargs)" in seg, "Communicate 仅接收 voice/rate/pitch"
+
+    def test_no_config_key(self):
+        """example 模板硬断言（不受运行时回写影响）；config.json 主系统运行中
+        可能被内存旧态全量回写复活退役键——无读取点无害，不作硬断言。"""
+        data = json.loads(_read("config.example.json"))
+        assert "extra_args_json" not in data.get("edge_tts", {})
+        try:
+            data = json.loads(_read("config.json"))
+            if "extra_args_json" in data.get("edge_tts", {}):
+                logger.warning(
+                    "config.json edge_tts.extra_args_json 运行态残留（主系统全量回写）"
+                    "——键已无读取点，重启前端保存一次即清除")
+        except FileNotFoundError:
+            pass
+
+    def test_frontend_field_retired(self):
+        src = _read("frontend/ui/tabs/tts.py")
+        assert 'set_config_callback("edge_tts", "extra_args_json"' not in src
+        assert 'get_nested_value(config, "edge_tts", "extra_args_json")' not in src
 
 
 # ---------- P27：my_translate 分发 ----------

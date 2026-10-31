@@ -65,7 +65,21 @@ def _get(node, keys):
 
 
 def _run_one_cycle(ts):
-    """运行一次文案节拍（线程体函数内循环，跑一轮后停）。"""
+    """运行一次文案节拍（线程体函数内循环，跑一轮后停）。
+
+    确定性单周期：首个播放调用即置 is_running=False（原实现依赖
+    interval≥10s 暗置下限在 2.5s 窗口内只跑一轮；间隔下限修正为 1s 后
+    改用确定性停止信号）。保留 2.5s 兜底 stopper 供无播放调用路径
+    （空目录 D-8 静默 / 解码失败跳过）使用。
+    """
+    real_play = ts.my_handle.audio_synthesis_handle
+
+    def _play_then_stop(*args, **kwargs):
+        ts.is_running = False
+        return real_play(*args, **kwargs)
+
+    ts.my_handle.audio_synthesis_handle = MagicMock(side_effect=_play_then_stop)
+
     def stopper():
         time.sleep(2.5)
         ts.is_running = False

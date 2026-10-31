@@ -94,12 +94,23 @@ def create_llm_tab(
                 style="width:100%;"
             )
 
+        # system 人设（2026-10-30 审查批次：对齐各平台 cURL 通用结构——messages
+        # 首条 {"role":"system","content":...}；留空不发送该消息）
+        ui.textarea(
+            label='人设提示词（system，可选）',
+            value=str(get_nested_value(config, "custom_llm", "system_prompt") or ""),
+            placeholder='如：你是一位专业、友好的线上销售，现在正在进行直播。',
+            on_change=lambda e: set_config_callback("custom_llm", "system_prompt", value=e.value),
+        ).style("width:100%;").tooltip(
+            '以 {"role": "system", "content": ...} 注入请求消息首位（对齐各平台 '
+            'cURL 通用调用结构）；留空则请求仅含 user 消息。即时保存。')
+
         # {{prompt}} 变量说明（C4：请求模板退役，弹幕内容自动注入 user 消息）
         ui.label(
             "请求固定为 OpenAI-compatible 协议：POST {base_url}/chat/completions；"
             "弹幕内容自动作为 user 消息发送（等价旧版请求体模板中的 {{prompt}} 变量，无需再手写请求体）；"
             "响应固定解析 choices[0].message.content。"
-            "各平台差异仅在 base_url / model / api_key 三项，示例见 docs/llm-request-template.md。"
+            "各平台差异仅在 base_url / model / api_key 三项（人设提示词可选），示例见 docs/llm-request-template.md。"
         ).style("color: var(--text-hint); font-size: var(--font-size-body)")
 
     # ================= fastrag 知识库卡片（EDTalk功能集成计划 §6.1） =================
@@ -489,12 +500,21 @@ def _create_fastrag_card(
                 ("max_answer_length", "答案最大字符数", 80),
             ]
             tpl_inputs = {}
+
+            def _save_tpl_input(key, value):
+                """输入即落盘 config.fastrag.template.*（2026-10-30 修复：模板
+                输入框此前仅标脏不落盘——用户输入人设/回答规则后刷新页面值丢失
+                （『应用并重启』按钮是唯一持久化路径，实测反馈）。_notify=False
+                防逐键 toast 轰炸；服务端 config_override.py 仍由『应用并重启』
+                统一落盘，脏标记提示语义不变。"""
+                set_config_callback("fastrag", "template", key, value=value, _notify=False)
+
             with ui.grid(columns=2):
                 for key, label, default in _TPL_KEYS:
                     tpl_inputs[key] = FormField.create_input(
                         label=label,
                         value=str(get_nested_value(config, "fastrag", "template", key, default=default)),
-                        on_change=lambda e: _mark_tpl_dirty(),
+                        on_change=lambda e, k=key: (_save_tpl_input(k, e.value), _mark_tpl_dirty()),
                         style="width:100%;",
                     )
             tpl_dirty_label = ui.label("").style("color: var(--color-warning); display:none")
@@ -505,7 +525,14 @@ def _create_fastrag_card(
                 tpl_dirty_label.style("color: var(--color-warning); display:block")
 
             def _apply_template_and_restart():
-                """模板生效（D6：保存落盘 override+显式重启+脏标记清零；DX F-7 失败回滚）。"""
+                """模板生效（D6：保存落盘 override+显式重启+脏标记清零；DX F-7 失败回滚）。
+
+                2026-10-30 修复（回答规则重启丢失）：此前仅落盘 config_override.py
+                （服务端运行态真源），UI 初始值读 config.fastrag.template.*——
+                config.json 无此节 → 重启后 UI 回显默认值（看似丢失）；再次点应用
+                会把 override 覆盖回默认=真丢失。修复：落盘 override 的同时把六参
+                数写回 config（set_config_callback 支持任意深度路径并自动落盘），
+                UI 回显与服务端 override 双源一致。"""
                 try:
                     # 落盘 config_override.py（fastrag-python 侧 P3 补丁加载）
                     py_dir = os.path.join(_fastrag_dir(), "fastrag-python")
@@ -524,6 +551,20 @@ def _create_fastrag_card(
                     lines.append(f"MAX_ANSWER_LENGTH = {int(vals['max_answer_length'] or 80)}")
                     with open(override, "w", encoding="utf-8") as f:
                         f.write("\n".join(lines) + "\n")
+                    # 同步写回 config（UI 重启后回显真源；_FASTRAG_DEFAULTS.template
+                    # 提供缺省骨架）——answer_rules 空串也写入（回显与服务端默认语义一致）
+                    set_config_callback("fastrag", "template", "system_role",
+                                        value=vals["system_role"], _notify=False)
+                    set_config_callback("fastrag", "template", "answer_rules",
+                                        value=vals["answer_rules"], _notify=False)
+                    set_config_callback("fastrag", "template", "temperature",
+                                        value=float(vals["temperature"] or 0.3), _notify=False)
+                    set_config_callback("fastrag", "template", "top_p",
+                                        value=float(vals["top_p"] or 0.9), _notify=False)
+                    set_config_callback("fastrag", "template", "max_new_tokens",
+                                        value=int(vals["max_new_tokens"] or 128), _notify=False)
+                    set_config_callback("fastrag", "template", "max_answer_length",
+                                        value=int(vals["max_answer_length"] or 80), _notify=False)
                 except Exception as e:
                     ui.notify(position="top", type="negative", message=f"模板落盘失败：{e}")
                     return

@@ -423,7 +423,7 @@ class ChatHandler:
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 构建数据（prompt 走共享构建器：弹幕模板→前后缀→语言指令，ENG E-1）
+                # 构建数据（prompt 走共享构建器：弹幕模板→语言指令，ENG E-1）
                 data_json = {
                     "username": username,
                     "content": content,
@@ -443,6 +443,9 @@ class ChatHandler:
                                         hit_layer="llm")
                         return {
                             "type": "talk",
+                            # talk_stream 标记（D-22）：流式回复分句豁免连续对话
+                            # 待播舍弃——同一次回复的分句必须完整排队
+                            "talk_stream": True,
                             "tts_type": self.my_handle.config.get("audio_synthesis_type"),
                             "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
                             "config": self.my_handle.config.get("filter"),
@@ -472,8 +475,6 @@ class ChatHandler:
                 return
             elif chat_type == "none":
                 return
-            elif chat_type == "reread":
-                resp_content = self.llm_handle(chat_type, data_json)
             else:
                 resp_content = content
 

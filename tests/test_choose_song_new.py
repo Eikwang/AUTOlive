@@ -155,8 +155,10 @@ class TestAssistantRoute:
         assert msg["type"] == "comment" and msg["username"] == "小明"
 
     def test_route_on_assistant_channel(self):
+        # 2026-10-28 批次：assistant_route 增加 enable 总开关门控——路由生效
+        # 需显式 enable=True（生产 config 默认开，测试桩需同步给出）
         cfg = dict(BASE_CFG)
-        cfg["assistant_anchor"] = {"type": ["song"], "username": "小助"}
+        cfg["assistant_anchor"] = {"enable": True, "type": ["song"], "username": "小助"}
         self.h = _make_handler(cfg)
         msg = self.h._song_copy_message("小明", "你好")
         assert msg["type"] == "assistant_anchor_text" and msg["username"] == "小助"

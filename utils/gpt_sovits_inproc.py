@@ -196,6 +196,7 @@ class GptSovitsInproc:
         # 双保险 #2：save_configs no-op（防 3 处无条件回写任何 yaml）
         TTS_Config.save_configs = lambda *a, **k: None
         self._patch_shadows()
+        self._patch_text_preprocessor()
         return TTS, TTS_Config
 
     def _patch_shadows(self):
@@ -241,6 +242,40 @@ class GptSovitsInproc:
                 logger.info(f"[gsv-inproc] bert_path env 已注入: {bert_abs}")
         except Exception:
             logger.warning("[gsv-inproc] bert_path env 注入失败", exc_info=True)
+
+    def _patch_text_preprocessor(self):
+        """空语种分段防护（2026-10-29 实测修复：torch.cat(): expected a non-empty list of Tensors）。
+
+        上游 get_phones_and_bert 混合分支按 LangSegmenter 分段后逐段 clean_text_inf，
+        纯符号分段会归一化为空串（实测触发：弹幕带全角方括号前缀“［离线请留言］”，
+        ［］被 LangSegmenter 判为 ja 段，text_lang=zh 混合分支强制按 zh 清洗 →
+        norm_text="" word2ph=[] → get_bert_feature 中 torch.cat(空列表) 崩溃；
+        多参考与降级单参考两次尝试同点崩溃，与参考音频无关）。
+        防护：text 与 word2ph 同时为空时返回 (hidden_size, 0) 零特征——phones 侧
+        同为空段，bert 沿 dim=1 cat 聚合时等价于无操作，其余分段正常合成。
+        """
+        try:
+            import torch
+            from GPT_SoVITS.TTS_infer_pack.TextPreprocessor import TextPreprocessor
+            if getattr(TextPreprocessor, "_autolive_empty_seg_guard", False):
+                return
+            orig = TextPreprocessor.get_bert_feature
+
+            def _safe_get_bert_feature(tp, text, word2ph):
+                if len(text) == 0 and len(word2ph) == 0:
+                    try:
+                        hidden = int(tp.bert_model.config.hidden_size)
+                    except Exception:
+                        hidden = 1024
+                    return torch.zeros((hidden, 0), dtype=torch.float32,
+                                       device=tp.device)
+                return orig(tp, text, word2ph)
+
+            TextPreprocessor.get_bert_feature = _safe_get_bert_feature
+            TextPreprocessor._autolive_empty_seg_guard = True
+            logger.info("[gsv-inproc] TextPreprocessor 空语种分段防护已启用")
+        except Exception:
+            logger.warning("[gsv-inproc] TextPreprocessor 防护补丁失败", exc_info=True)
 
     def _build_tts(self, gpt_model: str = "", sovits_model: str = ""):
         """构建全新 TTS 实例（换模事务的"新对象"侧，不触碰旧实例）。"""
@@ -303,6 +338,31 @@ class GptSovitsInproc:
 
     # ---------- 合成 ----------
 
+    # 启动竞态守卫：异步加载等待上限（慢盘/CPU 首次加载可到分钟级）
+    _LOAD_WAIT_TIMEOUT_S = 300.0
+
+    def _wait_ready(self, timeout_s: float = None) -> bool:
+        """等待异步加载完成（轮询；ready=True 提前返回，error=False 提前失败）。
+
+        仅 loading 态应调用（uninitialized 等不来——start 未调用，由调用方
+        直接走原失败路径）。等待发生在调用方工作线程（asyncio.to_thread），
+        不阻塞事件循环。
+        """
+        if timeout_s is None:
+            timeout_s = self._LOAD_WAIT_TIMEOUT_S
+        deadline = time.monotonic() + timeout_s
+        notified = False
+        while time.monotonic() < deadline:
+            if self.ready:
+                return True
+            if self.raw_state() == ST_ERROR:
+                return False
+            if not notified:
+                notified = True
+                logger.info("[gsv-inproc] 引擎加载中，合成请求等待就绪……")
+            time.sleep(0.5)
+        return self.ready
+
     def synthesize(self, text: str, params: Dict,
                    out_path: str,
                    on_chunk: Optional[Callable[[int, np.ndarray], None]] = None) -> str:
@@ -314,6 +374,14 @@ class GptSovitsInproc:
         消费循环逐块回调 on_chunk（R-3 观测接口；文件级推送由 playback_manager 既有通道负责）。
         返回 wav 路径；异常向上抛（调用方=my_tts 层转四要素文案 DX-12）。
         """
+        # 启动竞态守卫（2026-10-28 修复）：loading 态等待就绪再合成——原实现
+        # 直接抛 EngineNotReadyError，启动初期（模型加载分钟级）到来的直播消息
+        # 全部合成失败（my_tts 层"等待加载完成后执行"的语义由此真正成立）。
+        if self.raw_state() == ST_LOADING and not self.ready:
+            if not self._wait_ready():
+                raise EngineNotReadyError(
+                    f"等待引擎就绪超时或加载失败（state={self.raw_state()}，"
+                    f"error={self.error!r}；请查看胶囊日志并重载模型）")
         if not self.ready:
             raise EngineNotReadyError(
                 f"引擎状态 {self.raw_state()}（就绪后可用；error 态请查看胶囊日志并重载模型）")
@@ -356,21 +424,36 @@ class GptSovitsInproc:
         try:
             gs = self.config.get("gpt_sovits") or {}
             params = gs.get("params") or {}
-            ref = params.get("ref_audio_path") or ""
+            ref, prompt_text = _primary_ref_prompt(params)
             if not ref or not os.path.exists(ref):
-                logger.info("[gsv-inproc] 预热跳过（ref_audio_path 未配置或不存在）")
+                logger.info("[gsv-inproc] 预热跳过（参考音频未配置或不存在）")
                 return
             out = os.path.join(self.paths.autolive_home, "音频输出", "inproc_warmup.wav")
             self.synthesize("预热。", {
-                "text_lang": params.get("language") or "zh",
+                "text_lang": params.get("text_lang") or "zh",
                 "ref_audio_path": ref,
-                "prompt_text": params.get("prompt_text") or "",
-                "prompt_lang": params.get("prompt_language") or "zh",
+                "prompt_text": prompt_text,
+                "prompt_lang": params.get("prompt_lang") or params.get("prompt_language") or "zh",
                 "streaming_mode": False,
             }, out)
             logger.info("[gsv-inproc] 预热完成")
         except Exception as e:
             logger.warning(f"[gsv-inproc] 预热失败（不阻塞启动）: {e}")
+
+
+def _primary_ref_prompt(params: dict) -> tuple:
+    """多参考主参考/主转写提取（P25 迁移后统一读取口径）。
+
+    ref_audio_paths[0]/prompt_texts[0]（多参考面板逐行对应）> 旧版单值
+    ref_audio_path/prompt_text（存量配置兼容）。返回 (ref, prompt_text)。
+    """
+    paths = params.get("ref_audio_paths") or []
+    ref = (paths[0] if isinstance(paths, list) and paths else "") \
+        or params.get("ref_audio_path") or ""
+    texts = params.get("prompt_texts") or []
+    prompt_text = (texts[0] if isinstance(texts, list) and texts else "") \
+        or params.get("prompt_text") or ""
+    return ref, str(prompt_text).strip()
 
 
 # ---------- 模块级单例 ----------
@@ -431,15 +514,15 @@ def register_tts_routes(app, config) -> None:
         gs = config.get("gpt_sovits") or {}
         params = dict(gs.get("params") or {})
         text = (body or {}).get("text") or "你好，这里是声音试听。"
-        ref = params.get("ref_audio_path") or ""
+        ref, prompt_text = _primary_ref_prompt(params)
         if not ref or not os.path.exists(ref):
             raise HTTPException(status_code=409,
-                                detail="ref_audio_path 未配置或文件不存在——problem: 参考音频缺失；"
+                                detail="参考音频未配置或文件不存在——problem: 参考音频缺失；"
                                        "fix: 在 TTS 页配置参考音频或选择声音档案")
         run_params = {
             "text_lang": params.get("text_lang") or "zh",
             "ref_audio_path": ref,
-            "prompt_text": params.get("prompt_text") or "",
+            "prompt_text": prompt_text,
             "prompt_lang": params.get("prompt_lang") or "zh",
             "top_k": params.get("top_k", 15), "top_p": params.get("top_p", 1.0),
             "temperature": params.get("temperature", 1.0),

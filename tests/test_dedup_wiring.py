@@ -81,8 +81,8 @@ class TestDedupWiring(unittest.TestCase):
         data = {"username": "定时任务", "content": "欢迎回来"}
         fh.timer_handler.process_data(dict(data), "schedule")
         fh.timer_handler.process_data(dict(data), "schedule")
-        # 同内容两条都进了遗忘窗口（未被去重裁剪）
-        self.assertEqual(len(fh.timers["schedule"].last_data), 2)
+        # 2026-10-28 重构：首条立即分发（不进缓冲），第二条在窗口缓冲
+        self.assertEqual(len(fh.timers["schedule"].last_data), 1)
 
     def test_gift_dedup_key_uses_gift_name(self):
         """礼物无 content 键——按 gift_name 去重。"""
@@ -91,8 +91,8 @@ class TestDedupWiring(unittest.TestCase):
         fh = _FakeHandle(cfg)
         fh.timer_handler.process_data({"username": "u1", "gift_name": "火箭"}, "gift")
         fh.timer_handler.process_data({"username": "u1", "gift_name": "火箭"}, "gift")
-        # 窗口内第二条未入遗忘窗口（timers['gift'] 的 last_data 只有首条）
-        self.assertEqual(len(fh.timers["gift"].last_data), 1)
+        # 2026-10-28 重构：首条立即分发（缓冲空），窗口内第二条被去重裁剪
+        self.assertEqual(len(fh.timers["gift"].last_data), 0)
 
     def test_dedup_disabled_passthrough(self):
         """enable=false → 全部放行。"""
@@ -101,7 +101,44 @@ class TestDedupWiring(unittest.TestCase):
         fh = _FakeHandle(cfg)
         fh.timer_handler.process_data({"username": "u1", "content": "111"}, "comment")
         fh.timer_handler.process_data({"username": "u1", "content": "111"}, "comment")
+        # 2026-10-28 重构：首条立即分发，第二条进窗口缓冲
+        self.assertEqual(len(fh.timers["comment"].last_data), 1)
+
+    # ---------- 2026-10-28 防遗忘窗口重构：立即处理 + 窗口末补发 ----------
+
+    def test_first_message_dispatched_immediately(self):
+        """首条消息立即处理，不等遗忘窗口到期（单条延迟=0）。"""
+        fh = _FakeHandle(self._cfg())
+        fh.timer_handler.process_data({"username": "u1", "content": "666"}, "comment")
+        # 立即分发走 worker 线程——轮询等待（窗口 0.15s 尚未到期）
+        deadline = time.time() + 2
+        while time.time() < deadline and not fh.handled:
+            time.sleep(0.01)
+        self.assertEqual(len(fh.handled), 1)
+
+    def test_window_end_replays_reserve_tail(self):
+        """遗忘间隔 10s+保留数 2 语义：窗口内消息缓冲，窗口末补发最新 reserve_num-1 条。"""
+        cfg = self._cfg()
+        cfg["comment_forget_reserve_num"] = 3
+        fh = _FakeHandle(cfg)
+        fh.timer_handler.process_data({"username": "u1", "content": "666"}, "comment")  # 首条立即
+        fh.timer_handler.process_data({"username": "u2", "content": "666"}, "comment")  # 窗口内
+        fh.timer_handler.process_data({"username": "u3", "content": "666"}, "comment")  # 窗口内
+        # 缓冲只保留最新 reserve_num-1=2 条
         self.assertEqual(len(fh.timers["comment"].last_data), 2)
+        time.sleep(0.3)  # 等遗忘窗口到期补发
+        # 首条立即 1 条 + 窗口末补发 2 条 = 全部处理
+        self.assertEqual(len(fh.handled), 3)
+
+    def test_reserve_num_one_no_replay(self):
+        """入场语义（保留数 1）：每个窗口期内仅处理首条，窗口末不补发。"""
+        cfg = self._cfg()
+        cfg["comment_forget_reserve_num"] = 1
+        fh = _FakeHandle(cfg)
+        for i in range(5):
+            fh.timer_handler.process_data({"username": f"u{i}", "content": "来了"}, "comment")
+        time.sleep(0.3)
+        self.assertEqual(len(fh.handled), 1)
 
 
 if __name__ == "__main__":

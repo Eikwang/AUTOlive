@@ -91,6 +91,7 @@ def _default_config():
         "api_key": "",
         "max_tokens": "",
         "temperature": "",
+        "system_prompt": "",
     }
 
 
@@ -112,7 +113,7 @@ def migrate_legacy_config(data):
     """
     new_cfg = {}
     if isinstance(data, dict):
-        for key in ("base_url", "model", "api_key", "max_tokens", "temperature"):
+        for key in ("base_url", "model", "api_key", "max_tokens", "temperature", "system_prompt"):
             if key in data:
                 new_cfg[key] = data[key]
     has_legacy = isinstance(data, dict) and any(k in data for k in LEGACY_KEYS)
@@ -173,11 +174,27 @@ class Custom_LLM:
             return base
         return base + _CHAT_COMPLETIONS
 
-    def _build_body(self, prompt):
-        """固定请求体：model + messages；max_tokens/temperature 可选（留空不发）。"""
+    def _build_body(self, prompt, system_prompt_override=None):
+        """固定请求体：model + messages；system_prompt（可选，非空时注入首条
+        system 消息——各平台 cURL 示例通用结构）+ max_tokens/temperature 可选
+        （留空不发）。
+
+        2026-10-30 动态文案审查批次：system_prompt_override（请求级人设替换，
+        任务书「提示词转换」语义）——非空时**替换**配置的 system_prompt
+        （而非拼接），动态文案请求以「提示词转换内容」为人设；弹幕/语音路径
+        不传该键，行为不变。"""
+        messages = []
+        override = str(system_prompt_override or "").strip()
+        if override:
+            system_prompt = override
+        else:
+            system_prompt = str(self.config_data.get("system_prompt") or "").strip()
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         body = {
             "model": str(self.config_data.get("model") or DEFAULT_MODEL),
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
         }
         max_tokens = self.config_data.get("max_tokens")
         if max_tokens not in (None, ""):
@@ -222,9 +239,12 @@ class Custom_LLM:
         aiohttp = _get_aiohttp()
         try:
             prompt = self._build_prompt(data)
+            # 请求级人设替换（任务书「提示词转换」）：data 可携带 system_prompt
+            # 键（动态文案链），非空时替换配置的 system_prompt
+            system_prompt_override = data.get("system_prompt") if isinstance(data, dict) else None
             url = self._chat_completions_url()
             headers = self._build_headers()
-            body = self._build_body(prompt)
+            body = self._build_body(prompt, system_prompt_override=system_prompt_override)
             logger.debug(f"custom_llm 请求: url={url} model={body['model']}")
 
             status, text = await self.send_request(url=url, headers=headers, body=body, timeout=60)
@@ -313,9 +333,11 @@ class Custom_LLM:
         aiohttp = _get_aiohttp()
         try:
             prompt = self._build_prompt(data)
+            # 请求级人设替换（对齐 get_resp：data.system_prompt 非空时替换配置人设）
+            system_prompt_override = data.get("system_prompt") if isinstance(data, dict) else None
             url = self._chat_completions_url()
             headers = self._build_headers()
-            body = self._build_body(prompt)
+            body = self._build_body(prompt, system_prompt_override=system_prompt_override)
             body["stream"] = True
             logger.debug(f"custom_llm 流式请求: url={url} model={body['model']}")
 

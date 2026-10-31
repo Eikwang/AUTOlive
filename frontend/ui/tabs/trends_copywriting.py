@@ -77,10 +77,12 @@ def create_trends_copywriting_tab(
 
     with ui.card().style(card_css):
         ui.label('动态文案')
-        with ui.grid(columns=3):
+        # 2026-10-30 审查批次布局优化：随机生成开关与生成间隔移到 LLM 类型
+        # 下方，单列显示（原三列网格中两参数挤在 LLM 类型右侧）
+        with ui.column().style("width:100%; gap:12px;"):
             # UI-16 二轮验收（任务 13）：LLM 选项只保留 {自定义LLM, fastrag（内置）}，
             # 存量 chatgpt 等历史值彻底移除不展示（回落默认，保存即清除）；
-            # 随机播放→「随机生成」、文案播放间隔→「生成间隔」，两参数在 LLM 类型下方
+            # 随机播放→「随机生成」、文案播放间隔→「生成间隔」
             _llm_type_val = get_nested_value(config, "trends_copywriting", "llm_type") or "custom_llm"
             _llm_type_options = {'custom_llm': '自定义LLM', 'fastrag': 'fastrag（内置）'}
             if _llm_type_val not in _llm_type_options:
@@ -88,9 +90,10 @@ def create_trends_copywriting_tab(
                 ui.notify('LLM类型存量值已停用——已回落为「自定义LLM」，保存后生效；可选「fastrag（内置）」',
                           type='warning', close_button='知道了')
             _llm_select = _auto_save(ui.select(label='LLM类型', options=_llm_type_options, value=_llm_type_val).style("width:100%;"), ("trends_copywriting", "llm_type"))
-            with ui.column().style("width:100%;"):
+            # 单列显示（LLM 类型下方）：随机生成开关在上，生成间隔在下
+            with ui.column().style("width:100%;"):  # 单列显示：随机生成 → 生成间隔
                 _auto_save(ui.switch('随机生成', value=get_nested_value(config, "trends_copywriting", "random_play")).style(switch_internal_css), ("trends_copywriting", "random_play"))
-                _auto_save(ui.input(label='生成间隔', value=get_nested_value(config, "trends_copywriting", "play_interval"), placeholder='文案之间的生成间隔时间（秒）').style("width:100%;"), ("trends_copywriting", "play_interval"))
+                _auto_save(ui.input(label='生成间隔', value=get_nested_value(config, "trends_copywriting", "play_interval"), placeholder='完成一次文案生成后，进行下次文案生成的间隔时间（秒）').style("width:100%;"), ("trends_copywriting", "play_interval"))
 
         # R5③/DV-1g：提示词转换页级化（开关+内容框，作用于全部文案条目；
         # 关闭态=置灰禁用保留展示，与站内开关行为对齐）
@@ -123,6 +126,20 @@ def create_trends_copywriting_tab(
             'font-size: var(--font-size-assist, 12px); color: var(--text-secondary); width:100%;')
 
     # ---------- 存量 folder_path 迁移（进页自动重试，幂等；DV-1b⑥/EV-1a） ----------
+    # NiceGUI 约束（2026-10-30 修复）：background_tasks 协程无默认 slot——裸调
+    # ui.notify 抛 RuntimeError（slot stack empty）中断后续配置落盘（用户实测
+    # 控制台 traceback）。渲染期捕获 client，通知时 `with client:` 显式进入；
+    # 客户端已断开则静默跳过（迁移结果仍有 _migrate_status 状态行兜底可见）。
+    from nicegui import context as _ng_context
+    _migrate_client = _ng_context.client
+
+    def _bg_notify(**kwargs):
+        try:
+            with _migrate_client:
+                ui.notify(**kwargs)
+        except Exception:
+            pass
+
     async def _migrate_folder_paths():
         _entries = list(get_nested_value(config, "trends_copywriting", "copywriting") or [])
         _folders = [str((e or {}).get("folder_path", "")).strip() for e in _entries]
@@ -149,8 +166,13 @@ def create_trends_copywriting_tab(
         remaining = [e for e in _entries
                      if str((e or {}).get("folder_path", "")).strip() in failed_paths]
 
-        set_config_callback("trends_copywriting", "copy", value=merged)
-        set_config_callback("trends_copywriting", "copywriting", value=remaining)
+        # _notify=False：后台任务无 slot 不能 toast（会崩）；落盘失败路由状态行
+        try:
+            set_config_callback("trends_copywriting", "copy", value=merged, _notify=False)
+            set_config_callback("trends_copywriting", "copywriting", value=remaining, _notify=False)
+        except Exception as exc:
+            _migrate_status.set_text(f'存量文案迁移落盘失败：{exc}')
+            return
 
         parts = []
         if imported:
@@ -163,10 +185,10 @@ def create_trends_copywriting_tab(
             parts.append(f'失败 {len(failed)} 项（{fail_paths}{more}）——'
                          '恢复该目录可读后重新进入本页即自动回填')
             _migrate_status.style('font-size: var(--font-size-assist, 12px); color: var(--color-warning); width:100%;')
-            ui.notify('存量文案迁移部分失败：失败目录已保留，修复可读后重进本页自动重试',
-                      type='warning', close_button='知道了')
+            _bg_notify('存量文案迁移部分失败：失败目录已保留，修复可读后重进本页自动重试',
+                       type='warning', close_button='知道了')
         else:
-            ui.notify(f'存量文案迁移完成（{"；".join(parts) or "无存量"}）', type='positive')
+            _bg_notify(f'存量文案迁移完成（{"；".join(parts) or "无存量"}）', type='positive')
         _migrate_status.set_text('；'.join(parts))
 
     from nicegui import background_tasks
