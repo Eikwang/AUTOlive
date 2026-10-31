@@ -1,6 +1,8 @@
 import requests
 import random
 import json
+import threading
+from collections import OrderedDict
 from hashlib import md5
 import traceback
 from pygtrans import Translate
@@ -8,6 +10,37 @@ from pygtrans import Translate
 from .common import Common
 from .my_log import logger
 from .config import Config
+
+
+# T2b H-1（/autoplan main-20261031-201249 终门批准批次）：翻译 LRU 缓存——
+# 键=(原文, 目标语言判定码)，仅缓存成功译文（各通道失败返回 None 不缓存，失败
+# 语义不变）。同用户刷同内容/复读场景零外呼（baidu/google 计费+延迟+限流规避，
+# v1 审查 H-1）。reload_config 时清空（通道/目标语言配置变更后缓存作废）。
+_TRANSLATE_CACHE_MAX = 512
+_translate_cache = OrderedDict()
+_translate_cache_lock = threading.Lock()
+
+
+def _cache_get(text, to_lang):
+    try:
+        with _translate_cache_lock:
+            v = _translate_cache.get((text, to_lang))
+            if v is not None:
+                _translate_cache.move_to_end((text, to_lang))
+            return v
+    except Exception:
+        return None
+
+
+def _cache_put(text, to_lang, value):
+    try:
+        with _translate_cache_lock:
+            _translate_cache[(text, to_lang)] = value
+            _translate_cache.move_to_end((text, to_lang))
+            while len(_translate_cache) > _TRANSLATE_CACHE_MAX:
+                _translate_cache.popitem(last=False)
+    except Exception:
+        pass
 
 
 class My_Translate:
@@ -28,9 +61,23 @@ class My_Translate:
         self._llm_translator = fn
 
 
-    # 重载config
+    # 重载config（2026-10-31 翻译审查批次修复两处断链：①此前只重建 self.config，
+    # config_data/baidu_config/google_config 三个 __init__ 缓存保持旧值——热重载后
+    # trans() 仍按旧 type 分发、baidu/google 通道仍用旧密钥/语言码；②Config(path)
+    # 构造在类级缓存非 None 时 no-op，真读盘必须走 Config.reload——本方法自包含，
+    # 不再依赖调用方先刷新类缓存）
     def reload_config(self, config_path):
+        Config.reload(config_path)
         self.config = Config(config_path)
+        self.config_data = self.config.get("translate")
+        self.baidu_config = self.config.get("translate", "baidu")
+        self.google_config = self.config.get("translate", "google")
+        # T2b H-1：翻译配置热重载后缓存作废（通道/目标语言可能已变）
+        try:
+            with _translate_cache_lock:
+                _translate_cache.clear()
+        except Exception:
+            pass
 
     def trans(self, text, type=None) -> str:
         """通用翻译调用此函数
@@ -45,17 +92,28 @@ class My_Translate:
         if type is None:
             type = self.config_data["type"]
 
+        # T2b H-1：缓存查询（键=原文+目标语言；命中即零外呼）
+        to_lang = self._target_lang(type)
+        cached = _cache_get(text, to_lang)
+        if cached is not None:
+            return cached
+
         if type == "baidu":
-            return self.baidu_trans(text)
+            out = self.baidu_trans(text)
         elif type == "google":
-            return self.google_trans(text)
+            out = self.google_trans(text)
         elif type == "argos":
             # P27：argos 离线兜底翻译（不可用返回 None，调用方按翻译失败降级）
-            return self.argos_trans(text)
+            out = self.argos_trans(text)
         elif type == "custom_llm":
-            return self.custom_llm_trans(text)
+            out = self.custom_llm_trans(text)
         else:
-            return self.google_trans(text)
+            out = self.google_trans(text)
+
+        # 仅缓存成功译文（None=失败→调用方回退原文，失败结果不缓存防固定坏值）
+        if out is not None:
+            _cache_put(text, to_lang, out)
+        return out
         
 
     def baidu_trans(self, text):
@@ -97,20 +155,7 @@ class My_Translate:
             result = r.json()
 
             logger.info(f"百度翻译结果={result}")
-            translation = result["trans_result"][0]["dst"]
-            translation = translation.replace("パパパパ", "パンパカパーン")
-            translation = translation.replace("ボンボン", "パンパカパーン")
-            translation = translation.replace("RPG", "アールピージー")
-            translation = translation.replace("HP", "エイチピー")
-            translation = translation.replace("桃ちゃん", "モモイ")
-            translation = translation.replace("緑ちゃん", "ミドリ")
-            translation = translation.replace("みどりちゃん", "ミドリ")
-            translation = translation.replace("ゆずさん", "ユズ")
-            translation = translation.replace("優香さん", "ユウカ")
-            translation = translation.replace("優香", "ユウカ")
-            translation = translation.replace("孥", "ヌ")
-
-            return translation
+            return result["trans_result"][0]["dst"]
             # Show response
             # print(json.dumps(result, indent=4, ensure_ascii=False))
         except Exception as e:
@@ -195,17 +240,72 @@ class My_Translate:
     def _target_lang(self, type=None):
         """读当前翻译通道目标语言，映射到 lang_check 判定码（未知返回 None）。"""
         try:
-            if type in (None, "baidu"):
-                to = self.baidu_config.get("to_lang")
-            elif type == "google":
-                to = self.google_config.get("tgt_lang")
-            elif type == "argos":
-                to = self.config.get("translate", "argos", "to_lang")
-            else:
-                return None
-            return self._LANG_CODE_ALIASES.get(str(to or "").strip().lower())
+            raw = self.raw_target_lang(type)
+            if type == "custom_llm":
+                # custom_llm 目标=回复语言中文描述（raw_target_lang），反查判定码
+                return {"中文": "zh", "英文": "en", "日文": "ja",
+                        "韩文": "ko", "粤语": "yue"}.get(raw)
+            return self._LANG_CODE_ALIASES.get(str(raw or "").strip().lower())
         except Exception:
             return None
+
+    def raw_target_lang(self, type=None):
+        """当前通道原始目标语言码（LLM 翻译提示词/弹幕翻译目标回退用）。
+
+        2026-10-31 翻译审查批次新增：此前 my_handle 注入的 LLM 翻译回调把目标
+        语言固化读 baidu.to_lang——用户选 argos/google 通道时目标语言仍跟百度
+        配置。现在各通道读各自的 to_lang 配置；custom_llm 无通道语言码，按
+        任务书语义读「通用配置-回复语言」（need_lang，中文描述供提示词）。
+        """
+        try:
+            if type in (None, "baidu"):
+                return self.baidu_config.get("to_lang") or "zh"
+            if type == "google":
+                return self.google_config.get("tgt_lang") or "zh"
+            if type == "argos":
+                return self.config.get("translate", "argos", "to_lang") or "zh"
+            if type == "custom_llm":
+                need = self.config.get("need_lang") or "none"
+                return {"zh": "中文", "en": "英文", "ja": "日文", "jp": "日文",
+                        "ko": "韩文", "yue": "粤语"}.get(need, "中文")
+        except Exception:
+            pass
+        return "zh"
+
+    def trans_comment(self, text):
+        """弹幕链翻译入口（2026-10-31 翻译审查批次：补全 trans_type=弹幕）。
+
+        此前「弹幕」翻译类型全库零消费——外语弹幕原样进 LLM。任务书语义：
+        收到的信息非「通用配置-回复语言」时翻译为设定语言再处理。目标语言=
+        need_lang 映射判定码；need_lang=none（未设定回复语言）回退当前翻译
+        通道 to_lang。目标与文本语言一致跳过；翻译失败回原文（不阻塞主链）。
+
+        调用位置=双链 lang_filter_pass 之前：译文语言=回复语言，语言过滤
+        自然放行，翻译与 G3 过滤两功能叠加语义一致（翻译而非丢弃）。
+        """
+        if not text:
+            return text
+        try:
+            type = self.config_data["type"]
+        except Exception:
+            return text
+        target = None
+        try:
+            need_lang = self.config.get("need_lang") or "none"
+        except Exception:
+            need_lang = "none"
+        if need_lang != "none":
+            # need_lang 值域 {zh,en,jp,ko,yue} 与别名表键对齐（jp→ja 已有映射）
+            target = self._LANG_CODE_ALIASES.get(str(need_lang).strip().lower())
+        if target is None:
+            target = self._target_lang(type)
+        if target:
+            detected = self.common.lang_check(text)
+            if detected == target:
+                logger.debug(f"[translate] 弹幕已为目标语言 {target}，跳过翻译")
+                return text
+        out = self.trans(text, type)
+        return out if out else text
 
     def trans_reply(self, text):
         """回复链翻译入口（comment/talk 双链共用单点，D-20 纪律）：目标语言与

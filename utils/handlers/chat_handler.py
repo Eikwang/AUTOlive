@@ -7,12 +7,20 @@
 
 import os
 import re
+import threading
 import traceback
 from datetime import datetime
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
 from ..gpt_model.gpt import GPT_MODEL
 from .. import alarm_notifier
+
+# T2b H-2（/autoplan main-20261031-201249 终门批准批次）：LLM 全局并发上限
+# （信号量容量；常量起步，实播反馈排队常态后再配置化）——与 llm_breaker 故障
+# 隔离互补（熔断只计失败不节流，弹幕风暴 10+ 分发线程并发直发 API 会触发平台
+# 限流反噬，v1 审查 H-2）。
+_LLM_MAX_CONCURRENCY = 3
+_LLM_ACQUIRE_TIMEOUT_S = 30  # 槽位等待上限：超时=并发饱和降级走托底
 
 # ① 流式分句句末标点（2026-10-27 主链延迟优化批次）
 _STREAM_SENT_END = re.compile(r"[\n。！？；!?;]")
@@ -61,6 +69,8 @@ class ChatHandler:
         self.my_handle = my_handle
         # LLM 熔断器（per-channel，ENG E-3：通道间不互扰）
         self._llm_breakers = {}
+        # T2b H-2：LLM 全局并发信号量（槽位准入见 llm_handle；容量常量见模块头）
+        self._llm_semaphore = threading.BoundedSemaphore(_LLM_MAX_CONCURRENCY)
 
     def get_chat_model(self, chat_type, config):
         """
@@ -157,6 +167,13 @@ class ChatHandler:
                 return self._try_local_qa_fallback(
                     chat_type, data_json, f"熔断开路中（连续失败）")
 
+            # T2b H-2：并发槽位准入（在熔断之后获取——开路状态不占槽位；超时=并发
+            # 饱和降级走托底，不让分发线程无限堆积）。local_qa 直答分支不经过此处。
+            if not self._llm_semaphore.acquire(timeout=_LLM_ACQUIRE_TIMEOUT_S):
+                return self._try_local_qa_fallback(
+                    chat_type, data_json,
+                    f"LLM 并发饱和（>{_LLM_ACQUIRE_TIMEOUT_S}s 等待 {_LLM_MAX_CONCURRENCY} 槽位全占用）")
+
             # 获取模型
             model = self.my_handle.__dict__.get(chat_type)
             if model is None:
@@ -164,14 +181,18 @@ class ChatHandler:
                     f"模型 {chat_type} 未初始化；fix=检查 config chat_type 与对应配置节"
                     f"（custom_llm/fastrag），重启系统")
                 breaker.record_failure()
+                self._llm_semaphore.release()
                 return self._try_local_qa_fallback(chat_type, data_json, "模型未初始化")
 
             # 调用模型（使用 get_resp_sync 保持向后兼容）
             # 优先使用 get_resp_sync 方法（异步化改造后的方法）
-            if hasattr(model, 'get_resp_sync'):
-                resp_content = model.get_resp_sync(data_json)
-            else:
-                resp_content = model.chat(data_json)
+            try:
+                if hasattr(model, 'get_resp_sync'):
+                    resp_content = model.get_resp_sync(data_json)
+                else:
+                    resp_content = model.chat(data_json)
+            finally:
+                self._llm_semaphore.release()
 
             if resp_content:
                 breaker.record_success()
@@ -339,6 +360,13 @@ class ChatHandler:
             content = self.my_handle.comment_check_and_replace(content)
             if content is None:
                 return
+
+            # 弹幕翻译（2026-10-31 翻译审查批次：comment/talk 双链共用语义——
+            # trans_type=弹幕/弹幕+回复 时外语弹幕翻译为回复语言再处理，
+            # 位于语言过滤前，译文自然放行 lang_filter）
+            if self.my_handle.config.get("translate", "enable") and (self.my_handle.config.get("translate", "trans_type") == "弹幕" or \
+                self.my_handle.config.get("translate", "trans_type") == "弹幕+回复"):
+                content = self.my_handle.my_translate.trans_comment(content)
 
             # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
             if not self.my_handle.lang_filter_pass(content):
