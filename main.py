@@ -271,7 +271,20 @@ class MainApplication:
             # 启动任务调度器
             self.task_scheduler.start_all()
             logger.info("任务调度器已启动")
-            
+
+            # T4 启动期冒烟自检（/autoplan main-20261031-201249 终门批准批次）：
+            # 词表可达/曲源目录/词库桥/串口引用/优先级覆盖——只 warn 不阻断，
+            # 后台线程延迟 3s 跑一次（对齐 webui 退役键告知的启动模式）
+            import threading as _smoke_th
+            _smoke_cfg = self.config
+            def _run_startup_smoke():
+                try:
+                    from utils.startup_smoke import run_startup_smoke
+                    run_startup_smoke(_smoke_cfg)
+                except Exception:
+                    pass  # 冒烟失败绝不阻断启动
+            threading.Timer(3.0, _run_startup_smoke, name="startup-smoke").start()
+
             # 启动输入监听
             if self.config.get("talk", "key_listener_enable"):
                 self.input_handler.start_listening()
