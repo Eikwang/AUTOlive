@@ -32,6 +32,7 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
     ("本地输入", [
         ("talk", "聊天（语音输入）"),
         ("local_qa_audio", "本地问答-音频"),
+        ("local_qa_text", "本地问答-文本"),
         ("reread", "复读"),
         ("reread_top_priority", "最高优先级复读"),
     ]),
@@ -52,7 +53,7 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
     "互动优先": {
         "comment": 80, "read_comment": 75, "gift": 70, "follow": 65,
         "entrance": 55, "song": 50, "integral": 45, "key_mapping": 40,
-        "talk": 35, "local_qa_audio": 30, "reread": 25,
+        "talk": 35, "local_qa_audio": 30, "local_qa_text": 30, "reread": 25,
         "assistant_anchor_text": 20, "assistant_anchor_audio": 20,
         "schedule": 15, "trends_copywriting": 12, "idle_time_task": 10,
         "reread_top_priority": 999,
@@ -61,14 +62,14 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
         "schedule": 70, "trends_copywriting": 65, "song": 60, "idle_time_task": 55,
         "comment": 40, "read_comment": 35, "gift": 30, "follow": 28,
         "entrance": 25, "integral": 20, "key_mapping": 18,
-        "talk": 15, "local_qa_audio": 15, "reread": 12,
+        "talk": 15, "local_qa_audio": 15, "local_qa_text": 15, "reread": 12,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
         "reread_top_priority": 999,
     },
     "省资源": {
         "comment": 10, "read_comment": 10, "entrance": 10, "gift": 10,
         "follow": 10, "song": 10, "integral": 10, "key_mapping": 10,
-        "talk": 10, "local_qa_audio": 10, "reread": 10,
+        "talk": 10, "local_qa_audio": 10, "local_qa_text": 10, "reread": 10,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
         "schedule": 10, "trends_copywriting": 10, "idle_time_task": 10,
         "reread_top_priority": 999,
@@ -146,7 +147,7 @@ def create_filter_queue_tab(
                 elif cfg_section is not None:
                     # UI 未渲染的键（理论上不会发生）：直接落盘
                     set_config_callback("filter", "priority_mapping", key, value=v)
-            ui.notify(position="top", type="positive", message=f"已应用预设「{name}」（18 项优先级已写入）")
+            ui.notify(position="top", type="positive", message=f"已应用预设「{name}」（{len(vals)} 项优先级已写入）")
 
         with ui.row():
             for preset_name in build_priority_presets():

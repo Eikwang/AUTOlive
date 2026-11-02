@@ -477,11 +477,11 @@ class TestCompletionPredicate:
         h.trigger_gift()
         assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 第1次：未达档一（3）→ 基础素材
         # 跨档触发：置计数 5 → 本次第 6 次 → angry 档（从第 6 次起）
-        # （key_last 置 now-1：绕过节流且不触发 GAP-2 衰减——该测试测档位选择，
-        #   窗口衰减行为由 tests/test_choreography_completion.py::TestCounterDecay 专测）
+        # （key_last 为退役节流/衰减的历史锚点，引擎零消费——直接置计数即可，
+        #   计次不衰减行为由 tests/test_choreography_completion.py::TestCounterNoDecay 专测）
         h.engine.state = "default"
         h.engine.seq = None
-        h.engine.key_last["girl_A"] = h.now - 10  # >min_retrigger_s 绕过节流，<300 不触发衰减
+        h.engine.key_last["girl_A"] = h.now - 10
         h.engine.counters["girl_A"] = 5
         h.engine.decide_trigger("gift", "小心心", gift_data())
         assert h.engine.seq["steps"][0]["segment"] == "A_生气入场"

@@ -175,7 +175,9 @@ class KeywordHub:
         if query_enable is None:
             query_enable = True
         if query_enable:
-            cmds = query_cfg.get("cmd") or ["我的积分", "查询积分"]
+            # as_str_list 归一同 _integral_cmd_hit（防存量字符串污染子串退化）
+            from .handlers.feature_handler import as_str_list
+            cmds = as_str_list(query_cfg.get("cmd")) or ["我的积分", "查询积分"]
             query = content in cmds
         return sign, query
 
@@ -185,7 +187,11 @@ class KeywordHub:
             enable = True
         if not enable:
             return False
-        cmds = self.my_handle.config.get("integral", behavior, key)
+        # as_str_list 双形态归一（2026-10-31 积分审查批次）：存量 UI 字符串污染
+        # 时 `content in "签到\n打卡"` 退化为子串匹配（「签」也命中），归一为
+        # list 恢复精确匹配语义
+        from .handlers.feature_handler import as_str_list
+        cmds = as_str_list(self.my_handle.config.get("integral", behavior, key))
         if not cmds:
             cmds = default_cmds
         return content in cmds
@@ -263,7 +269,11 @@ class KeywordHub:
     # —— 礼物点歌映射（原 choose_song_gift_trigger 匹配段）——
 
     def _match_gift_song(self, gift_name):
+        """礼物点歌映射（2026-10-31 点歌审查批次：受 gift_song_enable 门控——
+        关闭=礼物仅答谢，映射不触发点歌）。"""
         if not self.my_handle.config.get("choose_song", "enable"):
+            return ""
+        if not self.my_handle.config.get("choose_song", "gift_song_enable"):
             return ""
         if not gift_name:
             return ""

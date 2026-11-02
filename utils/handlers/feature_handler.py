@@ -21,27 +21,86 @@ from ..base import logger
 # （迁移见 utils/db.ensure_integral_unique_index，索引缺失时本语句报错）。
 # 逐列累加语义：
 #   integral     累加（excluded.integral = 本次行为得分）
-#   view_num     累加——字段语义=累计观看（入场）次数，入场事件传 1、其余行为传 0；
-#                「覆盖或累加」二选一按字段语义定为累加（观看次数天然只增，覆盖会丢历史）
-#   sign_num     条件自增——签到事件传 1、其余行为传 0，即仅签到时 +1
-#   last_sign_ts 仅签到时覆盖（excluded.sign_num > 0），其余行为保留原值
+#   view_num     累加——字段语义=计分入场次数（2026-10-31 积分审查批次起：12h 限频
+#                窗口内的重复入场不计分不写库，view_num 即「总获得积分的进场次数」，
+#                与 {entrance_num} 变量语义一致），入场事件传 1、其余行为传 0
+#   sign_num     条件自增——签到事件传 1、其余行为传 0，即仅计分签到时 +1
+#                （语义=计分签到次数，与 {sign_num} 变量一致）
+#   last_sign_ts 仅签到时覆盖（excluded.sign_num > 0），其余行为保留原值；
+#                非签到事件传 now 占位（存量表 last_sign_ts NOT NULL，fresh INSERT
+#                不可为 None）——签到限频判定以 sign_num>0 为门卫排除占位值
 #   total_price  累加（excluded.total_price = 本次礼物总价，非礼物行为传 0）
 #   last_ts      每次行为覆盖
+#   last_entrance_ts 仅入场时覆盖（excluded.view_num > 0），非入场事件传 None
+#                （列可空）——入场限频判定以 view_num>0 为门卫
 INTEGRAL_UPSERT_SQL = '''
-INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, last_sign_ts, total_price, last_ts)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, last_sign_ts, total_price, last_ts, last_entrance_ts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(platform, username, uid) DO UPDATE SET
     integral = integral + excluded.integral,
     view_num = view_num + excluded.view_num,
     sign_num = sign_num + excluded.sign_num,
     last_sign_ts = CASE WHEN excluded.sign_num > 0 THEN excluded.last_sign_ts ELSE last_sign_ts END,
     total_price = total_price + excluded.total_price,
-    last_ts = excluded.last_ts
+    last_ts = excluded.last_ts,
+    last_entrance_ts = CASE WHEN excluded.view_num > 0 THEN excluded.last_entrance_ts ELSE last_entrance_ts END
 '''
 
 # 积分写库重试退避（E3/CAP6）：失败按 0.1*2^k 秒退避，最多 3 次尝试；
 # WAL 与 busy_timeout 已在 utils/db.py 连接初始化处统一设置。
 INTEGRAL_DB_MAX_ATTEMPTS = 3
+
+# 签到/入场 12h 隐形限频（2026-10-31 积分审查批次，防频繁刷分）：距上次
+# 「计分」签到/入场不足 12 小时，本行为不计分、不写库、不回复（隐形=无配置
+# 项，静默拦截）。礼物/关注/查询不受限频。解析失败的库时间戳视为从未计分
+# （fail-open，脏数据不封死计分链）。
+INTEGRAL_COOLDOWN_HOURS = 12
+
+
+def parse_db_ts(value):
+    """解析库中时间戳（datetime 或 ISO 字符串）为 datetime；空值/非法返回 None。"""
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def cooldown_active(last_ts, now):
+    """行为是否处于 12 小时限频窗口内。
+
+    Args:
+        last_ts: 库中上次计分时间（datetime 或 ISO 字符串；None/解析失败=从未计分）
+        now (datetime): 当前时间
+
+    Returns:
+        bool: True=窗口内（应拦截本次计分）
+    """
+    ts = parse_db_ts(last_ts)
+    if ts is None:
+        return False
+    return (now - ts).total_seconds() < INTEGRAL_COOLDOWN_HOURS * 3600
+
+
+def as_str_list(value):
+    """str/list 双形态归一（UI 存量字符串污染容错，与答谢 _copy 同款兼容）。
+
+    str 按行拆为 list（去除空行/首尾空白）；list/tuple 原样转 list；
+    空值/其它类型返回 None。
+
+    根因：integral 页 textarea 曾未传 split_lines=True，UI 保存把文案列表
+    污染成整串字符串——后端 random.choice 按字符迭代、cmd 匹配退化为子串
+    语义（「签」也命中签到）。UI 侧已修（split_lines=True），此处兜底存量。
+    """
+    if isinstance(value, str):
+        lines = [line.strip() for line in value.split("\n") if line.strip()]
+        return lines or None
+    if isinstance(value, (list, tuple)):
+        return list(value) if value else None
+    return None
 
 # 内置默认档位表（D-17：阈值+文案，至少 2 档）。仅当 config 缺少
 # integral.<behavior>.copywriting 时启用；config 中的 copywriting 块本身即档位表
@@ -148,7 +207,23 @@ class FeatureHandler:
         # 积分缺键告警去重（每个键仅警告一次，避免直播期间刷屏）
         self._integral_warned_keys = set()
     
-    def _qa_best_match(self, question, file_path, similarity=0.6):
+    def _qa_entries(self, source):
+        """问答数据源解析（2026-10-31 本地问答审查批次）：config 内嵌行列表
+        （新生产配置面，前端 textarea 实时保存）或 TXT 文件路径（既有别名
+        find_answer/load_data_from_file 语义与测试锚点保留）。
+
+        Args:
+            source (list | tuple | str | None): 问答行列表或词库文件路径
+
+        Returns:
+            list[tuple]: (question, answer, question_tokens|None) 三元组列表
+        """
+        if isinstance(source, (list, tuple)):
+            from .assistant_router import load_qa_entries_from_config
+            return load_qa_entries_from_config(source, "本地问答词库")
+        return self.load_data_from_file(source)
+
+    def _qa_best_match(self, question, source, similarity=0.6):
         """一问一答匹配统一实现（F6 收敛：原 find_answer/find_similar_answer
         函数体完全相同——两种格式历来共用同一管道行加载器；F5 修复：原实现调用
         不存在的 Common.calculate_similarity→AttributeError 被吞→主知识库匹配
@@ -158,14 +233,14 @@ class FeatureHandler:
 
         Args:
             question (str): 问题
-            file_path (str): 词库文件路径
+            source (list | tuple | str | None): 问答行列表（config 内嵌）或词库文件路径
             similarity (float): 相似度阈值
 
         Returns:
-            str | None: 答案；未命中/文件不可读返回 None
+            str | None: 答案；未命中/词库不可读返回 None
         """
         try:
-            data = self.load_data_from_file(file_path)
+            data = self._qa_entries(source)
             if not data:
                 return None
             from ..common.text_mixin import normalize_for_match, tokenize_for_match
@@ -268,9 +343,13 @@ class FeatureHandler:
             # 此前零消费——死开关；显式 False 关闭，缺键/None 视为启用保兼容）
             if self.my_handle.config.get("local_qa", "text", "enable") is False:
                 return None
+            _src = self.my_handle.config.get("local_qa", "text", "data")
+            if _src is None:
+                # 存量迁移桥：file_path 已退役（前端保存时清除），未重存旧配置回退文件词库
+                _src = self.my_handle.config.get("local_qa", "text", "file_path")
             tmp = self._qa_best_match(
                 content,
-                self.my_handle.config.get("local_qa", "text", "file_path"),
+                _src,
                 self.my_handle.config.get("local_qa", "text", "similarity"))
             if tmp is None:
                 return None
@@ -401,10 +480,14 @@ class FeatureHandler:
     # ---------- 点歌模式（/autoplan 2026-10-23 批次：礼物驱动重构 R1-R5/R7/R12）----------
     # 架构：双触发（弹幕意图/礼物映射）→ 纯函数匹配引擎（text_mixin.match_song_intent /
     # match_gift_to_song_entry）→ 三输出（文案播报 / 翻唱入队 / SongMode 播放）。
-    # 编排订阅 on_song（WP-10）与 C-5 插播回调保留；同歌冷却+回应节流防刷屏。
+    # 编排订阅 on_song（WP-10）与 C-5 插播回调保留。
+    # 2026-10-31 点歌审查批次：同歌冷却/回应节流退役（系统已有限入/去重/优先级
+    # 队列防刷屏）；关键词直点歌与礼物点歌统一走 _song_announce_and_play。
 
-    _SONG_REPLY_DEFAULT_COOLDOWN_S = 30
-    _SONG_PLAY_COOLDOWN_DEFAULT_S = 300
+    # 2026-10-31 点歌审查批次：礼物点歌开关语义（choose_song.gift_song_enable）
+    # - 开启：关键词点歌命中→仅回应引导文案（打赏即唱），礼物命中映射→播报+播放；
+    # - 关闭：关键词点歌命中→播报匹配成功文案并直接进入播放流程（免费点歌），
+    #   礼物映射不触发点歌（礼物仅答谢）。缺键=关闭（存量行为=关键词直点歌）。
 
     def _song_copy_message(self, username, copy_text):
         """R4 助播路由（T1 收编为中央助手调用方）：assistant_anchor.type 含 "song"
@@ -439,11 +522,34 @@ class FeatureHandler:
             return template
 
     def _song_song_names(self):
-        """歌曲列表的 song 字段集合（R2：弹幕匹配面=映射表歌名，非磁盘目录）。"""
+        """歌曲列表（2026-10-31 点歌审查批次扩展）：映射表歌名 ∪ covers/ 翻唱
+        成品名（<song>__<profile>.wav 剥离档案后缀）∪ song/ 根目录曲源音频名——
+        翻唱功能产物自动进入点歌列表（任务书：翻唱制作的歌曲自动可点）。"""
+        names = set()
         mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
-        if not isinstance(mapping, dict):
-            return []
-        return sorted({str(v).strip() for v in mapping.values() if str(v).strip()})
+        if isinstance(mapping, dict):
+            names.update(str(v).strip() for v in mapping.values() if str(v).strip())
+        try:
+            from utils.autolive_paths import song_audio_root
+            root = song_audio_root(self.my_handle.config)
+            if os.path.isdir(root):
+                for fn in os.listdir(root):
+                    stem, ext = os.path.splitext(fn)
+                    if ext.lower() in (".mp3", ".wav", ".flac") and stem:
+                        names.add(stem)
+                covers_dir = os.path.join(root, "covers")
+                if os.path.isdir(covers_dir):
+                    for fn in os.listdir(covers_dir):
+                        stem, ext = os.path.splitext(fn)
+                        low = ext.lower()
+                        if low not in (".wav", ".mp3") or stem.endswith("_vocal") or stem.endswith("_inst"):
+                            continue
+                        base = stem.split("__")[0].strip()
+                        if base:
+                            names.add(base)
+        except Exception:
+            logger.warning("[点歌] 歌曲列表磁盘扫描异常（回落映射表歌名）", exc_info=True)
+        return sorted(names)
 
     def _song_find_audio(self, song_name):
         """R2 song 字段→音频文件解析：内部根目录及 covers/ 内按归一歌名匹配
@@ -501,38 +607,6 @@ class FeatureHandler:
                 return (full, None, None)
         return None
 
-    def _song_cooldown_check(self, song_name):
-        """同歌最小冷却（native 后悔场景 1）：冷却内返回 False 防刷屏。"""
-        try:
-            cooldown = int(self.my_handle.config.get("choose_song", "song_cooldown_s")
-                           or self._SONG_PLAY_COOLDOWN_DEFAULT_S)
-        except (TypeError, ValueError):
-            cooldown = self._SONG_PLAY_COOLDOWN_DEFAULT_S
-        now = time.time()
-        last = getattr(self, "_song_last_play_ts", {}).get(song_name, 0)
-        if now - last < cooldown:
-            logger.info(f"[点歌] 同歌冷却中（{cooldown}s）：{song_name}")
-            return False
-        if not hasattr(self, "_song_last_play_ts"):
-            self._song_last_play_ts = {}
-        self._song_last_play_ts[song_name] = now
-        return True
-
-    def _song_reply_throttled(self):
-        """点歌判断回应节流（F-S3：既有 filter 无弹幕重复节流）。"""
-        try:
-            cooldown = int(self.my_handle.config.get("choose_song", "reply_cooldown_s")
-                           or self._SONG_REPLY_DEFAULT_COOLDOWN_S)
-        except (TypeError, ValueError):
-            cooldown = self._SONG_REPLY_DEFAULT_COOLDOWN_S
-        now = time.time()
-        last = getattr(self, "_song_reply_last_ts", 0)
-        if now - last < cooldown:
-            logger.info(f"[点歌] 回应节流中（{cooldown}s）")
-            return True
-        self._song_reply_last_ts = now
-        return False
-
     def _song_play_message(self, username, audio_path, backing_path, song_name):
         """SongMode 播放入队（R6/R12：song 消息扩展 backing_path 伴奏轨；
         编排订阅 on_song 保留 WP-10——画面序列接管，音频走 SongMode 原路）。"""
@@ -557,31 +631,26 @@ class FeatureHandler:
         self.my_handle.audio_synthesis_handle(message)
 
     def _song_announce_and_play(self, username, song_name, gift_name):
-        """礼物/点歌命中后的播报+播放主路径（R2/R5/R7）：
-        ① covers 成品命中→成功文案+播放（分轨双轨或整轨）；
-        ② 无成品→prepare_copy+入队翻唱（C-5 产出后自动插播）。
+        """礼物/点歌命中后的播报+播放主路径（R2/R5/R7；2026-10-31 点歌审查批次）：
+        ① 先播匹配成功文案（match_success_copy——关键词直点歌与礼物点歌共用，
+        准备文案已退役，无成品场景播报后静默入队）；
+        ② covers 成品命中→播放（分轨双轨或整轨降级）；
+        ③ 无成品→异步入队翻唱（C-5 产出后自动插播）。
         返回 True=已处理（礼物触发场景答谢照旧由调用方保证）。"""
+        copy_text = self._render_song_copy(
+            self.my_handle.config.get("choose_song", "match_success_copy") or "",
+            user=username, content=song_name, gift=gift_name or "")
+        self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, copy_text)
+        self.my_handle.audio_synthesis_handle(self._song_copy_message(username, copy_text))
         hit = self._song_covers_hit(song_name)
         if hit is not None:
             cover_full, vocal, inst = hit
             # R6 主方案：分轨齐全→人声轨驱动+伴奏外放；缺失→整轨自动降级
             audio_path, backing = (vocal, inst) if vocal else (cover_full, None)
-            copy_text = self._render_song_copy(
-                self.my_handle.config.get("choose_song", "match_success_copy") or "",
-                user=username, content=song_name, gift=gift_name or "")
             logger.info(f"[点歌] 命中翻唱成品: {cover_full}（分轨={'有' if vocal else '无→整轨'}）")
-            self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, copy_text)
-            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, copy_text))
             self._song_play_message(username, audio_path, backing, song_name)
             return True
-        # 无成品：prepare_copy 确认 + 异步入队翻唱（DX-5/C-5 既有语义）
-        prepare_text = self._render_song_copy(
-            self.my_handle.config.get("choose_song", "prepare_copy") or "",
-            user=username, content=song_name, gift=gift_name or "")
-        logger.info(f"[点歌] 无成品，准备翻唱: {song_name}")
-        if prepare_text:
-            self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, prepare_text)
-            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, prepare_text))
+        logger.info(f"[点歌] 无成品，入队翻唱: {song_name}")
         self._song_enqueue_cover(username, song_name)
         return True
 
@@ -611,6 +680,8 @@ class FeatureHandler:
         gift_song_map→命中=答谢照旧（调用方保证）+成功播报+播放/入队；
         未命中=返回 False（仅答谢，语义不变）。异常不中断礼物主流程。
 
+        2026-10-31 点歌审查批次：礼物点歌受 choose_song.gift_song_enable 门控
+        （关闭=礼物仅答谢，映射不触发点歌）；同歌冷却随批次退役。
         2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定
         （信任 hub_result.gift_song，空串=未命中）；None=自行匹配。"""
         try:
@@ -621,6 +692,8 @@ class FeatureHandler:
             else:
                 if not self.my_handle.config.get("choose_song", "enable"):
                     return False
+                if not self.my_handle.config.get("choose_song", "gift_song_enable"):
+                    return False
                 if not gift_name:
                     return False
                 from utils.common.text_mixin import match_gift_to_song_entry
@@ -628,8 +701,6 @@ class FeatureHandler:
                 song_name = match_gift_to_song_entry(gift_name, mapping)
             if song_name is None:
                 return False
-            if not self._song_cooldown_check(song_name):
-                return True  # 冷却内：跳过点歌但答谢照旧
             logger.info(f"[点歌] 礼物命中：[{username}] {gift_name} → {song_name}")
             return self._song_announce_and_play(username, song_name, gift_name)
         except Exception:
@@ -638,10 +709,13 @@ class FeatureHandler:
 
     def choose_song_handle(self, data, hub_result=None):
         """R1/R2 弹幕点歌判断：contains 触发词命中→剥离后对歌曲列表（映射表
-        song 字段）相似度匹配。命中→guide_copy 引导打赏（回应，不执行点歌播放）；
-        未命中→match_fail_copy（回应，不播放）。移除 stop_cmd/random_cmd/song_path
-        （/autoplan 2026-10-23 批次 R1）。回应受 reply_cooldown_s 节流（F-S3）。
+        歌名 ∪ 翻唱成品 ∪ song/ 曲源，见 _song_song_names）相似度匹配。
+        移除 stop_cmd/random_cmd/song_path（/autoplan 2026-10-23 批次 R1）。
 
+        2026-10-31 点歌审查批次：命中行为按 gift_song_enable 分叉——
+        开启=guide_copy 引导打赏（回应，不进播放，打赏礼物才唱）；
+        关闭=match_success_copy 播报并直接进入播放流程（关键词免费点歌）。
+        未命中→match_fail_copy（回应，不播放）。回应节流已退役。
         2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定（信任
         hub_result.song_verdict，None=未触发直接返回 False）；None=自行匹配。"""
         try:
@@ -667,23 +741,26 @@ class FeatureHandler:
             state, song_name, _ratio = verdict
             logger.info(f"[点歌] 弹幕意图{'命中' if state == 'matched' else '触发（列表无歌）'}："
                         f"[{username}] {content}" + (f" → {song_name}" if song_name else ""))
-            if self._song_reply_throttled():
-                return True
-            mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
             if state == "matched":
-                gift_for_song = next((str(k) for k, v in mapping.items()
-                                      if str(v).strip() == song_name), "")
-                # 场景 2：仅回应引导打赏，不执行点歌播放
-                guide_text = self._render_song_copy(
-                    self.my_handle.config.get("choose_song", "guide_copy") or "",
-                    user=username, content=song_name, gift=gift_for_song)
-            else:
-                # 场景 4：列表无歌→失败文案，回应不播放
-                guide_text = self._render_song_copy(
-                    self.my_handle.config.get("choose_song", "match_fail_copy") or "",
-                    user=username, content=content, gift="")
-            self.my_handle.webui_show_chat_log_callback("点歌", data, guide_text)
-            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, guide_text))
+                # 2026-10-31 分叉：礼物点歌开启→仅回应引导打赏，不进播放；
+                # 关闭→播报匹配成功文案并进入播放流程（免费点歌）
+                if self.my_handle.config.get("choose_song", "gift_song_enable"):
+                    mapping = self.my_handle.config.get("choose_song", "gift_song_map") or {}
+                    gift_for_song = next((str(k) for k, v in mapping.items()
+                                          if str(v).strip() == song_name), "")
+                    guide_text = self._render_song_copy(
+                        self.my_handle.config.get("choose_song", "guide_copy") or "",
+                        user=username, content=song_name, gift=gift_for_song)
+                    self.my_handle.webui_show_chat_log_callback("点歌", data, guide_text)
+                    self.my_handle.audio_synthesis_handle(self._song_copy_message(username, guide_text))
+                    return True
+                return self._song_announce_and_play(username, song_name, "")
+            # 场景 4：列表无歌→失败文案，回应不播放
+            fail_text = self._render_song_copy(
+                self.my_handle.config.get("choose_song", "match_fail_copy") or "",
+                user=username, content=content, gift="")
+            self.my_handle.webui_show_chat_log_callback("点歌", data, fail_text)
+            self.my_handle.audio_synthesis_handle(self._song_copy_message(username, fail_text))
             return True
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -724,7 +801,9 @@ class FeatureHandler:
 
         Returns:
             bool: 是否触发并处理。失败语义（CAP6）：写库失败 log 后返回 False，
-                  不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）
+                  不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）。
+                  2026-10-31 补充：签到处于 12h 限频窗口时返回 True——该弹幕已被
+                  积分链消费（静默拦截不计分），不再落入 LLM/助播链
         """
         try:
             # 检查是否启用积分（中枢判定通道下保留双检：热载竞态兜底，成本可忽略）
@@ -788,9 +867,10 @@ class FeatureHandler:
             return False
 
     def _integral_fetch_row(self, platform, username, uid):
-        """查询积分行，返回 (integral, view_num, sign_num, total_price) 或 None（无记录/查询失败）。"""
-        sql = ("SELECT integral, view_num, sign_num, total_price FROM integral "
-               "WHERE platform = ? AND username = ? AND uid = ?")
+        """查询积分行，返回 (integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts)
+        或 None（无记录/查询失败）；后两列为 2026-10-31 12h 限频新增（调用方按索引取前四列不受影响）。"""
+        sql = ("SELECT integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts "
+               "FROM integral WHERE platform = ? AND username = ? AND uid = ?")
         try:
             return self.my_handle.db.fetch_one(sql, (platform, username, uid))
         except Exception:
@@ -859,6 +939,7 @@ class FeatureHandler:
                     block = candidate
                     break
         copy_list = block.get("copywriting") if isinstance(block, dict) else None
+        copy_list = as_str_list(copy_list)
         if not copy_list:
             logger.warning("积分档位文案缺失，本行为积分已计入但不回复")
             return False
@@ -878,7 +959,7 @@ class FeatureHandler:
         content = str(data.get("content", "") or "").strip()
         # 审查修复（发布批次）：缺键告警提到 hub 守卫外——hub_result 非 None 时
         # 也须感知存量缺 integral.sign.cmd 配置（warn_once 自去重，每键仅一次）
-        sign_cmds = self.my_handle.config.get("integral", "sign", "cmd")
+        sign_cmds = as_str_list(self.my_handle.config.get("integral", "sign", "cmd"))
         if not sign_cmds:
             sign_cmds = ["签到", "打卡"]
             self._integral_warn_once("integral.sign.cmd", "积分配置缺少 integral.sign.cmd，使用默认签到命令词：签到/打卡")
@@ -892,6 +973,16 @@ class FeatureHandler:
             return False
 
         row = self._integral_fetch_row(platform, username, uid)
+        now = datetime.now()
+        # 12h 隐形限频（防刷分）：门卫 sign_num>0——上次签到真实发生过才看
+        # last_sign_ts（排除非签到事件 fresh INSERT 写入的 now 占位值）。
+        # 窗口内静默拦截：不计分、不写库、不回复（view/sign 次数与积分同步
+        # 不动，保持「总打卡次数=计分次数」口径）。返回 True=该弹幕已被积分
+        # 链消费，不再落入 LLM/助播链（防刷分弹幕刷出 AI 回复）。
+        if row and int(row[2] or 0) > 0 and cooldown_active(row[4], now):
+            logger.info(f"[积分] 用户 {username} 签到处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+            return True
+
         old_sign_num = int(row[2]) if row else 0
         new_sign_num = old_sign_num + 1
 
@@ -904,8 +995,7 @@ class FeatureHandler:
             self._integral_warn_once("integral.sign.get_integral", "积分配置缺少 integral.sign.get_integral，使用默认值 1")
         points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
 
-        now = datetime.now()
-        args = (platform, username, uid, points, 0, 1, now, 0, now)
+        args = (platform, username, uid, points, 0, 1, now, 0, now, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             # CAP6：写库失败不中断直播主流程——返回 False（状态条告警标记），弹幕继续走常规链路
             logger.error(f"签到积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
@@ -945,7 +1035,9 @@ class FeatureHandler:
         points = resolve_gift_points(block, proportion, total_price)
 
         now = datetime.now()
-        args = (platform, username, uid, points, 0, 0, now, total_price, now)
+        # 非签到事件 last_sign_ts 传 now 占位（UPSERT CASE 不消费；存量表该列
+        # NOT NULL，fresh INSERT 不可为 None）；last_entrance_ts 传 None（可空列）
+        args = (platform, username, uid, points, 0, 0, now, total_price, now, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"礼物积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
@@ -961,7 +1053,7 @@ class FeatureHandler:
         return True
 
     def _integral_entrance_handle(self, data):
-        """入场计分：view_num（累计观看次数）+1，积分按入场次数档位累加。"""
+        """入场计分：view_num（计分入场次数，12h 限频窗口内不计）+1，积分按入场次数档位累加。"""
         enable = self.my_handle.config.get("integral", "entrance", "enable")
         if enable is None:
             self._integral_warn_once("integral.entrance.enable", "积分配置缺少 integral.entrance.enable，按默认开启处理")
@@ -974,6 +1066,15 @@ class FeatureHandler:
             return False
 
         row = self._integral_fetch_row(platform, username, uid)
+        now = datetime.now()
+        # 12h 隐形限频（防刷分）：门卫 view_num>0——上次入场计分真实发生过才看
+        # last_entrance_ts（NULL=迁移前存量/从未计分，fail-open 放行）。
+        # 窗口内静默拦截：不计分、不写库（view_num 即「总获得积分的进场次数」，
+        # 与 {entrance_num} 变量口径一致）、不回复。
+        if row and int(row[1] or 0) > 0 and cooldown_active(row[5], now):
+            logger.info(f"[积分] 用户 {username} 入场处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+            return True
+
         old_view_num = int(row[1]) if row else 0
         new_view_num = old_view_num + 1
 
@@ -986,8 +1087,7 @@ class FeatureHandler:
             self._integral_warn_once("integral.entrance.get_integral", "积分配置缺少 integral.entrance.get_integral，使用默认值 1")
         points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
 
-        now = datetime.now()
-        args = (platform, username, uid, points, 1, 0, now, 0, now)
+        args = (platform, username, uid, points, 1, 0, now, 0, now, now)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"入场积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
@@ -1020,13 +1120,14 @@ class FeatureHandler:
                                      "积分配置缺少 integral.follow.get_integral，使用默认值 1")
         points = int(points)
 
-        copy_list = self.my_handle.config.get("integral", "follow", "copywriting")
+        copy_list = as_str_list(self.my_handle.config.get("integral", "follow", "copywriting"))
         if not copy_list:
             copy_list = ["{username}感谢关注，获得{get_integral}点积分"]
             self._integral_warn_once("integral.follow.copywriting", "积分配置缺少 integral.follow.copywriting，使用默认关注文案")
 
         now = datetime.now()
-        args = (platform, username, uid, points, 0, 0, now, 0, now)
+        # 关注无 12h 限频（任务书仅签到/入场限频）；列占位语义同礼物
+        args = (platform, username, uid, points, 0, 0, now, 0, now, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"关注积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
@@ -1050,7 +1151,7 @@ class FeatureHandler:
 
         content = str(data.get("content", "") or "").strip()
         # 审查修复（发布批次）：缺键告警提到 hub 守卫外（同 _integral_sign_handle）
-        cmds = query_cfg.get("cmd")
+        cmds = as_str_list(query_cfg.get("cmd"))
         if not cmds:
             cmds = ["我的积分", "查询积分"]
             self._integral_warn_once("integral.crud.query.cmd", "积分配置缺少 integral.crud.query.cmd，使用默认查询命令词：我的积分/查询积分")
@@ -1072,10 +1173,10 @@ class FeatureHandler:
         row = self._integral_fetch_row(platform, username, uid)
         if row is None:
             # D-12：无记录用户回复「暂无积分」分支文案（不静默）
-            copy_list = query_cfg.get("no_record_copywriting") or [_DEFAULT_QUERY_NO_RECORD_COPY]
+            copy_list = as_str_list(query_cfg.get("no_record_copywriting")) or [_DEFAULT_QUERY_NO_RECORD_COPY]
             variables["integral"] = 0
         else:
-            copy_list = query_cfg.get("copywriting") or ["{username}，您当前的积分是{integral}"]
+            copy_list = as_str_list(query_cfg.get("copywriting")) or ["{username}，您当前的积分是{integral}"]
             variables["integral"] = int(row[0])
 
         self._integral_format_and_reply(copy_list, data, variables)
@@ -1119,9 +1220,19 @@ class FeatureHandler:
         return True
 
     def _serial_send(self, key_mapping_config: dict, data: dict):
-        """串口触发（S-1 限速+同句去重；asyncio 安全执行——T-c 适配点④）。"""
+        """串口触发（S-1 限速+同句去重；asyncio 安全执行——T-c 适配点④）。
+
+        2026-10-31 审查批次：①（F2）serial_send_data 空/全空白行提前返回
+        None（原 random.choice([]) IndexError 落外层 traceback）；②（F3）同句
+        去重限定弹幕/回复源——礼物载荷无 content，原实现连续同礼物仅首个触发、
+        其余被误判"同句"静默吞掉（与全面战争类连送玩法冲突，刷屏由限速承担）。
+        """
         username = str(data.get("username", ""))
-        tmp = random.choice(key_mapping_config.get("serial_send_data") or [])
+        serial_pool = [str(item).strip() for item in (key_mapping_config.get("serial_send_data") or []) if str(item).strip()]
+        if not serial_pool:
+            logger.debug("串口触发跳过：配置组未填写串口发送内容")
+            return None
+        tmp = random.choice(serial_pool)
         if not tmp:
             return None
         tmp = self.my_handle.common.brackets_text_randomize(tmp)
@@ -1135,8 +1246,8 @@ class FeatureHandler:
         }
         tmp = self.my_handle.common.dynamic_variable_replacement(tmp, data_json)
 
-        # S-1 同句去重：同一弹幕内容不重复触发串口（复用 *_single_sentence_trigger_once 语义）
-        if FeatureHandler._serial_last_content == tmp and data.get("content") == getattr(self, "_serial_last_source", None):
+        # S-1 同句去重：同一弹幕内容不重复触发串口（仅弹幕/回复源——礼物无 content）
+        if data.get("content") is not None and FeatureHandler._serial_last_content == tmp and data.get("content") == getattr(self, "_serial_last_source", None):
             logger.debug(f"S-1 同句去重：{tmp} 已触发过，跳过")
             return None
 
@@ -1176,17 +1287,24 @@ class FeatureHandler:
             return None
 
     def _trigger_key_press(self, key_mapping_config: dict, data: dict):
-        """按键触发（pyautogui 延迟导入——未安装时降级警告，T-c 适配点②）。"""
+        """按键触发（pyautogui 延迟导入——未安装时降级警告，T-c 适配点②）。
+
+        2026-10-31 审查批次（F4）：空 keys（未填/全空白行）返回 None——原实现
+        空转后仍返回 True 占位，once 开启时阻断同组串口触发。
+        """
         try:
             import pyautogui
         except ImportError:
             logger.warning("按键触发需要 pyautogui（pip install pyautogui），当前未安装，跳过本次按键模拟")
-            return
-        for key in key_mapping_config.get("keys") or []:
+            return None
+        keys = [str(key).strip() for key in (key_mapping_config.get("keys") or []) if str(key).strip()]
+        if not keys:
+            return None
+        for key in keys:
             pyautogui.keyDown(key)
-        for key in key_mapping_config.get("keys") or []:
+        for key in keys:
             pyautogui.keyUp(key)
-        logger.info(f"【触发按键映射】按键：{key_mapping_config.get('keys')}")
+        logger.info(f"【触发按键映射】按键：{keys}")
         return True
 
     def key_mapping_handle(self, type, data, hub_result=None):
@@ -1211,17 +1329,22 @@ class FeatureHandler:
             if not self.my_handle.config.get("key_mapping", "enable"):
                 return False
 
-            def trigger_dispatch(trigger_type: str, key_mapping_config: dict, matched_text: str) -> bool:
+            def trigger_dispatch(trigger_type: str, key_mapping_config: dict, matched_text: str, source: str) -> bool:
                 """按 trigger_type 分派（T-c 适配点①：键面 f"{prefix}_single_sentence_trigger_once"，无 _enable 后缀）。
 
                 2026-10-24 精简：文案/本地音频/图片三路触发已移除，仅保留按键+串口。
+                2026-10-31 审查批次（F1 来源区分恢复）：原实现 keyword_handle_trigger/
+                gift_handle_trigger 双分派各自门控来源——弹幕/回复源仅 关键词|关键词+礼物
+                生效、礼物源仅 礼物|关键词+礼物 生效；T5 迁移合并单函数后丢失来源区分
+                （按键触发类型=礼物 时弹幕关键词误触按键、=关键词 时礼物误触），现恢复。
                 """
                 handlers_map = {
                     "key_trigger_type": lambda: self._trigger_key_press(key_mapping_config, data),
                     "serial_trigger_type": lambda: self._serial_send(key_mapping_config, data),
                 }
                 trigger_mode = self.my_handle.config.get("key_mapping", trigger_type)
-                if trigger_mode not in ["关键词", "礼物", "关键词+礼物"]:
+                allowed_modes = ("礼物", "关键词+礼物") if source == "礼物" else ("关键词", "关键词+礼物")
+                if trigger_mode not in allowed_modes:
                     return False
                 logger.info(f"【触发按键映射】匹配：{matched_text}，类型：{trigger_type}，模式：{trigger_mode}")
                 executed = handlers_map[trigger_type]()  # 降级（依赖缺失）返回 False
@@ -1248,14 +1371,14 @@ class FeatureHandler:
                     # 中枢已匹配：逐组分派（2026-10-25 中枢接线，gift_handle 生产链恢复）
                     for key_mapping_config, matched_text in hub_result.keymap_gift_groups:
                         for trigger in self._KEYMAP_TRIGGERS:
-                            if trigger_dispatch(trigger, key_mapping_config, matched_text):
+                            if trigger_dispatch(trigger, key_mapping_config, matched_text, "礼物"):
                                 return True
                     return flag
                 for key_mapping_config in key_mapping_configs:
                     for gift in key_mapping_config.get("gift") or []:
                         if gift == data["gift_name"]:
                             for trigger in self._KEYMAP_TRIGGERS:
-                                if trigger_dispatch(trigger, key_mapping_config, gift):
+                                if trigger_dispatch(trigger, key_mapping_config, gift, "礼物"):
                                     return True
                 return flag
 
@@ -1268,7 +1391,7 @@ class FeatureHandler:
                 # 中枢已匹配（弹幕型）：命中组平铺逐条分派，once 语义由 trigger_dispatch 返回值保持
                 for key_mapping_config, matched_text in hub_result.keymap_groups:
                     for trigger in self._KEYMAP_TRIGGERS:
-                        if trigger_dispatch(trigger, key_mapping_config, matched_text):
+                        if trigger_dispatch(trigger, key_mapping_config, matched_text, type):
                             return True
                 return flag
 
@@ -1288,7 +1411,7 @@ class FeatureHandler:
 
                     if matched:
                         for trigger in self._KEYMAP_TRIGGERS:
-                            if trigger_dispatch(trigger, key_mapping_config, keyword):
+                            if trigger_dispatch(trigger, key_mapping_config, keyword, type):
                                 return True
             return flag
         except Exception as e:
@@ -1310,6 +1433,12 @@ class FeatureHandler:
             bool: 是否在黑名单中
         """
         try:
+            # 启用门控（2026-10-31 黑名单审查批次修复断链）：二级菜单开关
+            # （enable_paths.py 注册 blacklist → filter.blacklist.enable）此前
+            # 后端零消费——关了开关名单非空仍拦截。语义：显式 false=关闭；
+            # 缺键/None 保持开启（存量配置无此键时不回退旧行为）。
+            if self.my_handle.config.get("filter", "blacklist", "enable") is False:
+                return False
             # 键面对齐：前端 blacklist tab 写 filter.blacklist.username（换行分隔 textarea）
             raw_list = self.my_handle.config.get("filter", "blacklist", "username")
             if isinstance(raw_list, str):

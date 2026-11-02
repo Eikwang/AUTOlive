@@ -172,28 +172,8 @@ def create_data_analysis_tab(
             ui.button('获取签到榜', on_click=_integral_btn('sign_num')).style('flex:1 1 140px; min-width:140px;')
             ui.button('获取金额榜', on_click=_integral_btn('total_price')).style('flex:1 1 140px; min-width:140px;')
 
-    # 礼物榜
-    data_analysis_gift_card = ui.card()
-    with data_analysis_gift_card.style("width:100%;"):
-        gift_top_n = int(get_nested_value(config, "data_analysis", "gift", "top_num") or 10)
-        echart_gift = ui.echart(
-            _placeholder_option('礼物榜单', loading=True)
-        ).style(echart_css)
-        _charts.append((echart_gift, '礼物榜单'))
-
-        with ui.grid(columns=3):
-            input_data_analysis_gift_top_num = _auto_save(ui.input(
-                label='Top N个数据',
-                value=get_nested_value(config, "data_analysis", "gift", "top_num"),
-                placeholder='筛选Top N个数据'
-            ).style("width:100%;"), ("data_analysis", "gift", "top_num"))
-
-            async def update_echart_gift():
-                top_n = int(input_data_analysis_gift_top_num.value or 10)
-                await _refresh(echart_gift, '礼物榜单',
-                               lambda: _holder["da"].get_gift_option(top_n))
-
-            ui.button('更新数据', on_click=update_echart_gift)
+    # 礼物榜卡片已移除（2026-10-31 数据分析审查批次，用户裁决：与积分
+    # 统计-金额榜重复展示——integral.total_price 已含礼物价值口径）
 
     # 进页首渲完成 50ms 后异步取数（不阻塞 UI 线程：单例构建/查询/jieba 分词
     # 全在后台线程，完成后 options 原地就位）
@@ -206,12 +186,11 @@ def create_data_analysis_tab(
             for echart, base_title in _charts:
                 _set_option(echart, _placeholder_option(base_title, loading=False))
             return
-        # 审查修复（发布批次）：三图并行取数（原串行 await——填充时间=三者
-        # 之和，最慢的词云 jieba 阻塞另外两图；gather 后=最慢者）
+        # 审查修复（发布批次）：两图并行取数（原串行 await——填充时间=两者
+        # 之和，最慢的词云 jieba 阻塞另外图表；gather 后=最慢者）
         await asyncio.gather(
             update_echart_comment_word_cloud(),
             update_echart_integral("integral"),
-            update_echart_gift(),
         )
 
     ui.timer(0.05, _initial_load, once=True)

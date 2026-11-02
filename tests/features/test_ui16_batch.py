@@ -4,7 +4,7 @@ UI-16 批次守卫测试（WebUI 功能调整与修复 16 项，终门 rec 批�
 
 四项完成定义守卫（EV-1c）+ talk 页渲染 smoke（EV-1i），锁定本批关键行为
 不被回退：
-(a) R10 念弹幕触发周期键迁移（periodic_time 单值/max 回填/旧键退役/分支隔离）
+(a) R10 念弹幕触发周期——已退役（2026-10-31 念弹幕审查批次，原迁移测试改写退役守卫）
 (b) R5 动态文案存量迁移（成功导入/不可读非破坏保留/合并去重幂等/体量上限）
 (c) R3 过滤总开关迁移（ENABLE_PATHS 注册+per-path 确认注册表+persistent 全关闭路径）
 (d) R8 页面移除清理（双页函数/导航注册/enable_paths 注册清零）+ 动态配置退役守卫
@@ -12,6 +12,7 @@ UI-16 批次守卫测试（WebUI 功能调整与修复 16 项，终门 rec 批�
 (e) E4 talk 页渲染 smoke（P1 password 参数修复+两列布局防回退）
 """
 from pathlib import Path
+import json
 
 import pytest
 
@@ -33,7 +34,9 @@ class _FakeSettings:
 
 
 # ---------------------------------------------------------------------------
-# (a) R10 念弹幕触发周期键迁移（EV-1c-a）
+# (a) R10 念弹幕触发周期——已退役（2026-10-31 念弹幕审查批次）
+# 周期触发/键迁移机制整体删除（系统已有限入/去重/优先级队列，念弹幕改为
+# comment_handler 弹幕处理时即时入队）；原迁移测试改写为退役守卫。
 # ---------------------------------------------------------------------------
 
 class TestR10PeriodicTimeMigration:
@@ -43,34 +46,24 @@ class TestR10PeriodicTimeMigration:
         _ensure_defaults(fake)
         return cfg
 
-    def test_max_backfill_and_old_keys_retired(self):
-        """存量 min/max → periodic_time=max 回填，旧键退役（EV-1g 迁移口径）。"""
-        cfg = {"read_comment": {"periodic_trigger": {
-            "enable": True, "periodic_time_min": 5, "periodic_time_max": 10,
-            "trigger_num_min": 0, "trigger_num_max": 1}}}
-        out = self._migrate(cfg)
-        pt = out["read_comment"]["periodic_trigger"]
-        assert pt["periodic_time"] == 10
-        assert "periodic_time_min" not in pt
-        assert "periodic_time_max" not in pt
-        assert pt["trigger_num_min"] == 0  # 触发次数 min/max 保留
+    def test_read_comment_periodic_trigger_retired(self):
+        """周期触发整体退役：后端分支/UI 控件/模板键/迁移逻辑全无残留。"""
+        timer_src = _src("utils/handlers/timer_handler.py")
+        assert '"read_comment"' not in timer_src
+        # 统一退役注释短语（2026-10-31 本地问答审查批次：local_qa 收官后
+        # periodic_trigger_data_handle 整体删除，专用注释并入统一注释）
+        assert "周期触发已退役" in timer_src
+        ui_src = _src("frontend/ui/tabs/read_comment.py")
+        assert "periodic_trigger" not in ui_src and "触发周期" not in ui_src
+        example = json.loads(_src("config.example.json"))
+        assert "periodic_trigger" not in example["read_comment"]
+        settings_src = _src("frontend/config/settings.py")
+        assert "_read_pt" not in settings_src
 
-    def test_missing_keys_default_60(self):
-        """新装/部分迁移配置缺 min/max → periodic_time 缺省 60 秒（EV-1g）。"""
-        cfg = {"read_comment": {"periodic_trigger": {"enable": True}}}
-        out = self._migrate(cfg)
-        assert out["read_comment"]["periodic_trigger"]["periodic_time"] == 60
-
-    def test_existing_value_not_overwritten(self):
-        """periodic_time 已存在 → 不覆盖（只补缺失，_ensure_defaults 语义）。"""
-        cfg = {"read_comment": {"periodic_trigger": {
-            "periodic_time": 90, "periodic_time_min": 5, "periodic_time_max": 10}}}
-        out = self._migrate(cfg)
-        assert out["read_comment"]["periodic_trigger"]["periodic_time"] == 90
-
-    def test_other_branches_isolated(self):
-        """分支隔离：local_qa/thanks 各节的 min/max 保持不动（EV-1c-a 隔离断言）。"""
-        # UI-16 二轮验收（任务 10）：thanks 三通道也合并单值；local_qa 不动（隔离）
+    def test_local_qa_thanks_branches_isolated(self):
+        """分支隔离（2026-10-31 本地问答审查批次更新）：thanks 三通道与
+        local_qa 周期触发均已退役（不再迁移，存量节由 _RETIRED_CONFIG_KEYS
+        告知后删除；read_comment 迁移逻辑不误伤其它类型）。"""
         cfg = {
             "read_comment": {"periodic_trigger": {"periodic_time_min": 5, "periodic_time_max": 10}},
             "local_qa": {"periodic_trigger": {"periodic_time_min": 1, "periodic_time_max": 2}},
@@ -79,29 +72,17 @@ class TestR10PeriodicTimeMigration:
         out = self._migrate(cfg)
         assert out["local_qa"]["periodic_trigger"]["periodic_time_min"] == 1  # 隔离不动
         assert out["local_qa"]["periodic_trigger"]["periodic_time_max"] == 2
-        assert out["thanks"]["gift"]["periodic_trigger"]["periodic_time"] == 4  # max 回填
-        assert "periodic_time_min" not in out["thanks"]["gift"]["periodic_trigger"]
-        assert out["thanks"].get("entrance", {}).get("periodic_trigger") is None  # 无节不创建
+        assert out["thanks"]["gift"]["periodic_trigger"] == {"periodic_time_min": 3, "periodic_time_max": 4}  # thanks 不再迁移（退役）
 
-    def test_timer_handler_branch_isolation_source(self):
-        """源级：timer_handler read_comment 分支单值化，其余分支保持 randint。"""
+    def test_timer_handler_remaining_branches_source(self):
+        """源级（2026-10-31 本地问答审查批次更新）：周期机制整体退役——
+        timer_handler 零周期分支（read_comment/thanks 三通道/local_qa 全退役）。"""
         src = _src("utils/handlers/timer_handler.py")
-        assert 'self.my_handle.config.get(type, "periodic_trigger", "periodic_time")' in src
-        assert "except (TypeError, ValueError):\n                periodic_time = 60" in src
-        # 分支隔离：local_qa/thanks 分支的 min/max+randint 必须仍在
-        assert src.count("random.randint(periodic_time_min, periodic_time_max)") == 1  # 仅 local_qa
-        assert src.count('periodic_trigger", "periodic_time_min') == 1
-        # thanks 三分支（type2 区分）+read_comment 均单值化
-        assert src.count('"periodic_trigger", "periodic_time")') == 4
-
-    def test_read_comment_ui_merged(self):
-        """源级：read_comment.py 单参数「触发周期（秒）」，min/max 输入框已移除。"""
-        src = _src("frontend/ui/tabs/read_comment.py")
-        assert "触发周期（秒）" in src
-        assert "periodic_time_min" not in src
-        assert "periodic_time_max" not in src
-        assert src.count("trigger_num_min") == 2  # 触发次数 min/max 保留（value+keys 各一）
-        assert src.count("trigger_num_max") == 2
+        assert src.count("random.randint(periodic_time_min, periodic_time_max)") == 0  # local_qa 分支收官
+        assert src.count('periodic_trigger", "periodic_time_min') == 0
+        assert src.count('"periodic_trigger", "periodic_time")') == 0  # thanks 单值分支全退役
+        assert '"thanks"' not in src
+        assert '"local_qa"' not in src  # 缓冲零写入死机制，随本批删除
 
 
 # ---------------------------------------------------------------------------
@@ -321,12 +302,13 @@ class TestBatchMisc:
         assert offenders == []
 
     def test_thanks_labels_chinese(self):
-        """R10：答谢页周期触发标签全中文（半中半英清零）。"""
+        """R10 标签中文化→随周期触发退役（2026-10-31 答谢审查批次）：
+        周期控件全删，三通道保留参数（开关/随机/文案/最低价格）仍在。"""
         src = _src("frontend/ui/tabs/thanks.py")
-        assert "label=f'触发{pt_key}'" not in src
-        assert "触发周期（秒）" in src  # 二轮任务 10：单值周期
-        assert src.count("['periodic_time', 'trigger_num_min', 'trigger_num_max']") == 3  # 旧键循环清零（注释提及不计）
-        assert "触发次数最大值" in src
+        assert "触发周期" not in src and "触发次数" not in src
+        assert "periodic_trigger" not in src
+        assert "入场文案" in src and "礼物文案" in src and "关注文案" in src
+        assert "最低答谢礼物价格" in src
 
     def test_thanks_single_lowest_price_in_gift_section(self):
         """R10：双「最低答谢礼物价格」收敛——礼物区唯一入口且在礼物文案下方。"""
@@ -442,15 +424,14 @@ class TestRound2Fixes:
         assert -1 < _llm_pos < _rand_pos < _interval_pos
 
     def test_read_comment_single_column(self):
-        """任务 11：触发周期/次数纵向单列（原三列网格移除）。"""
+        """任务 11：周期控件已随周期触发退役（2026-10-31），页面仅剩
+        念用户名开关/长度/文案三参数。"""
         src = _src("frontend/ui/tabs/read_comment.py")
-        assert "一列显示" in src
-        # 单列顺序：周期 → 次数min → 次数max
-        _sq = chr(39)
-        _period_pos = src.find("label=" + _sq + "触发周期（秒）" + _sq)
-        _min_pos = src.find("label=" + _sq + "触发次数最小值" + _sq)
-        _max_pos = src.find("label=" + _sq + "触发次数最大值" + _sq)
-        assert -1 < _period_pos < _min_pos < _max_pos
+        assert "触发周期（秒）" not in src
+        assert "触发次数最小值" not in src and "触发次数最大值" not in src
+        # 三保留参数仍接线（开关+长度在 3 列网格、文案 textarea）
+        assert "念用户名" in src and "username_max_len" in src
+        assert "read_username_copywriting" in src
 
     def test_char_split_damage_repair(self):
         """三轮验收：存量损坏形态（每行单字符）重组，合法多行文案不受影响。

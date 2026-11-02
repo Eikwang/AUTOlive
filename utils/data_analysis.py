@@ -214,15 +214,18 @@ class Data_Analysis:
                 logger.error("数据库连接未初始化")
                 return None
 
-            # 查询数据
+            # 查询数据（type 白名单守卫：f-string 拼接 ORDER BY，仅接受四个榜单键）
+            if type not in ("integral", "view_num", "sign_num", "total_price"):
+                logger.warning(f"积分榜类型非法，回退 integral: {type!r}")
+                type = "integral"
             select_data_sql = f'''
             SELECT * FROM integral
             ORDER BY {type} DESC
-            LIMIT {top_num};
+            LIMIT {int(top_num)};
             '''
             data_list = self.db.fetch_all(select_data_sql)
 
-            
+
             # 使用列表推导式将每个元组转换为列表
             list_list = [list(t) for t in data_list]
             username_list = [t[1] for t in data_list]
@@ -241,7 +244,10 @@ class Data_Analysis:
                 },
                 'dataset': [
                     {
-                        'dimensions': ['platform', 'username', 'uid', 'integral', 'view_num', 'sign_num', 'last_sign_ts', 'total_price', 'last_ts'],
+                        # 列序与 CREATE TABLE integral 一致（含 2026-10-31 积分审查
+                        # 批次新增的 last_entrance_ts——缺列会导致 SELECT * 的 10 值
+                        # 与 dimensions 9 维错位，数据视图表头错乱）
+                        'dimensions': ['platform', 'username', 'uid', 'integral', 'view_num', 'sign_num', 'last_sign_ts', 'total_price', 'last_ts', 'last_entrance_ts'],
                         'source': list_list
                     },
                     {
@@ -360,90 +366,8 @@ class Data_Analysis:
         except Exception as e:
             logger.error(traceback.format_exc())
             return None
-        
 
-    def get_gift_option(self, top_num=10):
-        """获取礼物表的图表option（用于给nicegui绘制图表）
 
-        Args:
-            top_num (int, optional): 前n个最大的数据. Defaults to 10.
+    # 礼物榜单接口已移除（2026-10-31 数据分析审查批次，用户裁决：与积分
+    # 统计-金额榜重复展示——integral.total_price 已含礼物价值口径）
 
-        Returns:
-            dict: nicegui绘制图表的option
-        """
-        try:
-            if not os.path.exists(self.config.get('database', 'path')):
-                logger.warning(f"数据库：{self.config.get('database', 'path')} 不存在，如果您是第一次启动项目，且没有 运行的情况下，那么请忽略此报错信息，正常运行后，会自动创建数据库，无须担心")
-                return None
-            
-            # 使用共享的数据库实例
-            if self.db is None:
-                logger.error("数据库连接未初始化")
-                return None
-
-            # 查询数据
-            select_data_sql = f'''
-            SELECT * FROM gift
-            ORDER BY total_price DESC
-            LIMIT {top_num};
-            '''
-            data_list = self.db.fetch_all(select_data_sql)
-
-            # 使用列表推导式将每个元组转换为列表
-            username_list = [t[0] for t in data_list]
-            total_price_list = [t[4] for t in data_list]
-
-            logger.debug(f"礼物榜查询行数={len(data_list)}")
-
-            option = {
-                'title': {
-                    'text': '礼物榜单',
-                    'left': 'center',
-                    'subtext': '2026-10-22 起礼物价值统一为元口径；此前数据为历史口径（部分平台偏低 10 倍），仅供对照'
-                },
-                'tooltip': {
-                    'trigger': 'axis',
-                    'axisPointer': {
-                        'type': 'cross',
-                        'crossStyle': {
-                            'color': '#999'
-                        }
-                    }
-                },
-                'toolbox': {
-                    'feature': {
-                        'dataView': { 'show': True, 'readOnly': False },
-                        'magicType': { 'show': True, 'type': ['line', 'bar'] },
-                        'restore': { 'show': True },
-                        'saveAsImage': { 'show': True }
-                    }
-                },
-                'xAxis': {
-                    'max': 'dataMax'
-                },
-                'yAxis': {
-                    'type': 'category',
-                    'data': username_list,
-                    'inverse': True,
-                    'animationDuration': 300,
-                    'animationDurationUpdate': 3003
-                },
-                'series': [
-                    {
-                        'realtimeSort': True,
-                        'name': 'X',
-                        'type': 'bar',
-                        'data': total_price_list,
-                        'label': {
-                            'show': True,
-                            'position': 'right',
-                            'valueAnimation': True
-                        }
-                    }
-                ]
-            }
-
-            return option
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            return None

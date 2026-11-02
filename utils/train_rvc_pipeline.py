@@ -303,8 +303,14 @@ class TrainRvcPipeline:
         os.makedirs(self._exp_dir(), exist_ok=True)
         log_path = os.path.join(self._exp_dir(), "preprocess.log")
         open(log_path, "w").close()  # 编排层先 truncate（上游约定 13）
+        # T-1 联动（2026-10-31 审查修复 V1）：MDX 步已产出干声时处理对象=mdx_vocals——
+        # 上游 preprocess.pipeline_mp_inp_dir 对入参目录做顶层 listdir，传原始目录
+        # =伴奏/混响原声直入训练、分离干声被弃用；已是干声（mdx SKIPPED）时用原始
+        # 目录。与 GSV 管线 _st_slice 同款分支语义（通用流程：干声供两管线共用）。
+        src_dir = (os.path.join(self.params["dataset_dir"], "mdx_vocals")
+                   if getattr(self, "mdx_outputs", None) else self.params["dataset_dir"])
         cmd = [self.python, "infer/modules/train/preprocess.py",
-               self.params["dataset_dir"], "40000", str(self.params["n_p"]),
+               src_dir, "40000", str(self.params["n_p"]),
                self._exp_dir(), "False", f"{self.params['per']:.1f}"]
         if not self._run(cmd, timeout=3600):
             return False

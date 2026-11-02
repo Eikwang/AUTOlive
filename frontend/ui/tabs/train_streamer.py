@@ -611,8 +611,20 @@ def create_train_streamer_tab(
                     progress_line.set_text(getattr(pipeline, "_final_message", "") or "")
                     pipeline_ref[0] = None
                     if ok:
-                        ui.notify(position="top", type="positive", timeout=10,
-                                  message="训练完成并已自动部署。下一步：到 数字人-画面设置 页选择该角色，启动系统开播。")
+                        # 部署结果分级呈现（2026-10-31 审查修复 F4/F5）：
+                        # 画面设置页角色选择已退役（画面由动作编排页接管），
+                        # 生效动作=停止并重新『运行系统』重启实时推理
+                        if getattr(pipeline, "_deploy_ran", False) and getattr(pipeline, "_deploy_ok", False):
+                            ui.notify(position="top", type="positive", timeout=10,
+                                      message="训练完成并已自动部署。停止并重新『运行系统』后数字人即用新模型；"
+                                              "动作画面到『动作编排』页管理。")
+                        elif getattr(pipeline, "_deploy_ran", False):
+                            ui.notify(position="top", type="warning", timeout=10,
+                                      message=f"训练完成，但自动部署失败：{getattr(pipeline, '_deploy_msg', '')}"
+                                              "（训练产物已保留，手动兜底见训练日志部署段）")
+                        else:
+                            ui.notify(position="top", type="positive", timeout=10,
+                                      message="训练完成（本次所选阶段无部署环节）。")
 
         # 评估"仍要继续"确认需求（pipeline 线程 set confirm_event 前调 on_confirm_needed）
         if pipeline is not None and getattr(pipeline, "_confirm_pending", False):

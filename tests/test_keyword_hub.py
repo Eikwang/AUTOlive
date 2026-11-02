@@ -54,6 +54,7 @@ _BASE_TEXT_CFG = {
     "local_qa": {"enable": True, "format": "text"},
     "choose_song": {
         "enable": True, "start_cmd": ["点歌"], "similarity": 1,
+        "gift_song_enable": True,
         "gift_song_map": {"小火箭": "孤勇者"},
     },
 }
@@ -237,10 +238,12 @@ class TestConsumerTrustsHubResult:
         assert msg["type"] == "reread"
 
     def test_choose_song_trusts_hub_verdict(self):
-        """点歌：中枢判定意图直接走回应分支（内容无需再过触发词/曲库）。"""
+        """点歌：中枢判定意图直接走回应分支（内容无需再过触发词/曲库）。
+        2026-10-31：gift_song_enable=True=礼物点歌开启→引导文案分支。"""
         mh = MagicMock()
         mh.config = _FakeConfig({
-            "choose_song": {"enable": True, "guide_copy": "已收到点歌 {content}",
+            "choose_song": {"enable": True, "gift_song_enable": True,
+                            "guide_copy": "已收到点歌 {content}",
                             "match_fail_copy": "没有 {content}"},
             "audio_synthesis_type": "none"})
         mh.common.merge_consecutive_asterisks.side_effect = lambda s: s
@@ -259,19 +262,18 @@ class TestConsumerTrustsHubResult:
         mh.audio_synthesis_handle.assert_not_called()
 
     def test_choose_song_gift_trusts_hub(self):
-        """礼物点歌：中枢 gift_song 直接播报播放；未命中（空串）不触发。"""
+        """礼物点歌：中枢 gift_song 直接播报播放；未命中（空串）不触发。
+        2026-10-31 点歌审查批次：同歌冷却退役（冷却检查已删除，不再 patch）。"""
         mh = MagicMock()
         fh = FeatureHandler(mh)
         rec = KeywordResult(source="gift")
         rec.gift_song = "孤勇者"
         data = {"username": "u", "gift_name": "小火箭"}
-        with patch.object(FeatureHandler, "_song_cooldown_check", return_value=True), \
-             patch.object(FeatureHandler, "_song_announce_and_play", return_value=True) as m_play:
+        with patch.object(FeatureHandler, "_song_announce_and_play", return_value=True) as m_play:
             assert fh.choose_song_gift_trigger(data, hub_result=rec) is True
             m_play.assert_called_once_with("u", "孤勇者", "小火箭")
         rec_miss = KeywordResult(source="gift")
-        with patch.object(FeatureHandler, "_song_cooldown_check", return_value=True), \
-             patch.object(FeatureHandler, "_song_announce_and_play", return_value=True) as m_play2:
+        with patch.object(FeatureHandler, "_song_announce_and_play", return_value=True) as m_play2:
             assert fh.choose_song_gift_trigger(data, hub_result=rec_miss) is False
             m_play2.assert_not_called()
 

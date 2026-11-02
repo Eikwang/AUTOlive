@@ -61,15 +61,13 @@ class EventHandler:
         return copy_list[idx]
 
     def _thanks_dispatch(self, type2: str, message: dict, username: str):
-        """答谢通道分发：周期开启→缓存；否则即时合成（每分钟限流，ENG E-2）。
+        """答谢即时分发 + 每分钟限流（ENG E-2）。
 
-        超限且周期关闭时丢弃本条并告警——答谢是可丢弃的锦上添花，
-        不能在答谢风暴中压垮播放队列（百连入场场景）。
+        周期触发已退役（2026-10-31 答谢审查批次：系统已有限入/去重/优先级
+        队列，缓冲定时回放删除）——答谢消息直通合成，答谢风暴由限流兜底：
+        超限时丢弃本条并告警——答谢是可丢弃的锦上添花，不能在答谢风暴中
+        压垮播放队列（百连入场场景）。
         """
-        periodic_on = self.my_handle.config.get("thanks", type2, "periodic_trigger", "enable")
-        if periodic_on:
-            self.my_handle.task_data["thanks"][type2]["data"].append(message)
-            return
         now = time.time()
         bucket = self._instant_thanks_window
         bucket.append(now)

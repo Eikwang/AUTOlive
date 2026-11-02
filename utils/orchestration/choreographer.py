@@ -208,7 +208,7 @@ class ChoreoEngine:
         self.ready = False
         self.enabled_rules: List[RuleCfg] = list(cfg.rules)
         self.counters: dict = {}          # rule_id -> consecutive_count
-        self.key_last: dict = {}          # rule_id -> 上次触发尝试时刻（节流窗口）
+        self.key_last: dict = {}          # rule_id -> 上次触发尝试时刻（节流/衰减均已退役——保留兼容锚点，引擎零消费）
         self.pending_queue: list = []     # queue 模式待播多槽（O1：权重降序插入）
         self.degrade_total = 0
         self._seq_counter = 0
@@ -251,21 +251,11 @@ class ChoreoEngine:
             return {"accepted": False, "takeover": False, "rule": None, "commands": commands,
                     "reason": match_reason or "no_match", "retry_after_s": None}
 
-        # 节流窗口已退役（R-ceo5/终门 P6 用户方向，2026-10-27 批次）：弹幕层限时
-        # 去重（ac90fe60）已在上游拦截重复，引擎级节流不再生效；同键重入走
-        # 条件2 计数+重排（触发次数轮换语义）。key_last 保留（reset_after_s 衰减
-        # 窗口锚点仍需最后一次尝试时刻）。
-        last = self.key_last.get(rule.rule_id)
-        if False and last is not None and (now - last) < self.cfg.min_retrigger_s:
-            self.key_last[rule.rule_id] = now
-            return {"accepted": False, "takeover": False, "rule": rule, "commands": commands,
-                    "reason": "throttled",
-                    "retry_after_s": round(self.cfg.min_retrigger_s - (now - last), 2)}
-        # 计数时间衰减（GAP-2，设计文档 reset_after 语义）：窗口锚点=最后一次尝试
-        # （含被节流拒绝的，与 key_last 同源——Eng F5）；位置=节流判定之后、计数+1 之前，
-        # 超窗清零后本轮从 1 重新累计；reset_after_s=0 禁用衰减。
-        if self.cfg.reset_after_s > 0 and last is not None and (now - last) > self.cfg.reset_after_s:
-            self.counters[rule.rule_id] = 0
+        # 节流窗口（R-ceo5，2026-10-27 批次）与计数时间衰减（reset_after_s，
+        # 2026-10-31 动作编排审查批次任务书"计数窗口弃用直接移除"）均已退役：
+        # 弹幕层限时去重在上游拦截重复；触发计次不再随时间清零（清零仅剩
+        # 他键打断 D-4 与配置重存换装）；同键重入走条件2 计数+重排。
+        # key_last 保留作兼容锚点（测试旁路句柄；引擎内零消费）。
         self.key_last[rule.rule_id] = now
 
         if self.state == "sequence" and self.seq is not None:
@@ -1512,6 +1502,12 @@ class ActionChoreographer:
                                                          loop=cmd.loop)
                     ok = bool(result.get("ok", True)) if isinstance(result, dict) else False
                     self._events.put(("restore_result", ok))
+                    # 回默认 lip/repair/gaze 联动复位（2026-10-31 审查批次 F1）：
+                    # 序列中 lip-off 步把三开关置 off 后，默认画面（口型正常）
+                    # 必须恢复——否则泄漏为「默认画面有音频不张嘴」。去抖缓存
+                    # 保证仅在离开 off 态时真正下发；服务端默认 lip=on（纯运行
+                    # 中开关无 config 初值），repair/gaze 恢复 webui 配置初值。
+                    self._apply_lip_linkage(True, "restore_default")
             except Exception as e:
                 logger.error(f"[编排] 命令执行异常（降级继续）：problem={type(cmd).__name__} 执行失败；cause={type(e).__name__}: {e}；fix=依赖超时/重试机制兜底")
 

@@ -1,6 +1,8 @@
 # 空闲时间计数器
 global_idle_time = 0
-last_username_list = None
+# 最近互动用户名环形记录（定时任务 {last_username} 变量数据源；2026-10-31
+# 定时任务审查批次接线——此前初始 None 且 add 函数全库零调用，变量恒"未知用户"）
+last_username_list = []
 last_liveroom_data = None
 
 # 待播放音频数量（在使用 音频播放器 等不通过AUTOlive播放音频的对接项目时，使用此变量记录是是否还有音频没有播放完；metahuman-stream 对接已随 2026-10-22 批次退役）
@@ -10,15 +12,17 @@ def idle_time_auto_clear(config, type: str):
     """闲时任务计时自动清零
 
     Args:
-        type (str): 消息类型（comment/gift/entrance等）
+        type (str): 类型（comment/gift/entrance/follow——UI「刷新闲时计时的
+            消息类型」四选项）
 
     Returns:
         bool: 是否清零的结果
     """
     global global_idle_time
 
-    # 触发的类型列表
-    type_list = config.get("idle_time_task", "trigger_type")
+    # 触发的类型列表（缺键/None 容错——2026-10-31 闲时任务审查批次接线，
+    # 此前本函数全库零调用、trigger_type 配置纯摆设）
+    type_list = config.get("idle_time_task", "trigger_type") or []
     if type in type_list:
         global_idle_time = 0
 

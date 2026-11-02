@@ -15,6 +15,11 @@
 - 移除 文案/本地音频/图片 三路触发（前端参数 + 配置组字段同步移除）
 - 顶部参数改 2×2：命令前缀|捕获类型 / 按键触发类型|串口触发类型
 - 配置组卡片双列布局（一行两组），同类输入框统一尺寸（textarea 64px）
+
+2026-10-31 审查批次：
+- 恢复「单句仅触发一次」双开关（按键/串口，key/serial_single_sentence_trigger_once）
+  ——上游旧 UI 有、前端重写时丢失，后端一直消费（once 默认 true：首个执行的
+  触发器命中即终止后续触发器与剩余命中组）
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
@@ -44,12 +49,13 @@ def create_key_mapping_tab(
     card_css = theme_config.get("card", "")
     button_internal_color = theme_config.get("button_internal_color", "primary")
     button_internal_css = theme_config.get("button_internal_css", "")
+    switch_internal_css = theme_config.get("switch_internal", "")
 
     # 导入自动绑定函数
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="key_mapping")
 
-    # 命令前缀/捕获类型/触发类型（2×2 布局）
+    # 命令前缀/捕获类型/触发类型（2 列网格，once 双开关补第三行）
     with ui.card().style(card_css):
         ui.label('按键/串口 映射')
         with ui.grid(columns=2):
@@ -57,6 +63,9 @@ def create_key_mapping_tab(
             _auto_save(ui.select(label='捕获类型', options={'弹幕': '弹幕', '回复': '回复', '弹幕+回复': '弹幕+回复'}, value=get_nested_value(config, "key_mapping", "type")).style("width:100%;"), keys=("key_mapping", "type"))
             _auto_save(ui.select(label='按键触发类型', options={'不启用': '不启用', '关键词': '关键词', '礼物': '礼物', '关键词+礼物': '关键词+礼物'}, value=get_nested_value(config, "key_mapping", "key_trigger_type")).style("width:100%;"), keys=("key_mapping", "key_trigger_type"))
             _auto_save(ui.select(label='串口触发类型', options={'不启用': '不启用', '关键词': '关键词', '礼物': '礼物', '关键词+礼物': '关键词+礼物'}, value=get_nested_value(config, "key_mapping", "serial_trigger_type")).style("width:100%;"), keys=("key_mapping", "serial_trigger_type"))
+            # once 双开关（2026-10-31 审查批次恢复：后端消费、前端重写时丢失）
+            _auto_save(ui.switch('单句仅触发一次（按键）', value=get_nested_value(config, "key_mapping", "key_single_sentence_trigger_once")).style(switch_internal_css).tooltip('开启后，一句话/一个礼物命中时按键触发一次即终止后续触发器与剩余命中组'), keys=("key_mapping", "key_single_sentence_trigger_once"))
+            _auto_save(ui.switch('单句仅触发一次（串口）', value=get_nested_value(config, "key_mapping", "serial_single_sentence_trigger_once")).style(switch_internal_css).tooltip('开启后，一句话/一个礼物命中时串口触发一次即终止后续触发器与剩余命中组'), keys=("key_mapping", "serial_single_sentence_trigger_once"))
 
     # ---------------- 配置组区域（双列布局，支持增删） ----------------
     def _get_groups() -> list:

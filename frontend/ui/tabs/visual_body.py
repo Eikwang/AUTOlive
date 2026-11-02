@@ -3,8 +3,11 @@
 画面设置标签页模块（EDTalk功能集成计划 §4.1，原"虚拟身体"页重做）
 
 三卡顺序 = 摄像头/虚拟设备 → 数字人基础配置 → 推理配置（默认折叠）。
-- 摄像头区：UnityCapture 虚拟摄像头安装/检测
-- 数字人基础配置：enable + 摄像头输出参数（character_dir/target_fps/buffer/preroll）；
+- 摄像头区：UnityCapture 虚拟摄像头安装/检测（安装=helpers.install_unity_capture，
+  与启动链自动安装共用；F1 修复：原本地实现引用未导入的 get_base_path → NameError）
+- 数字人基础配置：enable + 摄像头输出参数（target_fps/buffer/preroll）；
+  角色素材目录已退役（2026-10-31 画面设置批次：素材增删/清单由『动作编排』页
+  接管，目录为内部量默认 wy——materials.resolve_character_dir 兜底）；
   端口与解释器为系统内部量（runtime.py 自动解析+记忆，端口被占自动切换）；
   段播放调度已并入『动作编排』页（启动固定 --segments auto）
 - 推理配置：修复/视线(+收敛角)/口型统一卡片——应用=热推当前服务（立即生效）
@@ -20,11 +23,20 @@ from typing import Any, Callable, Dict
 
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
-from utils.my_log import logger
+from frontend.config.paths import get_base_path
 from utils.edtalk_realtime.helpers import (
-    is_edtalk_active,
+    install_unity_capture,
     query_unity_capture,
 )
+
+
+def _int_or(v, default: int) -> int:
+    """安全整数解析（2026-10-31 画面设置批次 F3：原裸整数转换遇非数字输入
+    抛 ValueError 中断 on_change，值不落盘且 UI 报错）。"""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def create_visual_body_tab(
@@ -63,25 +75,7 @@ def create_visual_body_tab(
         _update_combo_warning()
 
     # ================= 虚拟摄像头检测卡（义务块：检测=启动系统时触发+页面打开刷新；
-    #                  缺失态警示色最高视觉权重；安装编程化 regsvr32 静默+runas 提权） =================
-
-    import re as _re_cam
-
-    def _install_unity_capture(cam_name: str):
-        """编程化安装（义务块：regsvr32 静默注入名称+runas 提权；Eng F-E4：
-        名称白名单拒绝全部 shell 元字符+参数列表方式）。同步阻塞（线程池调用）。"""
-        if not _re_cam.match(r"^[A-Za-z0-9 _-]{1,64}$", cam_name or ""):
-            raise ValueError("problem=摄像头名含非法字符；cause=仅允许字母/数字/空格/下划线/短横线（1-64 位）；fix=改用合法名称")
-        import os as _os
-        dll = _os.path.join(str(get_base_path()), "edtalk", "UnityCapture-master", "Install", "UnityCaptureFilter64.dll")
-        if not _os.path.isfile(dll):
-            raise FileNotFoundError("problem=安装件缺失；cause=" + dll + "；fix=运行 Scripts/copy_edtalk.py 补复制")
-        import subprocess as _sp
-        # 参数列表传值（无 shell 拼接）；UAC 提权经 PowerShell -Verb RunAs（用户在场确认）
-        ps_cmd = "Start-Process regsvr32 -ArgumentList '/s','" + dll + "','/i:UnityCaptureName=" + cam_name + "' -Verb RunAs -Wait"
-        r = _sp.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, timeout=120, text=True)
-        if r.returncode != 0:
-            raise RuntimeError("problem=安装命令失败；cause=" + (r.stderr or "").strip()[:200] + "；fix=查看日志或手动运行 InstallCustomName.bat")
+    #                  缺失态警示色最高视觉权重；安装=helpers 共享函数，启动链同源） =================
 
     _cam_installed, _cam_name = query_unity_capture()
 
@@ -96,7 +90,7 @@ def create_visual_body_tab(
                 "width:100%;padding:6px 10px;border-radius:6px;"
                 "background:var(--color-danger-strong);color:var(--text-on-primary);font-size: var(--font-size-body)")
             cam_name_input = FormField.create_input(
-                label="摄像头名称（字母/数字/空格/下划线/短横线，1-64 位；OBS 里按此名选择）",
+                label="摄像头名称（中英文字母/数字/空格/下划线/短横线，1-64 位；OBS 里按此名选择）",
                 value="AUTOlive 数字人",
                 style="width:100%;",
             )
@@ -112,7 +106,8 @@ def create_visual_body_tab(
                     cam_status_label.set_text("安装中……（请在弹出的 UAC 窗口确认）")
                     cam_status_label.style("color: var(--color-warning)")
                     try:
-                        await asyncio.to_thread(_install_unity_capture, name)
+                        await asyncio.to_thread(
+                            install_unity_capture, name, str(get_base_path()))
                     except Exception as e:
                         cam_status_label.set_text(str(e))
                         cam_status_label.style("color: var(--color-danger)")
@@ -174,32 +169,31 @@ def create_visual_body_tab(
         ).tooltip("开启后『运行系统』时自动拉起 realtime_serve；端口与解释器自动解析，无需配置")
 
         with ui.grid(columns=3):
-            FormField.create_input(
-                label='角色素材目录',
-                value=get_nested_value(config, "edtalk_realtime", "character_dir", default="wy"),
-                on_change=lambda e: set_config_callback("edtalk_realtime", "character_dir", value=e.value),
-                tooltip="realtime_serve 的 --character-dir（orifra/ 素材所在目录名，大小写敏感）；素材增删在『动作编排』页",
-                style="width:100%;",
-            )
+            # 角色素材目录已退役（2026-10-31 画面设置批次）：素材增删/清单由
+            # 『动作编排』页接管，目录为内部量（默认 wy，materials.resolve_character_dir
+            # 与启动参数同源兜底）——UI 配置项移除，存量键经 _RETIRED_CONFIG_KEYS 告知
             FormField.create_input(
                 label='目标帧率',
                 value=str(get_nested_value(config, "edtalk_realtime", "target_fps", default=25)),
-                on_change=lambda e: set_config_callback("edtalk_realtime", "target_fps", value=int(e.value or 25)),
-                tooltip="仅约束摄像头输出帧率",
+                on_change=lambda e: set_config_callback(
+                    "edtalk_realtime", "target_fps", value=_int_or(e.value, 25)),
+                tooltip="数字人服务器输出帧率",
                 style="width:100%;",
             )
             FormField.create_input(
                 label='缓冲帧数',
                 value=str(get_nested_value(config, "edtalk_realtime", "buffer_frames", default=16)),
-                on_change=lambda e: set_config_callback("edtalk_realtime", "buffer_frames", value=int(e.value or 16)),
-                tooltip="输出缓冲容量；每帧约 11MB@1440×2560",
+                on_change=lambda e: set_config_callback(
+                    "edtalk_realtime", "buffer_frames", value=_int_or(e.value, 16)),
+                tooltip="输出缓冲容量，让画面更流畅；每帧约 11MB@1440×2560",
                 style="width:100%;",
             )
             FormField.create_input(
                 label='预填充帧数',
                 value=str(get_nested_value(config, "edtalk_realtime", "preroll_frames", default=8)),
-                on_change=lambda e: set_config_callback("edtalk_realtime", "preroll_frames", value=int(e.value or 8)),
-                tooltip="启动预填充帧数，须 ≤ 缓冲帧数",
+                on_change=lambda e: set_config_callback(
+                    "edtalk_realtime", "preroll_frames", value=_int_or(e.value, 8)),
+                tooltip="启动预填充帧数，须 ≤ 缓冲帧数（越界由启动链自动修正）",
                 style="width:100%;",
             )
 

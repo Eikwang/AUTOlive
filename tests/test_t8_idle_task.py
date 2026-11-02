@@ -55,7 +55,10 @@ def _get(node, keys):
 @pytest.fixture
 def scheduler():
     config = make_config()
-    common = MagicMock()
+    # 2026-10-31 闲时任务审查批次：文案模式接线变量替换（{time} 报时解包
+    # get_bj_time）+brackets 随机段——MagicMock 桩解包炸，改真 Common
+    from utils.common_original import Common
+    common = Common()
     my_handle = MagicMock()
     my_handle.is_handleing = 0
     my_handle.chat_type_list = ["custom_llm"]

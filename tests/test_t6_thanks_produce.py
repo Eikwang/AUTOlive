@@ -77,11 +77,10 @@ def handler():
     # （MagicMock 默认返回真值 MagicMock，会被误判为编排接管/礼物命中而短路答谢）
     from utils.keyword_hub import KeywordResult
     mh.keyword_recognize.return_value = KeywordResult(source="gift")
-    # task_data 用真实嵌套结构（周期缓存 append 需要 len 断言）
+    # task_data 与生产端一致：thanks 缓冲已退役（2026-10-31 答谢审查批次，
+    # 即时分发不依赖缓冲），仅保留 local_qa（周期触发仍在）
     mh.task_data = {
-        "thanks": {
-            t: {"data": [], "time": 0} for t in ("gift", "entrance", "follow")
-        },
+        "local_qa": {"data": [], "time": 0},
     }
     eh = EventHandler(mh)
     return eh, mh
@@ -151,14 +150,15 @@ class TestRateLimit:
         eh.entrance_handle({"username": "新观众"})
         assert mh.audio_synthesis_handle.call_count == 11
 
-    def test_periodic_channel_buffers_instead_of_speaking(self, handler):
-        """周期触发开启：入缓存不即时合成。"""
+    def test_periodic_trigger_retired_immediate_dispatch(self, handler):
+        """周期触发已退役（2026-10-31 答谢审查批次）：开启周期键不再缓冲——
+        消息即时合成直通（config 残留键无消费，行为与关闭一致）。"""
         eh, mh = handler
-        mh.config._cfg["thanks"]["entrance"]["periodic_trigger"]["enable"] = True
-        for i in range(30):
+        mh.config._cfg.setdefault("thanks", {}).setdefault("entrance", {})["periodic_trigger"] = {"enable": True}
+        for i in range(10):
             eh.entrance_handle({"username": f"观众{i}"})
-        mh.audio_synthesis_handle.assert_not_called()
-        assert len(mh.task_data["thanks"]["entrance"]["data"]) == 30
+        assert mh.audio_synthesis_handle.call_count == 10  # 全部即时直通
+        assert "thanks" not in mh.task_data  # 缓冲初始化已删
 
 
 class TestRobustness:

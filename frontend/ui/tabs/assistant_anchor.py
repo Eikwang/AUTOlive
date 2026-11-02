@@ -15,12 +15,14 @@
 - 音色下拉对齐主链 audio_synthesis_type 选项集（gpt_sovits/edge_tts 规范值）
 - 文本匹配格式下拉退役 json 项（F6 实证两格式同一加载器；存量经 settings
   迁移为 text）——唯一格式=一问一答 TXT（问题|答案）
-- 路由观测面板（D11/E-S2）：每类型最近路由决策+累计计数，只读，经主进程 API
+- 路由观测面板退役（2026-10-31 助播审查批次：纯内存态调试面板且原路决策
+  从不记录——观测核心"所配即所行"验证残缺，按用户裁决全链移除）
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
 
 from frontend.ui.components.config_helper import get_nested_value
+from frontend.utils.common import textarea_data_change
 
 
 def create_assistant_anchor_tab(
@@ -92,13 +94,22 @@ def create_assistant_anchor_tab(
                     _type_boxes[_t] = _box
                     ui.label(_sub).style('font-size: var(--font-size-assist, 12px); opacity: 0.7;')
 
-    # 文本匹配（唯一格式=一问一答 TXT：问题|答案；json 项已退役——F6 实证
+    # 文本匹配（唯一格式=一问一答：问题|答案；json 项已退役——F6 实证
     # 两格式历来同一管道行加载器，存量 format=json 经 settings 迁移为 text）
     with ui.grid(columns=3):
         with ui.column().style("width:100%;"):
             _auto_save(ui.switch('启用助播文本知识库', value=get_nested_value(config, "assistant_anchor", "local_qa", "text", "enable")).style(switch_internal_css), ("assistant_anchor", "local_qa", "text", "enable"))
-            _auto_save(ui.input(label='文本问答数据路径', value=get_nested_value(config, "assistant_anchor", "local_qa", "text", "file_path"), placeholder='一问一答 TXT 路径（每行：问题|答案）').style("width:100%;").tooltip('一问一答 TXT：每行一条，问题|答案；同答案多问法写多行'), ("assistant_anchor", "local_qa", "text", "file_path"))
             _auto_save(ui.input(label='文本最低相似度', value=get_nested_value(config, "assistant_anchor", "local_qa", "text", "similarity"), placeholder='最低文本匹配相似度').style("width:100%;"), ("assistant_anchor", "local_qa", "text", "similarity"))
+
+    # 文本问答数据（2026-10-31 本地问答审查批次：file_path 迁移为前端直编
+    # +实时保存，与本地问答页同构——每行一条：问题|答案）
+    _auto_save(ui.textarea(
+        label='文本问答数据',
+        value=textarea_data_change(get_nested_value(config, "assistant_anchor", "local_qa", "text", "data")),
+        placeholder='一问一答，每行一条：问题|答案'
+    ).props('input-style="min-height: 16rem"').style("width:100%;").tooltip(
+        '每行一条：问题|答案；同答案多问法写多行'
+    ), ("assistant_anchor", "local_qa", "text", "data"), split_lines=True)
 
     # 音频匹配（匹配问题→目录内音频文件标题，命中直接播放该音频）
     with ui.grid(columns=3):
@@ -111,38 +122,3 @@ def create_assistant_anchor_tab(
             ).style("width:100%;"), ("assistant_anchor", "local_qa", "audio", "type"))
             _auto_save(ui.input(label='音频存储路径', value=get_nested_value(config, "assistant_anchor", "local_qa", "audio", "file_path"), placeholder='本地问答音频文件存储路径').style("width:100%;"), ("assistant_anchor", "local_qa", "audio", "file_path"))
             _auto_save(ui.input(label='音频最低相似度', value=get_nested_value(config, "assistant_anchor", "local_qa", "audio", "similarity"), placeholder='最低音频匹配相似度').style("width:100%;"), ("assistant_anchor", "local_qa", "audio", "similarity"))
-
-    # 路由观测面板（D11/E-S2：只读，经主进程 API 取数——"所配即所行"验证）
-    with ui.card().style(card_css):
-        ui.label("路由观测（最近决策与累计计数）")
-        _stats_label = ui.label("尚未加载").style('font-size: var(--font-size-assist, 12px); white-space:pre-wrap;')
-
-        def _main_api_url() -> str:
-            api_port = get_nested_value(config, "api_port", default=8082)
-            api_ip = get_nested_value(config, "api_ip", default="127.0.0.1")
-            if str(api_ip) == "0.0.0.0":
-                api_ip = "127.0.0.1"
-            return f"http://{api_ip}:{api_port}"
-
-        async def _refresh_stats():
-            import aiohttp
-            try:
-                async with aiohttp.ClientSession(trust_env=False) as session:
-                    async with session.get(f"{_main_api_url()}/assistant_anchor/route-stats",
-                                           timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        body = await resp.json() if resp.status == 200 else {}
-                counters = body.get("counters") or {}
-                last = body.get("last") or {}
-                if not counters:
-                    _stats_label.set_text("暂无路由记录（勾选触发类型后，直播/聊天触发一条即可见）")
-                    return
-                lines = ["产线|来源        计数   最近决策（命中层→去向）"]
-                for key in sorted(counters, key=lambda k: -counters[k]):
-                    info = last.get(key) or {}
-                    arrows = f"{'助播' if info.get('routed') else '原路'} ← {info.get('hit_layer', '-')}"
-                    lines.append(f"{key:<14} {counters[key]:>5}   {arrows}")
-                _stats_label.set_text("\n".join(lines))
-            except Exception as e:
-                _stats_label.set_text(f"读取失败（主系统未启动？）：{e}")
-
-        ui.button("刷新路由观测", on_click=_refresh_stats).props("outline")

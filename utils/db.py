@@ -439,6 +439,40 @@ def ensure_integral_unique_index(db) -> bool:
     return True
 
 
+# 2026-10-31 积分审查批次：入场 12h 限频依赖 last_entrance_ts 列
+# （仅入场事件覆盖，见 feature_handler INTEGRAL_UPSERT_SQL 的 CASE 语义）
+INTEGRAL_ENTRANCE_TS_MIGRATION_SQL = "ALTER TABLE integral ADD COLUMN last_entrance_ts DATETIME"
+
+
+def ensure_integral_entrance_ts_column(db) -> bool:
+    """为 integral 表幂等补 last_entrance_ts 列（入场 12h 限频，2026-10-31 批次）。
+
+    PRAGMA table_info 探测列缺失后 ALTER TABLE ADD COLUMN，可重复执行。
+    新装库由建表 DDL 直接携带该列，本迁移对其 no-op。
+
+    Args:
+        db: SQLiteDB 实例（integral 表须已创建）
+
+    Returns:
+        bool: 列是否就位（False 时入场限频退化为不限频，不阻断主流程）
+    """
+    try:
+        cols = db.fetch_all("PRAGMA table_info(integral)")
+        if not cols:
+            logger.error("integral 表不存在，last_entrance_ts 列迁移跳过")
+            return False
+        if any(row[1] == "last_entrance_ts" for row in cols):
+            return True
+        if not db.execute(INTEGRAL_ENTRANCE_TS_MIGRATION_SQL):
+            logger.error("integral 表 last_entrance_ts 列迁移失败，入场 12h 限频退化为不限频")
+            return False
+        logger.info("integral 表迁移完成：新增 last_entrance_ts 列（入场 12h 限频依赖）")
+        return True
+    except Exception as e:
+        logger.error(f"integral 表 last_entrance_ts 列迁移异常：{e}")
+        return False
+
+
 # 向后兼容的旧版本SQLiteDB类
 class SQLiteDBLegacy:
     """旧版本的SQLiteDB类，用于向后兼容"""

@@ -9,8 +9,12 @@ T7 黑名单接线+规范化回归测试（/autoplan 断链批次）
 4. UID 优先匹配
 5. 空名单=功能关闭
 6. 接线验证：comment_handle/talk_handle 前置拦截（写库前，不污染数据分析）
+7. 2026-10-31 黑名单审查批次：enable 门控（二级菜单开关贯通）+ process_data
+   六类直播间消息统一前置拦截（礼物/关注/入场/点赞此前无拦截，违背
+   "名单内用户一切信息直接抛弃"语义）
 """
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +22,7 @@ import pytest
 from utils.handlers.feature_handler import FeatureHandler
 from utils.handlers.comment_handler import CommentHandler
 from utils.handlers.chat_handler import ChatHandler
+from utils.handlers.timer_handler import TimerHandler
 
 
 def make_config(blacklist_names):
@@ -119,3 +124,71 @@ class TestWiring:
         assert result is None
         handler.llm_handle = MagicMock()
         handler.llm_handle.assert_not_called()
+
+
+class TestEnableGate:
+    """enable 门控（2026-10-31 审查批次修复断链）：二级菜单开关
+    （enable_paths.py blacklist → filter.blacklist.enable）此前后端零消费
+    ——关了开关名单非空仍拦截。语义：显式 false=关闭；缺键保持开启（存量
+    配置无此键不回退旧行为）。"""
+
+    def test_enable_false_disables(self, feature):
+        fh, mh = feature
+        mh.config._cfg["filter"]["blacklist"]["enable"] = False
+        assert fh.blacklist_handle({"username": "坏人A"}) is False
+
+    def test_enable_true_keeps_blocking(self, feature):
+        fh, mh = feature
+        mh.config._cfg["filter"]["blacklist"]["enable"] = True
+        assert fh.blacklist_handle({"username": "坏人A"}) is True
+
+    def test_enable_missing_keeps_blocking(self, feature):
+        """存量 config 无 enable 键 → 保持开启（不回退行为）。"""
+        fh, _ = feature  # make_config 的 _cfg 无 enable 键
+        assert fh.blacklist_handle({"username": "坏人A"}) is True
+
+
+class TestProcessDataUnifiedBlock:
+    """process_data 统一前置拦截（2026-10-31 审查批次）：名单内用户的一切
+    直播间信息直接抛弃——先于限入窗口/去重/分发/关键词识别，不占窗口名额、
+    不触发答谢/积分/编排联动。room_stats 无用户维度天然放行（blacklist_handle
+    对空 username 返回 False）。"""
+
+    def _make_th(self, feature):
+        fh, mh = feature
+        mh.data_lock = threading.Lock()
+        mh.timers = {}
+        mh.is_data_repeat_in_limited_time.return_value = False
+        # 绑定真实现（MagicMock 默认返回值 truthy，会被误判为黑名单命中）
+        mh.blacklist_handle = fh.blacklist_handle
+        for t in ("comment", "gift", "entrance", "follow", "like"):
+            mh.config._cfg["filter"][f"{t}_forget_duration"] = 0.15
+            mh.config._cfg["filter"][f"{t}_forget_reserve_num"] = 2
+        return TimerHandler(mh), mh
+
+    def test_blocks_all_live_types(self, feature):
+        """gift/entrance/follow/like 黑名单用户：不分发、不建窗口。"""
+        th, mh = self._make_th(feature)
+        for flag in ("gift", "entrance", "follow", "like"):
+            th.process_data({"username": "坏人A", "content": ""}, flag)
+            assert flag not in mh.timers, f"{flag} 不应建遗忘窗口"
+
+    def test_blocks_before_dedup_registration(self, feature):
+        """拦截先于去重登记：黑名单消息不进 live_data（痕迹零残留）。"""
+        th, mh = self._make_th(feature)
+        th.process_data({"username": "坏人A", "content": "666"}, "comment")
+        mh.is_data_repeat_in_limited_time.assert_not_called()
+        assert "comment" not in mh.timers
+
+    def test_non_blacklist_enters_window(self, feature):
+        """好人正常进入限入窗口（拦截不误伤）。"""
+        th, mh = self._make_th(feature)
+        th.process_data({"username": "好人", "content": "hi"}, "comment")
+        assert "comment" in mh.timers
+
+    def test_enable_off_process_data_passes(self, feature):
+        """开关关闭：process_data 层不再拦截（enable 门控贯通到统一入口）。"""
+        th, mh = self._make_th(feature)
+        mh.config._cfg["filter"]["blacklist"]["enable"] = False
+        th.process_data({"username": "坏人A", "content": "hi"}, "comment")
+        assert "comment" in mh.timers

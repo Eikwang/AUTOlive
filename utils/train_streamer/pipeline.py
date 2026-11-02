@@ -21,6 +21,7 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -34,15 +35,23 @@ training_running = False
 training_role: str | None = None  # 最近训练角色（D2/D20：启动拦截弹窗读进度用）
 
 
-def notify_train_result(success: bool, message: str, *, stop_requested: bool = False) -> None:
-    """训练主播结果推送（报警重构 2026-10-26）。
+def notify_train_result(success: bool, message: str, *, stop_requested: bool = False,
+                        deploy_failed: bool = False) -> None:
+    """训练主播结果推送（报警重构 2026-10-26；2026-10-31 审查批次扩展）。
 
     完成=进度通知（非错误报警）；失败/评估未过门槛=报警；用户主动停止不发
-    （有意操作，训练页已有呈现）。
+    （有意操作，训练页已有呈现）；部署失败=报警（训练本身完成，但产物未应用
+    到数字人服务，需手动兜底——审查目标②分级修复）。
     """
     if stop_requested:
         return
-    if success:
+    if deploy_failed:
+        alarm_notifier.alarm_error(
+            alarm_notifier.MODULE_TRAIN_STREAMER,
+            message or "训练完成但自动部署失败",
+            fix_hint="手动兜底：将 ckpt_models/<角色>/checkpoint/ 最新 .pt 的 gen 键"
+                     "导出为角色包 checkpoint/new.pt（训练产物已保留，详见训练页日志部署段）")
+    elif success:
         alarm_notifier.alarm_notice(
             alarm_notifier.MODULE_TRAIN_STREAMER, message or "训练完成")
     else:
@@ -60,6 +69,19 @@ def get_interpreter(config_data: dict) -> str:
     return (config_data.get("edtalk_realtime", {}) or {}).get(
         "interpreter_path", "D:\\AI\\EDTalk\\runtime312\\python.exe"
     )
+
+
+def resolve_character_dir_name(config_data: dict) -> str:
+    """部署目标角色包目录名——与 frontend/main.py 启动参数、
+    materials.resolve_character_dir 同源：默认 wy，存量自定义值仍生效
+    （character_dir 已于 2026-10-31 画面设置批次退役为内部量）。
+
+    2026-10-31 审查修复 F2：此前部署 fallback 取 role_name，与服务默认
+    wy 两源不一致——character_dir 键退役删除后，训练产物会部署到
+    edtalk/<角色名>/ 而服务加载的是 wy，训练结果永不生效。
+    """
+    ed_cfg = (config_data.get("edtalk_realtime", {}) or {})
+    return str(ed_cfg.get("character_dir") or "wy")
 
 
 def pid_alive(pid: int) -> bool:
@@ -247,6 +269,10 @@ class TrainPipeline:
         self._vram_baseline_gb: float | None = None
         self._cleanup_timed_out = False
         self._final_message = ""
+        # 部署结果状态（UI 完成通知分级与推送分级消费，2026-10-31 审查修复 F4）
+        self._deploy_ran = False
+        self._deploy_ok = False
+        self._deploy_msg = ""
 
         self._process: subprocess.Popen | None = None
         self._last_proc: subprocess.Popen | None = None
@@ -298,7 +324,8 @@ class TrainPipeline:
             data = {
                 "role": self.role_name,
                 "video_dir": self.video_dir,
-                "completed_stage": stage - 1 if status == "done" else stage - 1,
+                # done=该阶段已完成→completed=stage；其余（running/failed）=stage-1
+                "completed_stage": stage if status == "done" else stage - 1,
                 "current_stage": stage,
                 "status": status,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -566,7 +593,10 @@ class TrainPipeline:
             # {iter_count:06d} 曾致 020000.pt 找不到、评估静默空过、
             # 口型微调深处才报 FileNotFoundError——现动态发现+提前拦截）
             self._ckpt_rel = None
-            if self.stages & {3, 4}:
+            # 底模产物前置校验：仅续训场景（本次不含阶段 2）才要求产物已
+            # 存在——全新全流程（含阶段 2）产物尚未产出，此处校验会把一键
+            # 训练必拦成"底模产物缺失"（2026-10-31 审查修复 F1）
+            if (self.stages & {3, 4}) and 2 not in self.stages:
                 self._ckpt_rel = self._latest_ckpt()
                 if not os.path.exists(os.path.join(self.edtalk_dir, self._ckpt_rel)):
                     stage_hit = min(self.stages & {3, 4})
@@ -609,6 +639,18 @@ class TrainPipeline:
                 self._cleanup_after_step(self._last_proc, 2)
                 if not ok or self._cleanup_timed_out:
                     message = "底模微调失败，详见日志" if not ok else "底模微调后显存清理失败（可强制解除后重跑下一阶段）"
+                    self._write_progress(2, "failed")
+                    return
+                # 底模产物动态发现（阶段 3/4 与部署依赖；off-by-one 实测
+                # 终点保存编号=iter-1，动态取最大编号不硬编码）；缺失即拦，
+                # 不进评估静默空过/口型微调深处报错（2026-10-31 审查修复 F1）
+                self._ckpt_rel = self._latest_ckpt()
+                if not os.path.exists(os.path.join(self.edtalk_dir, self._ckpt_rel)):
+                    message = (
+                        f"problem=底模微调产物缺失；cause={self._ckpt_rel} 不存在"
+                        f"（阶段 2 子进程未产出权重）；"
+                        f"fix=检查训练日志 ckpt_models/{self.role_name}/checkpoint/ 输出")
+                    self._log(f"[校验] {message}", 2)
                     self._write_progress(2, "failed")
                     return
                 self._write_progress(2, "done")
@@ -693,9 +735,12 @@ class TrainPipeline:
             deploy_msg = ""
             if self.stages & {2, 4}:
                 # 有训练产物（底模 ckpt 或口型产物）才部署；纯评估跑完无新 ckpt
+                self._deploy_ran = True
                 try:
-                    character_dir = (self.config_data.get("edtalk_realtime", {}) or {}).get(
-                        "character_dir") or self.role_name
+                    # 部署目标与服务启动/素材管理同源（默认 wy，存量自定义
+                    # 仍生效）——此前 fallback role_name 与服务两源不一致，
+                    # 产物落到无人加载的目录（2026-10-31 审查修复 F2）
+                    character_dir = resolve_character_dir_name(self.config_data)
                     deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count,
                                                              ckpt_rel=self._ckpt_rel)
                     deploy_ok = True
@@ -709,6 +754,9 @@ class TrainPipeline:
                     deploy_msg = f"自动部署失败：{de}"
             else:
                 self._log("[部署] 所选阶段无训练产物（仅评估），跳过自动部署")
+            # 部署结果落实例状态（UI 分级呈现 + finally 推送分级，F4）
+            self._deploy_ok = deploy_ok
+            self._deploy_msg = deploy_msg
 
             stage_times = ""
             self._log(f"=== 训练完成：产物 ckpt_models/{self.role_name}/checkpoint/（总耗时 {elapsed/3600:.1f}h，"
@@ -739,8 +787,10 @@ class TrainPipeline:
                     pass
                 self._log_file = None
             training_running = False
-            # 报警重构（2026-10-26）：训练主播结果推送（完成=通知/失败=报警/主动停止不发）
-            notify_train_result(success, message, stop_requested=self._stop_requested)
+            # 报警重构（2026-10-26）：训练主播结果推送（完成=通知/失败=报警/主动停止不发；
+            # 部署失败=报警——训练完成但产物未应用到数字人服务，2026-10-31 审查修复 F4）
+            notify_train_result(success, message, stop_requested=self._stop_requested,
+                                deploy_failed=bool(self._deploy_ran) and not self._deploy_ok)
             if not success:
                 self.on_complete(False, message or "训练未完成")
 
@@ -869,6 +919,29 @@ class TrainPipeline:
     _SERVE_DATA_OPTIONAL = ("gaze_data",)
 
     @staticmethod
+    def _norm_link_path(p: str) -> str:
+        """联接目标路径归一（Windows mklink /J 读回可能带 \\\\?\\ 前缀）。"""
+        p = str(p or "").strip()
+        if p.startswith("\\\\?\\"):
+            p = p[4:]
+        return os.path.normcase(os.path.normpath(p))
+
+    @staticmethod
+    def _is_reparse_link(path: str) -> bool:
+        """目录联接/符号链接探测。
+
+        注意 os.path.islink 对 junction（IO_REPARSE_TAG_MOUNT_POINT）返回
+        False（只认 SYMBOL_LINK tag），不能用它判联接——用 os.lstat 的
+        st_reparse_tag 判（2026-10-31 审查修复 F3 实测踩坑）。
+        """
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return False
+        tag = getattr(st, "st_reparse_tag", 0)
+        return tag in (stat.IO_REPARSE_TAG_MOUNT_POINT, stat.IO_REPARSE_TAG_SYMLINK)
+
+    @staticmethod
     def _ensure_serve_data(char_root: str, role_name: str) -> str:
         """补齐角色包的推理数据子目录（NTFS junction 到训练产物，零拷贝）。
 
@@ -876,11 +949,16 @@ class TrainPipeline:
         realtime_serve 启动第 1 步就因 "orifra directory not found" 崩溃且
         print 输出丢失无人看见——角色包还需要预处理数据。训练产物根
         data/edtalk_train/<角色>/ 有全套，目录联接引入并随训练重跑自动更新。
-        已存在的子目录（真目录或旧联接）不动。
+        已存在且指向本次角色数据的联接、真目录不动。
+
+        跨角色重对齐（2026-10-31 审查修复 F3）：character_dir 为固定角色包
+        （默认 wy），训练新角色部署时已有联接若指向旧角色数据，新权重配旧
+        脸数据必渲染错配——联接目标非本次角色数据时自动重建（os.rmdir 只删
+        联接本身不删目标数据）；真目录（用户手工资产）保持不动。
 
         Raises:
             FileNotFoundError: 必需子目录在训练产物中缺失（三段式）。
-            RuntimeError: 联接创建失败（三段式）。
+            RuntimeError: 联接创建/重对齐失败（三段式）。
         """
         data_root = os.path.join(
             os.path.dirname(get_edtalk_dir()), "data", "edtalk_train", role_name)
@@ -888,12 +966,28 @@ class TrainPipeline:
             raise FileNotFoundError(
                 f"problem=训练产物数据根不存在；cause={data_root}；"
                 f"fix=先完成阶段 1 预处理（或核对角色名大小写）")
-        linked, skipped = [], []
+        linked, skipped, realigned = [], [], []
         for name in TrainPipeline._SERVE_DATA_DIRS + TrainPipeline._SERVE_DATA_OPTIONAL:
             link = os.path.join(char_root, name)
             target = os.path.join(data_root, name)
-            if os.path.exists(link):
-                skipped.append(name)
+            if TrainPipeline._is_reparse_link(link):
+                # 联接：指向本次角色数据→跳过；指向旧角色数据→重建对齐
+                try:
+                    cur = TrainPipeline._norm_link_path(os.readlink(link))
+                except OSError:
+                    cur = ""
+                if cur == TrainPipeline._norm_link_path(target):
+                    skipped.append(name)
+                    continue
+                try:
+                    os.rmdir(link)  # 只删联接本身，不删目标数据
+                    realigned.append(name)
+                except OSError as oe:
+                    raise RuntimeError(
+                        f"problem=数据联接重对齐失败（{name}）；cause={oe}；"
+                        f"fix=手动删除旧联接 {link} 后重新部署")
+            elif os.path.exists(link):
+                skipped.append(name)  # 真目录（用户手工资产）不动
                 continue
             if not os.path.isdir(target):
                 if name in TrainPipeline._SERVE_DATA_OPTIONAL:
@@ -910,9 +1004,14 @@ class TrainPipeline:
                     f"cause={(r.stderr or r.stdout or '').strip()[:200]}；"
                     f"fix=手动运行 cmd /c mklink /J \"{link}\" \"{target}\"")
             linked.append(name)
-        if not linked:
+        if not linked and not realigned:
             return f"推理数据子目录已齐全（{', '.join(skipped)}）"
-        msg = f"推理数据联接：{', '.join(linked)} ← data/edtalk_train/{role_name}"
+        parts = []
+        if linked:
+            parts.append(f"推理数据联接：{', '.join(linked)} ← data/edtalk_train/{role_name}")
+        if realigned:
+            parts.append(f"跨角色重对齐：{', '.join(realigned)} ← data/edtalk_train/{role_name}")
+        msg = "；".join(parts)
         if skipped:
             msg += f"（已有：{', '.join(skipped)}）"
         return msg

@@ -37,7 +37,6 @@ from utils.handlers.feature_handler import (
     match_tier_block,
     resolve_gift_points,
 )
-
 # 与 utils/my_handle.py config_load 建表 DDL 保持一致
 # 建表 DDL 中的 UNIQUE 行（迁移测试构造"历史无约束库"时移除该行）
 # 注意正则形式：测试文件为 CRLF，行尾 \\r\\n 需容忍（字面 \n 匹配不上会留下悬空逗号）
@@ -54,6 +53,7 @@ CREATE TABLE IF NOT EXISTS integral (
     last_sign_ts DATETIME NOT NULL,
     total_price INT NOT NULL,
     last_ts DATETIME NOT NULL,
+    last_entrance_ts DATETIME,
     UNIQUE(platform, username, uid)
 )
 '''
@@ -132,6 +132,13 @@ def handler(integral_db):
 def fast_retry_sleep(monkeypatch):
     """积分写库重试退避跳过 sleep，保持用例高速。"""
     monkeypatch.setattr(feature_handler_module.time, "sleep", lambda *_: None)
+
+
+@pytest.fixture(autouse=True)
+def no_sign_cooldown(monkeypatch):
+    """关闭 12h 隐形限频（2026-10-31 批次引入）：本文件用例专注 UPSERT 语义，
+    连续签到/入场计分用例不受限频窗口拦截；限频语义由 test_integral_review_1031.py 专测。"""
+    monkeypatch.setattr(feature_handler_module, "INTEGRAL_COOLDOWN_HOURS", 0)
 
 
 # ============ A1 表迁移 ============
@@ -251,8 +258,8 @@ class TestConcurrency:
         conn1 = sqlite3.connect(db_file, timeout=5)
         conn2 = sqlite3.connect(db_file, timeout=5)
         try:
-            args1 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:00", 0, "2026-01-01 00:00:00")
-            args2 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:01", 0, "2026-01-01 00:00:01")
+            args1 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:00", 0, "2026-01-01 00:00:00", None)
+            args2 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:01", 0, "2026-01-01 00:00:01", None)
             conn1.execute(INTEGRAL_UPSERT_SQL, args1)
             conn1.commit()
             conn2.execute(INTEGRAL_UPSERT_SQL, args2)
@@ -357,7 +364,7 @@ class TestTiers:
         # 预置 sign_num=30（档 1 上限），下一次签到应落档 2（2 分）
         now = "2026-01-01 00:00:00"
         assert handler.my_handle.db.execute(INTEGRAL_UPSERT_SQL,
-                                            ("dy", "小明", "", 30, 0, 30, now, 0, now))
+                                            ("dy", "小明", "", 30, 0, 30, now, 0, now, None))
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
         row = handler.my_handle.db.fetch_one("SELECT integral, sign_num FROM integral")
         assert row[0] == 30 + 2

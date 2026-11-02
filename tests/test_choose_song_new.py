@@ -50,10 +50,8 @@ BASE_CFG = {
         "match_fail_copy": "抱歉，我还没学会唱{content}",
         "match_success_copy": "{user} 点了一首《{content}》，谢谢老板的{gift}！",
         "guide_copy": "会的{user}，只需要打赏一个{gift}我就唱给你听哦",
-        "prepare_copy": "收到{user}点的《{content}》，正在准备中",
+        "gift_song_enable": True,
         "gift_song_map": {"粉丝灯牌": "你是我的眼"},
-        "song_cooldown_s": 300,
-        "reply_cooldown_s": 30,
         "backing_volume": 0.8,
         "cover_profile_id": "default",
     },
@@ -164,18 +162,21 @@ class TestAssistantRoute:
         assert msg["type"] == "assistant_anchor_text" and msg["username"] == "小助"
 
 
-# ---------- 配置容错（F-S2：缺键/坏类型→空列表降级） ----------
+# ---------- 配置容错（F-S2：缺键/坏类型→空列表降级；2026-10-31 磁盘扫描面可控） ----------
 
 class TestConfigFaultTolerance:
-    def test_song_names_missing_key(self):
+    def test_song_names_missing_key(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.autolive_paths.SONG_AUDIO_DIR_DEFAULT", str(tmp_path))
         self.h = _make_handler({"choose_song": {}})
         assert self.h._song_song_names() == []
 
-    def test_song_names_bad_type(self):
+    def test_song_names_bad_type(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.autolive_paths.SONG_AUDIO_DIR_DEFAULT", str(tmp_path))
         self.h = _make_handler({"choose_song": {"gift_song_map": "not-a-dict"}})
         assert self.h._song_song_names() == []
 
-    def test_song_names_dedup(self):
+    def test_song_names_dedup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.autolive_paths.SONG_AUDIO_DIR_DEFAULT", str(tmp_path))
         self.h = _make_handler({"choose_song": {"gift_song_map": {"a": "歌1", "b": "歌1", "c": "歌2"}}})
         assert self.h._song_song_names() == ["歌1", "歌2"]
 
@@ -210,19 +211,7 @@ class TestCoversHit:
         assert self.h._song_covers_hit("孤勇者") is None
 
 
-# ---------- 冷却与节流（R7：同歌冷却/回应节流） ----------
-
-class TestCooldownAndThrottle:
-    def test_song_cooldown_first_pass_then_block(self):
-        self.h = _make_handler(BASE_CFG)
-        assert self.h._song_cooldown_check("歌A") is True
-        assert self.h._song_cooldown_check("歌A") is False
-        assert self.h._song_cooldown_check("歌B") is True  # 不同歌互不影响
-
-    def test_reply_throttle(self):
-        self.h = _make_handler(BASE_CFG)
-        assert self.h._song_reply_throttled() is False
-        assert self.h._song_reply_throttled() is True
+# ---------- 冷却与节流（2026-10-31 点歌审查批次退役：方法删除防复活守卫见 test_song_review_1031.py） ----------
 
 
 # ---------- 礼物触发链（R2/R5：命中播报/未命中仅答谢/enable 门控） ----------
@@ -240,7 +229,8 @@ class TestGiftTrigger:
         assert self.h.choose_song_gift_trigger({"username": "小明", "gift_name": "爱心"}) is False
 
     def test_mapped_gift_no_cover_enqueues(self):
-        # 场景 1 前半：命中无成品 → prepare_copy 播报+入队（mock 均记录调用）
+        # 场景 1 前半：命中无成品 → match_success_copy 播报+入队（2026-10-31：
+        # 准备文案退役，统一播匹配成功文案后静默入队；mock 均记录调用）
         self.h = _make_handler(BASE_CFG)
         calls = []
         self.h.my_handle.audio_synthesis_handle = lambda m: calls.append(m)
@@ -249,7 +239,7 @@ class TestGiftTrigger:
         r = self.h.choose_song_gift_trigger({"username": "小明", "gift_name": "粉丝灯牌"})
         assert r is True
         types = [m["type"] if isinstance(m, dict) else m[0] for m in calls]
-        assert types.count("comment") >= 1  # prepare_copy 播报（助播未开）
+        assert types.count("comment") >= 1  # match_success_copy 播报（助播未开）
         assert ("enqueue", ("小明", "你是我的眼")) in calls
 
 
@@ -290,6 +280,24 @@ class TestChooseSongHandle:
         cfg["choose_song"] = dict(BASE_CFG["choose_song"], enable=False)
         self.h = _make_handler(cfg)
         assert self.h.choose_song_handle({"username": "a", "content": "主播会唱X"}) is False
+
+    def test_gift_song_off_direct_play(self, tmp_path, monkeypatch):
+        # 2026-10-31 分叉：礼物点歌关闭→matched 播 match_success_copy 并入队
+        # 播放/翻唱（关键词免费点歌），不回应引导文案
+        monkeypatch.setattr("utils.autolive_paths.SONG_AUDIO_DIR_DEFAULT", str(tmp_path))
+        cfg = dict(BASE_CFG)
+        cfg["choose_song"] = dict(BASE_CFG["choose_song"], gift_song_enable=False)
+        self.h = _make_handler(cfg)
+        sent = []
+        self.h.my_handle.audio_synthesis_handle = lambda m: sent.append(m)
+        self.h.my_handle.webui_show_chat_log_callback = lambda *a: sent.append(("log", a))
+        self.h._song_enqueue_cover = lambda *a: sent.append(("enqueue", a))
+        r = self.h.choose_song_handle({"username": "小明", "content": "主播会唱你是我的眼吗？"})
+        assert r is True
+        texts = [m.get("content", "") for m in sent if isinstance(m, dict)]
+        assert any("小明" in t and "你是我的眼" in t for t in texts)  # 匹配成功文案
+        assert not any(isinstance(m, dict) and "打赏" in m.get("content", "") for m in sent)
+        assert ("enqueue", ("小明", "你是我的眼")) in sent  # 无成品→入队翻唱
 
 
 # ---------- R13 song_path 迁移（遗留键告警+采纳） ----------
@@ -339,12 +347,14 @@ class TestRetiredParams:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         with open(os.path.join(root, "config/features/features.json"), encoding="utf-8") as f:
             node = json.load(f)["choose_song"]
-        for gone in ("stop_cmd", "random_cmd", "song_path"):
-            assert gone not in node
+        gone = ("stop_cmd", "random_cmd", "song_path",
+                "prepare_copy", "song_cooldown_s", "reply_cooldown_s")
+        for key in gone:
+            assert key not in node, key
         for need in ("start_cmd", "match_fail_copy", "match_success_copy", "guide_copy",
-                     "prepare_copy", "gift_song_map", "song_cooldown_s", "reply_cooldown_s",
+                     "gift_song_enable", "gift_song_map",
                      "backing_volume", "similarity", "enable"):
-            assert need in node
+            assert need in node, need
 
 
 # ---------- R6 双轨消息契约（song 消息 backing 透传） ----------

@@ -206,12 +206,10 @@
       "唱个"
     ],
     "match_fail_copy": "抱歉，我还没学会唱{content}",
-    "match_success_copy": "{user} 点了一首《{content}》，谢谢老板的{gift}！",
+    "match_success_copy": "{user} 点了一首《{content}》，马上唱给你听！",
     "guide_copy": "会的{user}，只需要打赏一个{gift}我就唱给你听哦",
-    "prepare_copy": "收到{user}点的《{content}》，正在准备中，马上就好！",
+    "gift_song_enable": false,
     "gift_song_map": {},
-    "song_cooldown_s": 300,
-    "reply_cooldown_s": 30,
     "backing_volume": 0.8
   },
   "sd": {

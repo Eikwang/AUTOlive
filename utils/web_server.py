@@ -287,17 +287,35 @@ class WebServer:
                 logger.error("/cover/status 异常", exc_info=True)
                 return {"available": False, "reason": str(e)}
 
-        @self.app.get("/assistant_anchor/route-stats")
-        async def assistant_anchor_route_stats():
-            """助播路由观测取数（D11/E-S2：只读快照，无鉴权新增——与本机内网
-            API 其它只读端点同暴露面，复用既有 WebUI 访问边界）。"""
+        # 一键翻唱入队（2026-10-31 点歌审查批次：点歌页「上传歌曲+一键翻唱」
+        # 数据源——webui 选歌后 POST 入 CoverQueue；viewer=webui-manual 走
+        # 既有冷却/队列上限治理；on_done 自动插播回调与弹幕点歌同路）
+        @self.app.post("/cover/enqueue")
+        async def cover_enqueue(req: dict):
+            song = str((req or {}).get("song") or "").strip()
+            if not song:
+                raise HTTPException(status_code=400, detail="缺少 song 参数")
             try:
-                from .handlers.assistant_router import get_route_stats
-                return get_route_stats()
+                cq = getattr(self.my_handle, "cover_queue", None) if self.my_handle else None
+                if cq is None:
+                    from utils.cover_worker import CoverQueue
+                    cq = CoverQueue(self.config, None)
+                    if self.my_handle is not None:
+                        self.my_handle.cover_queue = cq
+                fh = getattr(self.my_handle, "feature_handler", None) if self.my_handle else None
+                if getattr(cq, "on_done", None) is None and fh is not None:
+                    cq.on_done = fh._play_cover_done
+                profile = self.config.get("choose_song", "cover_profile_id") or "default"
+                r = cq.enqueue("webui-manual", song, profile)
+                if r.get("action") == "queued":
+                    cq.ensure_worker()
+                return r
+            except HTTPException:
+                raise
             except Exception as e:
-                logger.error("/assistant_anchor/route-stats 异常", exc_info=True)
-                return {"counters": {}, "last": {}, "error": str(e)}
-            
+                logger.error("/cover/enqueue 异常", exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.post("/send")
         async def send(msg: SendMessage):
             """处理发送消息请求"""

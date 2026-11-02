@@ -27,7 +27,7 @@ from .common import Common
 from .audio import Audio
 from .gpt_model.gpt import GPT_MODEL
 from .base import logger
-from .db import SQLiteDB, ensure_integral_unique_index
+from .db import SQLiteDB, ensure_integral_unique_index, ensure_integral_entrance_ts_column
 from .my_translate import My_Translate
 
 # 导入 handler 模块
@@ -79,31 +79,10 @@ class My_handle(metaclass=SingletonMeta):
         "room_stats": [],
     }
 
-    # 各个任务运行数据缓存 暂时用于 限定任务周期性触发
-    task_data = {
-        "read_comment": {
-            "data": [],
-            "time": 0
-        },
-        "local_qa": {
-            "data": [],
-            "time": 0
-        },
-        "thanks": {
-            "gift": {
-                "data": [],
-                "time": 0
-            },
-            "entrance": {
-                "data": [],
-                "time": 0
-            },
-            "follow": {
-                "data": [],
-                "time": 0
-            },
-        }
-    }
+    # ~~task_data 各任务运行数据缓存~~（2026-10-31 本地问答审查批次移除：
+    # 仅存的 local_qa 条目服务周期性触发回放，而该缓冲自始零写入点——最后
+    # 一只消费者 periodic_trigger_data_handle 已随周期性触发一并退役；
+    # read_comment/thanks 缓冲先行退役，见各审查批次注释）
 
     # 答谢板块文案数据临时存储
     thanks_entrance_copy = []
@@ -204,15 +183,13 @@ class My_handle(metaclass=SingletonMeta):
                 "每条弹幕将无回复；fix=启用 WebUI 本地问答开关或改 chat_type")
 
         # uc2/LLM 翻译接线（切片 3 收尾）：GPT 通道就绪后注入翻译回调——
-        # 译文目标语言跟随翻译模块既有 to_lang 配置（baidu.to_lang 缺省 zh）
+        # 2026-10-31 翻译审查批次修复：此前闭包固化读 baidu.to_lang（且热重载
+        # 不更新），argos/google 通道目标语言错跟百度配置；现运行期动态读当前
+        # 翻译通道的 to_lang（My_Translate.raw_target_lang 单点）
         if My_handle.my_translate is not None:
-            to_lang = "zh"
-            try:
-                to_lang = (My_handle.config.get("translate", "baidu", "to_lang") or "zh")
-            except Exception:
-                pass
-
-            def _llm_translate(text, _to=to_lang):
+            def _llm_translate(text):
+                _type = My_handle.config.get("translate", "type") or "argos"
+                _to = My_handle.my_translate.raw_target_lang(_type)
                 from utils.gpt_model.custom_llm import Custom_LLM
                 llm = Custom_LLM(My_handle.config.get("custom_llm"))
                 prompt = (f"将以下文本翻译为{_to}，只输出译文，不要任何解释：\n{text}")
@@ -282,6 +259,7 @@ class My_handle(metaclass=SingletonMeta):
                 last_sign_ts DATETIME NOT NULL,
                 total_price INT NOT NULL,
                 last_ts DATETIME NOT NULL,
+                last_entrance_ts DATETIME,
                 UNIQUE(platform, username, uid)
             )
             '''
@@ -291,6 +269,9 @@ class My_handle(metaclass=SingletonMeta):
             # A1（/autoplan 放行前置）：integral 表幂等迁移——补 UNIQUE(platform, username, uid)
             # 唯一索引（UPSERT 计分写入依赖该索引，见 utils/db.ensure_integral_unique_index）
             ensure_integral_unique_index(self.db)
+            # 2026-10-31 积分审查批次：存量库幂等补 last_entrance_ts 列
+            # （入场 12h 限频依赖，见 utils/db.ensure_integral_entrance_ts_column）
+            ensure_integral_entrance_ts_column(self.db)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f'数据库 {My_handle.config.get("database", "path")} 创建失败，请查看日志排查问题！！！')
@@ -490,10 +471,8 @@ class My_handle(metaclass=SingletonMeta):
     def comment_handle(self, data):
         return self.comment_handler.comment_handle(data)
     
-    # 定时器相关
-    def periodic_trigger_data_handle(self):
-        return self.timer_handler.periodic_trigger_data_handle()
-    
+    # 定时器相关（periodic_trigger_data_handle 已随周期性触发退役移除，
+    # 2026-10-31 本地问答审查批次）
     def start_timers(self):
         return self.timer_handler.start_timers()
     

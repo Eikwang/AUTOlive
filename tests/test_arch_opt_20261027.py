@@ -214,6 +214,7 @@ class _FakeTranslateHost:
         import types
         from utils.my_translate import My_Translate
         self._LANG_CODE_ALIASES = My_Translate._LANG_CODE_ALIASES
+        self.raw_target_lang = types.MethodType(My_Translate.raw_target_lang, self)
         self._target_lang = types.MethodType(My_Translate._target_lang, self)
         self.trans_reply = types.MethodType(My_Translate.trans_reply, self)
 

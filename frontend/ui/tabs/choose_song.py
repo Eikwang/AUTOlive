@@ -79,21 +79,22 @@ def create_choose_song_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="choose_song")
 
     # 点歌模式（/autoplan 2026-10-23 批次 R1：移除 取消点歌命令/随机点歌命令/
-    # 歌曲路径 三控件——歌曲目录改为内部约定 song/；R2/R3 新增四文案+冷却+伴奏音量）
+    # 歌曲路径 三控件——歌曲目录改为内部约定 song/；2026-10-31 点歌审查批次：
+    # 移除 准备文案/同歌冷却间隔/弹幕回应节流 三控件（系统已有限入/去重/优先级
+    # 队列防刷屏），命中行为按礼物点歌开关分叉——关=关键词直点歌、开=打赏即唱）
     with ui.card().style(card_css):
         ui.label('点歌模式')
-        ui.label("弹幕含触发关键词+歌名 → 播报引导文案（打赏礼物即唱）；打赏礼物 → 匹配歌曲列表直接开唱。歌曲音频目录为内置 song/（无需配置）").style(
+        ui.label("弹幕含触发关键词+歌名 → 匹配歌曲列表：礼物点歌关闭=播报并直接开唱；开启=回应引导文案，打赏礼物即唱。歌曲列表=礼物映射歌名 ∪ 翻唱成品 ∪ song/ 曲源（翻唱产物自动可点）").style(
             "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
                 _auto_save(ui.textarea(label='点歌触发关键词', value=textarea_data_change(get_nested_value(config, "choose_song", "start_cmd")), placeholder='弹幕中包含即触发点歌判断，换行分隔\n例如：主播会唱 / 可以唱 / 能唱').style("width:100%;"), keys=("choose_song", "start_cmd"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.input(label='匹配失败文案', value=get_nested_value(config, "choose_song", "match_fail_copy"), placeholder='列表没有这首歌时回应\n变量：{user} {content}').style("width:100%;"), keys=("choose_song", "match_fail_copy"))
-                _auto_save(ui.input(label='引导文案（列表有歌）', value=get_nested_value(config, "choose_song", "guide_copy"), placeholder='弹幕问歌未打赏时回应，不播放\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "guide_copy"))
+                _auto_save(ui.input(label='引导文案（礼物点歌开启时）', value=get_nested_value(config, "choose_song", "guide_copy"), placeholder='开启礼物点歌后，匹配成功未打赏的回应，不播放\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "guide_copy"))
             with ui.column().style("width:100%;"):
-                _auto_save(ui.input(label='匹配成功文案（礼物点歌）', value=get_nested_value(config, "choose_song", "match_success_copy"), placeholder='礼物命中歌曲后播报\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "match_success_copy"))
-                _auto_save(ui.input(label='准备文案（翻唱生成中）', value=get_nested_value(config, "choose_song", "prepare_copy"), placeholder='命中但无成品、翻唱生成中播报\n变量：{user} {content}').style("width:100%;"), keys=("choose_song", "prepare_copy"))
-        with ui.grid(columns=3):
+                _auto_save(ui.input(label='匹配成功文案', value=get_nested_value(config, "choose_song", "match_success_copy"), placeholder='点歌匹配成功后播报（关键词直点/礼物点歌共用）\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "match_success_copy"))
+        with ui.grid(columns=2):
             with ui.column().style("width:100%;"):
                 similarity_val = float(get_nested_value(config, "choose_song", "similarity") or 0.5)
                 simlab = ui.label(f'匹配最低相似度: {similarity_val:.2f}').style("font-size:12px")
@@ -102,34 +103,27 @@ def create_choose_song_tab(
                                                set_config_callback("choose_song", "similarity", float(e.value)))
                           ).props("label-always").style("width:100%")
             with ui.column().style("width:100%;"):
-                cd_val = int(get_nested_value(config, "choose_song", "song_cooldown_s") or 300)
-                cdlab = ui.label(f'同歌冷却间隔: {cd_val}s').style("font-size:12px")
-                ui.slider(min=0, max=1800, step=30, value=cd_val,
-                          on_change=lambda e: (cdlab.set_text(f'同歌冷却间隔: {int(e.value)}s'),
-                                               set_config_callback("choose_song", "song_cooldown_s", int(e.value)))
-                          ).props("label-always").style("width:100%")
-            with ui.column().style("width:100%;"):
-                rc_val = int(get_nested_value(config, "choose_song", "reply_cooldown_s") or 30)
-                rclab = ui.label(f'弹幕回应节流: {rc_val}s').style("font-size:12px")
-                ui.slider(min=0, max=300, step=5, value=rc_val,
-                          on_change=lambda e: (rclab.set_text(f'弹幕回应节流: {int(e.value)}s'),
-                                               set_config_callback("choose_song", "reply_cooldown_s", int(e.value)))
-                          ).props("label-always").style("width:100%")
-        with ui.grid(columns=2):
-            with ui.column().style("width:100%;"):
                 bv_val = float(get_nested_value(config, "choose_song", "backing_volume") or 0.8)
                 bvlab = ui.label(f'伴奏音量（数字人演唱时）: {bv_val:.0%}').style("font-size:12px")
                 ui.slider(min=0.0, max=1.0, step=0.05, value=bv_val,
                           on_change=lambda e: (bvlab.set_text(f'伴奏音量（数字人演唱时）: {float(e.value):.0%}'),
                                                set_config_callback("choose_song", "backing_volume", float(e.value)))
                           ).props("label-always").style("width:100%")
-            ui.label("伴奏音量：数字人演唱时伴奏从直播设备外放的音量（0=静音）").style(
-                "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
+        ui.label("伴奏音量：数字人演唱时伴奏从直播设备外放的音量（0=静音）；干声经数字人口型驱动，伴奏本地外放").style(
+            "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
 
     # ---------- 礼物点歌映射表+匹配预演（D4：choose_song.gift_song_map 新键） ----------
     with ui.card().style(card_css):
         with ui.expansion("礼物点歌（礼物事件映射歌曲播放）", value=False).style("width:100%"):
-            ui.label("礼物名命中映射表后，按点歌既有链路（数字人口型）播放对应歌曲；配置即时保存，直播中可增删").style(
+            # 启用开关（2026-10-31 点歌审查批次：gift_song_enable——开启后礼物命中
+            # 映射即点歌播放、关键词点歌仅回应引导文案；关闭后关键词直点歌、礼物仅答谢）
+            with ui.row().style("width:100%;align-items:center;gap:12px"):
+                ui.switch('启用礼物点歌',
+                          value=bool(get_nested_value(config, "choose_song", "gift_song_enable")),
+                          on_change=lambda e: set_config_callback("choose_song", "gift_song_enable", bool(e.value)))
+                ui.label("开启：礼物命中映射→播报+开唱，关键词点歌=引导打赏（不播放）；关闭：关键词直点歌，礼物仅答谢").style(
+                    "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
+            ui.label("礼物名命中映射表后，按点歌既有链路（数字人口型）播放对应歌曲；配置即时保存，直播中可增删；礼物无映射歌曲时答谢文案照常触发").style(
                 "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
             # 拥塞规则（计划 D-23/E1）：同一礼物同时触发答谢与点歌时，答谢先出，
             # 点歌请求以 song 优先级恒定降权排队——映射表只决定"唱什么"，不改变队列次序。
@@ -299,6 +293,82 @@ def create_choose_song_tab(
                     status_lab.set_text("○ 翻唱队列空闲（弹幕点歌自动入队）")
 
             ui.timer(5.0, _poll_task)
+
+            # ①.5 上传歌曲+一键翻唱（2026-10-31 点歌审查批次：手动曲源管理——
+            # 上传原始歌曲入 song/ 曲源；一键翻唱调 main /cover/enqueue 入翻唱
+            # 队列，完成后自动插播+成品自动进入点歌列表）
+            ui.separator()
+            with ui.grid(columns=2).style("width:100%"):
+                with ui.column().style("width:100%;"):
+                    ui.label("上传歌曲（原始曲源，供翻唱与关键词点歌）").style(
+                        "font-size:12px;color:var(--text-secondary)")
+
+                    def _handle_upload(e):
+                        import re as _re
+                        name = os.path.basename(e.name or "").strip()
+                        stem, ext = os.path.splitext(name)
+                        if ext.lower() not in (".mp3", ".wav", ".flac"):
+                            ui.notify(f"格式 {ext or '未知'} 不在支持列表 [.mp3/.wav/.flac]，请转换格式后重传",
+                                      type="warning")
+                            return
+                        safe = _re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "untitled"
+                        dest = os.path.join(song_audio_root(), safe + ext.lower())
+                        try:
+                            with open(dest, "wb") as f:
+                                f.write(e.content.read())
+                        except Exception as ex:
+                            ui.notify(f"保存失败：{ex}", type="negative")
+                            return
+                        ui.notify(f"已保存：{os.path.basename(dest)}", type="positive")
+                        _refresh_song_options()
+
+                    ui.upload(label='选择歌曲文件（可多选）', multiple=True,
+                              auto_upload=True, on_upload=_handle_upload
+                              ).props('accept=.mp3,.wav,.flac').style("width:100%")
+                with ui.column().style("width:100%;"):
+                    ui.label("一键翻唱（入队自动生成，完成自动插播）").style(
+                        "font-size:12px;color:var(--text-secondary)")
+                    one_click_select = ui.select(
+                        options=sorted(list_song_names("")), label='选择歌曲',
+                        with_input=True).style("width:100%")
+
+                    def _refresh_song_options():
+                        try:
+                            one_click_select.set_options(sorted(list_song_names("")))
+                        except Exception:
+                            pass
+
+                    def _one_click_cover():
+                        song = (one_click_select.value or "").strip()
+                        if not song:
+                            ui.notify("请先选择要翻唱的歌曲（可先上传歌曲）", type="warning")
+                            return
+
+                        def _post():
+                            try:
+                                r = _session.post(f"{_main_base(config)}/cover/enqueue",
+                                                  json={"song": song}, timeout=6)
+                                return r.status_code, r.json()
+                            except Exception as ex:
+                                return None, {"detail": str(ex)[:80]}
+
+                        code, data = _post()
+                        if code == 200:
+                            action = data.get("action")
+                            if action == "queued":
+                                ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位）", type="positive")
+                            elif action == "cached":
+                                ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
+                            elif action == "queue_full":
+                                ui.notify("翻唱队列已满，稍后再试", type="warning")
+                            elif action == "cooldown":
+                                ui.notify("操作过于频繁（冷却中），稍后再试", type="warning")
+                            else:
+                                ui.notify(f"入队结果：{action}", type="info")
+                        else:
+                            ui.notify(f"翻唱入队失败：{data.get('detail', code)}", type="negative")
+
+                    ui.button('一键翻唱', on_click=_one_click_cover).props('outline dense')
 
             # ② 翻唱参数（档案选择写 cover_profile_id、音高写 cover_pitch——
             # cover_worker 派发 -p 直传八度，音色变更下次点歌生效）

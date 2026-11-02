@@ -92,7 +92,9 @@ def _run_one_cycle(ts):
 
 class TestCopywritingPlayback:
     def test_copy_file_reaches_playback(self, scheduler):
-        """本地文案文件内容进入播放链（T9 核心修复：原来只记日志）。"""
+        """本地文案文件内容进入播放链（T9 核心修复：原来只记日志）。
+        type=trends_copywriting（2026-10-31 队列审查批次：对齐 priority_mapping
+        键——原 "copywriting" 不在映射表，UI 动态文案优先级不生效）。"""
         ts, mh, tmp = scheduler
         ts.config._cfg["trends_copywriting"]["prompt_change_enable"] = False  # 页级改写关（R5③）
         ts.config._cfg["trends_copywriting"]["copywriting"][0]["prompt_change_enable"] = False
@@ -104,7 +106,7 @@ class TestCopywritingPlayback:
 
         mh.audio_synthesis_handle.assert_called()
         sent = mh.audio_synthesis_handle.call_args[0][0]
-        assert sent["type"] == "copywriting"
+        assert sent["type"] == "trends_copywriting"
         assert "欢迎来到直播间" in sent["content"]
 
     def test_llm_rewrite_applied(self, scheduler):

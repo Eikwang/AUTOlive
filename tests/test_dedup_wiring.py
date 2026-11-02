@@ -45,6 +45,19 @@ class _FakeHandle:
     def comment_handle(self, data):
         self.handled.append(("comment", data))
 
+    def blacklist_handle(self, data):
+        # 2026-10-31 黑名单统一拦截接线：去重测试桩默认无黑名单用户
+        return False
+
+    def talk_handle(self, data):
+        self.handled.append(("talk", data))
+
+    def schedule_handle(self, data):
+        self.handled.append(("schedule", data))
+
+    def idle_time_task_handle(self, data):
+        self.handled.append(("idle_time_task", data))
+
 
 class TestDedupWiring(unittest.TestCase):
     def _cfg(self):
@@ -73,16 +86,43 @@ class TestDedupWiring(unittest.TestCase):
         self.assertEqual(len(fh.handled), 2)
 
     def test_unconfigured_type_skips_dedup(self):
-        """未配置去重周期的类型（如 schedule）同内容重发不丢弃。"""
-        cfg = self._cfg()
-        cfg["schedule_forget_duration"] = 0.15
-        cfg["schedule_forget_reserve_num"] = 5
-        fh = _FakeHandle(cfg)
+        """系统生成类型（schedule）不参与去重——同内容重发不丢弃。
+
+        2026-10-31 限入审查批次：schedule 已直通分发（非限流类型白名单），
+        同内容两条均立即处理，不建遗忘窗口 Timer。"""
+        fh = _FakeHandle(self._cfg())
         data = {"username": "定时任务", "content": "欢迎回来"}
         fh.timer_handler.process_data(dict(data), "schedule")
         fh.timer_handler.process_data(dict(data), "schedule")
-        # 2026-10-28 重构：首条立即分发（不进缓冲），第二条在窗口缓冲
-        self.assertEqual(len(fh.timers["schedule"].last_data), 1)
+        # 直通无窗口 Timer；轮询等两条全部异步分发
+        assert "schedule" not in fh.timers
+        deadline = time.time() + 2
+        while time.time() < deadline and len(fh.handled) < 2:
+            time.sleep(0.01)
+        self.assertEqual(len(fh.handled), 2)
+
+    def test_non_throttled_types_direct_bypass(self):
+        """聊天/定时任务/闲时任务直通守卫（2026-10-31 限入审查批次）：
+        三类不过去重、不进遗忘窗口，逐条立即分发（语音对话被"遗忘"即丢
+        回复；系统任务低频无需限流）。"""
+        for flag in ("talk", "schedule", "idle_time_task"):
+            fh = _FakeHandle(self._cfg())
+            data = {"username": "u1", "content": "同一句"}
+            for _ in range(3):
+                fh.timer_handler.process_data(dict(data), flag)
+            assert flag not in fh.timers, f"{flag} 不应建遗忘窗口"
+            deadline = time.time() + 2
+            while time.time() < deadline and len(fh.handled) < 3:
+                time.sleep(0.01)
+            self.assertEqual(len(fh.handled), 3, f"{flag} 三条都应直通分发")
+
+    def test_forget_flags_whitelist_guard(self):
+        """限流白名单守卫：六类直播间消息在名单内，系统三类不在。"""
+        flags = TimerHandler._FORGET_FLAGS
+        assert flags == frozenset({
+            "comment", "gift", "entrance", "follow", "like", "room_stats"})
+        assert "talk" not in flags and "schedule" not in flags \
+            and "idle_time_task" not in flags
 
     def test_gift_dedup_key_uses_gift_name(self):
         """礼物无 content 键——按 gift_name 去重。"""

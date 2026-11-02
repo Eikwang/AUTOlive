@@ -6,6 +6,7 @@
 """
 
 import os
+import random
 import traceback
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
@@ -288,6 +289,54 @@ class CommentHandler:
             logger.error(f"调音处理失败：{e}")
             return False
 
+    def _read_comment_replay(self, _chat_src, username, content):
+        """念弹幕即时复读（2026-10-31 念弹幕审查批次重构）。
+
+        周期触发退役（用户裁决：系统已有限入/去重/优先级队列，不需要定时回放）
+        ——过滤链完成的弹幕处理时直接入待合成队列，按 filter.priority_mapping
+        .read_comment 优先级排序（"位于优先级排序之后"）。
+
+        念用户名三参数接线（此前 UI 有配置后端零消费）：
+        - read_username_enable 开 → 念用户名文案（随机一条，{username} 占位
+          替换）+ 截断后用户名 + 弹幕内容；关 → 仅念内容
+        - username_max_len 超长截断加省略号（对齐 reply_template G6 口径；
+          非法值容错缺省 10）
+        - read_username_copywriting 随机文案，空表/非法行过滤，兜底 "用户名说:"
+
+        助播分流（D5 路由判定从 timer 回放点前移至即时入队点，语义不变：
+        勾选 read_comment 助播触发 → 助播消息通道；未勾选 → 原路念弹幕）。
+        仅弹幕源（聊天页发送消息不复读）。
+        """
+        if _chat_src != "comment" or not self.my_handle.config.get("read_comment", "enable"):
+            return
+        rc_content = content
+        if self.my_handle.config.get("read_comment", "read_username_enable"):
+            uname = username
+            try:
+                _rc_max_len = int(self.my_handle.config.get("read_comment", "username_max_len"))
+            except (TypeError, ValueError):
+                _rc_max_len = 10
+            if _rc_max_len > 0 and len(uname) > _rc_max_len:
+                uname = uname[:_rc_max_len] + "..."
+            _rc_tpl = [t for t in (self.my_handle.config.get("read_comment", "read_username_copywriting") or [])
+                       if isinstance(t, str) and t.strip()]
+            _rc_prefix = random.choice(_rc_tpl).replace("{username}", uname) if _rc_tpl else f"{uname}说:"
+            rc_content = f"{_rc_prefix}{content}"
+        from .assistant_router import assistant_route, assistant_copy_message
+        if assistant_route(self.my_handle.config, "read_comment"):
+            self.my_handle.audio_synthesis_handle(assistant_copy_message(
+                self.my_handle.config, rc_content,
+                producer_type="read_comment", hit_layer="direct"))
+        else:
+            self.my_handle.audio_synthesis_handle({
+                "type": "read_comment",
+                "tts_type": self.my_handle.config.get("audio_synthesis_type"),
+                "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
+                "config": self.my_handle.config.get("filter"),
+                "username": username,
+                "content": rc_content,
+            })
+
     def comment_handle(self, data):
         """
         弹幕处理
@@ -347,6 +396,14 @@ class CommentHandler:
             if not content:
                 return
 
+            # 弹幕翻译（2026-10-31 翻译审查批次：补全 trans_type=弹幕/弹幕+回复——
+            # 此前「弹幕」类型全库零消费，外语弹幕原样进 LLM。任务书语义：收到的
+            # 信息非「通用配置-回复语言」时翻译为设定语言再处理。位于语言过滤前：
+            # 译文语言=回复语言，lang_filter 自然放行，翻译与 G3 过滤叠加语义一致）
+            if self.my_handle.config.get("translate", "enable") and (self.my_handle.config.get("translate", "trans_type") == "弹幕" or \
+                self.my_handle.config.get("translate", "trans_type") == "弹幕+回复"):
+                content = self.my_handle.my_translate.trans_comment(content)
+
             # 回复语言过滤（G3，基础功能 2026-10-22：need_lang≠none 时检测弹幕语言）
             if not self.my_handle.lang_filter_pass(content):
                 return
@@ -356,17 +413,12 @@ class CommentHandler:
                 logger.debug(f"用户:{username}]，发送纯符号的弹幕，已过滤")
                 return
 
-            # 念弹幕缓冲生产者（断链修复——/autoplan main-20261026-214845 实施
-            # 发现：task_data["read_comment"] 缓冲此前零生产者，timer 回放永远
-            # 空转；恢复=过滤链完成的弹幕入缓冲，由 periodic_trigger 定时回放，
-            # 路由判定在 timer_handler 回放点）。仅弹幕源入缓冲（聊天页消息不入）；
-            # 上限 500 防未消费堆积。
-            if _chat_src == "comment" and self.my_handle.config.get("read_comment", "enable"):
-                _rc_buf = (self.my_handle.task_data.get("read_comment") or {}).get("data")
-                if _rc_buf is not None:
-                    _rc_buf.append({"type": "read_comment", "username": username, "content": content})
-                    if len(_rc_buf) > 500:
-                        del _rc_buf[:-500]
+            # 念弹幕即时复读（2026-10-31 念弹幕审查批次重构）：周期触发退役
+            # （系统已有限入/去重/优先级队列，弹幕处理时直接入待合成队列按
+            # read_comment 优先级排序——"位于优先级排序之后"）；缓冲+定时回放
+            # 机制删除。仅弹幕源（聊天页消息不入）；过滤链完成后到达此处的
+            # 弹幕已经违禁/表情/语言/纯符号清洗。
+            self._read_comment_replay(_chat_src, username, content)
 
             # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Keyword 节点）=====
             # 过滤链完成后单次识别全部功能的关键词命中，产出 rec 分发到各模块——

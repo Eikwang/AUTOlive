@@ -384,6 +384,7 @@ _D12_EXPECTED = {
     ("chat_handler.py", "talk_handle"): ("exempt", "voice 语音对话不归 AI对话/聊天（uc2a，终门确认）"),
     ("comment_handler.py", "reread_handle"): ("routed", "复读归拢聊天（D2）"),
     ("comment_handler.py", "comment_handle"): ("routed", "助播KB链+llm_reply（AI对话/聊天）"),
+    ("comment_handler.py", "_read_comment_replay"): ("routed", "念弹幕即时复读（2026-10-31 审查批次：D5 路由判定从 timer 回放点前移至此，勾选 read_comment 助播触发走助播通道）"),
     ("event_handler.py", "_thanks_dispatch"): ("routed", "答谢三件（gift/entrance/follow，生成时已定 type）"),
     ("event_handler.py", "schedule_handle"): ("routed", "定时任务"),
     ("event_handler.py", "idle_time_task_handle"): ("routed", "闲时任务 text 类"),
@@ -393,7 +394,8 @@ _D12_EXPECTED = {
     ("feature_handler.py", "choose_song_handle"): ("routed", "点歌引导/失败文案（R4 经 _song_copy_message 路由）"),
     ("feature_handler.py", "_song_play_message"): ("exempt", "歌曲音频走编排/双轨（非文案，用户需求#3）"),
     ("feature_handler.py", "_play_cover_done"): ("exempt", "翻唱完成播报（独立链，非本批触发类型）"),
-    ("timer_handler.py", "periodic_trigger_data_handle"): ("routed", "念弹幕回放（local_qa/thanks 周期回放消息已带生成时 type）"),
+    # ~~("timer_handler.py", "periodic_trigger_data_handle")~~（2026-10-31 本地
+    # 问答审查批次：周期性触发整体移除，缓冲零写入的死机制，站点随之消失）
     ("utils_handler.py", "get_a_local_audio_and_audio_play"): ("exempt", "本地音频播放工具（非文案消息）"),
     ("task_scheduler.py", "run_trends_copywriting"): ("exempt", "动态文案独立功能（非本批触发类型）"),
     ("my_handle.py", "audio_synthesis_handle"): ("exempt", "定义委托链（my_handle→audio_handler 包装层，非生产点）"),
@@ -485,16 +487,6 @@ def _make_match_handler():
     fh = FeatureHandler.__new__(FeatureHandler)
     fh.my_handle = _Stub()
     return fh
-
-
-# ---------- 决策记录器（E-A2/D11 数据源） ----------
-
-def test_route_stats_snapshot_shape():
-    ar.assistant_copy_message(_base_cfg(), "x", producer_type="gift")
-    stats = ar.get_route_stats()
-    assert "gift|" in "".join(stats["counters"].keys())
-    last = next(v for k, v in stats["last"].items() if k.startswith("gift|"))
-    assert last["producer_type"] == "gift" and last["routed"] is True
 
 
 # ---------- 主 local_qa 收敛（终门 rec 后续项，2026-10-27） ----------

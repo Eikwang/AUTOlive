@@ -262,6 +262,25 @@ def create_train_voice_tab(
         start_btn.set_enabled(False)
         stop_btn.set_enabled(True)
 
+    def _pipe_name(p) -> str:
+        return next((n for n, q in _pipes if q is p), "训练管线")
+
+    def _notify_outcome(p, name: str):
+        """报警重构（2026-10-26）：训练声音结果推送——完成=进度通知（非错误
+        报警）；失败/未执行完整=报警；用户主动停止不发（有意操作）。
+        2026-10-31 审查修复 V4：自 _chain_run 提取，单步重跑同样路由。"""
+        outcome = pipeline_outcome(p)
+        if outcome == "stopped":
+            logger.info(f"[train-voice] {name} 用户停止，不发报警/通知")
+        elif outcome == "failed":
+            logger.error(f"[train-voice] {name} 管线存在失败/未执行步骤（详见页面红字），继续后续管线")
+            alarm_notifier.alarm_error(
+                alarm_notifier.MODULE_TRAIN_VOICE,
+                f"训练声音 {name} 未能完成（存在失败或未执行步骤，详见训练页日志）")
+        else:
+            alarm_notifier.alarm_notice(
+                alarm_notifier.MODULE_TRAIN_VOICE, f"训练声音 {name} 训练完成")
+
     def _chain_run(pipes):
         """串行编排：先 GPT-SoVITS 后 RVC（单卡 GPU 不能并行训练）。
         管线相互独立（资产/产物不同源），某条失败不影响另一条继续——
@@ -274,19 +293,7 @@ def create_train_voice_tab(
                 p.run_all()
                 while p.running_stage is not None:
                     time.sleep(0.5)
-                # 报警重构（2026-10-26）：训练声音结果推送——完成=进度通知（非错误
-                # 报警）；失败/未执行完整=报警；用户主动停止不发（有意操作）
-                outcome = pipeline_outcome(p)
-                if outcome == "stopped":
-                    logger.info(f"[train-voice] {name} 用户停止，不发报警/通知")
-                elif outcome == "failed":
-                    logger.error(f"[train-voice] {name} 管线存在失败/未执行步骤（详见页面红字），继续后续管线")
-                    alarm_notifier.alarm_error(
-                        alarm_notifier.MODULE_TRAIN_VOICE,
-                        f"训练声音 {name} 未能完成（存在失败或未执行步骤，详见训练页日志）")
-                else:
-                    alarm_notifier.alarm_notice(
-                        alarm_notifier.MODULE_TRAIN_VOICE, f"训练声音 {name} 训练完成")
+                _notify_outcome(p, name)
             logger.info("[train-voice] 全部启用管线执行完毕（失败项见页面标注）")
 
         threading.Thread(target=_worker, name="train-voice-chain", daemon=True).start()
@@ -336,9 +343,19 @@ def create_train_voice_tab(
             stop_btn.set_enabled(False)
 
     def _rerun(p, sid: str):
+        """单步重跑（H-2）：重置该步及下游后重跑。2026-10-31 审查修复 V4：
+        此前直接 run_all 绕过结果推送——重跑完成/失败均不触发通知/报警；
+        现与链式启动同款路由（后台 watcher 等管线收尾后推三态结果）。"""
         global _pipeline
         _pipeline = p
         p.reset_from(sid)
         p.run_all()
+
+        def _watch():
+            while p.running_stage is not None:
+                time.sleep(0.5)
+            _notify_outcome(p, _pipe_name(p))
+
+        threading.Thread(target=_watch, name="train-voice-rerun", daemon=True).start()
 
     ui.timer(0.5, _poll)

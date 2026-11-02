@@ -13,13 +13,18 @@ D5 参数页重组（2026-10-19 切片 3）：
 
 2026-10-24 审查批次：
 - 行扩至 9 类（新增 点赞 like / 房间信息 room_stats）；"定时"→"定时任务"
+
+2026-10-31 限入审查批次：
+- 行裁至 6 类——聊天(talk)/定时任务(schedule)/闲时任务(idle_time_task) 为
+  系统交互/系统生成消息，不参与弹幕处理流程限流，配置选项退役（后端
+  process_data 对三类直通分发；config 存量键登记 _RETIRED_CONFIG_KEYS）
 """
 from nicegui import ui
 from typing import Dict, Any, Callable
 from frontend.ui.components.config_helper import get_nested_value
 
-# 9 类消息（键前缀 → 行名）；顺序=表格行序（2026-10-24 审查批次：新增点赞/
-# 房间信息；"定时"更名"定时任务"与优先级页命名对齐）
+# 6 类消息（键前缀 → 行名）；顺序=表格行序（2026-10-31 限入审查批次：
+# 聊天/定时任务/闲时任务三行退役）
 FORGET_ROWS = [
     ("comment", "弹幕"),
     ("gift", "礼物"),
@@ -27,9 +32,6 @@ FORGET_ROWS = [
     ("follow", "关注"),
     ("like", "点赞"),
     ("room_stats", "房间信息"),
-    ("talk", "聊天"),
-    ("schedule", "定时任务"),
-    ("idle_time_task", "闲时任务"),
 ]
 
 

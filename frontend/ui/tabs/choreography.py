@@ -379,7 +379,7 @@ def create_choreography_tab(
     choreo_node = _copy.deepcopy(get_nested_value(config, "choreography", default={}) or {})
     if not isinstance(choreo_node, dict) or "enable" not in choreo_node:
         choreo_node = {"enable": False, "default_mode": "rotate", "default_segments": [],
-                       "step_timeout_s": 60, "reset_after_s": 300, "rules": []}
+                       "step_timeout_s": 60, "rules": []}
     choreo_node.setdefault("rules", [])
     choreo_node.setdefault("default_segments", [])
     # 退役键不再写出（R-ceo4/R-ceo5：min_retrigger_s/min_sequence_hold_s 已退役——
@@ -474,8 +474,9 @@ def create_choreography_tab(
                         with ui.row().style("width:100%;align-items:center;gap:6px"):
                             ui.label(n_label).style(
                                 "color: var(--text-hint); font-size: var(--font-size-body)").tooltip(
-                                "计次进档：设定时间内或主线片段播放完成前再次触发进入档位计次，"
-                                "从第 N 次起的触发使用该档片段（示例：档位一 1 次/档位二 4 次/"
+                                "计次进档：每次触发进入档位计次（主线播放中忽略不计数；"
+                                "他键触发清零），从第 N 次起的触发使用该档片段"
+                                "（示例：档位一 1 次/档位二 4 次/"
                                 "档位三 7 次 → 第 1~3 次档一、第 4~6 次档二、第 7 次起档三）")
                             ui.button(icon="delete", on_click=lambda i=idx: _delete_rule(i)).props(
                                 "outline color=negative dense").tooltip("删除本规则")
@@ -562,7 +563,7 @@ def create_choreography_tab(
                     on_change=lambda e, tr=tier: tr.__setitem__(
                         "min_count", int(e.value) if str(e.value or "").strip().isdigit() else 0),
                     tooltip="从第 N 次触发起使用本档片段（须严格递增；=1 则首次触发即用本档）；"
-                            "设定时间内或主线片段播放完成前再次触发进入档位计次",
+                            "每次触发进入档位计次（他键触发清零）",
                     style="width:110px;")
                 for n in ("enter", "main", "exit"):
                     cur = str(ov.get(n, "") or "")
@@ -610,6 +611,7 @@ def create_choreography_tab(
         choreo_node["enable"] = bool(get_nested_value(config, "choreography", "enable", default=False))
         choreo_node.pop("min_retrigger_s", None)        # R-ceo5 退役键不再写出
         choreo_node.pop("min_sequence_hold_s", None)    # R-ceo5/uc2a 退役键不再写出
+        choreo_node.pop("reset_after_s", None)          # 计数窗口退役（2026-10-31 审查批次）不再写出
         try:
             import requests
             resp = await asyncio.to_thread(
@@ -689,20 +691,16 @@ def create_choreography_tab(
                  "⚠ 触发命中立即切换，无最短保持保护（最短再触发间隔/序列最小展示已按"
                  "用户裁决退役；去重由弹幕层承担）——R-dsg7/R-ceo5").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
-        with ui.grid(columns=2):
-            FormField.create_select(
-                label='默认画面模式',
-                options={'rotate': '轮播（顺序）', 'random': '随机', 'single': '单段'},
-                value=str(choreo_node.get("default_mode", "rotate")),
-                on_change=lambda e: choreo_node.__setitem__("default_mode", e.value),
-                tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）",
-                style="width:100%;")
-            FormField.create_input(
-                label='计数窗口(s)', value=str(choreo_node.get("reset_after_s", 300)),
-                on_change=lambda e: choreo_node.__setitem__(
-                    "reset_after_s", float(e.value or 300) if str(e.value or "").replace(".", "", 1).lstrip("-").isdigit() else 300),
-                tooltip="触发次数计数时间窗口（GAP-2）：超过该秒数未触发则计数清零重新累计；0=禁用衰减",
-                style="width:100%;")
+        # 默认画面模式（计数窗口已退役——2026-10-31 审查批次，
+        # 触发计次不再随时间衰减，控件与键移除）
+        FormField.create_select(
+            label='默认画面模式',
+            options={'rotate': '轮播（顺序）', 'random': '随机', 'single': '单段'},
+            value=str(choreo_node.get("default_mode", "rotate")),
+            on_change=lambda e: choreo_node.__setitem__("default_mode", e.value),
+            tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）："
+                    "轮播=片段池顺序循环 / 随机=片段池随机 / 单段=指定片段循环",
+            style="width:60%;")
         # 默认画面（2026-10-27 动作编排完善批次）：段名池改选择模式（多选主线段）；
         # 一律立刻切换，无需设切换方式；单段模式=pingpong 首尾循环（可指定循环段，
         # 空=列表第一个）

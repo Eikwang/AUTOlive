@@ -4,7 +4,8 @@
 
 覆盖义务块验证条款：
 - GAP-1：热启用死路（_ensure_worker 幂等+apply 补启动+失败回滚+ready/worker_started 回填）
-- GAP-2：计数时间窗口（reset_after_s 解析校验+超窗清零+窗内累积+0 禁用+锚点含节流拒绝 F5）
+- GAP-2：~~计数时间窗口~~ 已退役（2026-10-31 动作编排审查批次：reset_after_s 弃用移除，
+  改测「退役键告警+值不生效+计次不随时间衰减」）
 - GAP-3：模拟触发（rule_id 形态合成载荷 F3/裸 API below_min_price/reason 枚举 F2/端点 422/403/503/200 诚实失败）
 - GAP-4：get_state 观测字段（pending_requeue/step_remaining_s/worker_alive/queue_depth）
 - F1：恢复重试竞态守卫（sequence 态放弃重试）
@@ -87,76 +88,45 @@ def wait_until(pred, timeout=5.0):
     return pred()
 
 
-# ---------- GAP-2：reset_after_s 配置解析 ----------
+# ---------- GAP-2 退役：reset_after_s 计数窗口（2026-10-31 动作编排审查批次） ----------
 
-class TestResetAfterConfig:
-    def test_reset_after_default_300(self):
+class TestResetAfterRetired:
+    """计数窗口弃用移除：旧键读取兼容一代（告警+值不生效），引擎零消费。"""
+
+    def test_reset_after_key_ignored(self):
+        """退役键存在→cfg 恒 0.0（引擎不消费），不再解析/回退。"""
+        cfg = load_choreography_config(make_cfg(reset_after_s=120))
+        assert cfg.reset_after_s == 0.0
+        cfg2 = load_choreography_config(make_cfg(reset_after_s="abc"))
+        assert cfg2.reset_after_s == 0.0
+
+    def test_reset_after_absent_silent(self):
         cfg = load_choreography_config(make_cfg())
-        assert cfg.reset_after_s == 300.0
-
-    def test_reset_after_zero_valid(self):
-        cfg = load_choreography_config(make_cfg(reset_after_s=0))
-        assert cfg.reset_after_s == 0.0  # 0=禁用衰减（合法值，非回退）
-
-    def test_reset_after_negative_falls_back(self):
-        cfg = load_choreography_config(make_cfg(reset_after_s=-5))
-        assert cfg.reset_after_s == 300.0
-
-    def test_reset_after_non_numeric_falls_back(self):
-        cfg = load_choreography_config(make_cfg(reset_after_s="abc"))
-        assert cfg.reset_after_s == 300.0
+        assert cfg.reset_after_s == 0.0
 
 
-# ---------- GAP-2 + F5：计数衰减（伪时钟） ----------
+class TestCounterNoDecay:
+    """计数衰减机制移除：触发计次不随时间清零（清零仅剩他键打断 D-4/配置重存）。"""
 
-class TestCounterDecay:
-    def test_decay_after_window(self):
-        h = _engine_harness()
-        d1 = h.trigger_gift()
-        assert h.engine.counters["girl_A"] == 1
-        h.advance(301)  # > reset_after_s=300
-        h.engine.on_restore_result(True, h.now) if False else None
-        # 直接清场回 DEFAULT（跳过序列推进——衰减判定只依赖 decide_trigger 路径）
-        h.engine.state = "default"
-        h.engine.seq = None
-        d2 = h.trigger_gift()
-        assert h.engine.counters["girl_A"] == 1  # 超窗清零后从 1 重新累计
-
-    def test_no_decay_within_window(self):
+    def test_counter_persists_over_long_idle(self):
         h = _engine_harness()
         h.trigger_gift()
         assert h.engine.counters["girl_A"] == 1
-        h.advance(299)  # < 300 窗口
+        h.advance(100000)  # 旧语义此处已超窗清零
         h.engine.state = "default"
         h.engine.seq = None
         h.trigger_gift()
-        assert h.engine.counters["girl_A"] == 2  # 窗口内累积
+        assert h.engine.counters["girl_A"] == 2  # 跨超长间隔仍累积（衰减已移除）
 
-    def test_reset_after_zero_disables_decay(self):
-        h = _engine_harness(reset_after_s=0)
+    def test_counter_reset_by_other_rule_only(self):
+        """保留的清零路径：他键触发打断清零（D-4，条件3 打断）。"""
+        other = make_rule(rule_id="girl_B", match="小花花")
+        h = _engine_harness(rules=[make_rule(), other])
         h.trigger_gift()
-        h.advance(100000)
-        h.engine.state = "default"
-        h.engine.seq = None
-        h.trigger_gift()
-        assert h.engine.counters["girl_A"] == 2  # 0=禁用：跨超长间隔仍累积
-
-    def test_anchor_includes_throttled_attempts(self):
-        """F5：窗口锚点=最后一次尝试（含被节流拒绝的）——拒绝续窗。"""
-        h = _engine_harness()
-        h.trigger_gift()                    # t=1000 计数=1
-        h.advance(250)
-        h.trigger_gift()                    # t=1250 被节流（min_retrigger_s=2>0 距离）……250>2 通过节流！
-        # 修正场景：需要真正被节流的尝试——紧凑间隔
-        h2 = _engine_harness()
-        h2.trigger_gift()                   # t0 计数=1，key_last=t0
-        h2.advance(1)                       # t0+1 < min_retrigger_s=2 → 节流拒绝（key_last 刷新为 t0+1）
-        h2.trigger_gift()
-        h2.advance(299)                     # t0+300：距锚点 t0+1 = 299 < 300 → 不清零
-        h2.engine.state = "default"
-        h2.engine.seq = None
-        h2.trigger_gift()
-        assert h2.engine.counters["girl_A"] == 2  # 锚点=被拒绝的尝试 t0+1（若锚=t0 则 300>300 清零为 1）
+        assert h.engine.counters["girl_A"] == 1
+        h.trigger_gift("小花花")  # 他键打断：girl_A 计数清零（_interrupt_sequence D-4）
+        assert h.engine.counters.get("girl_A", 0) == 0
+        assert h.engine.counters.get("girl_B") == 1
 
 
 # ---------- F1：恢复重试竞态守卫 ----------

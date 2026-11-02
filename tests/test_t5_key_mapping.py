@@ -98,8 +98,12 @@ class TestMatching:
         sentinel.assert_called_once()
 
     def test_gift_exact_match(self, feature, monkeypatch):
-        """礼物名精确匹配 → 实际执行（executed）→ flag 聚合 True。"""
+        """礼物名精确匹配 → 实际执行（executed）→ flag 聚合 True。
+
+        2026-10-31 审查批次（F1 来源区分恢复）：礼物源要求触发类型含 礼物。
+        """
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "礼物"
         sentinel = MagicMock(return_value=True)
         monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
         result = fh.key_mapping_handle("礼物", {"username": "小明", "gift_name": "小花火",
@@ -178,8 +182,12 @@ class TestSerialSafety:
 
 class TestOnceSemantics:
     def test_once_true_stops_chain(self, feature, monkeypatch):
-        """once=True（key 触发）：命中即 return True 终止后续触发器。"""
+        """once=True（key 触发）：命中即 return True 终止后续触发器。
+
+        2026-10-31 审查批次（F1 来源区分恢复）：礼物源要求触发类型含 礼物。
+        """
         fh, mh = feature
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "礼物"
         sentinel = MagicMock(return_value=True)
         monkeypatch.setattr(fh, "_trigger_key_press", sentinel)
         result = fh.key_mapping_handle("礼物", {"username": "u", "gift_name": "小花火",
@@ -196,13 +204,17 @@ class TestOnceSemantics:
 
 class TestDegradation:
     def test_pyautogui_missing_no_crash(self, feature):
-        """pyautogui 缺失：key 触发警告跳过不崩（serial_trigger_type 置"无"隔离串口）。"""
+        """pyautogui 缺失：key 触发警告跳过不崩（serial_trigger_type 置"无"隔离串口）。
+
+        2026-10-31 审查批次（F1 来源区分恢复）：礼物源要求触发类型含 礼物。
+        """
         fh, mh = feature
         try:
             import pyautogui  # noqa
             pytest.skip("pyautogui 已安装，无法测缺依赖路径")
         except ImportError:
             pass
+        mh.config._cfg["key_mapping"]["key_trigger_type"] = "礼物"
         mh.config._cfg["key_mapping"]["serial_trigger_type"] = "无"  # 隔离：只测 key 降级
         result = fh.key_mapping_handle("礼物", {"username": "u", "gift_name": "小花火",
                                                 "num": 1, "unit_price": 1, "total_price": 1})

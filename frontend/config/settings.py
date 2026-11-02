@@ -354,23 +354,10 @@ def _ensure_defaults(config: "Settings") -> None:
         cfg["custom_llm"] = _migrated
         changed = True
 
-    # UI-16 批次 R10/EV-1g：念弹幕触发周期 min/max 合并为单键 periodic_time
-    # （合并语义=固定单值不再区间随机；存量迁移口径=max(periodic_time_min,
-    # periodic_time_max) 回填，保守不提频；缺省 60 秒；旧 min/max 键退役并
-    # 入守卫测试范围）。local_qa/thanks 各节不受影响（分支隔离）。
-    _read_pt = cfg.get("read_comment", {}).get("periodic_trigger") if isinstance(cfg.get("read_comment"), dict) else None
-    if isinstance(_read_pt, dict):
-        if "periodic_time" not in _read_pt:
-            try:
-                _migrated = max(int(_read_pt.get("periodic_time_min", 60)), int(_read_pt.get("periodic_time_max", 60)))
-            except (TypeError, ValueError):
-                _migrated = 60
-            _read_pt["periodic_time"] = max(1, int(_migrated))
-            changed = True
-        for _old_key in ("periodic_time_min", "periodic_time_max"):
-            if _old_key in _read_pt:
-                del _read_pt[_old_key]
-                changed = True
+    # 念弹幕周期触发已退役（2026-10-31 念弹幕审查批次）：R10/EV-1g 的
+    # periodic_time 合并迁移逻辑随之删除——read_comment 节已无 periodic_trigger
+    # 子节，即时入队取代定时回放；存量 periodic_trigger 子节由
+    # _RETIRED_CONFIG_KEYS 告知后可删
 
     # reread 节默认（2026-10-30 过滤审查批次）：复读触发配置组退役——弹幕关键词
     # 触发复读整体移除（reread_handle 收口为手动直通，不读配置），默认注入与
@@ -445,22 +432,10 @@ def _ensure_defaults(config: "Settings") -> None:
             _lq_audio["type"] = "相似度匹配"
             changed = True
 
-    # UI-16 二轮验收（任务 10）：答谢三通道（entrance/gift/follow）周期同样
-    # 合并为单键 periodic_time（max 回填+旧键退役；local_qa 不动）
-    for _th_type in ("entrance", "gift", "follow"):
-        _th_node = cfg.get("thanks", {}).get(_th_type, {}).get("periodic_trigger") if isinstance(cfg.get("thanks"), dict) else None
-        if isinstance(_th_node, dict):
-            if "periodic_time" not in _th_node:
-                try:
-                    _th_mig = max(int(_th_node.get("periodic_time_min", 60)), int(_th_node.get("periodic_time_max", 60)))
-                except (TypeError, ValueError):
-                    _th_mig = 60
-                _th_node["periodic_time"] = max(1, int(_th_mig))
-                changed = True
-            for _old_key in ("periodic_time_min", "periodic_time_max"):
-                if _old_key in _th_node:
-                    del _th_node[_old_key]
-                    changed = True
+    # thanks 三通道周期触发已退役（2026-10-31 答谢审查批次）：答谢三通道
+    # （entrance/gift/follow）的 periodic_time 合并迁移逻辑随之删除——即时
+    # 分发+E-2 限流取代定时回放，config 不再有 thanks.<type>.periodic_trigger
+    # 子节，存量节由 _RETIRED_CONFIG_KEYS 告知后可删
 
     if changed:
         try:

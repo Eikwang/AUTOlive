@@ -331,3 +331,75 @@ class TestRereadRetired:
         """UI 守卫：过滤页不得再有复读触发卡（手动按钮在 talk 页，保留）。"""
         src = _src("frontend/ui/tabs/filter_config.py")
         assert "复读触发" not in src
+
+
+# ---------------------------------------------------------------------------
+# (d) 限入（遗忘&保留）/去重审查批次（2026-10-31）：三系统选项退役 + 集成
+#     语义锁定
+# ---------------------------------------------------------------------------
+
+_RETIRED_FORGET_TYPES = ("talk", "schedule", "idle_time_task")
+
+
+class TestForgetRetentionReview:
+    """限入=时间窗口内同类信息只保留前 N 条；去重=窗口内重复内容丢弃、
+    无重复立即放行。2026-10-31 审查裁决：
+    (1) 聊天(talk)/定时任务(schedule)/闲时任务(idle_time_task) 为系统交互/
+        系统生成消息，不参与弹幕处理流程——限流三选项退役，process_data
+        直通分发（跳过去重+遗忘窗口）
+    (2) 去重已是"无重复立即放行"语义（is_data_repeat_in_limited_time 窗口内
+        查询即判，无需等窗口结束）——2026-10-28 防遗忘窗口重构后首条消息
+        延迟已为 0，两逻辑同在 process_data 单入口串联完成
+    """
+
+    def test_forget_ui_six_rows(self):
+        """UI 守卫：遗忘&保留页裁至 6 行（弹幕/礼物/入场/关注/点赞/房间信息），
+        聊天/定时任务/闲时任务三行退役。"""
+        src = _src("frontend/ui/tabs/filter_forget.py")
+        assert '"talk"' not in src and '"schedule"' not in src \
+            and '"idle_time_task"' not in src
+        assert "FORGET_ROWS = [" in src
+        assert '("comment", "弹幕")' in src
+        assert '("room_stats", "房间信息")' in src
+
+    def test_config_template_no_retired_forget_keys(self):
+        """模板守卫：config.example.json 无三类 × duration/reserve_num 六键。"""
+        cfg = json.loads(_src("config.example.json"))
+        filter_cfg = cfg.get("filter", {})
+        for t in _RETIRED_FORGET_TYPES:
+            assert f"{t}_forget_duration" not in filter_cfg
+            assert f"{t}_forget_reserve_num" not in filter_cfg
+
+    def test_retired_forget_keys_registered(self):
+        """可见面守卫：六键登记 frontend/main.py 退役清单。"""
+        src = _src("frontend/main.py")
+        for t in _RETIRED_FORGET_TYPES:
+            assert f'("filter", "{t}_forget_duration")' in src
+            assert f'("filter", "{t}_forget_reserve_num")' in src
+
+    def test_backend_direct_bypass_wiring(self):
+        """后端直通接线守卫：timer_handler._FORGET_FLAGS 白名单六类；
+        process_data 非白名单直通 _dispatch；get_interval 不再读三类键。"""
+        src = _src("utils/handlers/timer_handler.py")
+        assert '_FORGET_FLAGS = frozenset({' in src
+        assert '"comment", "gift", "entrance", "follow", "like", "room_stats",' in src
+        assert "if timer_flag not in self._FORGET_FLAGS:" in src
+        for t in _RETIRED_FORGET_TYPES:
+            assert f'"{t}_forget_duration"' not in src
+        # 分发映射保留（三类消息仍需到达对应 handler）
+        assert '"talk": "talk_handle"' in src
+        assert '"schedule": "schedule_handle"' in src
+        assert '"idle_time_task": "idle_time_task_handle"' in src
+
+    def test_dedup_immediate_release_semantics(self):
+        """去重"无重复立即放行"语义守卫：is_data_repeat_in_limited_time
+        窗口内查询即判（查到重复 True 丢弃；未查到登记后 False 立即放行，
+        不等窗口结束）；process_data 入口串联去重→限入（单模块先去重后限入）。"""
+        uh = _src("utils/handlers/utils_handler.py")
+        assert "return False" in uh and "return True" in uh
+        # 窗口判断按时间戳逐条比对（不依赖清空定时器触发）
+        assert "current_time - item.get(\"time\", 0) < deduplication_time" in uh
+        th = _src("utils/handlers/timer_handler.py")
+        # 集成点：process_data 先去重后开窗，首条立即分发（延迟 0）
+        assert th.index("is_data_repeat_in_limited_time") < th.index("threading.Timer(self.get_interval")
+        assert "首条消息立即分发下游处理" in th

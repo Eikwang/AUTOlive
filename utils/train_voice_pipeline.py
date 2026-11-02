@@ -216,7 +216,15 @@ class TrainVoicePipeline:
                 self._states[sid] = RUNNING
                 self.running_stage = sid
                 self._notify()
-                ok = stage["fn"]()
+                # 步骤异常护栏（2026-10-31 审查修复 V5，对齐 RVC 管线）：意外异常
+                # 若外抛会杀死 worker 线程——running_stage 卡死 → 链式编排死等、
+                # 结果推送（报警）丢失、页面开始按钮永不恢复。捕获后按失败收尾。
+                try:
+                    ok = stage["fn"]()
+                except Exception:
+                    logger.error(f"[train-voice] 步骤 {sid} 异常", exc_info=True)
+                    self.log_lines.append(f"[步骤异常] {sid} 进程内异常（详见 webui 日志）")
+                    ok = False
                 self._states[sid] = SUCCESS if ok else FAILED
                 self._notify()
                 if not ok:
@@ -509,8 +517,8 @@ class TrainVoicePipeline:
         return self._run([self.python, "-s", "GPT_SoVITS/s1_train.py", "--config_file", tmp])
 
     def _st_export(self) -> bool:
-        """导出声音档案：取最新产物模型对写入 voice_profiles（P2-4）。"""
-        from utils.voice_profiles import upsert_profile
+        """导出声音档案：取最新产物模型对合并写入 voice_profiles（P2-4）。"""
+        from utils.voice_profiles import get_profile, upsert_profile
         exp = self.params["exp_name"]
         gsv_w = os.path.join(self.gsv_root, "GPT_weights_v2ProPlus")
         vits_w = os.path.join(self.gsv_root, "SoVITS_weights_v2ProPlus")
@@ -529,14 +537,23 @@ class TrainVoicePipeline:
             wavs = [f for f in os.listdir(sliced) if f.endswith(".wav")]
             if wavs:
                 ref = os.path.join(sliced, sorted(wavs)[0])
-        upsert_profile({
-            "name": exp,
+        # 档案合并更新（2026-10-31 审查修复 V2/V3）：与 RVC 导出同款单写者合并——
+        # upsert_profile 为整记录替换，此前硬写 rvc_model/rvc_index="" 会把同一实验
+        # RVC 管线已挂接的模型链接抹掉（两管线互不干扰被破坏）；id 统一=exp_name
+        #（RVC 导出同键，防 slug 差异把同一实验裂成两条档案）。
+        existing = get_profile(exp) or {}
+        merged = dict(existing)
+        merged.update({
+            "id": exp,
+            "name": existing.get("name") or exp,
             "note": f"训练于 {time.strftime('%Y-%m-%d %H:%M')}",
             "gpt_model": gpt_model,
             "sovits_model": sovits_model,
-            "rvc_model": "", "rvc_index": "",  # RVC 侧由 P3-1 训练流补挂
-            "ref_audio": ref, "prompt_text": "", "prompt_lang": "zh",
+            "ref_audio": ref,
+            "prompt_text": existing.get("prompt_text", ""),
+            "prompt_lang": existing.get("prompt_lang") or "zh",
         })
+        upsert_profile(merged)
         # T-3"仅保存最新"（编排层 fp16 清理）：删除该实验其余历史权重，仅留已选用对
         removed = 0
         for weight_dir, keep in ((gsv_w, gpt_model), (vits_w, sovits_model)):

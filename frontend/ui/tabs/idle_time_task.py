@@ -43,13 +43,27 @@ def create_idle_time_task_tab(
             _auto_save(ui.input(label='待播放音频队列个数小于此值时触发', value=get_nested_value(config, "idle_time_task", "min_audio_queue_len_to_trigger"), placeholder='待播放音频队列个数小于此值时触发').style("width:100%;"), ("idle_time_task", "min_audio_queue_len_to_trigger"))
             _auto_save(ui.input(label='最小闲时时间', value=get_nested_value(config, "idle_time_task", "idle_time_min"), placeholder='最小闲时间隔时间（秒）').style("width:100%;"), ("idle_time_task", "idle_time_min"))
             _auto_save(ui.input(label='最大闲时时间', value=get_nested_value(config, "idle_time_task", "idle_time_max"), placeholder='最大闲时间隔时间（秒）').style("width:100%;"), ("idle_time_task", "idle_time_max"))
-            _auto_save(ui.input(label='等待播放音频数量阈值', value=get_nested_value(config, "idle_time_task", "wait_play_audio_num_threshold"), placeholder='阈值').style("width:100%;"), ("idle_time_task", "wait_play_audio_num_threshold"))
-            _auto_save(ui.input(label='闲时计时减小到', value=get_nested_value(config, "idle_time_task", "idle_time_reduce_to"), placeholder='缩减值').style("width:100%;"), ("idle_time_task", "idle_time_reduce_to"))
-        with ui.row():
+        with ui.row().style("align-items:center;gap:8px;flex-wrap:wrap"):
             ui.label('刷新闲时计时的消息类型')
             idle_time_task_trigger_type_mapping = {"comment": "弹幕", "gift": "礼物", "entrance": "入场", "follow": "关注"}
+            # 2026-10-31 闲时任务审查批次：四复选框此前后端零保存（纯展示）——
+            # 聚合勾选状态落盘 idle_time_task.trigger_type 数组，消费方为
+            # my_global.idle_time_auto_clear（process_data 消息到达重置闲时计时）
+            trigger_checkboxes = {}
+
+            def _sync_trigger_types():
+                selected = [t for t, cb in trigger_checkboxes.items() if cb.value]
+                if isinstance(config, dict):
+                    config.setdefault("idle_time_task", {})["trigger_type"] = selected
+                try:
+                    set_config_callback("idle_time_task", "trigger_type", value=selected)
+                except Exception as ex:
+                    print(f"保存配置失败: {ex}")
+
             for trigger_type, trigger_label in idle_time_task_trigger_type_mapping.items():
-                ui.checkbox(text=trigger_label, value=trigger_type in (get_nested_value(config, "idle_time_task", "trigger_type") or []))
+                cb = ui.checkbox(text=trigger_label, value=trigger_type in (get_nested_value(config, "idle_time_task", "trigger_type") or []))
+                trigger_checkboxes[trigger_type] = cb
+                cb.on_value_change(lambda e: _sync_trigger_types())
         with ui.grid(columns=3):
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('文案模式', value=get_nested_value(config, "idle_time_task", "copywriting", "enable")).style(switch_internal_css), ("idle_time_task", "copywriting", "enable"))

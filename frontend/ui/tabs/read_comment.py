@@ -39,23 +39,6 @@ def create_read_comment_tab(
                 label='念用户名文案',
                 placeholder='念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用',
                 value=textarea_data_change(get_nested_value(config, "read_comment", "read_username_copywriting"))
-            ).style("width:100%;").tooltip('念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用'), keys=("read_comment", "read_username_copywriting"))
-        # UI-16 二轮验收（任务 11）：一列显示（纵向堆叠）——依次为触发周期、
-        # 触发次数最小值、触发次数最大值（周期单值语义沿用 R10 合并）
-        with ui.column().style("width:100%; gap:4px;"):
-            _auto_save(ui.switch('周期性触发启用', value=get_nested_value(config, "read_comment", "periodic_trigger", "enable")).style(switch_internal_css), keys=("read_comment", "periodic_trigger", "enable"))
-            _auto_save(ui.input(
-                label='触发周期（秒）',
-                value=get_nested_value(config, "read_comment", "periodic_trigger", "periodic_time"),
-                placeholder='例如：60'
-            ).style("width:100%;").tooltip('每隔这个周期的时间会触发n次此功能（固定单值，不再区间随机；正整数）'), keys=("read_comment", "periodic_trigger", "periodic_time"))
-            _auto_save(ui.input(
-                label='触发次数最小值',
-                value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_min"),
-                placeholder='例如：0'
-            ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_min"))
-            _auto_save(ui.input(
-                label='触发次数最大值',
-                value=get_nested_value(config, "read_comment", "periodic_trigger", "trigger_num_max"),
-                placeholder='例如：1'
-            ).style("width:100%;").tooltip('周期到后，会触发n次此功能，次数从最大最小值之间随机生成'), keys=("read_comment", "periodic_trigger", "trigger_num_max"))
+            ).style("width:100%;").tooltip('念用户名时使用的文案，可以自定义编辑多个（换行分隔），实际中会随机一个使用，{username} 为用户名占位符'), keys=("read_comment", "read_username_copywriting"))
+        # 周期性触发已退役（2026-10-31 念弹幕审查批次）：系统已有限入/去重/
+        # 优先级队列，念弹幕在弹幕处理时即时入队（定时回放机制删除）

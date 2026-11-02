@@ -50,103 +50,180 @@ class TaskScheduler:
         
         logger.info("任务调度器初始化完成")
     
+    def _build_time_desc(self) -> str:
+        """当前时间文案描述（凌晨X点Y分…，全时段覆盖）"""
+        hour, min = self.common.get_bj_time(6)
+        if 0 <= hour < 6:
+            return f"凌晨{hour}点{min}分"
+        if 6 <= hour < 9:
+            return f"早晨{hour}点{min}分"
+        if 9 <= hour < 12:
+            return f"上午{hour}点{min}分"
+        if hour == 12:
+            return f"中午{hour}点{min}分"
+        if 13 <= hour < 18:
+            return f"下午{hour - 12}点{min}分"
+        if 18 <= hour < 20:
+            return f"傍晚{hour - 12}点{min}分"
+        return f"晚上{hour - 12}点{min}分"
+
+    def _build_variables(self) -> dict:
+        """
+        构建系统任务公共变量表（定时任务/闲时任务共用）
+
+        - {time}：当前时间文案描述（报时）
+        - {user_num}：当前直播间用户数量（监听端 ROOM_STATS 统一契约键
+          viewer_count，全平台生效；未就绪容错 "N"）
+        - {last_username}：最近一个互动的用户名（timer_handler.process_data
+          互动记录；黑名单/系统自源/room_stats 不记录）
+
+        Returns:
+            dict: 变量名→值
+        """
+        user_num = "N"
+        liveroom_data = my_global.last_liveroom_data
+        if isinstance(liveroom_data, dict):
+            user_num = liveroom_data.get("viewer_count", "N")
+        return {
+            "time": self._build_time_desc(),
+            "user_num": user_num,
+            "last_username": my_global.last_username_list[-1] if my_global.last_username_list else "未知用户",
+        }
+
+    @staticmethod
+    def _replace_variables(text: str, variables: dict) -> str:
+        """逐变量替换（str.format → str.replace，2026-10-31 定时任务审查批次）：
+        文案含孤立花括号/未知占位符时 format 抛 KeyError/ValueError/IndexError
+        且异常可打死调度线程；replace 语义=未知占位符原样保留，与答谢链
+        dynamic_variable_replacement 同口径。"""
+        content = str(text)
+        for var, value in variables.items():
+            content = content.replace("{" + var + "}", str(value))
+        return content
+
+    def _emit_copy_task(self, copy_list, source_label: str = "定时任务"):
+        """
+        定时任务/任务组共用执行体：从文案列表随机取一条→变量替换→入合成队列
+        （经 process_data 直通分发：系统生成消息不走限流窗口）
+
+        Args:
+            copy_list: 文案列表
+            source_label: 消息 username 标识
+
+        Returns:
+            str: 替换后的文案；列表为空返回 None
+        """
+        if not isinstance(copy_list, list) or not copy_list:
+            logger.warning(f"[{source_label}] 文案列表为空，本轮跳过")
+            return None
+        random_copy = random.choice(copy_list)
+
+        content = self._replace_variables(random_copy, self._build_variables())
+
+        content = self.common.brackets_text_randomize(content)
+
+        data = {"platform": self.platform, "username": source_label, "content": content}
+
+        logger.info(f"{source_label}：{content}")
+
+        if self.my_handle:
+            self.my_handle.process_data(data, "schedule")
+        return content
+
     def schedule_task(self, index: int):
         """
-        执行定时任务
-        
+        执行存量单任务（按索引，config.schedule list 消费——任务组接管后不再调用）
+
         Args:
             index: 任务索引
         """
         logger.debug("定时任务执行中...")
-        hour, min = self.common.get_bj_time(6)
-        
-        # 时间描述
-        if 0 <= hour < 6:
-            time_desc = f"凌晨{hour}点{min}分"
-        elif 6 <= hour < 9:
-            time_desc = f"早晨{hour}点{min}分"
-        elif 9 <= hour < 12:
-            time_desc = f"上午{hour}点{min}分"
-        elif hour == 12:
-            time_desc = f"中午{hour}点{min}分"
-        elif 13 <= hour < 18:
-            time_desc = f"下午{hour - 12}点{min}分"
-        elif 18 <= hour < 20:
-            time_desc = f"傍晚{hour - 12}点{min}分"
-        elif 20 <= hour < 24:
-            time_desc = f"晚上{hour - 12}点{min}分"
-        else:
-            time_desc = f"{hour}点{min}分"
-        
-        # 根据对应索引从列表中随机获取一个值
         schedule_config = self.config.get("schedule")
-        if index >= len(schedule_config) or len(schedule_config[index]["copy"]) <= 0:
+        if not isinstance(schedule_config, list) or index >= len(schedule_config):
+            logger.warning(f"定时任务#{index} 不存在（配置已变更），本轮跳过")
             return None
-        
-        random_copy = random.choice(schedule_config[index]["copy"])
-        
-        # 假设有多个未知变量，用户可以在此处定义动态变量
-        variables = {
-            "time": time_desc,
-            "user_num": "N",
-            "last_username": my_global.last_username_list[-1] if my_global.last_username_list else "未知用户",
-        }
-        
-        # 有用户数据情况的平台特殊处理
-        if self.platform in ["dy", "tiktok"]:
-            variables["user_num"] = my_global.last_liveroom_data.get("OnlineUserCount", "N")
-        
-        # 使用字典进行字符串替换
-        if any(var in random_copy for var in variables):
-            content = random_copy.format(
-                **{var: value for var, value in variables.items() if var in random_copy}
-            )
-        else:
-            content = random_copy
-        
-        content = self.common.brackets_text_randomize(content)
-        
-        data = {"platform": self.platform, "username": "定时任务", "content": content}
-        
-        logger.info(f"定时任务：{content}")
-        
-        if self.my_handle:
-            self.my_handle.process_data(data, "schedule")
-    
-    def run_schedule(self):
-        """运行定时任务调度"""
+        return self._emit_copy_task(schedule_config[index].get("copy"), "定时任务")
+
+    @staticmethod
+    def _register_random_job(tag, min_seconds, max_seconds, task_fn):
+        """
+        注册自重排随机周期任务（H2 调度语义）：先执行一次 task_fn，随后按
+        min~max 秒随机间隔重排自身——"每触发一次任务，等待随机周期执行下一个"
+
+        Args:
+            tag: schedule 库任务标签（唯一；存量任务=int 索引，任务组=f"grp{i}"）
+            min_seconds: 最小循环周期（秒）
+            max_seconds: 最大循环周期（秒）
+            task_fn: 任务执行函数
+        """
         try:
-            schedule_config = self.config.get("schedule")
-            for index, task in enumerate(schedule_config):
-                if task["enable"]:
-                    min_seconds = int(task["time_min"])
-                    max_seconds = int(task["time_max"])
-                    
-                    def schedule_random_task(index, min_seconds, max_seconds):
-                        schedule.clear(index)
-                        # 在min_seconds和max_seconds之间随机选择下一次任务执行的时间
-                        next_time = random.randint(min_seconds, max_seconds)
-                        
-                        self.schedule_task(index)
-                        
-                        schedule.every(next_time).seconds.do(
-                            schedule_random_task, index, min_seconds, max_seconds
-                        ).tag(index)
-                    
-                    schedule_random_task(index, min_seconds, max_seconds)
+            lo = max(1, int(float(min_seconds)))
+            hi = max(1, int(float(max_seconds)))
+        except (TypeError, ValueError):
+            logger.warning(f"定时任务 tag={tag} 循环周期非法（{min_seconds}/{max_seconds}），跳过注册")
+            return
+        lo, hi = min(lo, hi), max(lo, hi)
+
+        def job():
+            schedule.clear(tag)
+            # 在min_seconds和max_seconds之间随机选择下一次任务执行的时间
+            next_time = random.randint(lo, hi)
+
+            try:
+                task_fn()
+            except Exception:
+                # 单次执行异常不中断重排（2026-10-31 审查批次：原实现任务异常
+                # 沿 run_pending 传播杀死调度线程——全部定时任务静默停摆）
+                logger.error(f"定时任务执行异常（tag={tag}，调度不中断）：{traceback.format_exc()}")
+
+            schedule.every(next_time).seconds.do(job).tag(tag)
+
+        job()
+
+    def run_schedule(self):
+        """运行定时任务调度（存量单任务 / D-16 任务组，二选一接管）"""
+        try:
+            # 任务组接管语义（H2：组循环周期=组内文案触发节奏，任务级周期字段
+            # 废弃随迁移）——schedule_groups 非空时组语义接管，存量单任务 list
+            # 不再消费（防迁移后双跑）；组无 enable 字段（存在即启用，删除组=停用）
+            groups = self.config.get("schedule_groups") or []
+            if groups:
+                for gi, group in enumerate(groups):
+                    if not isinstance(group, dict) or not str(group.get("name") or "").strip():
+                        logger.warning(f"任务组#{gi} 缺少组名，跳过注册")
+                        continue
+                    self._register_random_job(
+                        f"grp{gi}", group.get("min_interval"), group.get("max_interval"),
+                        lambda g=group: self._emit_copy_task(g.get("copywriting_list"), "定时任务"))
+            else:
+                # 存量单任务（enable/time_min/time_max/copy）——逐任务注册
+                # （2026-10-31 审查批次：原实现整循环单 try，单个任务周期参数
+                # 非法导致后续全部任务不注册）
+                for index, task in enumerate(self.config.get("schedule") or []):
+                    if not isinstance(task, dict) or not task.get("enable"):
+                        continue
+                    self._register_random_job(
+                        index, task.get("time_min"), task.get("time_max"),
+                        lambda idx=index: self.schedule_task(idx))
         except Exception as e:
             logger.error(f"定时任务调度失败: {traceback.format_exc()}")
-        
+
         self.is_running = True
         while self.is_running:
-            schedule.run_pending()
+            try:
+                schedule.run_pending()
+            except Exception:
+                # 调度循环异常不再杀死线程（2026-10-31 审查批次：原实现 while
+                # 无保护——job 内未捕获异常即静默停摆全部定时任务）
+                logger.error(f"定时任务调度循环异常（已恢复）：{traceback.format_exc()}")
             time.sleep(1)  # 控制每次循环的间隔时间
-    
+
     def start_schedule_thread(self):
         """启动定时任务线程"""
-        # 检查是否有启用的定时任务
-        schedule_config = self.config.get("schedule")
-        if any(item["enable"] for item in schedule_config) or self.platform == "dy":
+        schedule_config = self.config.get("schedule") or []
+        groups = self.config.get("schedule_groups") or []
+        if (any(isinstance(item, dict) and item.get("enable") for item in schedule_config)
+                or bool(groups) or self.platform == "dy"):
             self.scheduler_thread = threading.Thread(target=self.run_schedule, daemon=True)
             self.scheduler_thread.start()
             logger.info("定时任务线程已启动")
@@ -212,10 +289,14 @@ class TaskScheduler:
         mode = random.choice(active_modes)
 
         if mode == "copywriting":
-            # 闲时文案：随机/顺序取文案 → 闲时出口合成
+            # 闲时文案：随机/顺序取文案 → 变量替换+brackets 随机段 → 闲时出口合成
+            # （2026-10-31 闲时任务审查批次：模板文案含 {time} 与 [1|2|3] 随机段
+            # ——原实现原样念出占位符/未随机化，接线与定时任务同源处理）
             copy_content = self._pop_from_list(copywriting_copy_list, "copywriting")
             if copy_content is None:
                 return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
+            copy_content = self._replace_variables(copy_content, self._build_variables())
+            copy_content = self.common.brackets_text_randomize(copy_content)
             data = {"platform": self.platform, "username": "闲时任务", "content": copy_content}
             self.my_handle.process_data(data, "idle_time_task")
 
@@ -278,54 +359,81 @@ class TaskScheduler:
         def run_idle_time_task():
             logger.info("闲时任务线程运行中...")
             last_mode = 0
+            idle_wait = 0  # 两队列机制空闲确认后的等待累计（秒）
             while self.is_running:
-                time.sleep(5)
-                if self.my_handle is None:
-                    continue
+                try:
+                    time.sleep(5)
+                    if self.my_handle is None:
+                        continue
 
-                # 消息处理中 → 非闲时，重置计数
-                if getattr(self.my_handle, "is_handleing", 0) == 1:
-                    my_global.global_idle_time = 0
-                    continue
+                    # 消息处理中 → 非闲时，重置计数
+                    if getattr(self.my_handle, "is_handleing", 0) == 1:
+                        my_global.global_idle_time = 0
+                        idle_wait = 0
+                        continue
 
-                mechanism = str(self.config.get("idle_time_task", "type") or "")
-                idle_now = False
-
-                if "无消息" in mechanism:
-                    # 直播间无消息更新闲时：计数器递增（有消息处理时已被重置）
-                    my_global.global_idle_time += 5
+                    mechanism = str(self.config.get("idle_time_task", "type") or "")
                     try:
                         idle_min = int(self.config.get("idle_time_task", "idle_time_min") or 30)
                         idle_max = int(self.config.get("idle_time_task", "idle_time_max") or 60)
                         idle_min, idle_max = min(idle_min, idle_max), max(idle_min, idle_max)
                     except (TypeError, ValueError):
                         idle_min, idle_max = 30, 60
-                    idle_now = my_global.global_idle_time >= random.randint(idle_min, idle_max)
-                elif "合成" in mechanism or "消息队列" in mechanism:
-                    # 待合成消息队列闲时：队列长度 ≤ 阈值触发
-                    try:
-                        threshold = int(self.config.get("idle_time_task", "min_msg_queue_len_to_trigger") or 1)
-                    except (TypeError, ValueError):
-                        threshold = 1
-                    queue_len = len(getattr(self.my_handle.audio, "message_queue", []) or [])
-                    idle_now = queue_len <= threshold
-                elif "播放" in mechanism or "音频队列" in mechanism:
-                    # 待播放音频队列闲时
-                    try:
-                        threshold = int(self.config.get("idle_time_task", "min_audio_queue_len_to_trigger") or 1)
-                    except (TypeError, ValueError):
-                        threshold = 1
-                    queue_len = len(getattr(self.my_handle.audio, "voice_tmp_path_queue", []) or [])
-                    idle_now = queue_len <= threshold
-                else:
-                    logger.warning(f"未知闲时机制类型：{mechanism}，本轮跳过（E5 单选）")
-                    continue
 
-                if idle_now:
+                    idle_now = False
+
+                    if "无消息" in mechanism:
+                        # 直播间无消息更新闲时：计数器递增（有消息处理时已被重置；
+                        # 勾选的互动类型消息到达时经 idle_time_auto_clear 重置
+                        # ——2026-10-31 闲时任务审查批次接线 trigger_type 消费）。
+                        # 无消息持续时长即 min/max 等待时长（任务书语义）。
+                        my_global.global_idle_time += 5
+                        idle_now = my_global.global_idle_time >= random.randint(idle_min, idle_max)
+                    elif "合成" in mechanism or "消息队列" in mechanism:
+                        # 待合成消息队列闲时：队列长度 ≤ 阈值=空闲确认，持续
+                        # idle_min~max 随机等待后才执行（2026-10-31 审查批次：
+                        # 原实现每 5s 轮询阈值满足即触发——最小/最大闲时时间
+                        # 参数对两队列机制零生效，队列持续空时 5s 一条刷屏）
+                        try:
+                            threshold = int(self.config.get("idle_time_task", "min_msg_queue_len_to_trigger") or 1)
+                        except (TypeError, ValueError):
+                            threshold = 1
+                        queue_len = len(getattr(self.my_handle.audio, "message_queue", []) or [])
+                        idle_now = queue_len <= threshold
+                    elif "播放" in mechanism or "音频队列" in mechanism:
+                        # 待播放音频队列闲时（同上：min/max 等待生效）
+                        try:
+                            threshold = int(self.config.get("idle_time_task", "min_audio_queue_len_to_trigger") or 1)
+                        except (TypeError, ValueError):
+                            threshold = 1
+                        queue_len = len(getattr(self.my_handle.audio, "voice_tmp_path_queue", []) or [])
+                        idle_now = queue_len <= threshold
+                    else:
+                        logger.warning(f"未知闲时机制类型：{mechanism}，本轮跳过（E5 单选）")
+                        continue
+
+                    if not idle_now:
+                        idle_wait = 0  # 空闲条件不满足，重置等待
+                        continue
+
+                    # 空闲确认后等待 idle_min~max 随机秒（任务书：机制触发后等待
+                    # 多久开始执行，执行过后等待多久再次执行）——无消息机制计时
+                    # 已含等待语义（global_idle_time 达阈值即触发），两队列机制
+                    # 由 idle_wait 补齐
+                    if "无消息" not in mechanism:
+                        idle_wait += 5
+                        if idle_wait < random.randint(idle_min, idle_max):
+                            continue
+                        idle_wait = 0
+
                     logger.info(f"闲时触发（机制={mechanism}，idle={my_global.global_idle_time}s）")
                     last_mode, self.copywriting_copy_list, self.comment_copy_list, self.local_audio_path_list = \
                         self.do_task(last_mode, self.copywriting_copy_list,
                                      self.comment_copy_list, self.local_audio_path_list)
+                except Exception:
+                    # 单轮异常不杀线程（2026-10-31 审查批次：原 while 无保护——
+                    # 任一模式执行异常即闲时任务静默停摆）
+                    logger.error(f"闲时任务轮询异常（已恢复）：{traceback.format_exc()}")
 
         self.idle_time_task_thread = threading.Thread(target=run_idle_time_task, daemon=True)
         self.idle_time_task_thread.start()
@@ -449,8 +557,12 @@ class TaskScheduler:
 
                     # S-3 注入安全声明：此处 resp_content 的唯一来源是本地文案文件
                     # （+ 可选 LLM 对该文件的改写），不存在弹幕/观众输入注入点
+                    # type=trends_copywriting（2026-10-31 队列审查批次修复断链）：
+                    # 原构造 "copywriting" 不在 filter.priority_mapping——消息按
+                    # 未识别类型队尾排队+满则丢弃，UI「动态文案」优先级配置不生效；
+                    # 对齐映射表键（queue_manager docstring/UI 行同名）。
                     message = {
-                        "type": "copywriting",
+                        "type": "trends_copywriting",
                         "tts_type": self.config.get("audio_synthesis_type"),
                         "data": self.config.get(self.config.get("audio_synthesis_type")),
                         "config": self.config.get("filter"),

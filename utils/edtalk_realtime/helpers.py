@@ -78,3 +78,43 @@ def query_unity_capture():
             if str(name or "").strip():
                 return True, str(name)
     return False, ""
+
+
+def install_unity_capture(cam_name: str, base_path) -> None:
+    """编程化安装 UnityCapture 虚拟摄像头（regsvr32 静默注入名称 + runas 提权）。
+
+    『画面设置』页与启动链（_start_edtalk_realtime 启动前检测：2026-10-31
+    画面设置批次，任务书"进入系统后检测是否安装摄像头——画面输出的基本
+    支持，若没有安装则执行安装"）共用本函数。
+
+    - 名称白名单拒绝全部 shell 元字符（Eng F-E4），参数列表方式无 shell 拼接
+    - UAC 提权经 PowerShell -Verb RunAs（用户在场确认）
+    - 同步阻塞（最长 120s：调用方 UI 路径放线程池，启动链接受同步等待）
+
+    Raises:
+        ValueError: 名称含非法字符
+        FileNotFoundError: UnityCaptureFilter64.dll 缺失（未执行 copy_edtalk.py）
+        RuntimeError: regsvr32 返回非零（含用户拒绝 UAC）
+    """
+    import re
+    # 白名单允许中文（默认名"AUTOlive 数字人"；OBS 设备列表按此名显示），
+    # 拒绝全部 shell 元字符（Eng F-E4：引号/管道/重定向等无法进入 PowerShell 串）
+    if not re.match(r"^[A-Za-z0-9 \u4e00-\u9fff_-]{1,64}$", cam_name or ""):
+        raise ValueError(
+            "problem=摄像头名含非法字符；cause=仅允许中英文字母/数字/空格/下划线/短横线"
+            "（1-64 位）；fix=改用合法名称")
+    import os
+    dll = os.path.join(str(base_path), "edtalk", "UnityCapture-master", "Install",
+                       "UnityCaptureFilter64.dll")
+    if not os.path.isfile(dll):
+        raise FileNotFoundError(
+            "problem=安装件缺失；cause=" + dll + "；fix=运行 Scripts/copy_edtalk.py 补复制")
+    import subprocess
+    # 参数列表传值（无 shell 拼接）；UAC 提权经 PowerShell -Verb RunAs（用户在场确认）
+    ps_cmd = ("Start-Process regsvr32 -ArgumentList '/s','" + dll
+              + "','/i:UnityCaptureName=" + cam_name + "' -Verb RunAs -Wait")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
+                       capture_output=True, timeout=120, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("problem=安装命令失败；cause=" + (r.stderr or "").strip()[:200]
+                           + "；fix=查看日志或手动运行 InstallCustomName.bat")

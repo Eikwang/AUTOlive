@@ -14,7 +14,6 @@ comment/chatbox 分流处唯一插入点，主 KB 产线只接收"助播未命�
 """
 import difflib
 import os
-import threading
 import time
 import traceback
 
@@ -166,6 +165,48 @@ def _split_kb_line(line):
     return None
 
 
+def parse_qa_entries(lines, source="config"):
+    """一问一答词条解析（2026-10-31 本地问答审查批次：问答数据迁移 config
+    内嵌行列表后与文件加载器共用的解析语义）——按行 问题|答案（[1|2] 括号内
+    | 不切分）、脏行跳过计数、词条预分词。
+
+    Args:
+        lines (iterable[str] | None): 问答行列表（每行：问题|答案）
+        source (str): 日志来源标识
+
+    Returns:
+        list[tuple]: (question, answer, question_tokens|None) 三元组列表
+    """
+    entries = []
+    dirty = 0
+    for raw in lines or []:
+        line = str(raw).strip()
+        if not line:
+            continue
+        pair = _split_kb_line(line)
+        if pair is None:
+            dirty += 1
+            continue
+        q, a = pair
+        if not q or not a:
+            dirty += 1
+            continue
+        # D4：词条加载时分词一次（运行时仅对查询分词）
+        entries.append((q, a, tokenize_for_match(q)))
+    if dirty:
+        logger.warning(f"问答词库脏行跳过 {dirty} 行：{source}")
+    return entries
+
+
+def load_qa_entries_from_config(lines, source="config"):
+    """config 内嵌问答数据加载（本地问答审查批次新增）：异常按空词条集降级。"""
+    try:
+        return parse_qa_entries(lines, source)
+    except Exception as e:
+        logger.error(f"问答词库加载失败（按空词条集处理）：{source}，{e}")
+        return []
+
+
 def load_qa_library(file_path):
     """加载一问一答 TXT 词库（E-E3，主侧本地问答与助播知识库共用——TODOS
     主 local_qa 格式收敛项落地后两库同构）：UTF-8(errors='replace')、按行、
@@ -214,14 +255,24 @@ def load_qa_library(file_path):
 
 def match_assistant_text(config, content):
     """助播文本词库匹配（D4/D5）：精确短路（归一化全等）→ calculate_similarity
-    最优命中（阈值=assistant_anchor.local_qa.text.similarity）。"""
+    最优命中（阈值=assistant_anchor.local_qa.text.similarity）。
+
+    2026-10-31 本地问答审查批次：问答数据由 file_path 迁移为 config 内嵌行
+    列表（assistant_anchor.local_qa.text.data，前端 textarea 实时保存）。
+    """
     try:
-        file_path = config.get("assistant_anchor", "local_qa", "text", "file_path")
+        lines = config.get("assistant_anchor", "local_qa", "text", "data")
+        if lines is None:
+            # 存量迁移桥：file_path 已退役（前端保存时清除），未重存旧配置回退文件词库
+            lines = config.get("assistant_anchor", "local_qa", "text", "file_path")
         try:
             threshold = float(config.get("assistant_anchor", "local_qa", "text", "similarity"))
         except (TypeError, ValueError):
             threshold = 0.8
-        entries = load_qa_library(file_path)
+        if isinstance(lines, str):
+            entries = load_qa_library(lines)
+        else:
+            entries = load_qa_entries_from_config(lines, "助播知识库")
         if not entries:
             return None
         q_norm = normalize_for_match(content)
@@ -351,24 +402,21 @@ def assistant_match_chain(config, source, content, username=None):
         if config.get("assistant_anchor", "local_qa", "audio", "enable"):
             audio_path = match_assistant_audio(config, content)
             if audio_path:
-                _record("kb_chain", source, "assistant_audio", True)
                 return ("assistant_audio", audio_path)
         if config.get("assistant_anchor", "local_qa", "text", "enable"):
             answer = match_assistant_text(config, content)
             if answer is not None:
-                _record("kb_chain", source, "assistant_text", True)
                 return ("assistant_text", render_answer(answer, username))
     except Exception as e:
         logger.error(f"助播知识库匹配链异常（按未命中处理）：{e}\n" + traceback.format_exc())
-    _record("kb_chain", source, "miss", False)
     return ("miss", None)
 
 
 def assistant_copy_message(config, content, username=None, producer_type="", source=None,
                            hit_layer="direct", extra=None):
     """构建助播消息（E-A2）：type=assistant_anchor_text、助播音色（E-E1 规范化
-    回落）、助播名；返回 dict 附内部元数据（业务链不消费，仅供 D11 观测与
-    守卫读取）。extra 合入业务键（如 content_type）。"""
+    回落）、助播名；返回 dict 附内部元数据（业务链不消费，仅供路由守卫测试
+    读取）。extra 合入业务键（如 content_type）。"""
     try:
         anchor_name = config.get("assistant_anchor", "username") or DEFAULT_ANCHOR_NAME
     except Exception:
@@ -381,7 +429,7 @@ def assistant_copy_message(config, content, username=None, producer_type="", sou
         "config": config.get("filter"),
         "username": anchor_name,
         "content": content,
-        # 内部元数据（E-A2）：业务链不消费；观测/守卫读取
+        # 内部元数据（E-A2）：业务链不消费；路由守卫测试读取
         "_anchor_meta": {
             "producer_type": producer_type,
             "source": source,
@@ -391,50 +439,4 @@ def assistant_copy_message(config, content, username=None, producer_type="", sou
     }
     if extra:
         message.update(extra)
-    _record(producer_type, source, hit_layer, True)
     return message
-
-
-# ---------- 路由观测（D11/E-A2 数据源） ----------
-
-class _RouteRecorder:
-    """线程安全路由决策记录器：每 (产线,来源) 最近一次决策 + 累计计数。"""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._counters = {}
-        self._last = {}
-
-    def record(self, producer_type, source, hit_layer, routed):
-        key = f"{producer_type}|{source or '-'}"
-        with self._lock:
-            self._counters[key] = self._counters.get(key, 0) + 1
-            self._last[key] = {
-                "producer_type": producer_type,
-                "source": source,
-                "hit_layer": hit_layer,
-                "routed": bool(routed),
-                "ts": time.time(),
-            }
-
-    def snapshot(self):
-        with self._lock:
-            return {
-                "counters": dict(self._counters),
-                "last": {k: dict(v) for k, v in self._last.items()},
-            }
-
-
-_recorder = _RouteRecorder()
-
-
-def _record(producer_type, source, hit_layer, routed):
-    try:
-        _recorder.record(producer_type, source, hit_layer, routed)
-    except Exception:
-        pass
-
-
-def get_route_stats():
-    """D11 观测面板取数（只读快照）：counters + last。"""
-    return _recorder.snapshot()
