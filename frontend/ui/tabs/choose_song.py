@@ -313,6 +313,9 @@ def create_choose_song_tab(
                     _prev_wait["code"] = ""
                     _prev_wait["song"] = None
                 else:
+                    # CEO F2 闭环：current 消失=上一首完成（补刀或主跑落位）→完成通知
+                    if _prev_wait["song"]:
+                        ui.notify(f"《{_prev_wait['song']}》翻唱完成，已进入歌曲列表", type="positive")
                     status_lab.set_text("○ 翻唱队列空闲（弹幕点歌自动入队）")
                     _prev_wait["code"] = ""
                     _prev_wait["song"] = None
@@ -389,7 +392,13 @@ def create_choose_song_tab(
                     ".querySelector('input.q-uploader__input, input[type=file]');"
                     "if (input) { input.value = ''; input.click(); } })()")  # 选前清空：同文件重选也触发 change
 
-            def _one_click_cover():
+            async def _one_click_cover():
+                # R-7 真根因修（2026-11-02 r5 实测，/investigate learning
+                # nicegui3-eventloop-sync-requests 同族）：webui 单进程下
+                # /cover/enqueue 就在本进程 uvicorn——同步 handler 里发同步
+                # HTTP=事件循环等响应、响应等事件循环空闲→自锁→恒超时。
+                # 修=async handler+to_thread（learning 修复三件套）。
+                import asyncio as _aio
                 song = (uploaded_song.get("name") or "").strip()
                 if not song:
                     ui.notify("请先点击「上传歌曲」选择要翻唱的歌曲", type="warning")
@@ -398,12 +407,12 @@ def create_choose_song_tab(
                 def _post():
                     try:
                         r = _session.post(f"{_main_base(config)}/cover/enqueue",
-                                          json={"song": song}, timeout=6)
+                                          json={"song": song}, timeout=30)
                         return r.status_code, r.json()
                     except Exception as ex:
                         return None, {"detail": str(ex)[:80]}
 
-                code, data = _post()
+                code, data = await _aio.to_thread(_post)
                 if code == 200:
                     action = data.get("action")
                     if action == "queued":
