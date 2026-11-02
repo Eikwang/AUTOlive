@@ -12,6 +12,7 @@
 import ast
 import os
 import sys
+import types
 
 from utils.cover_worker import CoverQueue  # noqa: E402
 from utils.gpu_policy import (  # noqa: E402
@@ -151,3 +152,32 @@ def test_g3_wait_fields_written_then_cleared(tmp_path, monkeypatch):
     assert seen_at_gate[1] == (WAIT_LIVE_RUNNING, "直播运行中"), seen_at_gate
     # 准入通过置空(C-2)
     assert job["wait_code"] == WAIT_NONE and job["wait_reason"] == ""
+
+
+def test_bootstrap_slices_args_after_double_dash():
+    """T4 补充(2026-11-02 实测真因):bootstrap 的 argv 切片必须按 '--' 定位——
+    `python -c "<code>" -- -i ...` 的 sys.argv=[python, -c, <code>, --, -i, ...],
+    旧写法 sys.argv[1:] 把代码串本身传给 argparse（报 required: -i/-dir/-p，
+    参数全空——线上报错逐字吻合）。真执行验证:新切片产出干净参数表。"""
+    import subprocess
+    from utils.cover_worker import CoverQueue
+
+    q = CoverQueue.__new__(CoverQueue)
+    q.config = types.SimpleNamespace(get=lambda *a, **k: None)
+    # _aicovergen_src 依赖 paths——stub 掉
+    q._aicovergen_src = lambda: "D:/fake/src"
+
+    code = q._bootstrap_code()
+    assert "sys.argv.index('--')" in code, "bootstrap 缺 '--' 定位切片（旧缺陷 sys.argv[1:] 回归）"
+
+    # 真执行:模拟完整 cmd 形态,断言 main.py 收到的参数表
+    probe = (
+        "import sys\n"
+        "if '--' in sys.argv:\n"
+        "    sys.argv = ['main.py'] + sys.argv[sys.argv.index('--') + 1:]\n"
+        "print(repr(sys.argv[1:]))\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", probe, "--", "-i", "song.mp3", "-p", "0"],
+        capture_output=True, text=True)
+    assert r.stdout.strip() == "['-i', 'song.mp3', '-p', '0']", r.stdout

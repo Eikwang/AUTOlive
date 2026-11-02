@@ -497,7 +497,10 @@ print('POSTPROCESS_OK')
         return (
             "import sys, runpy\n"
             f"sys.path.insert(0, r'{src}')\n"
-            "sys.argv = ['main.py'] + sys.argv[1:]\n"
+            "if '--' in sys.argv:\n"
+            "    sys.argv = ['main.py'] + sys.argv[sys.argv.index('--') + 1:]\n"
+            "else:\n"
+            "    sys.argv = ['main.py'] + sys.argv[1:]\n"
             "try:\n"
             "    import gradio as _gr\n"
             "    if not hasattr(_gr, 'Progress'):\n"
