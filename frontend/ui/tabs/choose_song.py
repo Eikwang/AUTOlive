@@ -494,6 +494,26 @@ def create_choose_song_tab(
                                 except Exception as _au_err:
                                     logger.warning(f"成品试听控件渲染失败：{_au_err}")  # CEO F1
 
+                                # T7 删除按钮（2026-11-02 用户诉求）：删 covers/ 下
+                                # 同名三件（成品+分轨），song_source 原曲不删
+                                def _delete_cover(fn=fn):
+                                    try:
+                                        r = _session.post(f"{_main_base(config)}/cover/delete",
+                                                          json={"file": fn}, timeout=15)
+                                        data = r.json()
+                                        if r.status_code == 200 and data.get("success"):
+                                            ui.notify(f"已删除《{fn}》", type="positive")
+                                            _render_covers()
+                                        else:
+                                            ui.notify(f"删除失败：{data.get('detail', r.status_code)}",
+                                                      type="negative")
+                                    except Exception as ex:
+                                        ui.notify(f"删除请求失败：{ex}", type="negative")
+
+                                ui.button(icon='delete', on_click=_delete_cover).props(
+                                    'flat dense round color=negative').tooltip(
+                                    f'删除翻唱成品《{fn}》（含分轨；原曲与翻唱缓存不受影响）')
+
             covers_box = ui.column().style("width:100%")
             with ui.row().style("width:100%;align-items:center;gap:4px"):
                 ui.label("歌曲列表（已翻唱成品，可预览播放）").style(

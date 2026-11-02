@@ -13,6 +13,7 @@ AutoliveApp.config（init_config 同形态，零适配）；my_handle 可选（w
 进程无播放链，on_done=None=完成仅落盘，插播依赖点歌主链）。
 """
 import logging
+import os
 import threading
 
 from fastapi import HTTPException
@@ -54,6 +55,31 @@ def register_cover_routes(app, config, get_my_handle=None):
         except Exception as e:
             logger.error("/cover/status 异常", exc_info=True)
             return {"available": False, "reason": str(e)}
+
+    @app.post("/cover/delete")
+    async def cover_delete(req: dict):
+        """删除翻唱成品（T7 用户诉求：翻唱歌曲列表删除按钮）。
+
+        删除 covers/ 下同名三件（成品+分轨 vocal/inst）；song_source 原曲不删
+        （点歌曲源独立管理）。文件名白名单校验（防路径穿越）。"""
+        fn = str((req or {}).get("file") or "").strip()
+        if not fn or "/" in fn or "\\" in fn or ".." in fn or not fn.endswith(".wav"):
+            raise HTTPException(status_code=400, detail="非法文件名")
+        from utils.autolive_paths import song_audio_root
+        covers_dir = os.path.join(song_audio_root(config), "covers")
+        deleted = []
+        base = fn[:-4]  # 去 .wav
+        for cand in (fn, base + "_vocal.wav", base + "_inst.wav"):
+            full = os.path.join(covers_dir, cand)
+            if os.path.isfile(full):
+                try:
+                    os.remove(full)
+                    deleted.append(cand)
+                except OSError as e:
+                    raise HTTPException(status_code=500, detail=f"删除失败 {cand}: {e}")
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"成品不存在: {fn}")
+        return {"success": True, "deleted": deleted}
 
     @app.post("/cover/enqueue")
     async def cover_enqueue(req: dict):

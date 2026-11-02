@@ -301,9 +301,13 @@ class CoverQueue:
             return
         logger.info(f"[cover] 主跑结束 rc={rc}：{song}（输出: {run_log}）")
         if rc != 0:
+            # R-9 日志语义修正（2026-11-02 r4 批次）：pedalboard effects 段崩溃
+            # （四连崩实证）是已知设计路径——主跑崩→补刀接管产出成品。它不是
+            # 故障，ERROR 级会误导用户；尾部输出仍落主跑日志文件供诊断。
             try:
                 tail = open(run_log, encoding="utf-8", errors="replace").read()[-800:]
-                logger.error("[cover] 主跑失败尾部输出:\n" + tail)
+                logger.info(f"[cover] 主跑崩溃（已知，pedalboard effects 段，补刀接管）"
+                            f"尾部输出:\n{tail}")
             except Exception:
                 pass
         # 原子落位（S-4）：AICoverGen 输出在 song_output/，找到成品移到 covers/
