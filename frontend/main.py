@@ -1540,6 +1540,20 @@ class AutoliveApp:
         except Exception:
             logger.error("素材管理路由挂载失败（动作编排页素材区不可用）", exc_info=True)
 
+        # 点歌翻唱控制面（T3/2026-11-02 实测批次根修）：/cover/* 原注册于主进程
+        # WebServer.app（uvicorn 8082），webui 单进程工作流不启动 8082——端点不可达
+        # （实测 netstat 无监听+Max retries）。同素材路由模式挂本进程 NiceGUI app；
+        # config 传 AutoliveApp.config（Config 对象形态，CoverQueue 零适配）。
+        # webui 轻量进程无播放链（my_handle=None）→on_done=None=完成仅落盘，
+        # 插播依赖点歌主链；webui 选择器前端经同源 8086 访问（_self_base）。
+        try:
+            from utils.cover_endpoints import register_cover_routes
+            register_cover_routes(app, self.config,
+                                  get_my_handle=lambda: getattr(self, "my_handle", None))
+            logger.info("点歌翻唱路由已挂载至 webui（/cover/*，同源 8086）")
+        except Exception:
+            logger.error("点歌翻唱路由挂载失败（一键翻唱不可用）", exc_info=True)
+
     def _check_expiration(self):
         """检查账号过期（与原文件 webui-bak.py L284-333 一致）"""
         try:

@@ -236,12 +236,18 @@ class TestOneClickCover:
         assert "/cover/enqueue" in src
 
     def test_web_server_enqueue_endpoint(self):
-        src = _read("utils/web_server.py")
+        """T3 实测批次：端点抽共享注册（utils/cover_endpoints.py），web_server
+        与 webui（frontend/main.py）两侧挂载——webui 单进程工作流下主进程
+        uvicorn 不启动，原内联端点不可达（netstat 实证）。"""
+        src = _read("utils/cover_endpoints.py")
         assert '"/cover/enqueue"' in src
         assert "cover_enqueue" in src
         # 入队后 ensure_worker 拉起 worker，on_done 与弹幕点歌同路
         assert "ensure_worker" in src
         assert "on_done" in src
+        # 两侧挂载：web_server.py 调共享注册；webui（frontend/main.py）同
+        assert "register_cover_routes" in _read("utils/web_server.py")
+        assert "register_cover_routes" in _read("frontend/main.py")
 
     def test_frontend_one_click_uses_uploaded_song(self):
         """2026-11-02 用户裁决重构：一键翻唱使用本次上传的歌曲，「选择歌曲」
@@ -252,8 +258,9 @@ class TestOneClickCover:
         assert "上传歌曲" in src and "/song_source" in src   # 标准按钮入口+预览路由
 
     def test_web_server_manual_bypass(self):
-        """手动一键翻唱旁路冷却/同观众上限（连翻多首不被静默拒绝）。"""
-        src = _read("utils/web_server.py")
+        """手动一键翻唱旁路冷却/同观众上限（连翻多首不被静默拒绝）。
+        端点抽共享注册后断言目标=cover_endpoints.py。"""
+        src = _read("utils/cover_endpoints.py")
         assert "manual=True" in src
 
 

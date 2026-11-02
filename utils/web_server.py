@@ -268,54 +268,13 @@ class WebServer:
         # 避免 webui/主系统双写者与素材任务状态分裂）
 
         # 翻唱队列控制面（/autoplan 2026-10-14 C-3：点歌页队列状态卡数据源；
-        # 写者矩阵=cover_worker（main 进程）唯一写者，webui 只读窄端点）
-        @self.app.get("/cover/status")
-        async def cover_status():
-            try:
-                cq = getattr(self.my_handle, "cover_queue", None) if self.my_handle else None
-                if cq is None:
-                    return {"available": False, "reason": "翻唱队列未初始化（未触发过点歌）"}
-                with cq.lock:
-                    queue = [{"song": j["song"], "viewer": j["viewer"],
-                              "retries_left": j["retries_left"]} for j in cq.queue]
-                    cur = dict(cq.current) if cq.current else None
-                    if cur and cur.get("started_at"):
-                        cur = {**cur, "elapsed_s": round(__import__("time").time() - cur["started_at"], 1)}
-                return {"available": True, "queue": queue, "current": cur,
-                        "policies": cq._policies()}
-            except Exception as e:
-                logger.error("/cover/status 异常", exc_info=True)
-                return {"available": False, "reason": str(e)}
-
-        # 一键翻唱入队（2026-10-31 点歌审查批次：点歌页「上传歌曲+一键翻唱」
-        # 数据源——webui 选歌后 POST 入 CoverQueue；viewer=webui-manual，
-        # manual=True 旁路冷却/同观众上限（手动动作非弹幕刷屏，连翻多首不被
-        # 静默拒绝），队满/缓存命中治理仍生效；on_done 自动插播回调与弹幕点歌同路）
-        @self.app.post("/cover/enqueue")
-        async def cover_enqueue(req: dict):
-            song = str((req or {}).get("song") or "").strip()
-            if not song:
-                raise HTTPException(status_code=400, detail="缺少 song 参数")
-            try:
-                cq = getattr(self.my_handle, "cover_queue", None) if self.my_handle else None
-                if cq is None:
-                    from utils.cover_worker import CoverQueue
-                    cq = CoverQueue(self.config, None)
-                    if self.my_handle is not None:
-                        self.my_handle.cover_queue = cq
-                fh = getattr(self.my_handle, "feature_handler", None) if self.my_handle else None
-                if getattr(cq, "on_done", None) is None and fh is not None:
-                    cq.on_done = fh._play_cover_done
-                profile = self.config.get("choose_song", "cover_profile_id") or "default"
-                r = cq.enqueue("webui-manual", song, profile, manual=True)
-                if r.get("action") == "queued":
-                    cq.ensure_worker()
-                return r
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error("/cover/enqueue 异常", exc_info=True)
-                raise HTTPException(status_code=500, detail=str(e))
+        # 点歌翻唱控制面（T3/2026-11-02 实测批次）：/cover/* 抽共享注册
+        # （utils/cover_endpoints.register_cover_routes）——webui 单进程工作流下
+        # 同函数挂 NiceGUI app（本进程 uvicorn 不随 webui 启动，原内联端点不可达）。
+        # 写者矩阵=cover_worker（main 进程）唯一写者，webui 只读窄端点。
+        from utils.cover_endpoints import register_cover_routes
+        register_cover_routes(self.app, self.config,
+                              get_my_handle=lambda: self.my_handle)
 
         @self.app.post("/send")
         async def send(msg: SendMessage):

@@ -63,7 +63,12 @@ def match_gift_to_song(
 
 
 def _main_base(config) -> str:
-    return f"http://127.0.0.1:{int(get_nested_value(config, 'api_port') or 8000)}"
+    """点歌翻唱控制面基址（T3 实测批次改为 webui 同源）。
+
+    /cover/* 现挂载于 webui 进程自身（frontend/main.py register_cover_routes），
+    api_port（主进程 8082）在 webui 单进程工作流下不存在——同源 webui 端口
+    承载（NiceGUI 页面与其 API 同进程）。"""
+    return f"http://127.0.0.1:{int(get_nested_value(config, 'webui', 'port') or 8086)}"
 
 
 def create_choose_song_tab(
