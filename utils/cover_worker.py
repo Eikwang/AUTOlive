@@ -441,19 +441,23 @@ class CoverQueue:
         if not os.path.isdir(song_root):
             logger.warning("[cover] 补刀中止：song_output 不存在")
             return None
-        started = job.get("started_at", 0)
-        # CEO C1：先删主跑残留半成品 mixed（本轮 started_at 之后的）
+        # CEO C1：删主跑残留半成品 mixed——**全量删**（R-5：AICoverGen 缓存复用
+        # 语义下 started_at 守卫会漏删旧半成品；mixed 全部为可重生产物，删安全）
         for dirpath, _, fns in os.walk(song_root):
             for fn in fns:
                 if fn.endswith("_mixed.wav"):
                     full = os.path.join(dirpath, fn)
                     try:
-                        if os.path.getmtime(full) > started:
-                            os.remove(full)
-                            logger.warning(f"[cover] 已删除主跑残留半成品: {full}（CEO C1）")
+                        os.remove(full)
+                        logger.warning(f"[cover] 已删除残留半成品: {full}（CEO C1）")
                     except OSError:
                         pass
-        # vocal：参数链正则（Eng E-1 首选）+started_at 守卫+最新者胜
+        # vocal：参数链正则（Eng E-1 首选）+**无 started_at 守卫**（R-5 真根因修：
+        # AICoverGen 同曲重翻时 song_dir 缓存命中→跳过 MDX/RVC→主跑直接崩在
+        # effects→本轮"新增产物 0 个"——旧 vocal 是缓存语义下正确应复用的产物，
+        # mtime 守卫会把它排除=补刀恒中止。参数链正则已足够精准：文件名含
+        # 模型名+全参数链，同歌同参=同一 vocal 文件，跨参数/跨歌不冲突）。
+        # 最新者胜：缓存场景多轮同参产物相同，取最新保持确定性。
         vocal, vocal_m = None, 0
         for dirpath, _, fns in os.walk(song_root):
             for fn in fns:
@@ -465,7 +469,7 @@ class CoverQueue:
                     continue
                 full = os.path.join(dirpath, fn)
                 m = os.path.getmtime(full)
-                if m > started and m > vocal_m:
+                if m > vocal_m:
                     vocal, vocal_m = full, m
         if not vocal:
             logger.warning("[cover] 补刀中止：未找到 RVC 中产物（参数链签名无命中）")

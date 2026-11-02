@@ -309,3 +309,37 @@ class TestFaulthandlerSymmetry:
         assert "sys.argv[1:5]" in code, "补刀代码未用 argv 传参(E-2 回归)"
         triple = "'" * 3
         assert ("r" + triple) not in code, "路径内插形态回归"
+
+
+class TestCacheReuseSemantics:
+    """R-5 真根因回归锁（2026-11-02 r5 批次）：AICoverGen 同曲重翻时 song_dir
+    缓存命中（跳过 MDX/RVC）→主跑崩在 effects→vocal 为旧文件（mtime 早于本轮
+    started_at）——补刀不得用 mtime 守卫排除缓存产物。"""
+
+    def test_cached_vocal_found_despite_old_mtime(self, tmp_path):
+        """vocal mtime 早于 started_at（缓存命中）→仍定位命中。"""
+        import time as _t
+        root, src = _make_sources(tmp_path)
+        q = q_dir_stub(root)
+        # started_at 设在未来（比 vocal 的 mtime 新）——模拟"本轮无新增产物"
+        job = {"song": os.path.splitext(os.path.basename(src["vocal"]))[0],
+               "song_path": src["vocal"], "retries_left": 0,
+               "started_at": _t.time() + 3600}
+        located = q._locate_cover_sources(job)
+        assert located is not None, (
+            "缓存复用场景下 started_at 守卫不应排除旧 vocal（R-5 真根因回归）")
+        vocal, backup, inst, work_dir = located
+        assert os.path.samefile(vocal, src["vocal"])
+
+    def test_stale_mixed_deleted_regardless_of_mtime(self, tmp_path):
+        """旧半成品 mixed（mtime 早）也删——全量删不留漏网。"""
+        root, src = _make_sources(tmp_path)
+        stale = src["vocal"].replace(".wav", "_mixed.wav")
+        open(stale, "wb").write(b"PARTIAL")
+        import os as _os
+        _os.utime(stale, (1, 1))  # mtime 设为极旧
+        q = q_dir_stub(root)
+        job = {"song": "x", "song_path": src["vocal"], "retries_left": 0,
+               "started_at": __import__("time").time()}
+        q._locate_cover_sources(job)
+        assert not os.path.isfile(stale), "旧半成品 mixed 应被全量删除"
