@@ -114,11 +114,13 @@ def create_trends_copywriting_tab(
 
         # R5②：文案直输 textarea（回车分段、即时保存；复用闲时任务模式，
         # placeholder=空态占位）
+        # T3/C2（2026-11-01 批次）：「关键词|文案」格式语义的用户可见提示——
+        # 关键词部分仅触发动作编排，不参与按键映射等其它功能（防静默收窄）。
         _auto_save(ui.textarea(
             label='文案列表',
             value=textarea_data_change(get_nested_value(config, "trends_copywriting", "copy")),
-            placeholder='每行一条文案，回车分段',
-        ).props('input-style="min-height: 16rem"').style("width:100%;").tooltip('每行一条文案，回车分段；保存后即时生效（随机生成受上方开关控制）'),
+            placeholder='每行一条文案，回车分段\n支持「关键词|文案」格式：| 前关键词触发动作编排画面，| 后文案照常播放（全角｜亦可）',
+        ).props('input-style="min-height: 16rem"').style("width:100%;").tooltip('每行一条文案，回车分段；保存后即时生效（随机生成受上方开关控制）。\n「关键词|文案」格式：| 前关键词仅用于触发动作编排画面（不参与按键映射/回复等其它功能），| 后文案照常经 LLM 改写与合成播放；不带 | 的行走原有全链。'),
             ("trends_copywriting", "copy"), split_lines=True)
 
         # 存量迁移状态行（DV-1b⑥：迁移结果/失败指引的持久可见面）

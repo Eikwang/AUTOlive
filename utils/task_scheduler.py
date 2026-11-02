@@ -444,6 +444,31 @@ class TaskScheduler:
         if not self.config.get("trends_copywriting", "enable"):
             return
 
+        # ---------- "关键词|文案"拆分（T3，/autoplan main-20261101-213220 批次） ----------
+        _t3_new_format_logged = [False]  # 首次采用新格式 info 提示（CEO C2/F8）
+
+        def _split_kw_copy(entry: str):
+            """「关键词|文案」拆分（T3 义务块）。
+
+            分隔符识别=半角"|"与全角"｜"(U+FF5C) 取行内首个（Eng E2：中文输入法
+            高频产出全角；义务块的"整行 NFKC 副本定位"以双 find 等价达成，避免
+            NFKC 兼容映射的长度漂移）。多个分隔符=首个生效，其余归文案部分。
+            返回 (keyword, copy_part)；无分隔符/关键词空/文案部分空 = None
+            （向下兼容：整行走既有全链）。关键词侧 NFKC+去空白规范化（义务块）。
+            """
+            import unicodedata
+            idx = entry.find("|")
+            fw = entry.find("｜")
+            if fw >= 0 and (idx < 0 or fw < idx):
+                idx = fw
+            if idx < 0:
+                return None
+            kw = unicodedata.normalize("NFKC", entry[:idx]).strip()
+            copy_part = entry[idx + 1:].strip()
+            if not kw or not copy_part:
+                return None
+            return kw, copy_part
+
         def _read_copy_file(path):
             """读文案文件：UTF-8 优先，失败回退 GBK，双双失败返回 None 不静默（E4 教训）。"""
             for encoding in ("utf-8", "gbk"):
@@ -505,10 +530,26 @@ class TaskScheduler:
                             continue
                         resp_content = source_content
 
+                    # T3（/autoplan main-20261101-213220）：「关键词|文案」拆分
+                    # 仅作用 config 文案列表链（Eng E1：copywriting 文件夹链散文
+                    # 自然出现的"|"不得误拆，默认不启用格式）。
+                    t3_keyword = None
+                    if direct_copy_list:
+                        _split = _split_kw_copy(resp_content)
+                        if _split is not None:
+                            t3_keyword, resp_content = _split
+                            if not _t3_new_format_logged[0]:
+                                _t3_new_format_logged[0] = True
+                                logger.info(
+                                    "动态文案启用「关键词|文案」新格式：关键词部分仅用于"
+                                    "触发动作编排（不参与按键映射等其它功能），文案部分"
+                                    "照常播放（RUNBOOK 案例一边界声明）")
+
                     # S-3 注入防护：改写输入仅限本地文案原文+配置内固定提示词，
                     # 不接入任何弹幕/事件变量；原文截断 500 字符防爆 LLM/TTS。
                     # 新链（config 文案列表）与旧链（本地文件）来源性质一致：
                     # 均为配置内固定文案，无观众输入注入点。
+                    # T3/Eng E6：截断口径=作用于文案部分（关键词不计入）。
                     resp_content = resp_content[:500]
                     # R5③/EV-1e：提示词转换读页级新键（trends_copywriting 根），
                     # 逐条目旧键退役；页级值同样为配置内固定提示词（S-3 性质不变）
@@ -570,14 +611,36 @@ class TaskScheduler:
                         "content": resp_content,
                     }
                     if self.my_handle is not None:
-                        # 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD
-                        # DynamicCopy→Keyword→Queue）：动态文案入队前统一识别
-                        # （编排关键词订阅；中枢内部全兜底，识别不影响播放链）
-                        try:
-                            self.my_handle.keyword_recognize(
-                                {"content": resp_content}, "copywriting")
-                        except Exception as _kw_err:
-                            logger.debug(f"动态文案中枢识别异常（忽略）：{_kw_err}")
+                        if t3_keyword:
+                            # T3：格式化条目——关键词**无条件**投编排 on_keyword
+                            # （无论命中与否：no_match/enable=false/被拒只影响画面
+                            # 不影响文案——正交声明无条件适用，spec R2①）；文案部分
+                            # 一律不进 keyword_hub copywriting 源识别（设计文档 Q&A
+                            # 最狭义；其它 hub 消费者不接动态文案关键词）。直投
+                            # on_keyword 与 hub copywriting 源语义精确等价（hub 该源
+                            # 匹配器仅编排消费，keyword_hub.py:17/78），省整段子串扫描。
+                            try:
+                                from utils.orchestration import get_choreographer
+                                _choreo = get_choreographer()
+                                if _choreo is not None:
+                                    _accepted = bool(_choreo.on_keyword(t3_keyword))
+                                    if _accepted:
+                                        logger.info(f"动态文案关键词已触发动作编排：{t3_keyword}")
+                                    else:
+                                        # Eng H1：no_match/未启用分支降 debug 防刷屏
+                                        logger.debug(f"动态文案关键词未触发编排（未命中/未启用）：{t3_keyword}")
+                                else:
+                                    logger.debug("动态文案关键词编排器未装配（跳过画面触发）")
+                            except Exception as _t3_err:
+                                logger.debug(f"动态文案编排触发异常（忽略，文案照常播放）：{_t3_err}")
+                        else:
+                            # 向下兼容：未格式化条目走既有全链（hub copywriting 源
+                            # 统一识别，子串匹配语义不变）
+                            try:
+                                self.my_handle.keyword_recognize(
+                                    {"content": resp_content}, "copywriting")
+                            except Exception as _kw_err:
+                                logger.debug(f"动态文案中枢识别异常（忽略）：{_kw_err}")
                         self.my_handle.audio_synthesis_handle(message)
                         logger.info(f"动态文案已入播放链：{source_path}")
                     else:
