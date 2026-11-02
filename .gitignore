@@ -393,3 +393,4 @@ tests/vodeo/
 
 # 运行日志不入库（T1/Eng T-4：log*.txt 为运行时输出）
 log*.txt
+!docs/浸泡基线记录表.md

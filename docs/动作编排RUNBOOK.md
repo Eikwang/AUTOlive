@@ -31,15 +31,15 @@
 | `enable` | false | 总开关；false = 订阅点短路直通，全链零行为变化 |
 | `default_mode` | rotate | single（池首）/ rotate（顺序轮播）/ random（每次恢复打乱下发） |
 | `default_segments` | [] | 默认画面段名池；空池 = 不接管默认轮播（EDTalk 自身 --segments 生效） |
-| `min_retrigger_s` | 2 | 每规则最短再触发间隔（防连点风暴；被节流触发不计数） |
-| `min_sequence_hold_s` | 5 | 全局序列最小展示时间：hold 内他键触发忽略（防画面乒乓，F5） |
+| ~~`min_retrigger_s`~~ | — | **已退役**（2026-10-27 R-ceo5）：引擎不消费（去重在上游弹幕层）；旧键读取兼容一代+退役告警 |
+| ~~`min_sequence_hold_s`~~ | — | **已退役**（2026-10-27 R-ceo5/uc2a 用户裁决）：触发命中立即切换，无最短保持保护 |
 | `step_timeout_s` | 60 | audio 步骤缺省完成上限（F1 看门狗：超时强制推进+降级计数） |
-| `reset_after_s` | 300 | 情绪分级计数时间窗口（GAP-2）：超过该秒数未尝试触发则计数清零重新累计；锚点=最后一次尝试（含被节流拒绝的）；0=禁用衰减；负值/非数值回退缺省 300 并告警 |
-| `rules[].trigger_type` | — | gift / keyword / song（entrance/follow 预留，P1 不订阅） |
-| `rules[].match` | — | gift=礼物名全等；keyword=子串（NFKC+去空白+casefold 规范化）；song=可空=任意点歌 |
+| ~~`reset_after_s`~~ | — | **已退役**（2026-10-31 动作编排审查批次）：计数窗口弃用，触发计次不再随时间衰减（清零仅剩他键打断与配置重存） |
+| `rules[].trigger_type` | — | gift / keyword / song / entrance / follow（T4：入场/关注事件触发，2026-11-01 批次——三强制=自动 queue+权重恒最低档+10s 类型节流） |
+| `rules[].match` | — | gift=礼物名全等；keyword=子串（NFKC+去空白+casefold 规范化）；song/entrance/follow=可空=任意事件，非空=用户名等值（entrance/follow，username 经 _normalize_text 归一） |
 | `rules[].min_price` | 0 | 仅 gift：最低价值门槛，与答谢链 lowest_price 同口径 |
 | `rules[].sequence` | — | enter/main/exit 三步：segment+switch_at+duration_s+audio{mode,path} |
-| `rules[].emotion_tiers` | 可选 | max_count 严格递增；超出末档用最高档（缺省=单档恒用基础素材） |
+| `rules[].emotion_tiers` | 可选 | min_count=「从第 N 次起」下界、严格递增（2026-10-27 用户裁决；示例：档位一 1 次/二 4 次/三 7 次 → 第 1~3 次档一、4~6 次档二、7 次起档三）；未达任何档用规则基础三步；存量 max_count 上界键 load 时等价迁移 |
 
 **关键校验**：无 audio 的步骤必须 `duration_s > 0`（否则规则拒绝启用——拦截单槽 pending 静默跳段，FB-2）。`reaction_segment` 旧键已 deprecated（由编排规则取代，配置面保留不删）。
 
@@ -51,6 +51,27 @@
 - **tts 音轨与周期答谢通道**（WP-3/WP-4）：编排答谢经注入引用复用原生 `_thanks_generate`，E-2 每分钟限流窗口与周期通道全共享。**注意**：`thanks.gift.periodic_trigger.enable=true` 时答谢进周期缓存延后播报，画面按 F1 上限（duration_s 或 60s）推进——语音与画面的同步在该组合下降级为超时驱动。
 - **误匹配局限**（CL-2）：完成关联键 = (queue_type, content)+晚于入队时间。他链路同 content 音频可能提前触发完成判定 → 画面略早切换（EDTalk 边界兜底）。
 - **手动切段竞争**（WP-7）：webui 手动切段（画面设置页）会覆盖/清除编排 pending（单槽 last-write-wins）——**直播期间勿手动切段**。条件 3 拼接中若旧 exit 的 segment_end 请求尚在 pending，新 enter 请求会覆盖之（旧 exit 丢失，直接入场）——短衔接片段窗口极小，已知边界。
+
+## 3.5 复合转场配置模式（T5：设计文档转场条件3 的达成路径）
+
+**场景**（设计文档女团示例）：A 女跳舞中触发 C 女上场——需要「A 离场同时 C 入场」的复合转场视频，直接接 C 跳舞，不重复播放任何动作。
+
+**配置模式（零代码，纯配置约定）**：
+1. 复合视频（「A 离场+C 入场」单素材）配为 **旧规则（A）的 exit 段**；
+2. 新规则（C）的 **enter 段省略不配**（enter/exit 为可选过渡片段，2026-10-27 批次）；
+3. 打断拼接顺序 = [旧 exit=复合视频, 新 main=C 跳舞]——复合视频播完直接 C 跳舞。
+
+**示例**（config.json choreography.rules 节选）：
+
+```json
+{"rule_id": "girl_A", "trigger_type": "gift", "match": "热气球",
+ "sequence": {"main": {"segment": "A_跳舞", "switch_at": "segment_end", "duration_s": 30},
+              "exit": {"segment": "A离场+C入场_复合", "switch_at": "segment_end", "duration_s": 6}}},
+{"rule_id": "girl_C", "trigger_type": "gift", "match": "小星星",
+ "sequence": {"main": {"segment": "C_跳舞", "switch_at": "segment_end", "duration_s": 30}}}
+```
+
+**已知边界**（§3 手动切段竞争同源）：打断拼接中若旧 exit 的 segment_end 切换请求尚在 pending，新 main 请求会覆盖之（旧 exit 丢失直接入场）——短衔接片段窗口极小；复合视频时长（6s 量级）下基本无感。
 
 ## 4. 合规表述与浸泡验收（F3/F4）
 
@@ -64,16 +85,18 @@
 
 **浸泡验收清单**（P1 合并后实播验证；2026-10-23 补完批次代码交付，实测仍待执行）：
 - [ ] 最小可跑资产集：1 条规则 3 段，完整触发→enter→main→exit→回默认轮播闭环
-- [ ] 条件 3 拼接场景：两次不同礼物连发（[旧 exit, 新 enter, 新 main] + hold 窗口行为）
+- [ ] 条件 3 拼接场景：两次不同礼物连发（[旧 exit, 新 enter, 新 main] 拼接顺序可见；触发命中立即切换，无 hold 保护窗——2026-10-27 R-ceo5 退役）
 - [ ] 情绪分级：同礼物连发跨档（素材组切换可见）
 - [ ] F1 看门狗：移走 file 音频文件复现超时推进（降级日志出现，画面不卡死）
 - [ ] 关闭回滚：enable=false 重启 → 全链零行为变化
 - [ ] （补完批次新增）热启用链：初始 enable=false → 管理页应用启用 → worker 热启动 → 模拟触发画面切换
+- [ ] （T2b 追加 2026-11-01 批次）案例一联动：动态文案「关键词|文案」条目触发→编排画面切换+文案部分照常播放
+- [ ] （T2b 追加 2026-11-01 批次）entrance/follow 触发：模拟触发入场/关注→编排排队→响应率可观测（分母含 queued_full 与 type_throttled 丢弃——Eng E5）
 - [x] ~~（补完批次新增）计数窗口：同礼物跨 reset_after_s 两次触发 → 情绪档回落第 1 档~~（2026-10-31 动作编排审查批次退役：计数窗口参数移除，触发计次不再随时间衰减，清零仅剩他键触发打断）
 
 ## 5. 模拟测试（GAP-3：配置后即时验证，无需等待真实礼物）
 
-**管理页方式（推荐）**：「动作编排」卡片 → 模拟触发分区 → 下拉选择已配置规则 → 点「模拟触发」（outline 弱化按钮与「应用」分行）。结果 notify：成功=已启动/已排队；失败=reason+fix 文案（如 `未触发[throttled]：触发过快被节流，2s 后可重试`）。
+**管理页方式（推荐）**：「动作编排」卡片 → 模拟触发分区 → 下拉选择已配置规则 → 点「模拟触发」（outline 弱化按钮与「应用」分行）。结果 notify：成功=已启动/已排队；失败=reason+fix 文案（reason 枚举见 decide_trigger docstring：no_match/below_min_price/type_throttled{retry_after_s}/disabled/queued/queued_full/in_progress——历史 throttled/hold 已退役）。
 
 **curl 方式（copy-paste，端口按 config api_port 调整）**：
 
@@ -94,7 +117,7 @@ curl -s -X POST http://127.0.0.1:8082/choreography/trigger \
 #   200 + accepted=true  + reason=accepted/interrupted/requeued → 画面切换（观察状态条）
 #   200 + accepted=false + reason=no_match            → 没有命中启用规则（检查 match/启用状态）
 #   200 + accepted=false + reason=below_min_price     → 价值未达门槛（rule_id 形态已合成达标载荷，不会出现）
-#   200 + accepted=false + reason=throttled{retry_after_s} → 节流（等 retry_after_s 重试）
+#   200 + accepted=false + reason=type_throttled{retry_after_s} → entrance/follow 类型节流（等 retry_after_s 重试；gift/keyword/song 无引擎节流——去重在弹幕层）
 #   200 + accepted=false + reason=hold{retry_after_s} / in_progress → 序列执行中（等待/观察）
 #   200 + accepted=false + reason=disabled            → enable=false 或 worker 未运行（检查配置与启动日志）
 #   403  → 非本机来源被拒（编排控制仅限本机；远程控制官方不支持，须自建反代+鉴权）
@@ -117,6 +140,6 @@ curl -s http://127.0.0.1:8082/choreography/status
 | 步骤跳得太快 | problem=降级计数增长；cause=切段失败或音频未入队（file 门拦截/文件缺失）；fix=查 play_audio.enable 与文件路径 |
 | 编排器无响应 | problem=worker 未启动；cause=enable=false 或 EDTalk 客户端缺失；fix=检查配置与 EDTalk 启用状态 |
 | 已启用但状态条显示 worker 未运行 | problem=worker 启动失败或死亡；cause=见启动日志 `[编排] worker 启动失败` 三段式；fix=按日志修复后管理页重新「应用」（热启动） |
-| 模拟触发未生效 | problem=模拟触发被拒绝；cause=reason 字段（no_match/below_min_price/throttled/hold/in_progress/disabled——见 §5 对照表）；fix=按响应体 fix 字段处置 |
+| 模拟触发未生效 | problem=模拟触发被拒绝；cause=reason 字段（no_match/below_min_price/type_throttled/queued/queued_full/in_progress/disabled——见 decide_trigger docstring）；fix=按响应体 fix 字段处置 |
 
 **回滚**：`choreography.enable=false` + 重启（分钟级）；模块隔离，git revert 可整体退役。
