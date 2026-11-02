@@ -181,3 +181,131 @@ def test_bootstrap_slices_args_after_double_dash():
         [sys.executable, "-c", probe, "--", "-i", "song.mp3", "-p", "0"],
         capture_output=True, text=True)
     assert r.stdout.strip() == "['-i', 'song.mp3', '-p', '0']", r.stdout
+
+
+# ==================== r4 补刀重写守卫(T3/R-1,Eng A-1/E-1/E-3/T-1) ====================
+
+import re as _re
+
+
+def _make_sources(tmp_path, song_name="陈奕迅 - 最佳损友", stereo=False):
+    """伪造 AICoverGen song_output/<hash>/ 三件套+RVC vocal(真实命名形态)。"""
+    song_dir = tmp_path / "song_output" / "8c6dfb7df7d"
+    song_dir.mkdir(parents=True, exist_ok=True)
+    stem = song_name + ("_stereo" if stereo else "")
+    inst = song_dir / f"{stem}_Instrumental.wav"
+    backup = song_dir / f"{stem}_Vocals_Backup.wav"
+    dereverb = song_dir / f"{stem}_Vocals_Main_DeReverb.wav"
+    vocal = song_dir / f"{song_name}_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+    for f in (inst, backup, dereverb, vocal):
+        f.write_bytes(b"RIFF" + b"0" * 64)
+    return str(tmp_path / "song_output"), {"vocal": str(vocal), "backup": str(backup), "inst": str(inst), "dir": str(song_dir)}
+
+
+def q_dir_stub(song_output_root):
+    q = CoverQueue.__new__(CoverQueue)
+    q.queue = []
+    q.current = None
+    q.lock = __import__("threading").RLock()
+    q._stop = types.SimpleNamespace(is_set=lambda: False, wait=lambda t: False)
+    q.config = types.SimpleNamespace(get=lambda *a, **k: None)
+    _base_root = (song_output_root[: -len(os.sep + "song_output")]
+                  if song_output_root.endswith(os.sep + "song_output")
+                  else song_output_root)
+    q._aicovergen_root = lambda: _base_root  # 独立名:防外层 root 重绑穿闭包
+    return q
+
+
+class TestPostprocessFallbackR4:
+    """r4 补刀重写守卫(纯后缀匹配/半成品防御/参数链定位)。"""
+
+    def _job(self, song_path):
+        return {"song": os.path.splitext(os.path.basename(song_path))[0],
+                "song_path": song_path, "retries_left": 0,
+                "started_at": __import__("time").time() - 10}
+
+    def test_suffix_match_finds_instrumental_and_backup(self, tmp_path):
+        """纯后缀匹配:补刀定位不依赖 stem 反推(rsplit _pro 截断缺陷回归守卫)。"""
+        root, src = _make_sources(tmp_path)
+        q = q_dir_stub(root)
+        located = q._locate_cover_sources(self._job(src["vocal"]))
+        assert located is not None, "三件套应定位成功(纯后缀匹配)"
+        vocal, backup, inst, work_dir = located
+        assert os.path.samefile(vocal, src["vocal"])
+        assert os.path.samefile(backup, src["backup"])
+        assert os.path.samefile(inst, src["inst"])
+
+    def test_mono_stereo_variant_covered(self, tmp_path):
+        """Eng E-1/mono _stereo 变体:后缀匹配天然覆盖(拼名口径会漏)。"""
+        root, src = _make_sources(tmp_path, stereo=True)
+        q = q_dir_stub(root)
+        located = q._locate_cover_sources(self._job(src["vocal"]))
+        assert located is not None, "mono _stereo 变体应被后缀匹配覆盖"
+
+    def test_stale_mixed_removed_before_locate(self, tmp_path):
+        """CEO C1/Eng E-1 时序陷阱:伪造比 vocal 更新的残留 mixed——应被删除且
+        vocal 定位仍命中参数链文件(半成品不混入成品)。"""
+        root, src = _make_sources(tmp_path)
+        stale_mixed = src["vocal"].replace(".wav", "_mixed.wav")
+        open(stale_mixed, "wb").write(b"PARTIAL")  # 比 vocal 更新(后写)
+        import time as _t
+        _t.sleep(0.02)
+        q = q_dir_stub(root)
+        located = q._locate_cover_sources(self._job(src["vocal"]))
+        assert located is not None
+        assert not os.path.isfile(stale_mixed), "残留半成品 mixed 应已被 CEO C1 删除"
+
+    def test_cross_song_isolation(self, tmp_path):
+        """Eng E-5/串歌隔离:另一 hash 目录的同名三件套不命中。"""
+        root, src = _make_sources(tmp_path)
+        # 串歌目录:另一 hash,同名文件
+        other = tmp_path / "song_output" / "deadbeefcafe"
+        other.mkdir(parents=True, exist_ok=True)
+        (other / "陈奕迅 - 最佳损友_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav").write_bytes(b"x")
+        q = q_dir_stub(root)
+        located = q._locate_cover_sources(self._job(src["vocal"]))
+        assert located is not None
+        assert os.path.samefile(located[0], src["vocal"]), "vocal 应命中目标 hash 目录而非串歌目录"
+
+    def test_abort_when_instrumental_missing(self, tmp_path):
+        """Eng T-1/abort 路径:缺伴奏轨→明确 None(不落半成品 final)。"""
+        root, src = _make_sources(tmp_path)
+        os.remove(src["inst"])  # 删伴奏
+        q = q_dir_stub(root)
+        located = q._locate_cover_sources(self._job(src["vocal"]))
+        assert located is None, "缺伴奏应返回 None(明确中止)"
+
+
+class TestFaulthandlerSymmetry:
+    """R-2/CEO C2:主跑+补刀 subprocess env 对称挂 PYTHONFAULTHANDLER。"""
+
+    def test_main_run_env_has_fault_handler(self, tmp_path, monkeypatch):
+        """主跑 cmd env 含 PYTHONFAULTHANDLER=1(R-2 对称)。"""
+        import inspect
+        src = inspect.getsource(CoverQueue._process)
+        assert "FAULTHANDLER_ENV" in src, "主跑 env 未挂 faulthandler"
+        src_fb = inspect.getsource(CoverQueue._postprocess_fallback)
+        assert "FAULTHANDLER_ENV" in src_fb, "补刀 env 未对称挂 faulthandler"
+        # 模块级常量值正确
+        from utils.cover_worker import FAULTHANDLER_ENV
+        assert FAULTHANDLER_ENV == {"PYTHONFAULTHANDLER": "1"}
+
+    def test_param_chain_regex_signature(self):
+        """Eng E-1:参数链正则=唯一不受歌名污染/mtime 影响的 vocal 签名。"""
+        from utils.cover_worker import _VOCAL_PARAM_RE
+        good = "陈奕迅 - 最佳损友_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+        neg_pitch = "陈奕迅 - 最佳损友_autolive_WY_p-2_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+        crepe = "song_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_mangio-crepe_hop.wav"
+        assert _VOCAL_PARAM_RE.search(good)
+        assert _VOCAL_PARAM_RE.search(neg_pitch)
+        assert _VOCAL_PARAM_RE.search(crepe)
+        # mixed 排除在 _locate_cover_sources 循环侧(签名对 mixed 尾巴仍匹配,
+        # 排除靠文件名 'mixed' 过滤——test_stale_mixed_removed 已锁该行为)
+
+    def test_arg_passing_code_form(self):
+        """Eng E-2:补刀代码串路径经 sys.argv 传入(非 r 引号内插)。"""
+        import inspect
+        code = CoverQueue._postprocess_code(object())
+        assert "sys.argv[1:5]" in code, "补刀代码未用 argv 传参(E-2 回归)"
+        triple = "'" * 3
+        assert ("r" + triple) not in code, "路径内插形态回归"

@@ -1,3 +1,8 @@
+## Deferred Items from /autoplan (2026-11-02 r4) — 一键翻唱补刀伴奏对齐+崩溃可诊断(main-20261102-104518/r4,终门 rec 全推荐批准)
+
+1. **pedalboard 原生崩溃根因台账**(P2, M)——四连崩(rc=139×3+0xC0000005,均在 torch 进程上下文)无根因记录;三选项=钉 pedalboard 版本/剔除混响效果(纯直出)/替换音频效果库;**R-2 faulthandler 的首个崩溃栈为决策输入**(0xC0000005 时 Python 栈落 logs/cover_aicovergen_last.log)。零上游 AICoverGen 改动纪律 vs 崩溃常态化的权衡随条目落账(CEO F1/C3)。
+2. **SoX 安装**(P3, S)——AICoverGen 阶段 5.5 变调(sox.Transformer,pitch_shift)需要 sox.exe;当前链路恒不传 -pall **无影响**;未来若接 -pall 全曲变调才需要。安装=SoX 装入 `D:\AI\RVC20240604Nvidiauntime\sox\`(main.py:12-14 的 sys.prefix/sox PATH 约定目录,Eng H-1);探测也按此目录(非父进程 PATH)。
+
 ## Deferred Items from /autoplan (2026-11-02) — 一键翻唱三缺陷修复批次(main-20261102-104518,终门 rec 全推荐批准)
 
 1. **翻唱队列完整轮询面板**(P3, M)——前提更正(Eng F7):页内已有 _poll_task 5s 最小轮询状态卡,T3 的 wait_reason/wait_code 并入即覆盖 80% 感知缺口;完整面板(队列明细/历史/重试操作)**重启条件=G3 实测反馈 wait_reason 并入后仍不足时**。依赖:T3 实播验收。
