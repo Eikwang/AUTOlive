@@ -147,6 +147,8 @@ class TestChoreoTopology:
         ("Compile --> |需要口型|AvatarAI", "编排口型音频必须直达数字人服务（AvatarAI）"),
         ("Compile --> |不需口型|Frame", "编排纯画面必须直出画面帧（Frame，不经口型）"),
         ("lineout --> |回传|AudioList", "已消费信息必须回传音频队列（v2.7 用户终版回传子图：消费完成驱动串行消费）"),
+        ("DynamicCopy --> |关键词直投·格式化条目|Compile", "T3 动态文案格式化条目关键词直投编排（跳过中枢子串识别，v2.10）"),
+        ("EventEF --> |entrance/follow 订阅|Compile", "T4 入场/关注事件订阅编排（感谢链同源三强制，v2.10）"),
     )
 
     # Compile 不允许的歧义形态：旧 Sort→Compile 裸边 / 标签漂移
@@ -189,6 +191,19 @@ class TestChoreoTopology:
             encoding="utf-8")
         assert '"standard", "queue"' in cfg_src, "打断模式值域缺少 queue（排序联动语义）"
 
+    def test_t4_entrance_follow_implemented(self):
+        """代码侧镜像断言（v2.10）：entrance/follow 触发实装+三强制落码。"""
+        cfg_src = (REPO / "utils" / "orchestration" / "config_model.py").read_text(
+            encoding="utf-8")
+        assert 'VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow")' in cfg_src, (
+            "触发类型值域缺少 entrance/follow（T4 案例二）")
+        engine_src = (REPO / "utils" / "orchestration" / "choreographer.py").read_text(
+            encoding="utf-8")
+        assert "ENTRANCE_FOLLOW_MIN_INTERVAL_S" in engine_src, "缺少类型专属节流常量（三强制三）"
+        assert "_CLAMPED_PRIORITY_TYPES" in engine_src, "缺少权重恒强制钳制（三强制二）"
+        assert "on_entrance" in (REPO / "utils" / "handlers" / "event_handler.py").read_text(
+            encoding="utf-8"), "入场事件缺编排订阅点（感谢链同源）"
+
 
 class TestGraphHeader:
     """C7 图头断言：元数据两行在位（restore 回滚曾静默丢失图头，native Eng F2；
@@ -196,7 +211,9 @@ class TestGraphHeader:
     落码后随批次重落盘，版本升至 v2.9）。"""
 
     def test_version_line_present(self):
-        assert "v2.9" in _graph_text(), "图头版本行（v2.9）缺失——疑 restore 回滚，须随批次重落盘"
+        """v2.10（2026-11-01 动作编排优化批次 T3/T4）；v2.9 历史行保留。"""
+        assert "v2.10" in _graph_text(), "图头版本行（v2.10）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.9" in _graph_text(), "图头 v2.9 历史行缺失——版本链断裂"
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"
