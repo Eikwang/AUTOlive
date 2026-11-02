@@ -343,3 +343,89 @@ class TestCacheReuseSemantics:
                "started_at": __import__("time").time()}
         q._locate_cover_sources(job)
         assert not os.path.isfile(stale), "旧半成品 mixed 应被全量删除"
+
+
+class TestR6SuccessCondition:
+    """R-6 真根因回归锁（/investigate 五轮链终点）：主跑崩(rc!=0)+补刀产出
+    成品=成功路径——旧条件 rc==0 and produced 把补刀的成功成果否决为失败
+    （日志实证：两次"补刀完成"紧跟两次 _fail）。
+
+    实现与 /investigate 诊断脚本同构（直调属性赋值——pytest monkeypatch 与
+    CoverQueue 类属性交互在此场景有未解差异，诊断脚本已验证产品代码正确）。"""
+
+    def test_produced_succeeds_despite_rc(self):
+        import time as _t
+        import tempfile as _tf
+        import traceback as _tb
+        from unittest.mock import MagicMock
+        import utils.cover_worker as cw
+
+        tmp_path = _tf.mkdtemp(prefix="r6_guard_")
+        q = CoverQueue.__new__(CoverQueue)
+        q.queue = []
+        q.current = None
+        q.lock = __import__("threading").RLock()
+        q._stop = types.SimpleNamespace(is_set=lambda: False, wait=lambda t: False)
+        q.config = types.SimpleNamespace(get=lambda *a, **k: None)
+        q._rt_python = lambda: sys.executable
+        q._covers_dir = lambda: os.path.join(tmp_path, "covers")
+        q._aicovergen_root = lambda: tmp_path
+        song_dir = os.path.join(tmp_path, "song_output", "hash1")
+        os.makedirs(song_dir, exist_ok=True)
+        vocal = os.path.join(song_dir, "song_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav")
+        open(vocal, "wb").write(b"RIFF" + b"0" * 64)
+        song_path = os.path.join(tmp_path, "s.mp3")
+        open(song_path, "wb").write(b"ID3")
+        job = {"song": "song", "song_path": song_path, "profile_id": "WY",
+               "cover_path": os.path.join(tmp_path, "covers", "song__WY.wav"),
+               "retries_left": 1, "started_at": _t.time() - 100,
+               "wait_code": "", "wait_reason": ""}
+        os.makedirs(os.path.dirname(job["cover_path"]), exist_ok=True)
+        seq = iter([(False, "x", "live_running"), (True, "GPU", "")])
+        gp_orig = cw_subprocess = None
+        import utils.gpu_policy as gp
+        gp_orig = gp.background_task_gate
+        gate_state = {"calls": 0}
+
+        def _fake_gate(*a, **k):
+            gate_state["calls"] += 1
+            if gate_state["calls"] == 1:
+                return (False, "x", "live_running")
+            return (True, "GPU", "")
+        gp.background_task_gate = _fake_gate
+        env_orig = dict(cw.FAULTHANDLER_ENV)
+        cw.FAULTHANDLER_ENV = {}
+        popen_orig = cw.subprocess.Popen
+        fake_proc = MagicMock()
+        fake_proc.wait.return_value = 3221225477  # 0xC0000005
+        cw.subprocess.Popen = lambda *a, **k: fake_proc
+        produced_file = os.path.join(song_dir, "song (autolive_WY Ver).wav")
+        open(produced_file, "wb").write(b"RIFF" + b"0" * 64)
+        fb_orig = CoverQueue._postprocess_fallback
+        find_orig = CoverQueue._find_produced_wav
+        CoverQueue._postprocess_fallback = lambda self, job: None
+        CoverQueue._find_produced_wav = lambda self, job: (
+            produced_file if os.path.isfile(produced_file) else None)
+        fail_calls = []
+        fail_orig = CoverQueue._fail
+        CoverQueue._fail = lambda self, j, p, timeout=False: fail_calls.append(1)
+        retain_orig = CoverQueue._retain_split_tracks
+        prep_orig = CoverQueue._prepare_rvc_model_dir
+        CoverQueue._retain_split_tracks = lambda self, j, c: None
+        CoverQueue._prepare_rvc_model_dir = lambda self, j: None
+        on_done = MagicMock()
+        q.on_done = on_done
+        try:
+            q._process(job, q._policies())
+        finally:
+            gp.background_task_gate = gp_orig
+            cw.FAULTHANDLER_ENV = env_orig
+            cw.subprocess.Popen = popen_orig
+            CoverQueue._postprocess_fallback = fb_orig
+            CoverQueue._find_produced_wav = find_orig
+            CoverQueue._fail = fail_orig
+            CoverQueue._retain_split_tracks = retain_orig
+            CoverQueue._prepare_rvc_model_dir = prep_orig
+        assert on_done.called, "rc!=0+补刀产出成品应走成功路径（on_done 触发）"
+        assert not fail_calls, "补刀产出成品不应走 _fail"
+        assert os.path.isfile(job["cover_path"]), "成品应原子落位 covers/"

@@ -324,11 +324,16 @@ class CoverQueue:
             # 死在效果链时 RVC 中产物已在，用干净进程（零 torch）补 effects+mix。
             self._postprocess_fallback(job)
             produced = self._find_produced_wav(job)
-        if rc == 0 and produced:
+        # R-6 真根因修（2026-11-02 r4 实测批次，/investigate 五轮链终点）：
+        # 成功条件=成品存在（produced），不要求主跑 rc==0——补刀的存在意义就是
+        # "主跑崩（pedalboard 四连崩）→补刀接管"，rc==0 门槛会把补刀的成功成果
+        # 否决为失败（日志实证：两次"补刀完成"紧跟两次 _fail）。rc 仅作诊断日志。
+        if produced:
             tmp = cover + ".tmp.wav"
             shutil.copy2(produced, tmp)
             os.replace(tmp, cover)
-            logger.info(f"[cover] 完成: {song} → {cover}")
+            logger.info(f"[cover] 完成: {song} → {cover}"
+                        f"{'（主跑崩溃，补刀接管）' if rc != 0 else ''}")
             # R6 分轨保留（/autoplan 2026-10-23 批次）：人声轨+伴奏轨复制入 covers/
             # 供 SongMode 双轨播放（人声驱动 EDTalk 对口型+伴奏外放）；缺失静默
             # （feature_handler._song_covers_hit 自动降级整轨）。
