@@ -172,7 +172,8 @@ class TestTaskSchedulerRewrite:
     def test_generation_enter_system_flow(self):
         """生成答复进入系统处理流程：关键词中枢识别 + 合成入播放链。"""
         src = self._src()
-        assert 'keyword_recognize(\n                                {"content": resp_content}, "copywriting")' in src
+        # 2026-11-01 动作编排批次 T3：调用包 try 保护，缩进随内层 try 加深
+        assert 'keyword_recognize(\n                                    {"content": resp_content}, "copywriting")' in src
         assert "audio_synthesis_handle(message)" in src
 
     def test_random_vs_sequential(self):

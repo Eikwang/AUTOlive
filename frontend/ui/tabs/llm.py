@@ -395,7 +395,8 @@ def _create_fastrag_card(
 
         def _pick_docs():
             # NiceGUI 元素根节点无 DOM id（getElementById 仅作快速路径）；
-            # 本应用唯一 ui.upload——按 q-uploader 原生 input 类名全局选取
+            # 按上传器元素 id 选取内部原生 input[type=file]（choose_song 页
+            # 上传歌曲为同模式第二处，均按 id 作用域选取不互串）
             ui.run_javascript(
                 "(() => { const root = document.getElementById("
                 f"'{_doc_uploader.id}');"

@@ -243,6 +243,19 @@ class TestOneClickCover:
         assert "ensure_worker" in src
         assert "on_done" in src
 
+    def test_frontend_one_click_uses_uploaded_song(self):
+        """2026-11-02 用户裁决重构：一键翻唱使用本次上传的歌曲，「选择歌曲」
+        下拉移除（多余）；上传入口=标准 outline 按钮+上传后音频预览。"""
+        src = _read("frontend/ui/tabs/choose_song.py")
+        assert "uploaded_song" in src                      # 一键翻唱取本次上传歌曲
+        assert "one_click_select" not in src               # 冗余下拉已移除
+        assert "上传歌曲" in src and "/song_source" in src   # 标准按钮入口+预览路由
+
+    def test_web_server_manual_bypass(self):
+        """手动一键翻唱旁路冷却/同观众上限（连翻多首不被静默拒绝）。"""
+        src = _read("utils/web_server.py")
+        assert "manual=True" in src
+
 
 # ---------- 5. 干声/伴奏协同（R6 双轨） ----------
 

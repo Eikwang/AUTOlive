@@ -79,7 +79,9 @@ class TestPriorityMappingCoverage:
         src = _src("utils/task_scheduler.py")
         assert '"type": "copywriting"' not in src
         assert '"type": "trends_copywriting"' in src
-        assert 'keyword_recognize(\n                                {"content": resp_content}, "copywriting")' in src
+        # 2026-11-01 动作编排批次 T3：调用包 try 保护（异常不杀文案播放链），
+        # 缩进随内层 try 加深——断言同步对齐
+        assert 'keyword_recognize(\n                                    {"content": resp_content}, "copywriting")' in src
 
     def test_local_qa_text_wired(self):
         """本地问答文本补键（2026-10-31）：模板键 + UI 行 + 三预设。"""

@@ -294,81 +294,115 @@ def create_choose_song_tab(
 
             ui.timer(5.0, _poll_task)
 
-            # ①.5 上传歌曲+一键翻唱（2026-10-31 点歌审查批次：手动曲源管理——
-            # 上传原始歌曲入 song/ 曲源；一键翻唱调 main /cover/enqueue 入翻唱
-            # 队列，完成后自动插播+成品自动进入点歌列表）
+            # ①.5 上传歌曲+一键翻唱（2026-11-02 用户裁决重构：①上传入口改标准
+            # outline 按钮（q-uploader 原生拾取按钮过小且样式不统一——llm 页隐藏
+            # uploader 模式同款先例），上传后显示音频预览；②「选择歌曲」下拉移除
+            # （多余）——一键翻唱直接使用本次上传的歌曲；③手动入队 manual=True
+            # 旁路冷却/同观众上限，连翻多首不被静默拒绝）
             ui.separator()
-            with ui.grid(columns=2).style("width:100%"):
-                with ui.column().style("width:100%;"):
-                    ui.label("上传歌曲（原始曲源，供翻唱与关键词点歌）").style(
-                        "font-size:12px;color:var(--text-secondary)")
 
-                    def _handle_upload(e):
-                        import re as _re
-                        name = os.path.basename(e.name or "").strip()
-                        stem, ext = os.path.splitext(name)
-                        if ext.lower() not in (".mp3", ".wav", ".flac"):
-                            ui.notify(f"格式 {ext or '未知'} 不在支持列表 [.mp3/.wav/.flac]，请转换格式后重传",
-                                      type="warning")
-                            return
-                        safe = _re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "untitled"
-                        dest = os.path.join(song_audio_root(), safe + ext.lower())
-                        try:
-                            with open(dest, "wb") as f:
-                                f.write(e.content.read())
-                        except Exception as ex:
-                            ui.notify(f"保存失败：{ex}", type="negative")
-                            return
-                        ui.notify(f"已保存：{os.path.basename(dest)}", type="positive")
-                        _refresh_song_options()
+            async def _handle_upload(e):
+                import re as _re
+                # 双版本兼容：NiceGUI ≥3.x 新 API 为 e.file（FileUpload，
+                # save/read 异步）；旧 API 为 e.name + e.content（BytesIO 同步读）
+                file = getattr(e, "file", None)
+                if file is not None:
+                    name = file.name
 
-                    ui.upload(label='选择歌曲文件（可多选）', multiple=True,
-                              auto_upload=True, on_upload=_handle_upload
-                              ).props('accept=.mp3,.wav,.flac').style("width:100%")
-                with ui.column().style("width:100%;"):
-                    ui.label("一键翻唱（入队自动生成，完成自动插播）").style(
-                        "font-size:12px;color:var(--text-secondary)")
-                    one_click_select = ui.select(
-                        options=sorted(list_song_names("")), label='选择歌曲',
-                        with_input=True).style("width:100%")
+                    async def _save(dest):
+                        await file.save(dest)
+                else:
+                    name = getattr(e, "name", None)
 
-                    def _refresh_song_options():
-                        try:
-                            one_click_select.set_options(sorted(list_song_names("")))
-                        except Exception:
-                            pass
+                    async def _save(dest):
+                        with open(dest, "wb") as f:
+                            f.write(e.content.read())
+                name = os.path.basename(name or "").strip()
+                stem, ext = os.path.splitext(name)
+                if ext.lower() not in (".mp3", ".wav", ".flac"):
+                    ui.notify(f"格式 {ext or '未知'} 不在支持列表 [.mp3/.wav/.flac]，请转换格式后重传",
+                              type="warning")
+                    return
+                safe = _re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "untitled"
+                dest = os.path.join(song_audio_root(), safe + ext.lower())
+                try:
+                    await _save(dest)
+                except Exception as ex:
+                    ui.notify(f"保存失败：{ex}", type="negative")
+                    return
+                uploaded_song["name"] = safe  # 一键翻唱使用本次上传的歌曲
+                upload_hint.set_text(f"已上传：{name}")
+                _show_upload_preview(name)
+                ui.notify(f"上传完成：{name}", type="positive")
 
-                    def _one_click_cover():
-                        song = (one_click_select.value or "").strip()
-                        if not song:
-                            ui.notify("请先选择要翻唱的歌曲（可先上传歌曲）", type="warning")
-                            return
+            def _show_upload_preview(filename):
+                from urllib.parse import quote
+                upload_preview.clear()
+                with upload_preview:
+                    try:
+                        ui.audio(f"/song_source/{quote(filename)}", controls=True
+                                 ).style("width:100%;max-width:420px;height:40px")
+                    except Exception:
+                        pass  # 预览失败仅降级为无试听（上传本身已成功）
 
-                        def _post():
-                            try:
-                                r = _session.post(f"{_main_base(config)}/cover/enqueue",
-                                                  json={"song": song}, timeout=6)
-                                return r.status_code, r.json()
-                            except Exception as ex:
-                                return None, {"detail": str(ex)[:80]}
+            _song_uploader = ui.upload(label='上传歌曲', auto_upload=True,
+                                       on_upload=_handle_upload
+                                       ).props('accept=.mp3,.wav,.flac').style("width:100%")
+            _song_uploader.set_visibility(False)
+            _song_uploader.on_rejected(lambda _e: ui.notify(
+                position="top", type="negative",
+                message="problem=文件被拒绝；cause=浏览器/上传器拒绝该文件；fix=确认文件为 .mp3/.wav/.flac 且可读后重试"))
 
-                        code, data = _post()
-                        if code == 200:
-                            action = data.get("action")
-                            if action == "queued":
-                                ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位）", type="positive")
-                            elif action == "cached":
-                                ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
-                            elif action == "queue_full":
-                                ui.notify("翻唱队列已满，稍后再试", type="warning")
-                            elif action == "cooldown":
-                                ui.notify("操作过于频繁（冷却中），稍后再试", type="warning")
-                            else:
-                                ui.notify(f"入队结果：{action}", type="info")
-                        else:
-                            ui.notify(f"翻唱入队失败：{data.get('detail', code)}", type="negative")
+            def _pick_song():
+                # NiceGUI 元素根节点无 DOM id（getElementById 仅作快速路径）；
+                # 按上传器元素 id 选取内部原生 input[type=file]（隐藏态程序化
+                # 点击有效，且处于按钮点击的用户激活上下文内）
+                ui.run_javascript(
+                    "(() => { const root = document.getElementById("
+                    f"'{_song_uploader.id}');"
+                    "const input = (root || document)"
+                    ".querySelector('input.q-uploader__input, input[type=file]');"
+                    "if (input) { input.value = ''; input.click(); } })()")  # 选前清空：同文件重选也触发 change
 
-                    ui.button('一键翻唱', on_click=_one_click_cover).props('outline dense')
+            def _one_click_cover():
+                song = (uploaded_song.get("name") or "").strip()
+                if not song:
+                    ui.notify("请先点击「上传歌曲」选择要翻唱的歌曲", type="warning")
+                    return
+
+                def _post():
+                    try:
+                        r = _session.post(f"{_main_base(config)}/cover/enqueue",
+                                          json={"song": song}, timeout=6)
+                        return r.status_code, r.json()
+                    except Exception as ex:
+                        return None, {"detail": str(ex)[:80]}
+
+                code, data = _post()
+                if code == 200:
+                    action = data.get("action")
+                    if action == "queued":
+                        ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位），完成后自动进入歌曲列表",
+                                  type="positive")
+                    elif action == "cached":
+                        ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
+                    elif action == "queue_full":
+                        ui.notify("翻唱队列已满，稍后再试", type="warning")
+                    elif action == "cooldown":
+                        ui.notify("操作过于频繁（冷却中），稍后再试", type="warning")
+                    else:
+                        ui.notify(f"入队结果：{action}", type="info")
+                else:
+                    ui.notify(f"翻唱入队失败：{data.get('detail', code)}", type="negative")
+
+            uploaded_song: Dict[str, str] = {}  # 本次会话上传的歌曲 {"name": 歌名 stem}
+            upload_hint = ui.label("未上传歌曲").style("font-size:12px;color:var(--text-secondary)")
+            upload_preview = ui.column().style("width:100%;margin-top:2px")
+            with ui.row().style("width:100%;align-items:center;gap:8px;flex-wrap:wrap"):
+                ui.button('上传歌曲', icon='upload_file', on_click=_pick_song).props('outline').tooltip(
+                    "打开文件管理器选取歌曲（.mp3/.wav/.flac），上传后可预览，并供翻唱与关键词点歌")
+                ui.button('一键翻唱', icon='mic_external_on', on_click=_one_click_cover).props('outline').tooltip(
+                    "使用刚上传的歌曲入翻唱队列（音色档案/音高用下方参数），完成后自动进入歌曲列表并插播")
 
             # ② 翻唱参数（档案选择写 cover_profile_id、音高写 cover_pitch——
             # cover_worker 派发 -p 直传八度，音色变更下次点歌生效）
@@ -398,26 +432,52 @@ def create_choose_song_tab(
             ui.label("音高单位=八度（男转女 +1）；AI 翻唱内部换算半音").style(
                 "font-size:11px;color:var(--text-secondary)")
 
-            # ③ 成品列表（内部约定 song/covers/，R1）+ 试听入口（R7 UI 三项）+ EMPTY 引导
-            covers_dir = os.path.join(song_audio_root(), "covers")
-            covers = sorted((f for f in (os.listdir(covers_dir) if os.path.isdir(covers_dir) else [])
-                             if f.endswith(".wav") and not (f.endswith("_vocal.wav") or f.endswith("_inst.wav"))),
-                            reverse=True)
-            if not covers:
-                ui.label("暂无翻唱成品——礼物点歌命中后将自动翻唱，成品在此列出并可试听").style(
+            # ③ 歌曲列表（已翻唱成品，内部约定 song/covers/，R1；可预览播放，
+            # 手动刷新——翻唱完成入队通知后点刷新即见新品）
+            ui.separator()
+
+            def _render_covers():
+                covers_dir = os.path.join(song_audio_root(), "covers")
+                covers = sorted(
+                    (f for f in (os.listdir(covers_dir) if os.path.isdir(covers_dir) else [])
+                     if f.endswith(".wav") and not (f.endswith("_vocal.wav") or f.endswith("_inst.wav"))),
+                    reverse=True)
+                covers_box.clear()
+                with covers_box:
+                    if not covers:
+                        ui.label("暂无翻唱成品——上传歌曲后点击「一键翻唱」，或弹幕点歌命中自动翻唱；成品在此列出并可试听").style(
+                            "font-size:12px;color:var(--text-secondary)")
+                        return
+                    try:
+                        from nicegui import app as _app
+                        if not any(r.path == "/song_audio" for r in _app._stack.routes if hasattr(r, "path")):
+                            _app.add_media_files("/song_audio", covers_dir)
+                    except Exception:
+                        pass  # 静态服务注册失败仅降级为无试听（列表仍可用）
+                    with ui.column().style("width:100%;gap:2px;max-height:240px;overflow:auto"):
+                        for fn in covers[:20]:
+                            with ui.row().style("width:100%;align-items:center;gap:6px"):
+                                ui.label(f"🎵 {fn}").style("font-size:12px;flex:1")
+                                try:
+                                    ui.audio(f"/song_audio/{fn}", controls=True).style("height:32px;width:260px")
+                                except Exception:
+                                    pass
+
+            covers_box = ui.column().style("width:100%")
+            with ui.row().style("width:100%;align-items:center;gap:4px"):
+                ui.label("歌曲列表（已翻唱成品，可预览播放）").style(
                     "font-size:12px;color:var(--text-secondary)")
-            else:
-                try:
-                    from nicegui import app as _app
-                    if not any(r.path == "/song_audio" for r in _app._stack.routes if hasattr(r, "path")):
-                        _app.add_media_files("/song_audio", covers_dir)
-                except Exception:
-                    pass  # 静态服务注册失败仅降级为无试听（列表仍可用）
-                with ui.column().style("width:100%;gap:2px;max-height:240px;overflow:auto"):
-                    for fn in covers[:20]:
-                        with ui.row().style("width:100%;align-items:center;gap:6px"):
-                            ui.label(f"🎵 {fn}").style("font-size:12px;flex:1")
-                            try:
-                                ui.audio(f"/song_audio/{fn}", controls=True).style("height:32px;width:260px")
-                            except Exception:
-                                pass
+                ui.button(icon='refresh').props('flat dense round').tooltip(
+                    '刷新列表（翻唱完成后刷新即见新品）').on_click(_render_covers)
+            _render_covers()
+
+            # 曲源静态服务（上传预览用）：/song_audio 服务 covers/ 成品，此处挂
+            # song/ 根目录供刚上传的原始歌曲试听（upload_preview 引用 /song_source）
+            try:
+                from nicegui import app as _app
+                _song_root = song_audio_root()
+                os.makedirs(_song_root, exist_ok=True)
+                if not any(r.path == "/song_source" for r in _app._stack.routes if hasattr(r, "path")):
+                    _app.add_media_files("/song_source", _song_root)
+            except Exception:
+                pass  # 静态服务注册失败仅降级为无预览（上传本身不受影响）

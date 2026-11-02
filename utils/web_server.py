@@ -288,8 +288,9 @@ class WebServer:
                 return {"available": False, "reason": str(e)}
 
         # 一键翻唱入队（2026-10-31 点歌审查批次：点歌页「上传歌曲+一键翻唱」
-        # 数据源——webui 选歌后 POST 入 CoverQueue；viewer=webui-manual 走
-        # 既有冷却/队列上限治理；on_done 自动插播回调与弹幕点歌同路）
+        # 数据源——webui 选歌后 POST 入 CoverQueue；viewer=webui-manual，
+        # manual=True 旁路冷却/同观众上限（手动动作非弹幕刷屏，连翻多首不被
+        # 静默拒绝），队满/缓存命中治理仍生效；on_done 自动插播回调与弹幕点歌同路）
         @self.app.post("/cover/enqueue")
         async def cover_enqueue(req: dict):
             song = str((req or {}).get("song") or "").strip()
@@ -306,7 +307,7 @@ class WebServer:
                 if getattr(cq, "on_done", None) is None and fh is not None:
                     cq.on_done = fh._play_cover_done
                 profile = self.config.get("choose_song", "cover_profile_id") or "default"
-                r = cq.enqueue("webui-manual", song, profile)
+                r = cq.enqueue("webui-manual", song, profile, manual=True)
                 if r.get("action") == "queued":
                     cq.ensure_worker()
                 return r

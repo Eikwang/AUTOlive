@@ -137,10 +137,14 @@ class CoverQueue:
 
     # ---------- 入队（D6/B-3/S-1/S-4）----------
 
-    def enqueue(self, viewer: str, song_name: str, profile_id: str) -> Dict:
+    def enqueue(self, viewer: str, song_name: str, profile_id: str,
+                manual: bool = False) -> Dict:
         """弹幕点歌入口。返回 {action, message, cover_path?}。
 
         action: cached / queued / queue_full / cooldown / duplicated_in_queue
+        manual=True（webui 一键翻唱）：跳过同观众在队上限与冷却治理——冷却/在队
+        上限防的是弹幕刷屏，手动点按是有意的用户动作，连翻多首不应被静默拒绝；
+        队列上限与成品缓存命中两道治理对 manual 仍然生效。
         """
         policies = self._policies()
         cover = self.cover_path(song_name, profile_id)
@@ -149,15 +153,16 @@ class CoverQueue:
         with self.lock:
             if len(self.queue) >= policies["queue_max"]:
                 return {"action": "queue_full"}
-            in_queue = [j for j in self.queue if j["viewer"] == viewer]
-            in_queue += [self.current] if (self.current and self.current["viewer"] == viewer) else []
-            if len(in_queue) >= policies.get("same_viewer_in_queue_max", 1):
-                return {"action": "cooldown"}  # B-3：同观众在队上限 1，静默
-            now = time.time()
-            last = getattr(self, "_last_enqueue_by_viewer", {}).get(viewer, 0)
-            if now - last < policies["cooldown_s"]:
-                return {"action": "cooldown"}  # 静默（D6 有意设计）
-            getattr(self, "_last_enqueue_by_viewer", {})[viewer] = now
+            if not manual:
+                in_queue = [j for j in self.queue if j["viewer"] == viewer]
+                in_queue += [self.current] if (self.current and self.current["viewer"] == viewer) else []
+                if len(in_queue) >= policies.get("same_viewer_in_queue_max", 1):
+                    return {"action": "cooldown"}  # B-3：同观众在队上限 1，静默
+                now = time.time()
+                last = getattr(self, "_last_enqueue_by_viewer", {}).get(viewer, 0)
+                if now - last < policies["cooldown_s"]:
+                    return {"action": "cooldown"}  # 静默（D6 有意设计）
+                getattr(self, "_last_enqueue_by_viewer", {})[viewer] = now
             job = {
                 "viewer": viewer, "song": song_name,
                 "profile_id": profile_id,

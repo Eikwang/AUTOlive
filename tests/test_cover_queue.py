@@ -59,6 +59,26 @@ def test_same_viewer_in_queue_max():
     assert r2["action"] == "cooldown"  # 静默拒绝（B-3）
 
 
+def test_manual_enqueue_bypasses_cooldown_and_viewer_limit():
+    """manual=True（2026-11-02 webui 一键翻唱）：旁路冷却/同观众在队上限——
+    手动点按是有意的用户动作，连翻多首不应被静默拒绝；队满治理仍生效。"""
+    import tempfile, pathlib
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    q = _queue(tmp, same_viewer_max=1)
+    r1 = q.enqueue("webui-manual", "song_a", "p1")
+    assert r1["action"] == "queued"
+    # 非 manual：同观众在队第二首 → 冷却静默拒绝
+    r2 = q.enqueue("webui-manual", "song_b", "p1")
+    assert r2["action"] == "cooldown"
+    # manual：同观众第二首照常入队
+    r3 = q.enqueue("webui-manual", "song_b", "p1", manual=True)
+    assert r3["action"] == "queued"
+    # manual 队满仍拒绝（队列上限治理保留）
+    for i in range(3):
+        assert q.enqueue(f"v{i}", f"s{i}", "p1", manual=True)["action"] == "queued"
+    assert q.enqueue("v9", "s9", "p1", manual=True)["action"] == "queue_full"
+
+
 def test_cached_returns_cover_path():
     """成品缓存命中 → 直接返回路径（零延迟）。"""
     import tempfile, pathlib
