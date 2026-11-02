@@ -265,21 +265,49 @@ class CoverQueue:
         ]
         env = os.environ.copy()
         env.setdefault("AUTOLIVE_COVER_OUT", self._covers_dir())
+        # 主跑输出落盘（2026-11-02 实测批次：PIPE 不读=死锁风险+AICoverGen 真实
+        # 报错全被丢弃——"未找到 RVC 中产物"却无一行原因）。写文件+尾部回灌日志。
+        run_log = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "logs", "cover_aicovergen_last.log")
+        os.makedirs(os.path.dirname(run_log), exist_ok=True)
         try:
-            proc = subprocess.Popen(
-                cmd, cwd=self._aicovergen_src(), env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-            )
-            self.proc = proc
-            rc = proc.wait(timeout=timeout_s)
+            with open(run_log, "w", encoding="utf-8", errors="replace") as logf:
+                logf.write(f"# cmd: {cmd}\n# cwd: {self._aicovergen_src()}\n")
+                logf.flush()
+                proc = subprocess.Popen(
+                    cmd, cwd=self._aicovergen_src(), env=env,
+                    stdout=logf, stderr=subprocess.STDOUT,
+                )
+                self.proc = proc
+                rc = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            logger.error(f"[cover] 超时（{timeout_s}s）：{song}")
+            logger.error(f"[cover] 超时（{timeout_s}s）：{song}；主跑输出: {run_log}")
             proc.kill() if hasattr(self, "proc") and self.proc else None
             self._fail(job, policies, timeout=True)
             return
+        except FileNotFoundError as _sp_err:
+            logger.error(f"[cover] 主跑解释器/命令不可达：{_sp_err}；cmd[0]={cmd[0]}")
+            self._fail(job, policies)
+            return
+        logger.info(f"[cover] 主跑结束 rc={rc}：{song}（输出: {run_log}）")
+        if rc != 0:
+            try:
+                tail = open(run_log, encoding="utf-8", errors="replace").read()[-800:]
+                logger.error("[cover] 主跑失败尾部输出:\n" + tail)
+            except Exception:
+                pass
         # 原子落位（S-4）：AICoverGen 输出在 song_output/，找到成品移到 covers/
         produced = self._find_produced_wav(job)
+        if not produced:
+            # 诊断上下文：song_output 实际内容（产物命名漂移/空目录一目了然）
+            out_root = os.path.join(self._aicovergen_root(), "song_output")
+            listing = []
+            for dirpath, _, fns in os.walk(out_root):
+                for fn in fns:
+                    full = os.path.join(dirpath, fn)
+                    if os.path.getmtime(full) > job.get("started_at", 0):
+                        listing.append(os.path.relpath(full, out_root))
+            logger.info(f"[cover] song_output 本轮新增产物 {len(listing)} 个: {listing[:8]}")
         if rc != 0 or not produced:
             # 后处理补刀（/autoplan 2026-10-14 翻唱实跑发现）：py39 runtime 下
             # torch 加载后 pedalboard C++ 同进程崩溃（rc=139，三次复现）——主跑
