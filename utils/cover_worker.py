@@ -403,7 +403,7 @@ class CoverQueue:
         env.update(FAULTHANDLER_ENV)  # R-2/CEO C2：补刀对称挂
         try:
             r = subprocess.run(
-                [self._rt_python(), "-c", code, "--", vocal, backup, inst, final_tmp],
+                [self._rt_python(), "-c", code, vocal, backup, inst, final_tmp],
                 capture_output=True, text=True, timeout=600, encoding="utf-8",
                 errors="replace", env=env, cwd=self._aicovergen_src(),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

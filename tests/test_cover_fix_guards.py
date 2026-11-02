@@ -306,7 +306,7 @@ class TestFaulthandlerSymmetry:
         """Eng E-2:补刀代码串路径经 sys.argv 传入(非 r 引号内插)。"""
         import inspect
         code = CoverQueue._postprocess_code(object())
-        assert "sys.argv[1:5]" in code, "补刀代码未用 argv 传参(E-2 回归)"
+        assert "sys.argv[1:5]" in code, "补刀代码 argv 切片错误(应为 [1:5]:-c 占 0,参数从 1 起)"
         triple = "'" * 3
         assert ("r" + triple) not in code, "路径内插形态回归"
 
