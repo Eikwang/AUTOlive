@@ -209,7 +209,7 @@ class CoverQueue:
 
     def _process(self, job: Dict, policies: dict):
         """单任务处理：ffprobe 预检 → GPU 准入 → 派发 AICoverGen → 原子改名。"""
-        from utils.gpu_policy import is_background_task_allowed
+        from utils.gpu_policy import background_task_gate
         song, cover = job["song"], job["cover_path"]
         if job["song_path"] is None:
             logger.warning(f"[cover] 本地无此歌曲（S-3 拒绝外部 URL）: {song}")
@@ -218,13 +218,27 @@ class CoverQueue:
         if not os.path.isfile(job["song_path"]):
             self._fail(job, policies)
             return
-        # GPU 准入（E-2）：不满足→等待重试（排队语义，B-3 对立面）
+        # GPU 准入（E-2）：不满足→等待重试（排队语义，B-3 对立面）。
+        # T3（2026-11-02 批次）：等待原因/稳定码写入 job 供 /cover/status 透出
+        # （webui 轮询侧做转换通知——worker 无 NiceGUI 客户端，Eng F1）；准入
+        # 通过置空两字段（C-2 防推理期残留误导）；日志首次 info 后续 debug（F9）。
+        waited_once = False
         while True:
-            ok, reason = is_background_task_allowed(policies["vram_reserve_gb"])
+            ok, reason, wait_code = background_task_gate(policies["vram_reserve_gb"])
             if ok or self._stop.is_set():
                 break
-            logger.info(f"[cover] GPU 忙（{reason}），任务 {song} 排队等待")
+            job["wait_reason"] = reason
+            job["wait_code"] = wait_code
+            if not waited_once:
+                logger.info(f"[cover] GPU 忙（{reason}），任务 {song} 排队等待（空闲后自动开始）")
+                waited_once = True
+            else:
+                logger.debug(f"[cover] GPU 忙（{reason}），任务 {song} 继续等待")
             self._stop.wait(30)
+        job["wait_reason"] = ""
+        job["wait_code"] = ""  # C-2：准入通过置空（webui 轮询侧按 非空→空 转换 notify）
+        if waited_once:
+            logger.info(f"[cover] 等待结束，开始翻唱: {song}")
         if self._stop.is_set():
             return
         os.makedirs(self._covers_dir(), exist_ok=True)

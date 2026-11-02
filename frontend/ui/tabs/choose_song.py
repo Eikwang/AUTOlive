@@ -17,6 +17,7 @@ import requests
 from nicegui import ui
 from typing import Dict, Any, Callable
 from frontend.ui.components.config_helper import get_nested_value
+from utils.my_log import logger
 from frontend.utils.common import textarea_data_change
 from utils.autolive_paths import song_audio_root, SONG_AUDIO_DIR_DEFAULT
 from utils.common.text_mixin import match_gift_to_song_preview, match_song_intent
@@ -100,14 +101,14 @@ def create_choose_song_tab(
                 simlab = ui.label(f'匹配最低相似度: {similarity_val:.2f}').style("font-size:12px")
                 ui.slider(min=0.1, max=1.0, step=0.05, value=similarity_val,
                           on_change=lambda e: (simlab.set_text(f'匹配最低相似度: {float(e.value):.2f}'),
-                                               set_config_callback("choose_song", "similarity", float(e.value)))
+                                               set_config_callback("choose_song", "similarity", value=float(e.value)))
                           ).props("label-always").style("width:100%")
             with ui.column().style("width:100%;"):
                 bv_val = float(get_nested_value(config, "choose_song", "backing_volume") or 0.8)
                 bvlab = ui.label(f'伴奏音量（数字人演唱时）: {bv_val:.0%}').style("font-size:12px")
                 ui.slider(min=0.0, max=1.0, step=0.05, value=bv_val,
                           on_change=lambda e: (bvlab.set_text(f'伴奏音量（数字人演唱时）: {float(e.value):.0%}'),
-                                               set_config_callback("choose_song", "backing_volume", float(e.value)))
+                                               set_config_callback("choose_song", "backing_volume", value=float(e.value)))
                           ).props("label-always").style("width:100%")
         ui.label("伴奏音量：数字人演唱时伴奏从直播设备外放的音量（0=静音）；干声经数字人口型驱动，伴奏本地外放").style(
             "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
@@ -120,7 +121,7 @@ def create_choose_song_tab(
             with ui.row().style("width:100%;align-items:center;gap:12px"):
                 ui.switch('启用礼物点歌',
                           value=bool(get_nested_value(config, "choose_song", "gift_song_enable")),
-                          on_change=lambda e: set_config_callback("choose_song", "gift_song_enable", bool(e.value)))
+                          on_change=lambda e: set_config_callback("choose_song", "gift_song_enable", value=bool(e.value)))
                 ui.label("开启：礼物命中映射→播报+开唱，关键词点歌=引导打赏（不播放）；关闭：关键词直点歌，礼物仅答谢").style(
                     "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
             ui.label("礼物名命中映射表后，按点歌既有链路（数字人口型）播放对应歌曲；配置即时保存，直播中可增删；礼物无映射歌曲时答谢文案照常触发").style(
@@ -276,6 +277,8 @@ def create_choose_song_tab(
                 except Exception as e:
                     return {"available": False, "reason": str(e)[:80]}
 
+            _prev_wait = {"code": "", "song": None}  # T3/Eng F1：转换检测状态（闭包）
+
             async def _poll_task():
                 import asyncio as _aio
                 data = await _aio.to_thread(lambda: _safe_get(_main_base(config)))
@@ -285,12 +288,29 @@ def create_choose_song_tab(
                 q = data.get("queue") or []
                 cur = data.get("current")
                 if cur:
-                    status_lab.set_text(f"▶ 正在翻唱《{cur['song']}》（{cur.get('elapsed_s', 0):.0f}s）"
-                                        f" · 排队 {len(q)} 个")
+                    wr = cur.get("wait_reason") or ""
+                    wc = cur.get("wait_code") or ""
+                    if wr:
+                        # 等待中（GPU 准入未过：直播运行/EDTalk 占用/显存不足/fail-closed）
+                        status_lab.set_text(f"⏳ 等待中《{cur['song']}》：{wr}"
+                                            f" · 排队 {len(q)} 个 · 空闲后自动开始")
+                    else:
+                        status_lab.set_text(f"▶ 正在翻唱《{cur['song']}》（{cur.get('elapsed_s', 0):.0f}s）"
+                                            f" · 排队 {len(q)} 个")
+                    # Eng F1：转换通知在轮询侧（cover_worker 主进程无 NiceGUI 客户端，
+                    # worker 侧 notify=no-op）——wait_code 非空→空且同任务=开始翻唱
+                    if _prev_wait["code"] and not wc and _prev_wait["song"] == cur.get("song"):
+                        ui.notify(f"《{cur['song']}》翻唱开始（GPU 空闲）", type="positive")
+                    _prev_wait["code"] = wc
+                    _prev_wait["song"] = cur.get("song")
                 elif q:
                     status_lab.set_text(f"○ 排队中：{len(q)} 个（下一首《{q[0]['song']}》）")
+                    _prev_wait["code"] = ""
+                    _prev_wait["song"] = None
                 else:
                     status_lab.set_text("○ 翻唱队列空闲（弹幕点歌自动入队）")
+                    _prev_wait["code"] = ""
+                    _prev_wait["song"] = None
 
             ui.timer(5.0, _poll_task)
 
@@ -342,8 +362,8 @@ def create_choose_song_tab(
                     try:
                         ui.audio(f"/song_source/{quote(filename)}", controls=True
                                  ).style("width:100%;max-width:420px;height:40px")
-                    except Exception:
-                        pass  # 预览失败仅降级为无试听（上传本身已成功）
+                    except Exception as _pv_err:
+                        logger.warning(f"上传预览挂载/渲染失败（降级为无试听）：{_pv_err}")  # CEO F1
 
             _song_uploader = ui.upload(label='上传歌曲', auto_upload=True,
                                        on_upload=_handle_upload
@@ -382,7 +402,8 @@ def create_choose_song_tab(
                 if code == 200:
                     action = data.get("action")
                     if action == "queued":
-                        ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位），完成后自动进入歌曲列表",
+                        ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位）——若 GPU 忙"
+                                  f"（直播运行/数字人占用/显存不足）将自动排队，空闲后自动开始，完成后自动进入歌曲列表",
                                   type="positive")
                     elif action == "cached":
                         ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
@@ -427,7 +448,7 @@ def create_choose_song_tab(
                     plab = ui.label(f"翻唱音高（八度）: {pitch_val:+d}").style("font-size:12px")
                     ui.slider(min=-12, max=12, step=1, value=pitch_val,
                               on_change=lambda e: (plab.set_text(f"翻唱音高（八度）: {int(e.value):+d}"),
-                                                   set_config_callback("choose_song", "cover_pitch", int(e.value))),
+                                                   set_config_callback("choose_song", "cover_pitch", value=int(e.value))),
                               ).props("label-always").style("width:100%")
             ui.label("音高单位=八度（男转女 +1）；AI 翻唱内部换算半音").style(
                 "font-size:11px;color:var(--text-secondary)")
@@ -448,20 +469,16 @@ def create_choose_song_tab(
                         ui.label("暂无翻唱成品——上传歌曲后点击「一键翻唱」，或弹幕点歌命中自动翻唱；成品在此列出并可试听").style(
                             "font-size:12px;color:var(--text-secondary)")
                         return
-                    try:
-                        from nicegui import app as _app
-                        if not any(r.path == "/song_audio" for r in _app._stack.routes if hasattr(r, "path")):
-                            _app.add_media_files("/song_audio", covers_dir)
-                    except Exception:
-                        pass  # 静态服务注册失败仅降级为无试听（列表仍可用）
+                    # /song_audio 挂载已提升至 tab 构建期一次性挂载（T2/Eng F3：
+                    # 每次 _render_covers 重复注册致路由表无界增长）
                     with ui.column().style("width:100%;gap:2px;max-height:240px;overflow:auto"):
                         for fn in covers[:20]:
                             with ui.row().style("width:100%;align-items:center;gap:6px"):
                                 ui.label(f"🎵 {fn}").style("font-size:12px;flex:1")
                                 try:
                                     ui.audio(f"/song_audio/{fn}", controls=True).style("height:32px;width:260px")
-                                except Exception:
-                                    pass
+                                except Exception as _au_err:
+                                    logger.warning(f"成品试听控件渲染失败：{_au_err}")  # CEO F1
 
             covers_box = ui.column().style("width:100%")
             with ui.row().style("width:100%;align-items:center;gap:4px"):
@@ -471,13 +488,21 @@ def create_choose_song_tab(
                     '刷新列表（翻唱完成后刷新即见新品）').on_click(_render_covers)
             _render_covers()
 
-            # 曲源静态服务（上传预览用）：/song_audio 服务 covers/ 成品，此处挂
-            # song/ 根目录供刚上传的原始歌曲试听（upload_preview 引用 /song_source）
+            # 曲源静态服务（T2/Eng F3 根修，2026-11-02 批次）：原守卫访问 NiceGUI
+            # 3.16 不存在的 _app._stack 属性 → AttributeError 被 pass 吞 → 两路由
+            # 从未挂载（预览 404 真根因）。修=守卫换实存的 _app.routes+add_static_files
+            # 目录挂载（新文件自动可达）+max_cache_age=0（同名重传/重翻零陈旧，
+            # CEO F3/Eng F4）+构建期 makedirs（covers 不存在=全程 404）。
             try:
                 from nicegui import app as _app
                 _song_root = song_audio_root()
+                _covers_root = os.path.join(_song_root, "covers")
                 os.makedirs(_song_root, exist_ok=True)
-                if not any(r.path == "/song_source" for r in _app._stack.routes if hasattr(r, "path")):
-                    _app.add_media_files("/song_source", _song_root)
-            except Exception:
-                pass  # 静态服务注册失败仅降级为无预览（上传本身不受影响）
+                os.makedirs(_covers_root, exist_ok=True)
+                _have = {getattr(r, "path", None) for r in _app.routes}
+                if "/song_source" not in _have:
+                    _app.add_static_files("/song_source", _song_root, max_cache_age=0)
+                if "/song_audio" not in _have:
+                    _app.add_static_files("/song_audio", _covers_root, max_cache_age=0)
+            except Exception as _st_err:
+                logger.warning(f"曲源静态服务挂载失败（降级为无试听）：{_st_err}")  # CEO F1

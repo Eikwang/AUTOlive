@@ -25,6 +25,7 @@ from nicegui import ui
 from typing import Dict, Any, Callable
 
 from frontend.ui.components.config_helper import get_nested_value
+from utils.my_log import logger
 
 
 def _main_api_base(config: Dict[str, Any]) -> str:
@@ -196,13 +197,16 @@ def create_audio_play_tab(
     # on_value_change（有 .value）；底层 .on('update:value') 的事件对象无 .value，
     # int(e.value) 抛 AttributeError 被下方 except 静默吞掉 → 设备选择从不落盘
     def _on_device_change(e):
+        # T1/Eng F6（2026-11-02 批次）：空参调用与前置直写双缺陷根修——原实现
+        # set_config_callback() 空参（keyword-only value 缺失→TypeError）被
+        # except 吞掉 → 设备选择从不落盘；前置直写只进内存不落盘=双写双语义。
+        # 修=三参 value= 调用单点落盘；None（系统默认类）显式跳过；失败 warning 可见。
         try:
-            cfg_section = config.setdefault("audio_player", {}) if isinstance(config, dict) else None
-            if cfg_section is not None:
-                cfg_section["device_index"] = int(e.value)
-                set_config_callback()
-        except Exception:
-            pass
+            if e.value is None:
+                return  # Eng F6：None 显式跳过（不误写 0）
+            set_config_callback("audio_player", "device_index", value=int(e.value))
+        except Exception as _dev_err:
+            logger.warning(f"设备选择落盘失败（choice={getattr(e, 'value', '?')}）：{_dev_err}")  # CEO F1
     device_select.on_value_change(_on_device_change)
 
     _refresh_visibility()

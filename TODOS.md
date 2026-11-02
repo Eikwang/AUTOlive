@@ -1,3 +1,9 @@
+## Deferred Items from /autoplan (2026-11-02) — 一键翻唱三缺陷修复批次(main-20261102-104518,终门 rec 全推荐批准)
+
+1. **翻唱队列完整轮询面板**(P3, M)——前提更正(Eng F7):页内已有 _poll_task 5s 最小轮询状态卡,T3 的 wait_reason/wait_code 并入即覆盖 80% 感知缺口;完整面板(队列明细/历史/重试操作)**重启条件=G3 实测反馈 wait_reason 并入后仍不足时**。依赖:T3 实播验收。
+2. **frontend/ui 全量 `except.*pass` 审计批次**(P2, M)——本批三缺陷的共同放大器=UI 副作用包在 except:pass 静默坏死(G2 AttributeError 被吞/G1 TypeError 被吞/audio_play 永不落盘);本批触及位点已 warning 化,**全量清扫另批**(CEO F1 落账)。
+3. **apps/aicovergen 上游漂移登记**(P3, S)——vendored 副本冻结在 rvc-deep-integration E2E 基线,上游模型/修复不自动流入;有 danmaku 上游同步先例,暂无需行动,登记意识(Eng 声部竞争风险节)。
+
 ## Deferred Items from /autoplan (2026-11-01) — 动作编排优化完善批次（main-20261101-213220，终门 rec 全推荐批准）
 
 1. **编排效果统计 DB 留存+回看面板**（M-L）— 规则级编排触发/完成/降级计数入 DB 一张表+历史回看面；现状 get_state+P2 状态条仅运行态观测，编排启动日志滚动丢失，无法回答"哪条规则带动互动"。**重启触发条件：T2b 浸泡实测完成且"礼物触发互动率"指标被证明有意义，即启动最小版规则级计数入 DB 一张表（S 级起步）**——防 defer 变永久搁置（CEO F3）。依赖：T2b 实测结果。

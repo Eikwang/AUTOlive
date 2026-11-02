@@ -87,18 +87,22 @@ def gpu_snapshot() -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def is_background_task_allowed(vram_reserve_gb: float = 4.0,
-                               inproc_tts_reserve_gb: float = 2.0) -> Tuple[bool, str]:
-    """背景任务（音频训练/翻唱）准入判定。返回 (允许, 原因)。
+# 稳定等待码（T3/Eng F2，2026-11-02 批次）：reason 为展示文本，code 为稳定
+# 枚举——webui/观测面按 code 分流，不耦合文案（上游改文案不静默错类）。
+WAIT_LIVE_RUNNING = "live_running"
+WAIT_EDTALK_BUSY = "edtalk_busy"
+WAIT_VRAM_QUERY_FAILED = "vram_query_failed"
+WAIT_VRAM_INSUFFICIENT = "vram_insufficient"
+WAIT_NONE = ""  # 准入通过
 
-    R-6 升级：inproc_tts_reserve_gb=进程内 TTS 常驻显存的额外预留——训练 OOM 会
-    拖死同进程的进程内 TTS（托管子进程时代仅是 TTS 短暂中断），故准入要求
-    空闲显存 ≥ vram_reserve_gb + inproc_tts_reserve_gb（引擎就绪时才加）。
-    """
+
+def _gate(vram_reserve_gb: float, inproc_tts_reserve_gb: float) -> Tuple[bool, str, str]:
+    """准入判定内部实现（三元组：允许/原因/稳定码）。is_background_task_allowed
+    薄封装保既有二元组调用方零改动；background_task_gate 供等待可见面消费。"""
     if _live_running():
-        return False, "直播运行中"
+        return False, "直播运行中", WAIT_LIVE_RUNNING
     if _edtalk_busy():
-        return False, "EDTalk 占用中（完成后可重试）"
+        return False, "EDTalk 占用中（完成后可重试）", WAIT_EDTALK_BUSY
     free = _vram_free_gb()
     if free < 0:
         # S-2 fail-closed：查询失败拒绝训练入场（原返回 999.0 兜底放行→OOM 连带推理）
@@ -109,15 +113,36 @@ def is_background_task_allowed(vram_reserve_gb: float = 4.0,
                         fix_hint="检查 nvidia-smi 可用性与驱动状态；显存信息恢复后训练可重试")
         except Exception:
             pass
-        return False, "显存查询失败（fail-closed，S-2：不误放行）"
+        return False, "显存查询失败（fail-closed，S-2：不误放行）", WAIT_VRAM_QUERY_FAILED
     reserve = vram_reserve_gb
     if _inproc_engine_ready():
         reserve += inproc_tts_reserve_gb
     if free < reserve:
         return False, (f"显存余量 {free:.1f}GB 低于阈值 {reserve:.1f}GB"
                        f"（含进程内 TTS 常驻预留 {inproc_tts_reserve_gb}GB）"
-                       "——完成后可重试，或在对话页临时设 backend=api")
-    return True, "GPU 空闲"
+                       "——完成后可重试，或在对话页临时设 backend=api"), WAIT_VRAM_INSUFFICIENT
+    return True, "GPU 空闲", WAIT_NONE
+
+
+def is_background_task_allowed(vram_reserve_gb: float = 4.0,
+                               inproc_tts_reserve_gb: float = 2.0) -> Tuple[bool, str]:
+    """背景任务（音频训练/翻唱）准入判定。返回 (允许, 原因)。
+
+    R-6 升级：inproc_tts_reserve_gb=进程内 TTS 常驻显存的额外预留——训练 OOM 会
+    拖死同进程的进程内 TTS（托管子进程时代仅是 TTS 短暂中断），故准入要求
+    空闲显存 ≥ vram_reserve_gb + inproc_tts_reserve_gb（引擎就绪时才加）。
+    """
+    ok, reason, _code = _gate(vram_reserve_gb, inproc_tts_reserve_gb)
+    return ok, reason
+
+
+def background_task_gate(vram_reserve_gb: float = 4.0,
+                         inproc_tts_reserve_gb: float = 2.0) -> Tuple[bool, str, str]:
+    """背景任务准入判定三元组版（T3/Eng F2）：(允许, 原因, 稳定等待码)。
+
+    等待可见面消费 code（webui 按 code 区分等待/推理与分流），reason 仅展示。
+    """
+    return _gate(vram_reserve_gb, inproc_tts_reserve_gb)
 
 
 def _inproc_engine_ready() -> bool:
