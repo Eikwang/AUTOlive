@@ -418,10 +418,16 @@ class TestEndpoints:
         assert data["accepted"] is True and data["reason"] == "accepted"
 
     def test_trigger_unknown_type_422(self):
+        """T4：entrance 已合法化（模拟触发受理）；值域外类型仍 422，且 422
+        文案含拼接值域（A1 断言）。"""
         client = _app_and_client(None)
         client.app.dependency_overrides[choreo_api._require_loopback] = lambda: None
-        resp = client.post("/choreography/trigger", json={"trigger_type": "entrance", "match_value": "x"})
+        resp_ok = client.post("/choreography/trigger", json={"trigger_type": "entrance", "match_value": ""})
+        # 合法值域不再 422（编排器未装配=503；装配后=200+accepted 字段）
+        assert resp_ok.status_code in (200, 503)
+        resp = client.post("/choreography/trigger", json={"trigger_type": "bogus", "match_value": "x"})
         assert resp.status_code == 422
+        assert "entrance" in resp.json()["detail"]["fix"]  # 422 文案含新值域（join 拼接）
 
     def test_trigger_match_value_too_long_422(self):
         client = _app_and_client(None)

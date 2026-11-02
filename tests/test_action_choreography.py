@@ -142,9 +142,16 @@ class TestConfigModel:
         cfg = load_choreography_config(DottedConfig({}))
         assert cfg.enable is False and cfg.rules == []
 
-    def test_reject_trigger_type_entrance(self):
-        cfg = load_choreography_config(make_cfg(rules=[make_rule(trigger_type="entrance")]))
-        assert cfg.rules == []  # 预留枚举位拒绝并提示 P1 不订阅
+    def test_entrance_trigger_type_now_valid(self):
+        """T4（2026-11-01 批次）：entrance/follow 合法化（原预留拒绝语义退役），
+        match 可空=任意事件、load 强制 interrupt=queue（三强制）。"""
+        cfg = load_choreography_config(make_cfg(rules=[make_rule(trigger_type="entrance",
+                                                                 sequence={"main": {"segment": "A_入场", "switch_at": "segment_end", "duration_s": 5}})]))
+        assert len(cfg.rules) == 1 and cfg.rules[0].interrupt == "queue"
+        # 值域外类型仍拒绝
+        cfg2 = load_choreography_config(make_cfg(rules=[make_rule(trigger_type="bogus",
+                                                                  sequence={"main": {"segment": "A_入场", "switch_at": "segment_end", "duration_s": 5}})]))
+        assert cfg2.rules == []
 
     def test_reject_unknown_switch_at(self):
         rules = [make_rule(sequence={"enter": {"segment": "A", "switch_at": "fade", "duration_s": 1},

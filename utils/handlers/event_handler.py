@@ -211,6 +211,17 @@ class EventHandler:
 
             logger.info(f"[{username}]进入了直播间")
 
+            # 动作编排订阅（T4，2026-11-01 批次：设计文档案例二答谢三类型）：
+            # 入场触发编排画面——三强制（类型节流/queue/权重钳制）在引擎与装载
+            # 侧；编排拒绝/未启用不影响入场主流程（正交，异常全兜底）。
+            try:
+                from utils.orchestration import get_choreographer
+                _choreo = get_choreographer()
+                if _choreo is not None:
+                    _choreo.on_entrance(data)
+            except Exception as _choreo_err:
+                logger.debug(f"入场编排触发异常（忽略）：{_choreo_err}")
+
             # 0、积分机制运转（C1：入场行为计分；写库失败不中断入场主流程）
             self.my_handle.integral_handle("entrance", data)
 
@@ -239,6 +250,15 @@ class EventHandler:
             username = data["username"]
 
             logger.info(f"[{username}]关注了直播间")
+
+            # 动作编排订阅（T4：关注触发编排画面，语义同入场——三强制在引擎侧）
+            try:
+                from utils.orchestration import get_choreographer
+                _choreo = get_choreographer()
+                if _choreo is not None:
+                    _choreo.on_follow(data)
+            except Exception as _choreo_err:
+                logger.debug(f"关注编排触发异常（忽略）：{_choreo_err}")
 
             # 0、积分机制运转（C1：关注行为计分，新增规则键缺键走安全默认；写库失败不中断主流程）
             self.my_handle.integral_handle("follow", data)

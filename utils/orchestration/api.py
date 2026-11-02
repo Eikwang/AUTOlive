@@ -26,10 +26,11 @@ from typing import Callable, Optional
 from fastapi import Request
 
 from utils.my_log import logger
+# T4/A1（Eng 三处手工同步消除）：触发类型值域单源 config_model（同包导入无循环）
+from utils.orchestration.config_model import VALID_TRIGGER_TYPES
 
 _CONFIG_LOCK = threading.Lock()
 
-VALID_TRIGGER_TYPES = ("gift", "keyword", "song")
 MAX_MATCH_VALUE_LEN = 500
 
 
@@ -163,12 +164,12 @@ def register_choreography_routes(app, config) -> None:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail={
                 "problem": "请求体不是对象", "cause": "需提交模拟触发载荷",
-                "fix": '提交 {"rule_id": ...} 或 {"trigger_type": "gift|keyword|song", "match_value": ...}'})
+                "fix": '提交 {"rule_id": ...} 或 {"trigger_type": "' + "/".join(VALID_TRIGGER_TYPES) + '", "match_value": ...}'})
         if not payload.get("rule_id"):
             if str(payload.get("trigger_type", "") or "") not in VALID_TRIGGER_TYPES:
                 raise HTTPException(status_code=422, detail={
                     "problem": "trigger_type 值域外", "cause": str(payload.get("trigger_type")),
-                    "fix": "使用 gift|keyword|song，或提交 rule_id 形态"})
+                    "fix": "使用 " + "/".join(VALID_TRIGGER_TYPES) + "，或提交 rule_id 形态"})
             if len(str(payload.get("match_value", "") or "")) > MAX_MATCH_VALUE_LEN:
                 raise HTTPException(status_code=422, detail={
                     "problem": "match_value 超长", "cause": f">{MAX_MATCH_VALUE_LEN} 字符",

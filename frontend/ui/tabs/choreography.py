@@ -450,14 +450,17 @@ def create_choreography_tab(
                             style="width:100%;")
                         FormField.create_select(
                             label='触发类型',
-                            options={'gift': '礼物打赏', 'keyword': '弹幕关键词', 'song': '点歌命中'},
+                            options={'gift': '礼物打赏', 'keyword': '弹幕关键词', 'song': '点歌命中',
+                                     'entrance': '观众入场', 'follow': '观众关注'},
                             value=str(rule.get("trigger_type", "gift")),
                             on_change=lambda e, r=rule: r.__setitem__("trigger_type", e.value),
                             tooltip="song 触发=接管（歌曲音频走既有链路，主线保持至歌终）；"
-                                    "gift/keyword 新语义=不接管（原生答谢照常）",
+                                    "gift/keyword 新语义=不接管（原生答谢照常）；"
+                                    "entrance/follow=入场/关注事件触发（T4：自动排队不打断，"
+                                    "10s 类型节流防风暴，权重恒最低档）",
                             style="width:100%;")
                         FormField.create_input(
-                            label='匹配值（gift=礼物名全等 / keyword=子串 / song 可空=任意）',
+                            label='匹配值（gift=礼物名全等 / keyword=子串 / song·entrance·follow 可空=任意；非空=用户名等值）',
                             value=str(rule.get("match", "")),
                             on_change=lambda e, r=rule: r.__setitem__("match", e.value or ""),
                             style="width:100%;")

@@ -15,7 +15,12 @@ from typing import Optional
 
 from utils.my_log import logger
 
-VALID_TRIGGER_TYPES = ("gift", "keyword", "song")  # entrance/follow 预留，P1 不订阅
+VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow")
+# entrance/follow（2026-11-01 动作编排优化批次 T4：设计文档案例二答谢三类型）：
+# 入场/关注事件订阅（感谢链同源 event_handler.entrance_handle/follow_handle）。
+# 三强制（风暴防护，CEO F7 豁免声明）：load 时强制 interrupt=queue、权重恒钳制
+# 0（choreographer._rule_priority）、引擎内类型专属节流常量（无配置键——事件流
+# 无弹幕层去重覆盖，系 R-ceo5 弹幕源定向例外）。
 VALID_SWITCH_AT = ("immediate", "segment_end")
 VALID_AUDIO_MODES = ("none", "tts", "file")
 # 打断模式（2026-10-27 动作编排完善批次：优先级排序联动）：standard=触发即打断
@@ -252,8 +257,8 @@ def load_choreography_config(config) -> ChoreographyConfig:
             _reject(rule_id, f"trigger_type 值域外：{trigger_type!r}{hint}", rejections)
             continue
         match = str(raw.get("match", "") or "")
-        if trigger_type != "song" and not match:
-            _reject(rule_id, "match 缺失（gift/keyword 必填；song 可空=任意点歌）", rejections)
+        if trigger_type not in ("song", "entrance", "follow") and not match:
+            _reject(rule_id, "match 缺失（gift/keyword 必填；song/entrance/follow 可空=任意事件）", rejections)
             continue
         try:
             min_price = float(raw.get("min_price", 0) or 0)
@@ -277,6 +282,15 @@ def load_choreography_config(config) -> ChoreographyConfig:
         if interrupt not in VALID_INTERRUPT:
             _reject(rule_id, f"interrupt 值域外：{interrupt!r}（仅 standard）", rejections)
             continue
+        if trigger_type in ("entrance", "follow") and interrupt != "queue":
+            # T4 三强制一（CEO F7 豁免声明的新裁决）：入场/关注事件流无上游去重，
+            # 高热直播间风暴不得挤占礼物/关键词序列——显式 standard 被覆盖并告警。
+            logger.warning(
+                f"编排规则 [{rule_id}] interrupt={interrupt!r} 被强制改判 queue："
+                "problem=entrance/follow 不允许打断档；cause=入场/关注事件流无上游去重，"
+                "风暴防护为装载期强制（2026-11-01 批次三强制）；"
+                "fix=无需处理（该键对 entrance/follow 无效，可删除）")
+            interrupt = "queue"
         tiers: list = []
         tier_error = None
         prev_min = 0

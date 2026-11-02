@@ -103,7 +103,7 @@ class TestApplyConfig:
         ch, _ = _facade()
         ch.engine.state = "default"
         node = _cfg_node(rules=[make_rule(),
-                                make_rule(rule_id="bad", trigger_type="entrance")])
+                                make_rule(rule_id="bad", trigger_type="bogus")])
         result = ch.apply_config(node)
         assert result["applied"] is True  # 好规则照常生效
         assert result["rejected"] and result["rejected"][0]["rule_id"] == "bad"
