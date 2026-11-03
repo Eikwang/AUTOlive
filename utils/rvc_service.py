@@ -1,21 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-RVC 变声服务 AUTOlive 侧启动器 + 控制客户端（P2-1）
+RVC 变声服务 AUTOlive 侧启动器 + 控制客户端（P2-1；C2/C3 治理批次扩展）
 
 - build_rvc_vc_service(): 构造 ManagedProcess（RVC runtime python 跑薄 adapter，
-  注册进 ServiceRegistry 供状态条展示）
+  注册进 ServiceRegistry 供状态条展示）——C2 终版单例判定内建
+- lazy_register_rvc_vc(): C3 懒启动占位登记（进前端不拉进程，幂等）
+- ensure_rvc_vc(): C3 懒触发（变声功能入口调用——按 C2 判定语义拉起）
+- start_idle_monitor(): C3 闲置退出（无活跃流 N 分钟优雅休眠）
 - RvcVcClient(): 控制面 HTTP 客户端（/switch /start /stop /status /devices），
   供前端 svc.py 与训练页调用
 """
 import json
 import os
+import threading
+import time
 import urllib.request
 from typing import Optional
 
-from utils.autolive_paths import AutolivePaths
+from utils.autolive_paths import AutolivePaths, as_keyed_config
 from utils.config import Config
 from utils.my_log import logger
-from utils.service_orchestrator import DEFAULT_POLICIES, ManagedProcess, ServiceRegistry
+from utils.service_orchestrator import (DEFAULT_POLICIES, ST_STOPPED, ST_STARTING,
+                                        ManagedProcess, ServiceRegistry)
 
 HTTP_PORT_DEFAULT = 9391
 
@@ -23,9 +29,10 @@ HTTP_PORT_DEFAULT = 9391
 def rvc_vc_alive(config: Config, paths: AutolivePaths, timeout: float = 2.0) -> bool:
     """控制面探活（2026-10-30 变声独立化）：GET /status 短超时，在线返回 True。
 
-    用途：变声服务独立于系统主流程——前端进程（进前端即托管）与 main.py 核心
-    （启动系统时按 rvc_vc.enabled 拉起）都可能拉起，双方拉起前先探活防端口
-    冲突/双实例。"""
+    用途：变声服务独立于系统主流程——懒触发（C3）与 main.py 核心（启动系统时
+    按 rvc_vc.enabled 拉起）拉起前探活防端口冲突/双实例。注意（D-5 defer 项）：
+    探 URL 不认进程——端口被无关进程占用时会误判在线（pid 归属核验见
+    _verify_port_owner）。"""
     try:
         http_port = int(config.get("rvc_vc", "http_port") or HTTP_PORT_DEFAULT)
         with urllib.request.urlopen(
@@ -33,6 +40,25 @@ def rvc_vc_alive(config: Config, paths: AutolivePaths, timeout: float = 2.0) -> 
             return r.status == 200
     except Exception:
         return False
+
+
+def _verify_port_owner(config: Config) -> str:
+    """C2/native F4：在线跳过路径的 pid 归属核验（best-effort）。
+
+    返回占用者描述串（"pid=123 name=python.exe cmd=..." 或 "归属未知"）。
+    核验失败不阻断跳过（保守防竞态），仅 warning 提供归因线索——端口冲突的
+    权威处置仍归 ManagedProcess.start 既有归因机制。"""
+    try:
+        import psutil
+        http_port = int(config.get("rvc_vc", "http_port") or HTTP_PORT_DEFAULT)
+        for conn in psutil.net_connections(kind="tcp"):
+            if (conn.status == psutil.CONN_LISTEN and conn.laddr.port == http_port
+                    and conn.pid):
+                p = psutil.Process(conn.pid)
+                return f"pid={p.pid} name={p.name()} cmd={' '.join((p.cmdline() or [])[:3])}"
+    except Exception as e:
+        return f"归属未知（{type(e).__name__}）"
+    return "归属未知（未找到监听者）"
 
 
 def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
@@ -48,13 +74,49 @@ def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
 def build_rvc_vc_service(
     config: Config, paths: AutolivePaths, on_state_change=None
 ) -> Optional[ManagedProcess]:
-    """构造（不启动）RVC 变声服务。config rvc_vc.hosted 默认 true。"""
+    """构造（或复用在册实例）RVC 变声服务。config rvc_vc.hosted 默认 true。
+
+    C2 终版单例判定（spec 三轮收敛：C-1/CP-2/FE-1；ENG-1 堵窗口）：
+    ①注册表在册且 state 非 stopped → 复用跳过（无论 alive 真假——实例自愈由
+      ManagedProcess 监控线程承担（_monitor_loop 死进程 auto_restart 在位），
+      外部重拉恰是竞态源，不做）；
+    ②不在册或 state==stopped → alive 复查：在线 → 跳过拉起仅记日志
+      （覆盖外部进程/主系统已拉起场景，pid 归属核验 native F4）；离线 → 构造；
+    时序约束（spec FE-1）：register 同步完成后置 ST_STARTING（ENG-1：语义
+    真相=「拉起已在途」，堵 register→start 线程的 stopped 判定窗口）——
+    调用方 start 线程在其后，register 恒先于 Popen。
+
+    返回：ManagedProcess（调用方负责 start）/ 已在线时 None / hosted=false None。
+    """
+    config = as_keyed_config(config)  # C3 双形态归一（svc 页 dict / main Config）
     hosted = config.get("rvc_vc", "hosted")
     if hosted is None:
         hosted = True
     if not hosted:
         logger.info("[rvc-vc] rvc_vc.hosted=false，跳过托管拉起")
         return None
+
+    registry = ServiceRegistry.instance()
+    existing = registry.get("rvc-vc")
+    if existing is not None and existing.state != ST_STOPPED:
+        # ① 在册非 stopped → 复用跳过（无论 alive——自愈归监控线程，spec C-1）
+        logger.debug(f"[rvc-vc] 注册表在册实例（state={existing.state}），复用跳过新建")
+        return existing
+
+    # ② 不在册或 stopped → alive 复查
+    if rvc_vc_alive(config, paths):
+        owner = _verify_port_owner(config)
+        if "name=python" in owner or "归属未知" in owner:
+            logger.info(f"[rvc-vc] 服务已在线，跳过拉起（{owner}）")
+        else:
+            logger.warning(f"[rvc-vc] 端口被非 Python 进程占用却响应 /status？"
+                           f"{owner}——保守跳过拉起（归因处置交由端口冲突机制）")
+        return None
+
+    # 离线 → 构造（stopped 在册实例不重建：stop 后 proc=None，复用实例直接
+    # start 即可——见 ensure_rvc_vc 的 stopped 分支；此处仅处理「不在册」）
+    if existing is not None and existing.state == ST_STOPPED:
+        return existing
 
     # S-1 根收敛：副本根=paths.rvc_root（apps/rvc），config 可覆盖回外部树
     rvc_root = getattr(paths, "rvc_root", None) or config.get("rvc_vc", "rvc_root") \
@@ -86,8 +148,78 @@ def build_rvc_vc_service(
         policies=policies,
         on_state_change=on_state_change,
     )
-    ServiceRegistry.instance().register(svc)
+    registry.register(svc)
+    # ENG-1：register 后立即置 ST_STARTING（语义真相=「拉起已在途」）——
+    # 堵 register→start 线程之间 state==stopped 的判定窗口（spec E-1）。
+    # 直接赋值跳过 _set_state 日志（start() 会再打一次 starting，避免重复行）。
+    svc.state = ST_STARTING
     return svc
+
+
+def ensure_rvc_vc(config: Config, paths: AutolivePaths,
+                  on_state_change=None) -> Optional[ManagedProcess]:
+    """C3 懒触发（变声功能入口调用：svc 页开关/试音/start_stream 前）。
+
+    按 C2 终版判定语义拉起：在册非 stopped → 复用（含 starting 在途——已在
+    拉起中，直接返回）；stopped 在册 → 复用实例后台 start（不新建）；不在册
+    且离线 → build+后台 start；在线 → 返回 None（调用方按 None 走在线直连）。
+
+    返回：ManagedProcess（新拉起/复用中，状态条轮询就绪）或 None（已在线）。"""
+    config = as_keyed_config(config)  # 双形态归一（idle_exit_min/透传 build）
+    svc = build_rvc_vc_service(config, paths, on_state_change=on_state_change)
+    if svc is None:
+        return None  # 已在线 / hosted=false
+    if svc.proc is None and svc.state == ST_STOPPED:
+        # C3：stopped 复用实例（idle 休眠后重拉/懒占位首拉）
+        def _start():
+            if svc.start():
+                start_idle_monitor(svc, config)
+        threading.Thread(target=_start, name="rvc-vc-ensure", daemon=True).start()
+        logger.info("[rvc-vc] 首次使用/闲置唤醒：后台拉起变声服务（状态条可查进度）")
+        return svc
+    # 在途（starting/healthy/...）——build 分支已返回在册实例
+    return svc
+
+
+def start_idle_monitor(svc: ManagedProcess, config: Config,
+                       check_interval_s: float = 60.0) -> None:
+    """C3 闲置退出（uc1c 终门裁决）：无活跃变声流（/status state!="running"）
+    持续 rvc_vc.idle_exit_min（默认 10）分钟 → svc.stop() 优雅休眠。
+
+    懒触发登记（ensure）不随休眠消失——下次使用 ensure 复用 stopped 实例重拉。
+    探测失败（/status 不可达瞬态）不累计闲置（保守）；子进程死亡交回监控线程
+    auto_restart，不在此处理。"""
+    try:
+        minutes = float(config.get("rvc_vc", "idle_exit_min") or 10)
+    except (TypeError, ValueError):
+        minutes = 10.0
+
+    def _monitor():
+        idle_since: Optional[float] = None
+        client = RvcVcClient(config=config)
+        logger.info(f"[rvc-vc] 闲置监控已启动（{minutes:g} 分钟无活跃流自动休眠）")
+        while not svc._monitor_stop.is_set():
+            if svc._monitor_stop.wait(timeout=check_interval_s):
+                return
+            if svc.proc is None or svc.proc.poll() is not None:
+                return  # 子进程未起/已死——监控线程或 ensure 负责后续
+            try:
+                state = (client.status() or {}).get("state")
+            except Exception:
+                state = "unknown"  # 保守：状态不可知不累计闲置
+            if state == "running":
+                idle_since = None
+                continue
+            if state == "idle":
+                idle_since = idle_since or time.time()
+            # unknown：idle_since 不动
+            if idle_since and time.time() - idle_since >= minutes * 60:
+                logger.info(f"[rvc-vc] 闲置 {minutes:g} 分钟，自动休眠"
+                            f"（GPU/CPU 已释放；下次使用变声功能时自动拉起）")
+                svc.stop()
+                return
+
+    threading.Thread(target=_monitor, name="rvc-vc-idle", daemon=True).start()
 
 
 class RvcVcClient:

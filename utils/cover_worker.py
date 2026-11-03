@@ -66,6 +66,7 @@ class CoverQueue:
             "queue_max": 5, "cooldown_s": 60, "job_timeout_min": 10,
             "retries": 1, "vram_reserve_gb": 4.0, "same_viewer_in_queue_max": 1,
             "worker_idle_exit_s": 300,
+            "cover_sweep_log_only": True,  # DX-7 浸泡：C7 扫描首周 log-only（期满配置切 False）
         }
         custom = self.config.get("audio_integration", "policies") or {}
         base.update({k: v for k, v in custom.items() if isinstance(v, (int, float))})
@@ -292,7 +293,15 @@ class CoverQueue:
                 rc = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             logger.error(f"[cover] 超时（{timeout_s}s）：{song}；主跑输出: {run_log}")
-            proc.kill() if hasattr(self, "proc") and self.proc else None
+            # C7 ①超时场景（主跑仍存活，spec F1）：树杀 taskkill /F /T——活进程
+            # 场景与先例 train_rvc_pipeline.py:241-243 同型；ENG-5：taskkill 失败
+            # 或执行前已自行退出（竞态）→回落 psutil 双条件扫描（崩溃分支同款）
+            if hasattr(self, "proc") and self.proc:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+                self._reap_process_tree(self.proc)
             self._fail(job, policies, timeout=True)
             return
         except FileNotFoundError as _sp_err:
@@ -301,6 +310,10 @@ class CoverQueue:
             return
         logger.info(f"[cover] 主跑结束 rc={rc}：{song}（输出: {run_log}）")
         if rc != 0:
+            # C7 ②崩溃场景（spec CL-2 挂点）：主跑已死（access violation 常态）
+            # taskkill 对死 PID 的 /T 无法枚举孙进程——psutil 双条件扫描收尸
+            if hasattr(self, "proc") and self.proc and self.proc.poll() is not None:
+                self._reap_process_tree(self.proc)
             # R-9 日志语义修正（2026-11-02 r4 批次）：pedalboard effects 段崩溃
             # （四连崩实证）是已知设计路径——主跑崩→补刀接管产出成品。它不是
             # 故障，ERROR 级会误导用户；尾部输出仍落主跑日志文件供诊断。
@@ -352,6 +365,85 @@ class CoverQueue:
                     logger.error("[cover] 插播回调异常（成品已落盘不影响任务）", exc_info=True)
         else:
             self._fail(job, policies)
+
+    def _reap_process_tree(self, proc):
+        """C7 进程树收尸（spec F1 双场景+ENG-5 回落+ENG-6 分级+DX-7 浸泡）。
+
+        ①活 PID 树杀：taskkill /F /T /PID（活进程场景，先例
+          utils/train_rvc_pipeline.py:241-243 同型——进程树枚举有效）；
+        ②死 PID/回落（ENG-5：taskkill 竞态失败或执行前自行退出）：psutil 双
+          条件扫描——映像名 python*.exe 且 cwd 或 cmdline 完整匹配 AICoverGen
+          源目录（spec CP-4 收窄：编辑器/终端非 Python 进程被映像条件排除，
+          非 aicovergen 路径 Python 进程被路径条件排除）；
+        ③DX-7 log-only 浸泡：audio_integration.policies.cover_sweep_log_only
+          （默认 True）首周只记录不 terminate，期满无误杀再启用（配置键切换）；
+        ④ENG-6 日志分级：扫描无残留=DEBUG / 处置（或 log-only 记录）=INFO /
+          收尸全败=DX-3 WARNING 模板（崩溃为常态路径，防每任务刷控制台）。"""
+        import psutil
+        src = self._aicovergen_src()
+        policies = self._policies()
+        log_only = bool(policies.get("cover_sweep_log_only", True))
+        pid = getattr(proc, "pid", None)
+        alive = proc is not None and proc.poll() is None
+
+        # ① 活 PID 树杀
+        if alive and pid:
+            try:
+                r = subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if r.returncode == 0:
+                    logger.info(f"[cover] 主跑进程树已清理（taskkill /T pid={pid}）")
+                else:
+                    logger.debug(f"[cover] taskkill 未命中（pid={pid}，可能已退出）——回落扫描")
+            except Exception as e:
+                logger.warning(f"[cover] taskkill 异常（pid={pid}）：{e}——回落扫描")
+
+        # ② psutil 双条件扫描（死 PID 场景/回落/兜底）
+        victims = []
+        for p in psutil.process_iter(["pid", "name", "cmdline", "cwd"]):
+            try:
+                name = (p.info.get("name") or "").lower()
+                if not name.startswith("python"):
+                    continue  # 映像条件：编辑器/终端等非 Python 进程不触碰
+                cwd = p.info.get("cwd") or ""
+                cmdline = " ".join(p.info.get("cmdline") or [])
+                if cwd == src or src in cmdline:
+                    victims.append(p)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue  # cmdline 或语义兜底（spec F-1：cwd 读失败不排除）
+        if not victims:
+            logger.debug("[cover] 收尸扫描：无残留进程")  # ENG-6：常态路径 DEBUG
+            return
+        desc = "; ".join(f"pid={v.pid} name={v.info.get('name')} "
+                         f"cwd={v.info.get('cwd')}" for v in victims)
+        if log_only:
+            # DX-7 浸泡：仅记录（INFO），附手动清理命令（可复核误杀面）
+            logger.info(f"[cover] 收尸浸泡期（log-only）：发现疑似残留 "
+                        f"{len(victims)} 个——{desc}；手动清理 taskkill /F /T /PID "
+                        f"{victims[0].pid}；复核 nvidia-smi --query-compute-apps="
+                        f"pid,process_name,used_memory --format=csv")
+            return
+        # ③ terminate（浸泡期满后启用）
+        remaining = []
+        for v in victims:
+            try:
+                v.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except Exception as e:
+                logger.warning(f"[cover] terminate pid={v.pid} 异常：{e}")
+                remaining.append(v)
+        gone = len(victims) - len(remaining)
+        if gone:
+            logger.info(f"[cover] 收尸完成：清理 {gone} 个 AICoverGen 残留进程")
+        if remaining:
+            # DX-3 WARNING 模板（收尸全败——含手动清理命令）
+            logger.warning(f"[cover] 收尸未完成：残留 pid={','.join(str(v.pid) for v in remaining)}"
+                           f"（image={remaining[0].info.get('name')}）——手动清理 "
+                           f"taskkill /F /T /PID {remaining[0].pid}；复核 nvidia-smi "
+                           f"--query-compute-apps=pid,process_name,used_memory --format=csv")
 
     def _retain_split_tracks(self, job: Dict, cover: str):
         """R6 分轨保留：从 song_output 定位本次任务的 ai_vocals（RVC 人声）与

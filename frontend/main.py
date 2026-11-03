@@ -379,30 +379,20 @@ class AutoliveApp:
                 logger.warning(f"数据分析模块初始化失败: {e}")
                 self.data_analysis = None
 
-        # 变声服务前端托管（2026-10-30 变声独立化，用户裁决）：变声是独立流程，
-        # 不应依赖系统主进程——进入前端即可配置/使用。rvc_vc.enabled（二级菜单
-        # 「变声」开关）=true 时 webui 进程直接托管拉起 rvc-vc 子进程（独立
-        # HTTP 服务），不等「启动系统」。探活防双实例（主系统启动时同样探活）。
-        try:
-            if bool(get_nested_value(self.config._config, "rvc_vc", "enabled")):
-                from utils.autolive_paths import AutolivePaths
-                from utils.rvc_service import build_rvc_vc_service, rvc_vc_alive
-                _paths = AutolivePaths(self.config)
-                if rvc_vc_alive(self.config, _paths):
-                    logger.info("[rvc-vc] 服务已在线（主系统托管），前端不重复拉起")
-                else:
-                    self.rvc_vc_svc = build_rvc_vc_service(self.config, _paths)
-                    if self.rvc_vc_svc is not None:
-                        threading.Thread(
-                            target=self.rvc_vc_svc.start,
-                            name="webui-rvc-vc", daemon=True).start()
-                        logger.info("[rvc-vc] 前端托管拉起已后台启动（进入前端即可用变声）")
-        except Exception:
-            logger.warning(
-                "[rvc-vc] 前端托管拉起失败（不阻断 webui，启动系统后仍可随主流程拉起）: "
-                + traceback.format_exc())
+        # 变声服务前端托管（C3 懒启动，2026-11-03 终门 uc1c 裁决）：进前端**不再
+        # 直接拉起** rvc-vc 子进程（原实现每次重入都有 alive 2s 探测 vs 120s 就绪
+        # 窗竞态双拉风险，且 GPU/CPU 常驻）——首次使用变声功能时 ensure_rvc_vc()
+        # （svc 页挂点）按 C2 终版单例判定自动拉起，闲置自动休眠
+        # （rvc_service.start_idle_monitor）。不注册状态条占位（2026-11-03 用户
+        # 实测裁决：不使用变声时常驻胶囊是噪音，服务拉起后胶囊自然出现）。
+        if bool(get_nested_value(self.config._config, "rvc_vc", "enabled")):
+            logger.info("[rvc-vc] 懒启动模式：进程未拉起，首次使用变声时自动拉起"
+                        "（闲置自动休眠；拉起后状态条可查）")
 
-        logger.info("AUTOlive 应用程序初始化完成")
+        if self._reentry:
+            logger.debug("AUTOlive 应用程序初始化完成（重入）")
+        else:
+            logger.info("AUTOlive 应用程序初始化完成")
     
     def _init_directories(self):
         """初始化必要的目录"""
@@ -1636,6 +1626,51 @@ class AutoliveApp:
         if getattr(_nicegui_core.app, "is_started", False):
             logger.debug("AutoliveApp.run() 重入——跳过 ui.run（server 已运行）")
             return
+
+        # C4-①（2026-11-03 治理批次，ENG-2 挂点修正）：Windows proactor 连接
+        # 重置噪音过滤——挂点=on_startup（loop 就绪后恰执行一次；ui.run 之前
+        # get_running_loop 首启必抛 RuntimeError）。幂等护栏防重复安装。
+        def _install_loop_noise_filter():
+            """C4-①：ConnectionResetError(10054) 的 proactor 连接丢失回调异常
+            降为 DEBUG 单行（浏览器断开伴生噪音，erro5.log:52-59/91-106 实证）；
+            过滤类别外异常链式委托原 handler，原 handler 为 None 时委托
+            loop.default_exception_handler（spec CP-3：防非过滤异常静默吞弃）。"""
+            import asyncio as _aio
+
+            def _autolive_filter(loop, context):
+                exc = context.get("exception")
+                msg = str(context.get("message") or "")
+                is_reset_noise = (
+                    isinstance(exc, (ConnectionResetError, ConnectionAbortedError))
+                    or (exc is not None and getattr(exc, "winerror", None) == 10054)
+                    or "_call_connection_lost" in msg
+                    and isinstance(exc, OSError)
+                )
+                if is_reset_noise:
+                    logger.debug(f"[loop] 连接重置噪音已抑制: {exc or msg}")
+                    return
+                prev = getattr(_autolive_filter, "_prev_handler", None)
+                if prev is not None:
+                    prev(loop, context)
+                else:
+                    loop.default_exception_handler(context)
+
+            def _prev_handler_setter(loop):
+                prev = loop.get_exception_handler()
+                _autolive_filter._prev_handler = prev
+
+            async def _startup_install():
+                loop = _aio.get_running_loop()
+                if getattr(_autolive_filter, "_installed", False):
+                    return  # 幂等（ENG-2：防重入重复安装成无界嵌套委托链）
+                _prev_handler_setter(loop)
+                loop.set_exception_handler(_autolive_filter)
+                _autolive_filter._installed = True
+                logger.info("[loop] proactor 连接重置噪音过滤器已挂载")
+
+            _nicegui_core.app.on_startup(_startup_install)
+
+        _install_loop_noise_filter()
 
         # NiceGUI 3.16 socket.io 消息超限断联（TODOS 既有问题）：AsyncServer 在
         # nicegui/nicegui.py:52 硬编码初始化，无 buffer 配置通道（默认 1MB，3.x script

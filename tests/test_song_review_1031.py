@@ -233,7 +233,9 @@ class TestOneClickCover:
         src = _read("frontend/ui/tabs/choose_song.py")
         assert "ui.upload" in src and "accept=.mp3,.wav,.flac" in src
         assert "一键翻唱" in src
-        assert "/cover/enqueue" in src
+        # C1/ENG-3（2026-11-03 批次）：入队改进程内直调共享函数，HTTP 自调用清零
+        assert "enqueue_cover_manual" in src
+        assert "/cover/enqueue" not in src
 
     def test_web_server_enqueue_endpoint(self):
         """T3 实测批次：端点抽共享注册（utils/cover_endpoints.py），web_server

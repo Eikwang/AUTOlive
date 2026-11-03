@@ -1,7 +1,16 @@
+## Deferred Items from /autoplan (2026-11-03) — 一键翻唱整合运行机制治理批次（main-20261103-102228，CEO/ENG/DX 三阶段审查完毕待终门）
+
+1. **P2 机制本体缺陷两项**（P2, M；D-5/spec Q3）— ServiceRegistry.register 同名覆盖不 stop 旧实例子进程 + ManagedProcess 健康检查探 URL 不认进程（utils/service_orchestrator.py:380-382/:296-309）——影响所有 ManagedProcess 用户（gpt_sovits/rvc-vc 共用）。**触发条件：任一托管服务再现孤儿/双拉即升 P0**。依赖：无。
+2. **「GPU 服务按需治理」命名批次**（P2, L；native F1）— GPT-SoVITS/rvc-vc/EDTalk/AICoverGen 统一按需策略引擎（用才拉/完即退/闲置自退）——12 个月理想态「GPU 服务全部按需」的承接批次，防 Dream State 无归属。依赖：uc1 终门裁决结果；C6 量化数据（rvc-vc 常驻成本基线）为输入。
+3. **跨进程双拉**（P3, S；ENG-4）— ServiceRegistry 进程内单例，主系统与 webui 注册表互不可见——webui starting 就绪窗内点「启动系统」仍会双拉（后绑定方端口冲突升级）。归入 GPU 治理批次。依赖：条目 2。
+4. **webui 事件循环阻塞源确诊可修项**（P2, ?；D-6）— 实施期 /investigate 确诊产出：S 级可修项已按 F2 规则入批顺手修；M 级以上落此（含 alive 复查 to_thread 记名，ENG-12——script mode 重入 __init__ 事件循环线程内同步 urlopen 至多阻塞 2s）。依赖：实施期确诊记录。
+5. **erro5.log 类实测日志卫生门禁**（P3, S；native F9）— tests/test_repo_hygiene 风格拦截实测日志快照入库。依赖：无。
+
 ## Deferred Items from /autoplan (2026-11-02 r4) — 一键翻唱补刀伴奏对齐+崩溃可诊断(main-20261102-104518/r4,终门 rec 全推荐批准)
 
 1. **pedalboard 原生崩溃根因台账**(P2, M)——四连崩(rc=139×3+0xC0000005,均在 torch 进程上下文)无根因记录;三选项=钉 pedalboard 版本/剔除混响效果(纯直出)/替换音频效果库;**R-2 faulthandler 的首个崩溃栈为决策输入**(0xC0000005 时 Python 栈落 logs/cover_aicovergen_last.log)。零上游 AICoverGen 改动纪律 vs 崩溃常态化的权衡随条目落账(CEO F1/C3)。
-2. **SoX 安装**(P3, S)——AICoverGen 阶段 5.5 变调(sox.Transformer,pitch_shift)需要 sox.exe;当前链路恒不传 -pall **无影响**;未来若接 -pall 全曲变调才需要。安装=SoX 装入 `D:\AI\RVC20240604Nvidiauntime\sox\`(main.py:12-14 的 sys.prefix/sox PATH 约定目录,Eng H-1);探测也按此目录(非父进程 PATH)。
+2. **SoX 安装**(P3, S)——AICoverGen 阶段 5.5 变调(sox.Transformer,pitch_shift)需要 sox.exe;当前链路恒不传 -pall **无影响**;未来若接 -pall 全曲变调才需要。安装=SoX 装入 `D:\AI\RVC20240604Nvidia
+untime\sox\`(main.py:12-14 的 sys.prefix/sox PATH 约定目录,Eng H-1);探测也按此目录(非父进程 PATH)。
 
 ## Deferred Items from /autoplan (2026-11-02) — 一键翻唱三缺陷修复批次(main-20261102-104518,终门 rec 全推荐批准)
 

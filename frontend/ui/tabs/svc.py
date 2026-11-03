@@ -94,10 +94,29 @@ def create_svc_tab(
     theme_config: Dict[str, str],
     set_config_callback: Callable,
 ):
-    """创建变声标签页（独立设备到设备流程，TE6）。"""
+    """创建变声标签页（独立设备到设备流程，TE6；C3 懒触发挂点）。"""
     global _client
     card_css = theme_config.get("card", "")
     client = _client_for(config)
+
+    # C3 懒触发（2026-11-03 终门 uc1c）：进变声页=首次使用变声功能——按 C2
+    # 终版单例判定后台拉起（在册/在线跳过；离线 build+start+idle 监控）。
+    # 全程后台任务（ENG-12：alive 探活至多 2s 同步会阻塞页构建，挪出事件循环）；
+    # 懒拉起失败不阻断页面渲染（状态条/启动按钮四态可见真实状态）。
+    async def _lazy_ensure():
+        try:
+            from utils.autolive_paths import AutolivePaths
+            from utils.rvc_service import ensure_rvc_vc
+            _paths = AutolivePaths(config)
+            _svc = await run.io_bound(ensure_rvc_vc, config, _paths)
+            if _svc is None:
+                logger.info("[svc] rvc-vc 已在线，直连使用")
+        except Exception as _ensure_err:
+            logger.warning(f"[svc] 变声服务懒拉起失败（不阻断页面）：{_ensure_err}")
+            ui.notify(f"变声服务自动拉起失败：{str(_ensure_err)[:80]}"
+                      f"——请查看服务状态条与 logs/services/rvc-vc.log", type="warning")
+
+    background_tasks.create(_lazy_ensure())
     _stop_stale_timers()
     models_dir = os.path.join(
         get_nested_value(config, "paths", "autolive_home")

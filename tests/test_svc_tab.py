@@ -44,13 +44,16 @@ class TestVoiceChangerIndependence:
         assert "rvc_vc_alive" in seg, "拉起前探活防双实例"
 
     def test_frontend_hosts_service(self):
-        """前端进程托管：进入前端即拉起（不等启动系统）。"""
+        """C3 懒启动（2026-11-03 终门 uc1c+用户实测裁决）：进前端不拉进程、
+        不注册状态条占位；ensure_rvc_vc 挂变声页（svc.py），闲置自动休眠。"""
         src = _read_root("frontend/main.py")
-        seg = src[src.find("# 变声服务前端托管"):src.find('logger.info("AUTOlive 应用程序初始化完成")')]
+        seg = src[src.find("变声服务前端托管（C3 懒启动"):src.find('logger.debug("AUTOlive 应用程序初始化完成（重入）")')]
         assert 'get_nested_value(self.config._config, "rvc_vc", "enabled")' in seg
-        assert "build_rvc_vc_service" in seg
-        assert "rvc_vc_alive" in seg
-        assert "webui-rvc-vc" in seg
+        assert "懒启动模式" in seg
+        assert "build_rvc_vc_service" not in seg, "进前端即拉残留（C3 未完成）"
+        assert "lazy_register_rvc_vc" not in seg, "占位登记残留（用户裁决清理）"
+        svc_src = _read_root("frontend/ui/tabs/svc.py")
+        assert "ensure_rvc_vc" in svc_src
 
     def test_offline_hint_updated(self):
         """svc.py 离线提示不再指向「启动系统」（前端托管语义）。"""

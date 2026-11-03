@@ -393,42 +393,38 @@ def create_choose_song_tab(
                     "if (input) { input.value = ''; input.click(); } })()")  # 选前清空：同文件重选也触发 change
 
             async def _one_click_cover():
-                # R-7 真根因修（2026-11-02 r5 实测，/investigate learning
-                # nicegui3-eventloop-sync-requests 同族）：webui 单进程下
-                # /cover/enqueue 就在本进程 uvicorn——同步 handler 里发同步
-                # HTTP=事件循环等响应、响应等事件循环空闲→自锁→恒超时。
-                # 修=async handler+to_thread（learning 修复三件套）。
+                # ENG-3（2026-11-03 C1 扩围，终门 d3a）：与删除按钮同族 HTTP 自调用
+                # 一并进程内直调——enqueue_cover_manual 共享函数（cover_endpoints
+                # 同源），本批标题功能不再依赖 HTTP 响应及时性（R-7/R-1 同族根治）。
                 import asyncio as _aio
                 song = (uploaded_song.get("name") or "").strip()
                 if not song:
                     ui.notify("请先点击「上传歌曲」选择要翻唱的歌曲", type="warning")
                     return
 
-                def _post():
-                    try:
-                        r = _session.post(f"{_main_base(config)}/cover/enqueue",
-                                          json={"song": song}, timeout=30)
-                        return r.status_code, r.json()
-                    except Exception as ex:
-                        return None, {"detail": str(ex)[:80]}
+                from utils.cover_endpoints import enqueue_cover_manual
 
-                code, data = await _aio.to_thread(_post)
-                if code == 200:
-                    action = data.get("action")
-                    if action == "queued":
-                        ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位）——若 GPU 忙"
-                                  f"（直播运行/数字人占用/显存不足）将自动排队，空闲后自动开始，完成后自动进入歌曲列表",
-                                  type="positive")
-                    elif action == "cached":
-                        ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
-                    elif action == "queue_full":
-                        ui.notify("翻唱队列已满，稍后再试", type="warning")
-                    elif action == "cooldown":
-                        ui.notify("操作过于频繁（冷却中），稍后再试", type="warning")
-                    else:
-                        ui.notify(f"入队结果：{action}", type="info")
+                def _enqueue():
+                    return enqueue_cover_manual(config, None, song)
+
+                try:
+                    data = await _aio.to_thread(_enqueue)
+                except Exception as ex:
+                    ui.notify(f"翻唱入队失败：{str(ex)[:80]}", type="negative")
+                    return
+                action = data.get("action")
+                if action == "queued":
+                    ui.notify(f"《{song}》已入翻唱队列（第 {data.get('position')} 位）——若 GPU 忙"
+                              f"（直播运行/数字人占用/显存不足）将自动排队，空闲后自动开始，完成后自动进入歌曲列表",
+                              type="positive")
+                elif action == "cached":
+                    ui.notify(f"《{song}》已有翻唱成品，点歌即可播放", type="info")
+                elif action == "queue_full":
+                    ui.notify("翻唱队列已满，稍后再试", type="warning")
+                elif action == "cooldown":
+                    ui.notify("操作过于频繁（冷却中），稍后再试", type="warning")
                 else:
-                    ui.notify(f"翻唱入队失败：{data.get('detail', code)}", type="negative")
+                    ui.notify(f"入队结果：{action}", type="info")
 
             uploaded_song: Dict[str, str] = {}  # 本次会话上传的歌曲 {"name": 歌名 stem}
             upload_hint = ui.label("未上传歌曲").style("font-size:12px;color:var(--text-secondary)")
@@ -496,26 +492,35 @@ def create_choose_song_tab(
 
                                 # T7 删除按钮（2026-11-02 用户诉求）：删 covers/ 下
                                 # 同名三件（成品+分轨），song_source 原曲不删
-                                # R-1（r8 批次）：async handler+to_thread——同步 HTTP
-                                # 打同进程 uvicorn=事件循环自锁（R-7 同款）
+                                # C1（2026-11-03 终门批次）：进程内直调共享删除函数
+                                # （cover_endpoints.delete_cover_artifact）——移除
+                                # HTTP 自调用绕路，删除不再耦合事件循环健康度
                                 async def _delete_cover(fn=fn):
                                     import asyncio as _aio
+                                    from utils.cover_endpoints import (delete_cover_artifact,
+                                                                       DELETE_NOT_FOUND, DELETE_OSERROR)
 
                                     def _do_delete():
-                                        try:
-                                            r = _session.post(f"{_main_base(config)}/cover/delete",
-                                                              json={"file": fn}, timeout=15)
-                                            return r.status_code, r.json()
-                                        except Exception as ex:
-                                            return None, {"detail": str(ex)[:80]}
+                                        return delete_cover_artifact(config, fn)
 
-                                    code, data = await _aio.to_thread(_do_delete)
-                                    if code == 200 and data.get("success"):
+                                    r = await _aio.to_thread(_do_delete)
+                                    if r.ok:
                                         ui.notify(f"已删除《{fn}》", type="positive")
                                         _render_covers()
-                                    else:
-                                        ui.notify(f"删除失败：{data.get('detail', code)}",
+                                    elif r.code == DELETE_NOT_FOUND:
+                                        # DX-2：404=三件全无聚合语义（双击竞态高频）——
+                                        # 给刷新指引而非裸 404 文案
+                                        ui.notify(f"无可删除的翻唱文件（可能已被删除）：《{fn}》——刷新列表后重试",
                                                   type="negative")
+                                    elif r.code == DELETE_OSERROR:
+                                        # DX-1：OSError（文件占用/权限高频）——文案含
+                                        # 可执行下一步+重试安全声明
+                                        ui.notify(f"删除失败（文件可能正在播放或被占用）：{r.detail}"
+                                                  f"——停止播放或关闭占用程序后重试；重试安全（已删文件自动跳过）",
+                                                  type="negative")
+                                    else:
+                                        # DX-2：400 含被拒 fn 实际值
+                                        ui.notify(f"删除请求被拒绝：{r.detail}", type="negative")
 
                                 ui.button(icon='delete', on_click=_delete_cover).props(
                                     'flat dense round color=negative').tooltip(
