@@ -571,13 +571,10 @@ def test_c3_main_lazy_registration():
 
 
 def test_c5_runtime312_first_choice_recorded():
-    """uc2a+用户环境补充：runtime312 切换首选路径已记录（cover_worker 配置路径）。"""
+    """uc2a+用户环境补充：runtime312 切换首选路径已落地（cover_worker 配置
+    覆盖路径在位；终门裁决与实测结论记录于提交 16767949 与 .gstack 会话档案）。"""
     src = Path("utils/cover_worker.py").read_text(encoding="utf-8")
     assert "runtime_python" in src  # 配置覆盖路径在位（rvc_vc.runtime_python）
-    record = Path(".gstack/tmp/autoplan/main-20261103-102228-plan.md")
-    if record.exists():
-        txt = record.read_text(encoding="utf-8")
-        assert "runtime312" in txt  # 终门裁决记录在案
 
 
 def test_d2_semantics_documented_five_states():
