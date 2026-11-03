@@ -60,6 +60,30 @@ def config_get(config, *keys):
     return config.get(*keys)
 
 
+class KeyedConfigView:
+    """dict → Config 变长键语义视图（2026-11-03 治理批次 erro6.log 实测修复）。
+
+    UI 组件族（layout）全链持有页面 dict，而共享消费面（CoverQueue._policies、
+    rvc_service build/ensure 的 hosted/http_port/policies 读取）按
+    Config.get(*keys) 变长键语义设计——dict 直接传入会把节 dict 当值返回
+    （dict.get 两参=default 语义，2026-10-16 config_get 同坑的进程内直调变体）。
+    包装后 get(*keys) 走 config_get 逐键下钻，两形态同语义。"""
+
+    def __init__(self, d):
+        self._d = d
+
+    def get(self, *keys, default=None):
+        v = config_get(self._d, *keys)
+        return v if v is not None else default
+
+
+def as_keyed_config(config):
+    """config 双形态归一：dict → KeyedConfigView；Config 对象原样透传。"""
+    if isinstance(config, dict):
+        return KeyedConfigView(config)
+    return config
+
+
 # 点歌模式歌曲音频根目录（/autoplan 2026-10-23 批次 R1：song_path 用户配置键
 # 退役后的内部约定常量，经本函数锚定，不再暴露为用户配置参数）。
 SONG_AUDIO_DIR_DEFAULT = "song"
