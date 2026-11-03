@@ -662,3 +662,114 @@ def test_erro6_regression_rvc_build_dict_config(rvc_env, tmp_path, monkeypatch):
     out = rs.build_rvc_vc_service(dict_cfg, _fake_paths(tmp_path))
     assert out is not None and out.name == "rvc-vc"
     assert out.state == "starting"  # ENG-1 语义在 dict 形态下同样成立
+
+
+# ---------------------------------------------------------------------------
+# 分轨保留 v2（2026-11-03 补刀退役批次）：inst=False 警告修复回归
+# ---------------------------------------------------------------------------
+
+def _mk_split_env(root, monkeypatch=None, stem="陈奕迅 - 最佳损友"):
+    """song_output 环境（covers 挂 tmp；worker 直调桩）。
+
+    monkeypatch 缺省时新建临时实例并由本函数持有（测试进程级还原由
+    pytest.MonkeyPatch 的 context 语义兜底——类属性 patch 在模块收尾统一 undo）。"""
+    src_dir = root / "aicovergen_src"
+    out_root = root / "song_output"
+    out_root.mkdir(parents=True)
+    covers = root / "covers"
+    covers.mkdir()
+    from utils.cover_worker import CoverQueue
+    q = CoverQueue.__new__(CoverQueue)
+    q.config = _FakeConfig()
+    q.paths = None
+    mp = monkeypatch if monkeypatch is not None else pytest.MonkeyPatch()
+    mp.setattr(CoverQueue, "_aicovergen_src", lambda self: str(src_dir))
+    job = {"song_path": str(root / f"{stem}.mp3")}
+    cover = str(covers / f"{stem}__WY.wav")
+    return q, out_root, covers, job, cover
+
+
+def test_retain_v2_inst_found_with_keep_flag(tmp_path, monkeypatch):
+    """erro 警告回归：主跑成功+派发 -k 保留产物——vocal（参数链）与
+    inst（_Instrumental）均定位复制（vocal=True, inst=True）。"""
+    q, out_root, covers, job, cover = _mk_split_env(tmp_path)
+    import time as _t
+    hash_dir = out_root / "deadbeefcafe"
+    hash_dir.mkdir()
+    vocal = hash_dir / f"{job_path_stem(job)}_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+    inst = hash_dir / f"{job_path_stem(job)}_Cleaned_Instrumental.wav"
+    vocal.write_bytes(b"RIFF" + b"0" * 32)
+    inst.write_bytes(b"RIFF" + b"0" * 32)
+    _t.sleep(0.01)
+    q._retain_split_tracks(job, cover)
+    base = os.path.splitext(cover)[0]
+    assert os.path.isfile(base + "_vocal.wav"), "vocal 分轨缺失"
+    assert os.path.isfile(base + "_inst.wav"), "inst 分轨缺失（erro6 警告回归）"
+
+
+def test_retain_v2_no_mtime_gate_cache_reuse(tmp_path, monkeypatch):
+    """R-5 同源：缓存重翻产物 mtime 早于本次——仍定位（mtime 门槛已去）。"""
+    import time as _t
+    q, out_root, covers, job, cover = _mk_split_env(tmp_path)
+    hash_dir = out_root / "cafe"
+    hash_dir.mkdir()
+    vocal = hash_dir / f"{job_path_stem(job)}_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+    inst = hash_dir / f"{job_path_stem(job)}_Cleaned_Instrumental.wav"
+    vocal.write_bytes(b"RIFF" + b"0" * 32)
+    inst.write_bytes(b"RIFF" + b"0" * 32)
+    old = _t.time() - 86400
+    os.utime(vocal, (old, old))
+    os.utime(inst, (old, old))
+    job = {**job, "started_at": _t.time()}  # started_at 远新于产物
+    q._retain_split_tracks(job, cover)
+    base = os.path.splitext(cover)[0]
+    assert os.path.isfile(base + "_vocal.wav") and os.path.isfile(base + "_inst.wav")
+
+
+def test_retain_v2_cross_song_isolation(tmp_path, monkeypatch):
+    """跨歌隔离：另一 stem 的同名产物不命中（stem 匹配替代 mtime 圈定）。"""
+    q, out_root, covers, job, cover = _mk_split_env(tmp_path)
+    other_dir = out_root / "beef"
+    other_dir.mkdir()
+    (other_dir / "另一首_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav").write_bytes(b"R")
+    (other_dir / "另一首_Cleaned_Instrumental.wav").write_bytes(b"R")
+    q._retain_split_tracks(job, cover)
+    assert not os.path.exists(os.path.splitext(cover)[0] + "_vocal.wav")
+
+
+def test_retain_v2_cleanup_keeps_instrumental_only(tmp_path, monkeypatch):
+    """自清理：本次 stem 的中间产物（vocal 源/mixed/半成品）删——仅
+    _Instrumental 保留为 MDX 缓存件；跨歌产物不触碰。"""
+    q, out_root, covers, job, cover = _mk_split_env(tmp_path)
+    stem = job_path_stem(job)
+    hash_dir = out_root / "dead"
+    hash_dir.mkdir()
+    vocal = hash_dir / f"{stem}_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
+    inst = hash_dir / f"{stem}_Cleaned_Instrumental.wav"
+    mixed = hash_dir / f"{stem} (autolive_WY Ver).wav"          # 成品（covers 已落）
+    raw_vocals = hash_dir / f"{stem}_UVR-MDX-NET Inst_Main.wav"  # 原始分离人声
+    stale_mixed = hash_dir / f"{stem}_mixed.wav"                 # 主跑残留半成品
+    other = out_root / "other" / "别的歌_Cleaned_Instrumental.wav"
+    other.parent.mkdir()
+    for f in (vocal, inst, mixed, raw_vocals, stale_mixed, other):
+        f.write_bytes(b"R")
+    q._retain_split_tracks(job, cover)
+    assert not os.path.isfile(vocal), "vocal 源应清理（covers 已有副本）"
+    assert not os.path.isfile(mixed) and not os.path.isfile(stale_mixed), "mixed 系应清理（CEO C1 语义迁移）"
+    assert not os.path.isfile(raw_vocals), "原始分离人声应清理"
+    assert os.path.isfile(inst), "_Instrumental 必须保留（MDX 缓存件）"
+    assert os.path.isfile(other), "跨歌产物不触碰"
+
+
+def test_retain_v2_dispatch_has_keep_flag():
+    """派发 cmd 含 -k（主跑原生清理禁用——inst=False 根因的源头修复）。"""
+    import ast as _ast
+    src = Path("utils/cover_worker.py").read_text(encoding="utf-8")
+    assert '"-k",' in src, "派发未加 -k（主跑会删 _Instrumental——inst=False 复发）"
+    assert "_postprocess_fallback" not in src.replace(
+        "_postprocess_fallback/_locate_cover_sources/_postprocess_code 退役", ""
+    ), "补刀调用残留（退役未完成）"
+
+
+def job_path_stem(job):
+    return os.path.splitext(os.path.basename(job["song_path"]))[0]

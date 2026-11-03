@@ -216,134 +216,21 @@ def q_dir_stub(song_output_root):
     return q
 
 
-class TestPostprocessFallbackR4:
-    """r4 补刀重写守卫(纯后缀匹配/半成品防御/参数链定位)。"""
-
-    def _job(self, song_path):
-        return {"song": os.path.splitext(os.path.basename(song_path))[0],
-                "song_path": song_path, "retries_left": 0,
-                "started_at": __import__("time").time() - 10}
-
-    def test_suffix_match_finds_instrumental_and_backup(self, tmp_path):
-        """纯后缀匹配:补刀定位不依赖 stem 反推(rsplit _pro 截断缺陷回归守卫)。"""
-        root, src = _make_sources(tmp_path)
-        q = q_dir_stub(root)
-        located = q._locate_cover_sources(self._job(src["vocal"]))
-        assert located is not None, "三件套应定位成功(纯后缀匹配)"
-        vocal, backup, inst, work_dir = located
-        assert os.path.samefile(vocal, src["vocal"])
-        assert os.path.samefile(backup, src["backup"])
-        assert os.path.samefile(inst, src["inst"])
-
-    def test_mono_stereo_variant_covered(self, tmp_path):
-        """Eng E-1/mono _stereo 变体:后缀匹配天然覆盖(拼名口径会漏)。"""
-        root, src = _make_sources(tmp_path, stereo=True)
-        q = q_dir_stub(root)
-        located = q._locate_cover_sources(self._job(src["vocal"]))
-        assert located is not None, "mono _stereo 变体应被后缀匹配覆盖"
-
-    def test_stale_mixed_removed_before_locate(self, tmp_path):
-        """CEO C1/Eng E-1 时序陷阱:伪造比 vocal 更新的残留 mixed——应被删除且
-        vocal 定位仍命中参数链文件(半成品不混入成品)。"""
-        root, src = _make_sources(tmp_path)
-        stale_mixed = src["vocal"].replace(".wav", "_mixed.wav")
-        open(stale_mixed, "wb").write(b"PARTIAL")  # 比 vocal 更新(后写)
-        import time as _t
-        _t.sleep(0.02)
-        q = q_dir_stub(root)
-        located = q._locate_cover_sources(self._job(src["vocal"]))
-        assert located is not None
-        assert not os.path.isfile(stale_mixed), "残留半成品 mixed 应已被 CEO C1 删除"
-
-    def test_cross_song_isolation(self, tmp_path):
-        """Eng E-5/串歌隔离:另一 hash 目录的同名三件套不命中。"""
-        root, src = _make_sources(tmp_path)
-        # 串歌目录:另一 hash,同名文件
-        other = tmp_path / "song_output" / "deadbeefcafe"
-        other.mkdir(parents=True, exist_ok=True)
-        (other / "陈奕迅 - 最佳损友_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav").write_bytes(b"x")
-        q = q_dir_stub(root)
-        located = q._locate_cover_sources(self._job(src["vocal"]))
-        assert located is not None
-        assert os.path.samefile(located[0], src["vocal"]), "vocal 应命中目标 hash 目录而非串歌目录"
-
-    def test_abort_when_instrumental_missing(self, tmp_path):
-        """Eng T-1/abort 路径:缺伴奏轨→明确 None(不落半成品 final)。"""
-        root, src = _make_sources(tmp_path)
-        os.remove(src["inst"])  # 删伴奏
-        q = q_dir_stub(root)
-        located = q._locate_cover_sources(self._job(src["vocal"]))
-        assert located is None, "缺伴奏应返回 None(明确中止)"
-
-
 class TestFaulthandlerSymmetry:
-    """R-2/CEO C2:主跑+补刀 subprocess env 对称挂 PYTHONFAULTHANDLER。"""
+    """R-2：主跑 subprocess env 挂 PYTHONFAULTHANDLER（C5 补刀退役后仅主跑侧，
+    崩溃可诊断性保留）。"""
 
     def test_main_run_env_has_fault_handler(self, tmp_path, monkeypatch):
-        """主跑 cmd env 含 PYTHONFAULTHANDLER=1(R-2 对称)。"""
+        """主跑 cmd env 含 PYTHONFAULTHANDLER=1（R-2）。"""
         import inspect
         src = inspect.getsource(CoverQueue._process)
         assert "FAULTHANDLER_ENV" in src, "主跑 env 未挂 faulthandler"
-        src_fb = inspect.getsource(CoverQueue._postprocess_fallback)
-        assert "FAULTHANDLER_ENV" in src_fb, "补刀 env 未对称挂 faulthandler"
+        assert "_postprocess_fallback" not in src.replace(
+            "_postprocess_fallback/_locate_cover_sources/_postprocess_code 退役", ""
+        ), "补刀调用残留（C5 退役未完成）"
         # 模块级常量值正确
         from utils.cover_worker import FAULTHANDLER_ENV
         assert FAULTHANDLER_ENV == {"PYTHONFAULTHANDLER": "1"}
-
-    def test_param_chain_regex_signature(self):
-        """Eng E-1:参数链正则=唯一不受歌名污染/mtime 影响的 vocal 签名。"""
-        from utils.cover_worker import _VOCAL_PARAM_RE
-        good = "陈奕迅 - 最佳损友_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
-        neg_pitch = "陈奕迅 - 最佳损友_autolive_WY_p-2_i0.75_fr3_rms0.25_pro0.33_rmvpe.wav"
-        crepe = "song_autolive_WY_p0_i0.75_fr3_rms0.25_pro0.33_mangio-crepe_hop.wav"
-        assert _VOCAL_PARAM_RE.search(good)
-        assert _VOCAL_PARAM_RE.search(neg_pitch)
-        assert _VOCAL_PARAM_RE.search(crepe)
-        # mixed 排除在 _locate_cover_sources 循环侧(签名对 mixed 尾巴仍匹配,
-        # 排除靠文件名 'mixed' 过滤——test_stale_mixed_removed 已锁该行为)
-
-    def test_arg_passing_code_form(self):
-        """Eng E-2:补刀代码串路径经 sys.argv 传入(非 r 引号内插)。"""
-        import inspect
-        code = CoverQueue._postprocess_code(object())
-        assert "sys.argv[1:5]" in code, "补刀代码 argv 切片错误(应为 [1:5]:-c 占 0,参数从 1 起)"
-        triple = "'" * 3
-        assert ("r" + triple) not in code, "路径内插形态回归"
-
-
-class TestCacheReuseSemantics:
-    """R-5 真根因回归锁（2026-11-02 r5 批次）：AICoverGen 同曲重翻时 song_dir
-    缓存命中（跳过 MDX/RVC）→主跑崩在 effects→vocal 为旧文件（mtime 早于本轮
-    started_at）——补刀不得用 mtime 守卫排除缓存产物。"""
-
-    def test_cached_vocal_found_despite_old_mtime(self, tmp_path):
-        """vocal mtime 早于 started_at（缓存命中）→仍定位命中。"""
-        import time as _t
-        root, src = _make_sources(tmp_path)
-        q = q_dir_stub(root)
-        # started_at 设在未来（比 vocal 的 mtime 新）——模拟"本轮无新增产物"
-        job = {"song": os.path.splitext(os.path.basename(src["vocal"]))[0],
-               "song_path": src["vocal"], "retries_left": 0,
-               "started_at": _t.time() + 3600}
-        located = q._locate_cover_sources(job)
-        assert located is not None, (
-            "缓存复用场景下 started_at 守卫不应排除旧 vocal（R-5 真根因回归）")
-        vocal, backup, inst, work_dir = located
-        assert os.path.samefile(vocal, src["vocal"])
-
-    def test_stale_mixed_deleted_regardless_of_mtime(self, tmp_path):
-        """旧半成品 mixed（mtime 早）也删——全量删不留漏网。"""
-        root, src = _make_sources(tmp_path)
-        stale = src["vocal"].replace(".wav", "_mixed.wav")
-        open(stale, "wb").write(b"PARTIAL")
-        import os as _os
-        _os.utime(stale, (1, 1))  # mtime 设为极旧
-        q = q_dir_stub(root)
-        job = {"song": "x", "song_path": src["vocal"], "retries_left": 0,
-               "started_at": __import__("time").time()}
-        q._locate_cover_sources(job)
-        assert not os.path.isfile(stale), "旧半成品 mixed 应被全量删除"
-
 
 class TestR6SuccessCondition:
     """R-6 真根因回归锁（/investigate 五轮链终点）：主跑崩(rc!=0)+补刀产出
@@ -401,9 +288,7 @@ class TestR6SuccessCondition:
         cw.subprocess.Popen = lambda *a, **k: fake_proc
         produced_file = os.path.join(song_dir, "song (autolive_WY Ver).wav")
         open(produced_file, "wb").write(b"RIFF" + b"0" * 64)
-        fb_orig = CoverQueue._postprocess_fallback
         find_orig = CoverQueue._find_produced_wav
-        CoverQueue._postprocess_fallback = lambda self, job: None
         CoverQueue._find_produced_wav = lambda self, job: (
             produced_file if os.path.isfile(produced_file) else None)
         fail_calls = []
@@ -421,7 +306,6 @@ class TestR6SuccessCondition:
             gp.background_task_gate = gp_orig
             cw.FAULTHANDLER_ENV = env_orig
             cw.subprocess.Popen = popen_orig
-            CoverQueue._postprocess_fallback = fb_orig
             CoverQueue._find_produced_wav = find_orig
             CoverQueue._fail = fail_orig
             CoverQueue._retain_split_tracks = retain_orig

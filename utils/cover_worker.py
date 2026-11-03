@@ -272,6 +272,12 @@ class CoverQueue:
             self._rt_python(), "-c", self._bootstrap_code(),
             "--", "-i", job["song_path"], "-dir", f"autolive_{profile}",
             "-p", pitch, "-ir", "0.75", "-palgo", "rmvpe", "-oformat", "wav",
+            # 分轨保留 v2（2026-11-03 补刀退役批次）：-k 保留中间产物——主跑
+            # 原生清理（main.py:311-318）会删 _Instrumental.wav 等 5 件，是
+            # 「分轨定位不全 inst=False」警告的根因（崩溃时代 pipeline 未走完
+            # 才留得下）；分轨复制后由 _retain_split_tracks 自清理（保留
+            # _Instrumental 作 MDX 缓存件）。
+            "-k",
         ]
         env = os.environ.copy()
         env.setdefault("AUTOLIVE_COVER_OUT", self._covers_dir())
@@ -310,17 +316,15 @@ class CoverQueue:
             return
         logger.info(f"[cover] 主跑结束 rc={rc}：{song}（输出: {run_log}）")
         if rc != 0:
-            # C7 ②崩溃场景（spec CL-2 挂点）：主跑已死（access violation 常态）
-            # taskkill 对死 PID 的 /T 无法枚举孙进程——psutil 双条件扫描收尸
+            # C7 ②崩溃场景（spec CL-2 挂点）：主跑已死——psutil 双条件扫描收尸
+            # （收尸与产物成败解耦：崩溃≠失败，produced 判定在下方）
             if hasattr(self, "proc") and self.proc and self.proc.poll() is not None:
                 self._reap_process_tree(self.proc)
-            # R-9 日志语义修正（2026-11-02 r4 批次）：pedalboard effects 段崩溃
-            # （四连崩实证）是已知设计路径——主跑崩→补刀接管产出成品。它不是
-            # 故障，ERROR 级会误导用户；尾部输出仍落主跑日志文件供诊断。
+            # 非零 rc 尾部落日志供诊断（C5 补刀退役 2026-11-03：runtime312 下
+            # 主跑 rc 稳定为 0，崩溃路径已退役；此分支仅剩异常环境兜底诊断）
             try:
                 tail = open(run_log, encoding="utf-8", errors="replace").read()[-800:]
-                logger.info(f"[cover] 主跑崩溃（已知，pedalboard effects 段，补刀接管）"
-                            f"尾部输出:\n{tail}")
+                logger.info(f"[cover] 主跑非零 rc，尾部输出:\n{tail}")
             except Exception:
                 pass
         # 原子落位（S-4）：AICoverGen 输出在 song_output/，找到成品移到 covers/
@@ -335,22 +339,17 @@ class CoverQueue:
                     if os.path.getmtime(full) > job.get("started_at", 0):
                         listing.append(os.path.relpath(full, out_root))
             logger.info(f"[cover] song_output 本轮新增产物 {len(listing)} 个: {listing[:8]}")
-        if rc != 0 or not produced:
-            # 后处理补刀（/autoplan 2026-10-14 翻唱实跑发现）：py39 runtime 下
-            # torch 加载后 pedalboard C++ 同进程崩溃（rc=139，三次复现）——主跑
-            # 死在效果链时 RVC 中产物已在，用干净进程（零 torch）补 effects+mix。
-            self._postprocess_fallback(job)
-            produced = self._find_produced_wav(job)
-        # R-6 真根因修（2026-11-02 r4 实测批次，/investigate 五轮链终点）：
-        # 成功条件=成品存在（produced），不要求主跑 rc==0——补刀的存在意义就是
-        # "主跑崩（pedalboard 四连崩）→补刀接管"，rc==0 门槛会把补刀的成功成果
-        # 否决为失败（日志实证：两次"补刀完成"紧跟两次 _fail）。rc 仅作诊断日志。
+        # C5 补刀退役（2026-11-03 用户确认：runtime312 主跑多次实测 rc=0 稳定，
+        # pedalboard 崩溃路径随解释器切换根治——补刀兜底链
+        # _postprocess_fallback/_locate_cover_sources/_postprocess_code 退役删除，
+        # git revert 16767949 可回滚）。R-6 语义保留：成功条件=成品存在
+        #（produced），rc 仅作诊断日志。
         if produced:
             tmp = cover + ".tmp.wav"
             shutil.copy2(produced, tmp)
             os.replace(tmp, cover)
             logger.info(f"[cover] 完成: {song} → {cover}"
-                        f"{'（主跑崩溃，补刀接管）' if rc != 0 else ''}")
+                        f"{'（主跑非零 rc，产物有效）' if rc != 0 else ''}")
             # R6 分轨保留（/autoplan 2026-10-23 批次）：人声轨+伴奏轨复制入 covers/
             # 供 SongMode 双轨播放（人声驱动 EDTalk 对口型+伴奏外放）；缺失静默
             # （feature_handler._song_covers_hit 自动降级整轨）。
@@ -446,177 +445,75 @@ class CoverQueue:
                            f"--query-compute-apps=pid,process_name,used_memory --format=csv")
 
     def _retain_split_tracks(self, job: Dict, cover: str):
-        """R6 分轨保留：从 song_output 定位本次任务的 ai_vocals（RVC 人声）与
-        *_Instrumental.wav（伴奏），复制为 covers/<成品base>_vocal.wav / _inst.wav。
-        定位失败（上游产物名变化）仅告警不失败——播放侧自动降级整轨成品。"""
+        """分轨保留 v2（2026-11-03 补刀退役批次重写）：从 song_output 定位本次
+        任务的 RVC 人声（参数链产物）与 *_Instrumental.wav（MDX 伴奏），复制为
+        covers/<成品base>_vocal.wav / _inst.wav，供 SongMode 双轨播放（人声驱动
+        EDTalk 对口型+伴奏外放）；缺失告警不失败——播放侧自动降级整轨成品。
+
+        v2 变更（修复「分轨定位不全 inst=False」警告）：
+        - 派发加 -k（主跑原生清理 main.py:311-318 会删 _Instrumental 等 5 件，
+          是 inst=False 的根因——崩溃时代 pipeline 未走完才留得下）；
+        - 无 mtime 门槛（R-5 同源教训：同曲缓存重翻时产物 mtime 早于
+          started_at，mtime 守卫会排除正确应复用的产物）；
+        - stem 匹配隔离（跨歌防串台，替代 mtime 圈定）；
+        - 复制后自清理：删本次 stem 的全部中间 wav（含主跑残留 mixed 半成品，
+          CEO C1 语义迁移），**仅保留 *_Instrumental.wav**（MDX 最慢环节的
+          缓存件——缓存重翻时跳过 MDX；vocal 源删后缓存重翻由 RVC 重产）。
+        定位失败仅告警不失败。"""
         try:
             out_root = os.path.join(self._aicovergen_src(), "..", "song_output")
             if not os.path.isdir(out_root):
                 return
-            started = job.get("started_at", 0)
+            stem = os.path.splitext(os.path.basename(job.get("song_path") or ""))[0]
+            if not stem:
+                logger.warning("[cover] 分轨保留中止：job 无 song_path（stem 不可得）")
+                return
             vocal = inst = None
+            matched: List[str] = []  # 本次 stem 的全部产物（清理候选）
             for dirpath, _, filenames in os.walk(out_root):
                 for fn in filenames:
-                    if not fn.endswith(".wav"):
+                    if not fn.endswith(".wav") or not fn.startswith(stem):
                         continue
                     full = os.path.join(dirpath, fn)
-                    if os.path.getmtime(full) <= started:
+                    matched.append(full)
+                    if fn.endswith("_Instrumental.wav"):
+                        if inst is None or os.path.getmtime(full) > os.path.getmtime(inst):
+                            inst = full  # 最新者胜（多轮同曲取最新）
                         continue
-                    low = fn.lower()
-                    if "mixed" in low or " ver)." in low or "_inst.wav" in low or "_vocal.wav" in low:
-                        continue
-                    if low.endswith("_instrumental.wav") and inst is None:
-                        inst = full
-                    elif "_p" in fn and "_i" in fn and vocal is None:
-                        m = os.path.getmtime(full)
-                        if vocal is None or m > os.path.getmtime(vocal):
-                            vocal = full
+                    if "mixed" in fn.lower():
+                        continue  # mixed 半成品/成品（covers 已有），不作战 vocal
+                    if _VOCAL_PARAM_RE.search(fn):
+                        if vocal is None or os.path.getmtime(full) > os.path.getmtime(vocal):
+                            vocal = full  # RVC 人声（参数链签名，Eng E-1 单源）
             base = os.path.splitext(cover)[0]
             if vocal and os.path.isfile(vocal):
                 shutil.copy2(vocal, base + "_vocal.wav")
             if inst and os.path.isfile(inst):
                 shutil.copy2(inst, base + "_inst.wav")
+            # 自清理：本次 stem 的中间产物（inst 源除外——MDX 缓存件；mixed
+            # 半成品一并清，CEO C1 语义迁移自退役的 _locate_cover_sources）
+            cleaned = 0
+            for full in matched:
+                if full == inst:
+                    continue
+                try:
+                    os.remove(full)
+                    cleaned += 1
+                except OSError:
+                    pass
+            if cleaned:
+                logger.debug(f"[cover] 分轨自清理：本次任务中间产物 {cleaned} 个"
+                             f"（_Instrumental 保留为 MDX 缓存件）")
             if vocal and inst:
                 logger.info(f"[cover] 分轨保留: {base}_vocal.wav + _inst.wav")
             else:
-                logger.warning(f"[cover] 分轨定位不全（vocal={vocal is not None}, inst={inst is not None}），播放将走整轨降级")
+                logger.warning(
+                    f"[cover] 分轨定位不全（vocal={vocal is not None}, "
+                    f"inst={inst is not None}），播放将走整轨降级"
+                    f"——stem={stem!r}；核对派发 -k 是否生效与 AICoverGen 产物命名")
         except Exception:
             logger.error("[cover] 分轨保留异常（不影响成品）", exc_info=True)
 
-    def _postprocess_fallback(self, job: Dict):
-        """效果链+混音补刀（零 torch 干净进程）：主跑崩在 effects 段时，
-        ai_vocals 中产物已落盘 song_output——本方法用 pedalboard+pydub 直接
-        补齐 add_audio_effects+combine_audio（逻辑对齐 main.py:213-240，
-        参数同默认值）。成功=成品原子落位 covers/（finder 可命中）。
-
-        T3/R-1（2026-11-02 r4 批次，spec R1 修正口径+CEO C1/C4+Eng A-1/E-1/E-2/E-3）：
-        定位单源 _locate_cover_sources；CEO C1 半成品防御；Eng E-2 argv 传参；
-        Eng E-3 原子落位；R-2 补刀对称挂 faulthandler。"""
-        located = self._locate_cover_sources(job)
-        if located is None:
-            return
-        vocal, backup, inst, work_dir = located
-        final = f"{os.path.splitext(os.path.basename(job['song_path']))[0]} (autolive_{job['profile_id']} Ver).wav"
-        final_path = os.path.join(work_dir, final)
-        final_tmp = final_path + ".tmp.wav"
-        code = self._postprocess_code()
-        env = os.environ.copy()
-        env.update(FAULTHANDLER_ENV)  # R-2/CEO C2：补刀对称挂
-        try:
-            r = subprocess.run(
-                [self._rt_python(), "-c", code, vocal, backup, inst, final_tmp],
-                capture_output=True, text=True, timeout=600, encoding="utf-8",
-                errors="replace", env=env, cwd=self._aicovergen_src(),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            tail = ((r.stdout or "") + (r.stderr or ""))[-800:]  # Eng E-4：对齐主跑
-            if r.returncode == 0 and os.path.isfile(final_tmp) \
-                    and os.path.getsize(final_tmp) > 1024:  # Eng E-3：防空壳
-                os.replace(final_tmp, final_path)
-                logger.info(f"[cover] 补刀完成: {final_path}")
-            else:
-                logger.error(f"[cover] 补刀失败（rc={r.returncode}）尾部: {tail}")
-                if os.path.isfile(final_tmp):
-                    os.remove(final_tmp)  # 半成品 final 不入 covers（Eng E-3）
-        except Exception:
-            logger.error("[cover] 补刀异常", exc_info=True)
-            if os.path.isfile(final_tmp):
-                try:
-                    os.remove(final_tmp)
-                except OSError:
-                    pass
-
-    def _locate_cover_sources(self, job):
-        """补刀三件套定位单源（T3/R-1，Eng A-1：命名约定单点；纯后缀匹配）。
-
-        spec R1 修正口径：旧 rsplit("_p",1) 被 protect 段 _pro0.33 截断（_pro 的
-        _p 比变调 _p0 更靠右）→base 反推必错；且 <rvc_stem>_Instrumental.wav
-        AICoverGen 从不生成（combine 的伴奏=song_dir 的 MDX 原始伴奏）。
-        纯后缀匹配天然绕开 stem 反推+覆盖 mono _stereo 变体；walk 全 song_output
-        +started_at 守卫+参数链正则（Eng E-1：不受歌名污染/mtime 影响）定位 vocal。
-
-        CEO C1：定位**前**先删主跑残留 {stem}_mixed.wav 半成品（崩在 effects
-        写中的部分文件被补刀当已完成混入=坏成品事故）。
-
-        Returns: (vocal, backup, inst, work_dir) 或 None（缺任一=明确日志）。"""
-        song_root = os.path.join(self._aicovergen_root(), "song_output")
-        if not os.path.isdir(song_root):
-            logger.warning("[cover] 补刀中止：song_output 不存在")
-            return None
-        # CEO C1：删主跑残留半成品 mixed——**全量删**（R-5：AICoverGen 缓存复用
-        # 语义下 started_at 守卫会漏删旧半成品；mixed 全部为可重生产物，删安全）
-        for dirpath, _, fns in os.walk(song_root):
-            for fn in fns:
-                if fn.endswith("_mixed.wav"):
-                    full = os.path.join(dirpath, fn)
-                    try:
-                        os.remove(full)
-                        logger.warning(f"[cover] 已删除残留半成品: {full}（CEO C1）")
-                    except OSError:
-                        pass
-        # vocal：参数链正则（Eng E-1 首选）+**无 started_at 守卫**（R-5 真根因修：
-        # AICoverGen 同曲重翻时 song_dir 缓存命中→跳过 MDX/RVC→主跑直接崩在
-        # effects→本轮"新增产物 0 个"——旧 vocal 是缓存语义下正确应复用的产物，
-        # mtime 守卫会把它排除=补刀恒中止。参数链正则已足够精准：文件名含
-        # 模型名+全参数链，同歌同参=同一 vocal 文件，跨参数/跨歌不冲突）。
-        # 最新者胜：缓存场景多轮同参产物相同，取最新保持确定性。
-        vocal, vocal_m = None, 0
-        for dirpath, _, fns in os.walk(song_root):
-            for fn in fns:
-                if not fn.endswith(".wav") or "mixed" in fn.lower() \
-                        or fn.endswith("_Instrumental.wav") or fn.endswith("_inst.wav") \
-                        or fn.endswith("_vocal.wav") or fn.endswith("_Vocals_Backup.wav"):
-                    continue
-                if not _VOCAL_PARAM_RE.search(fn):
-                    continue
-                full = os.path.join(dirpath, fn)
-                m = os.path.getmtime(full)
-                if m > vocal_m:
-                    vocal, vocal_m = full, m
-        if not vocal:
-            logger.warning("[cover] 补刀中止：未找到 RVC 中产物（参数链签名无命中）")
-            return None
-        work_dir = os.path.dirname(vocal)
-        # 伴奏/备份：纯后缀匹配（vocal 同目录=hash 隔离防串歌；词序=Vocals_Backup）
-        inst = backup = None
-        for fn in os.listdir(work_dir):
-            full = os.path.join(work_dir, fn)
-            if fn.endswith("_Instrumental.wav") and inst is None:
-                inst = full
-            elif fn.endswith("_Vocals_Backup.wav") and backup is None:
-                backup = full
-        if not inst or not backup or not os.path.isfile(inst) or not os.path.isfile(backup):
-            logger.warning(f"[cover] 补刀中止：缺伴奏/备份轨（inst={inst is not None}, "
-                           f"backup={backup is not None}）——song_dir={work_dir}")
-            return None
-        return vocal, backup, inst, work_dir
-
-    def _postprocess_code(self) -> str:
-        """零 torch 后处理代码串（Eng E-2：路径经 sys.argv 传入——r''' 内插在
-        歌名含连续单引号/尾随反斜杠时静默死）：效果链（高通+压缩+混响，
-        main.py:217-223 同参）+三轨混音（main -4dB/backup -6dB/inst -7dB，
-        main.py:236-240 同语义）。final 由父进程 .tmp 落位+os.replace 原子化
-        （Eng E-3）；effects 强制重写（CEO C1：父侧已删半成品 mixed）。"""
-        return """
-import os, sys
-ai_vocals, backup, inst, final = sys.argv[1:5]
-from pedalboard import Pedalboard, HighpassFilter, Compressor, Reverb
-from pedalboard.io import AudioFile
-from pydub import AudioSegment
-mixed = os.path.splitext(ai_vocals)[0] + '_mixed.wav'
-if os.path.isfile(mixed):
-    os.remove(mixed)  # CEO C1：主跑残留半成品强制重写
-board = Pedalboard([HighpassFilter(), Compressor(ratio=4, threshold_db=-15),
-                    Reverb(room_size=0.15, dry_level=0.8, wet_level=0.2, damping=0.7)])
-with AudioFile(ai_vocals) as f, AudioFile(mixed, 'w', f.samplerate, f.num_channels) as o:
-    while f.tell() < f.frames:
-        chunk = f.read(int(f.samplerate))
-        o.write(board(chunk, f.samplerate, reset=False))
-main_v = AudioSegment.from_wav(mixed) - 4
-back_v = AudioSegment.from_wav(backup) - 6
-inst_v = AudioSegment.from_wav(inst) - 7
-main_v.overlay(back_v).overlay(inst_v).export(final, format='wav')
-print('POSTPROCESS_OK')
-"""
 
     def _fail(self, job: Dict, policies: dict, timeout: bool = False):
         if job["retries_left"] > 0:
