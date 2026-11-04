@@ -133,7 +133,11 @@ def register_choreography_routes(app, config) -> None:
                 "fix": "重启运行系统后重试"})
         result = ch.apply_config(node)
         persisted = False
-        if result.get("applied"):
+        # 持久化条件（C5-1 语义，2026-11-04 实测校正）：applied（换装成功）或
+        # edtalk_unreachable（已保存、暂未生效）——后者曾漏写盘致配置期改动
+        # （默认画面池/单段段）静默丢失+前端假成功文案。409（序列执行中）与
+        # worker 启动失败（已回滚）不持久化——防写回未生效状态。
+        if result.get("applied") or result.get("reason") == "edtalk_unreachable":
             persisted = _write_choreography_section(node)
             if not persisted:
                 logger.error("[choreography] 运行时已应用但持久化失败（重启丢失）")

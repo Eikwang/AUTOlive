@@ -60,15 +60,13 @@ def create_choreography_tab(
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     # ==================================================================
-    # 卡片 1：动作素材管理（添加 / 删除 / 清单）
+    # 卡片 1：动作素材创建（添加表单 / 预处理任务状态）
     # ==================================================================
     with ui.card().style(card_css):
-        with ui.row().style("width:100%;align-items:center;gap:12px"):
-            ui.label("动作素材管理（画面资产库）").style("font-size: var(--font-size-title)")
-            mat_status_label = ui.label("").style("color: var(--text-hint)")
-        ui.label("添加：选本地视频 → 指定类型（上场/主线/离场）→ 勾选口型推理决定预处理链"
+        ui.label("动作素材创建（画面资产库）").style("font-size: var(--font-size-title)")
+        ui.label("选本地视频 → 指定类型（上场/主线/离场）→ 勾选口型推理决定预处理链"
                  "（勾选=拆帧+人脸检测；不勾选=仅拆序列帧，播放时作画外音直通）→ 上线。"
-                 "删除：被编排规则/默认池/段调度引用或正在渲染的素材会被拒绝并给出去处").style(
+                 "预处理耗时与视频长度成正比，完成自动出现在下方素材列表").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
         # 视频选择（文件选择器取代手输路径；防重入沿训练页 LocalFilePicker 模式）
@@ -114,7 +112,6 @@ def create_choreography_tab(
             mat_add_btn = ui.button("添加素材", on_click=lambda: _publish_material())
 
         mat_task_label = ui.label("").style("color: var(--text-hint); white-space: pre-wrap")
-        mat_list_slot = ui.column().style("width:100%")
 
         async def _publish_material():
             video = _picked_video[0]
@@ -225,6 +222,18 @@ def create_choreography_tab(
                     msg += f"；{mig['conflicts']} 个素材存在跨类引用，需在列表中人工改类型"
                 ui.notify(position="top", type="info", message=msg, duration=8)
             _render_materials(items)
+            # 素材清单变化 → 规则区重渲染（_seg_options/_def_pool 选项源同步）。
+            # 曾仅 8s timer 晚到且到达后不重渲染规则区——规则/覆盖档下拉停在
+            # 构建期空集，「加一档」无法选择新片段（2026-11-04 erro 批次）。
+            # 签名比对：清单未变不重渲染，防 8s 心跳折叠/打断编辑中控件。
+            sig = tuple(sorted((str(it.get("segment")), str(it.get("type") or "main"))
+                               for it in items))
+            if sig != _choreo_avail.get("typed_sig"):
+                _choreo_avail["typed_sig"] = sig
+                try:
+                    _render_rules()
+                except NameError:
+                    pass
 
         def _render_materials(items: list):
             """素材库三列显示（2026-10-27 用户裁决：上场/主线/离场三列分离，
@@ -356,14 +365,29 @@ def create_choreography_tab(
                 ui.notify(position="top", type="warning",
                           message=f"删除被拒（HTTP {resp.status_code}）：{detail}")
 
-        ui.button("刷新清单", on_click=_refresh_materials).props("flat")
         ui.timer(2.0, _poll_task)
+
+    # ==================================================================
+    # 卡片 2：素材列表（清单 / 引用状态 / 改类型·重处理·删除操作）
+    # ==================================================================
+    with ui.card().style(card_css):
+        with ui.row().style("width:100%;align-items:center;gap:12px"):
+            ui.label("素材列表").style("font-size: var(--font-size-title)")
+            mat_status_label = ui.label("").style("color: var(--text-hint)")
+            ui.button("刷新清单", on_click=_refresh_materials).props("flat")
+        ui.label("删除：被编排规则/默认池/段调度引用或正在渲染的素材会被拒绝并给出去处；"
+                 "「改类型」即时生效并同步规则步骤下拉候选").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
+        mat_list_slot = ui.column().style("width:100%")
         ui.timer(8.0, lambda: asyncio.create_task(_refresh_materials()))
 
     # ==================================================================
     # 卡片 2：编排规则管理（自画面设置页迁移；行为不变）
     # ==================================================================
     _choreo_avail = {"segments": [], "voiceover": set(), "typed": {}}
+    # 规则展开状态（重渲染保留——素材清单到达/变化触发 _render_rules 重渲染
+    # 同步下拉选项源，不折叠用户正在编辑的规则）
+    _rule_expanded: set = set()
 
     def _default_rule():
         """新语义规则（R-ceo4：pred_version=new——时长/音轨由系统接管）。"""
@@ -432,11 +456,17 @@ def create_choreography_tab(
                 is_new = str(rule.get("pred_version", "legacy")) == "new"
                 tiers = rule.get("emotion_tiers") or []
                 tier_note = f" · {len(tiers) + 1} 档" if tiers else ""
+                rid = str(rule.get('rule_id') or ('#' + str(idx + 1)))
                 with ui.expansion(
-                    f"规则 {rule.get('rule_id') or ('#' + str(idx + 1))}"
+                    f"规则 {rid}"
                     f"（{rule.get('trigger_type', '?')} · {rule.get('match') or '任意'}）"
                     f"{' · 新语义' if is_new else ' · 存量语义（重存后转新）'}{tier_note}"
-                ).style("width:100%"):
+                ).style("width:100%") as _exp:
+                    # 展开状态保留（清单变化重渲染不折叠编辑中的规则）
+                    if rid in _rule_expanded:
+                        _exp.value = True
+                    _exp.on_value_change(lambda e, r=rid: (
+                        _rule_expanded.add(r) if e.value else _rule_expanded.discard(r)))
                     if not is_new:
                         ui.label("⚠ 存量语义规则：维持旧时长/音轨判定直至本页重存；"
                                  "重存后转新语义（时长=素材时长，音轨由系统判断）").style(
@@ -571,7 +601,11 @@ def create_choreography_tab(
                 for n in ("enter", "main", "exit"):
                     cur = str(ov.get(n, "") or "")
                     ui.select(
-                        options=dict([("（继承基础档）", "")] + list(_seg_options(cur).items())),
+                        # NiceGUI dict options 语义=键为值/值为标签：哨兵须为 ("", 标签)——
+                        # 曾反写为 ("（继承基础档）", "")，空覆盖档 value="" 不在键中
+                        # → ValueError: Invalid value:（erro2.log；选中哨兵还会把字面
+                        #   文本写进 segment_overrides）。留空=沿用基础档语义不变。
+                        options=dict([("", "（继承基础档）")] + list(_seg_options(cur).items())),
                         value=cur,
                         label={"enter": "上场", "main": "主线", "exit": "离场"}[n],
                         on_change=lambda e, o=ov, k=n: (
@@ -632,12 +666,29 @@ def create_choreography_tab(
                     msg += f"，缺失段 {missing}"
                 if not data.get("persisted"):
                     msg += "（⚠ 持久化失败：重启后丢失）"
+                else:
+                    # webui 内存快照对齐（2026-11-04）：main 进程落盘后本进程
+                    # Settings 不自动 reload，刷新页面 deepcopy 到旧值=「保存后
+                    # 又变默认」。仅对齐内存不落盘——choreography 节磁盘唯一
+                    # 写者=main 进程（写者矩阵），本进程 save 不触碰该节。
+                    try:
+                        from frontend.config.settings import get_config
+                        get_config().set("choreography",
+                                         value=_copy.deepcopy(choreo_node))
+                    except Exception:
+                        pass
                 ui.notify(position="top", type="positive", message=msg)  # 已生效
             elif resp.status_code == 503:
-                # R-dsg6 两态提示（R-eng6① C5-1 语义）：已保存但 EDTalk 不可达暂未生效
+                # C5-1 两态提示（2026-11-04 实测校正）：后端对 EDTalk 不可达已
+                # 持久化（reason=edtalk_unreachable），文案与实际对齐——曾无差别
+                # 报「已保存」而实际未写盘（假成功）
                 detail = data.get("message") or "EDTalk 不可达"
-                ui.notify(position="top", type="warning", duration=8,
-                          message=f"已保存、暂未生效（EDTalk 不可达，就绪后重试应用）：{detail}")
+                if data.get("persisted"):
+                    ui.notify(position="top", type="warning", duration=8,
+                              message=f"已保存、暂未生效（EDTalk 不可达，就绪后重试应用即生效）：{detail}")
+                else:
+                    ui.notify(position="top", type="negative", duration=8,
+                              message=f"未保存（持久化失败，配置未变更）：{detail}")
             else:
                 detail = data.get("message") or (resp.json() or {}).get("detail", {})
                 ui.notify(position="top", type="warning",
@@ -685,14 +736,13 @@ def create_choreography_tab(
                 choreo_status_label.text + " · ⚠ EDTalk 未就绪（规则未校验生效）").style(
                 "color: var(--color-warning)")
 
+    # ==================================================================
+    # 卡片 3：默认画面（空闲轮播——EDTalk 段调度器承载）
+    # ==================================================================
     with ui.card().style(card_css):
-        with ui.row().style("width:100%;align-items:center;gap:12px"):
-            ui.label("编排规则（事件驱动画面序列）").style("font-size: var(--font-size-title)")
-            choreo_status_label = ui.label("状态：未轮询").style("color: var(--text-hint)")
-        ui.label("打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 触发次数轮换档位。"
-                 "改动后点『应用』= 校验 + 热生效 + 写回 config（重启后按 config 装载）。"
-                 "⚠ 触发命中立即切换，无最短保持保护（最短再触发间隔/序列最小展示已按"
-                 "用户裁决退役；去重由弹幕层承担）——R-dsg7/R-ceo5").style(
+        ui.label("默认画面（空闲轮播）").style("font-size: var(--font-size-title)")
+        ui.label("无事件触发时数字人画面的承载方式（序列结束后恢复）。"
+                 "改动后点『应用』= 校验 + 热生效 + 写回 config（与编排规则整节同一次提交）。").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
         # 默认画面模式（计数窗口已退役——2026-10-31 审查批次，
         # 触发计次不再随时间衰减，控件与键移除）
@@ -753,6 +803,23 @@ def create_choreography_tab(
             _def_single_select.update()
 
         _def_pool_select.on_value_change(lambda _e: _refresh_def_single_options())
+        with ui.row().style("width:100%;align-items:center;gap:10px;margin-top:4px"):
+            ui.button("应用（校验+热生效+写回）", on_click=_apply_choreography).props("outline")
+            ui.label("EDTalk 未运行也可保存（就绪后重试应用即生效）").style(
+                "color: var(--text-hint); font-size: var(--font-size-body)")
+
+    # ==================================================================
+    # 卡片 4：编排规则（事件驱动画面序列 + 模拟触发）
+    # ==================================================================
+    with ui.card().style(card_css):
+        with ui.row().style("width:100%;align-items:center;gap:12px"):
+            ui.label("编排规则（事件驱动画面序列）").style("font-size: var(--font-size-title)")
+            choreo_status_label = ui.label("状态：未轮询").style("color: var(--text-hint)")
+        ui.label("打赏/关键词/点歌 → 片段序列（上场→主线→离场）+ 触发次数轮换档位。"
+                 "改动后点『应用』= 校验 + 热生效 + 写回 config（重启后按 config 装载）。"
+                 "⚠ 触发命中立即切换，无最短保持保护（最短再触发间隔/序列最小展示已按"
+                 "用户裁决退役；去重由弹幕层承担）——R-dsg7/R-ceo5").style(
+            "color: var(--text-hint); font-size: var(--font-size-body)")
         ui.label("规则列表").style("font-size: var(--font-size-body)")
         rules_container = ui.column().style("width:100%")
         with ui.row():
@@ -809,4 +876,6 @@ def create_choreography_tab(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
     _render_rules()
+    # 立即拉素材清单（不等 8s timer）：规则/覆盖档/默认池下拉的段候选主源
+    asyncio.create_task(_refresh_materials())
     ui.timer(5.0, _poll_choreo_status)

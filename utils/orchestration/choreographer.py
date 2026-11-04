@@ -1258,10 +1258,16 @@ class ActionChoreographer:
                 status = {}
             segments = set(status.get("available_segments") or [])
             if not segments:
+                # C5-1 语义（2026-11-04 实测校正）：不可达=保存但不生效——
+                # 曾实现为裸 503 applied=False（端点不写盘、前端仍报「已保存」
+                # 假成功），配置期改动（默认画面池/单段段）全部静默丢失。
+                # reason 标记供 api.py 端点区分「该持久化」与 409/worker 失败
+                # 「不该持久化」两种未应用态。
                 return {"applied": False, "status": 503, "enabled_rules": [],
                         "rejected": rejected, "missing_all": [],
-                        "message": "EDTalk 未连接（/status 无可用段）：规则已校验但未生效，"
-                                   "服务就绪后重试应用"}
+                        "reason": "edtalk_unreachable",
+                        "message": "EDTalk 未连接（/status 无可用段）：已保存、暂未生效，"
+                                   "服务就绪后重试应用即校验生效"}
             result = validate_rule_segments(new_cfg.rules, segments)
             enabled_ids = set(result["enabled_rules"])
             # new 规则素材属性解析（R-ceo7/R-eng2/R-eng6③：时长+口型标志从

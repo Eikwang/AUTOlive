@@ -199,6 +199,42 @@ class TestRoutes:
         assert r.status_code == 200  # HTTP 层 200，body.status_code=409（页面按 body 分支）
         assert r.json()["applied"] is False and r.json()["status"] == 409
 
+    def test_rules_persist_on_edtalk_unreachable(self, tmp_path, monkeypatch):
+        """C5-1 语义落盘（2026-11-04 erro 批次根修）：EDTalk 不可达=已保存、
+        暂未生效——曾实现为 503 不写盘+前端照报「已保存」假成功，配置期改动
+        （默认画面片段池/单段模式循环段）全部静默丢失（刷新页面回旧值）。"""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(choreo_api, "_config_path", lambda: str(cfg_file))
+        ch, client_mock = _facade()
+        client_mock.get_status.return_value = {}  # EDTalk 不可达（无可用段）
+        node = _cfg_node(default_segments=["s1"], default_single_segment="s1")
+        client = self._app(ch, node)
+        with patch("utils.orchestration.api._choreographer", return_value=ch):
+            r = client.post("/choreography/rules", json=node)
+        body = r.json()
+        assert body["applied"] is False and body["status"] == 503
+        assert body.get("reason") == "edtalk_unreachable"
+        assert body["persisted"] is True  # 已保存（暂不生效）
+        saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert saved["choreography"]["default_segments"] == ["s1"]
+        assert saved["choreography"]["default_single_segment"] == "s1"
+
+    def test_rules_409_not_persisted(self, tmp_path, monkeypatch):
+        """409（序列执行中）不落盘：防写回未生效状态（与 C5-1 不可达持久化相区分）。"""
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(choreo_api, "_config_path", lambda: str(cfg_file))
+        ch, _ = _facade()
+        ch.engine.on_edtalk_ready(AVAILABLE)
+        ch.on_gift(gift_data())  # sequence
+        client = self._app(ch, _cfg_node())
+        with patch("utils.orchestration.api._choreographer", return_value=ch):
+            r = client.post("/choreography/rules", json=_cfg_node(default_segments=["s9"]))
+        assert r.json()["persisted"] is False
+        saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert "choreography" not in saved
+
     def test_rules_422_non_object(self):
         client = self._app(None, _cfg_node())
         with patch("utils.orchestration.api._choreographer", return_value=None):
