@@ -170,28 +170,35 @@ def create_choose_song_tab(
                 set_config_callback("choose_song", "gift_song_map", value=cfg["gift_song_map"])
 
             def _add_row(gift: str = "", song: str = ""):
-                row_wrap = ui.row().style("width:100%;align-items:center;gap:8px")
-                with row_wrap:
-                    gi = ui.input(label='礼物名', value=gift, placeholder='例如：小火箭').style("width:100%;")
-                    si = ui.input(label='歌曲名', value=song, placeholder='例如：晴天').style("width:100%;")
-                    del_btn = ui.button(icon='delete').props('flat dense round')
+                # 一行四列卡片布局：每条映射为一张独立卡片（礼物名/歌曲名/删除）
+                # 显式挂载到 rows_container，保证按钮点击时新卡片追加到既有卡片之后
+                with rows_container:
+                    # F-1a 设计令牌：边框/圆角/背景走 CSS 变量（裸 rgba 触发样式守卫）
+                    card = ui.element('div').style(
+                        'border:1px solid var(--border-color,#e0e0e0);border-radius:var(--radius-sm,4px);'
+                        'padding:8px;display:flex;flex-direction:column;gap:4px;'
+                        'background:var(--bg-card)')
+                    with card:
+                        gi = ui.input(label='礼物名', value=gift, placeholder='例如：小火箭').props('dense outlined').style("width:100%;")
+                        si = ui.input(label='歌曲名', value=song, placeholder='例如：晴天').props('dense outlined').style("width:100%;")
+                        with ui.row().style('width:100%;justify-content:flex-end;gap:4px'):
+                            del_btn = ui.button(icon='delete').props('flat dense round')
                 live_rows.append((gi, si))
 
                 def _remove_row():
                     live_rows[:] = [r for r in live_rows if r[0] is not gi]
-                    row_wrap.delete()
+                    card.delete()
                     _sync_gift_map()
 
                 del_btn.on_click(_remove_row)
                 gi.on_value_change(lambda e: _sync_gift_map())
                 si.on_value_change(lambda e: _sync_gift_map())
 
-            rows_container = ui.column().style("width:100%;gap:4px")
+            rows_container = ui.element('div').style(
+                'width:100%;display:grid;grid-template-columns:repeat(4, 1fr);gap:8px')
             with rows_container:
                 for _g, _s in dict(get_nested_value(config, "choose_song", "gift_song_map", default={}) or {}).items():
                     _add_row(str(_g), str(_s))
-            with ui.row():
-                ui.button('添加映射', on_click=lambda: _add_row()).props('outline dense')
 
             # CP-6（2026-10-23 TODOS 批次）：歌曲列表 JSON 导入导出（歌曲数多时批量配置）
             def _export_map():
@@ -242,6 +249,7 @@ def create_choose_song_tab(
                 dlg.open()
 
             with ui.row():
+                ui.button('添加映射', on_click=lambda: _add_row()).props('outline dense')
                 ui.button('导出映射', on_click=_export_map).props('outline dense')
                 ui.button('导入映射', on_click=_import_map).props('outline dense')
 
