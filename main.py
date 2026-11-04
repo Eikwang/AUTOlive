@@ -52,6 +52,7 @@ class MainApplication:
         # 初始化状态
         self.is_initialized = False
         self.is_running = False
+        self._start_failed = False  # 启动失败标志：main() 据此 os._exit 阻断僵尸（2026-11-03）
         
         logger.info("主应用程序初始化开始")
     
@@ -256,6 +257,7 @@ class MainApplication:
     def start(self):
         """启动应用程序"""
         if not self.is_initialized:
+            self._start_failed = True
             logger.error("应用程序未初始化，无法启动")
             return
         
@@ -275,7 +277,6 @@ class MainApplication:
             # T4 启动期冒烟自检（/autoplan main-20261031-201249 终门批准批次）：
             # 词表可达/曲源目录/词库桥/串口引用/优先级覆盖——只 warn 不阻断，
             # 后台线程延迟 3s 跑一次（对齐 webui 退役键告知的启动模式）
-            import threading as _smoke_th
             _smoke_cfg = self.config
             def _run_startup_smoke():
                 try:
@@ -283,7 +284,15 @@ class MainApplication:
                     run_startup_smoke(_smoke_cfg)
                 except Exception:
                     pass  # 冒烟失败绝不阻断启动
-            threading.Timer(3.0, _run_startup_smoke, name="startup-smoke").start()
+            # 2026-11-03 根因修复：threading.Timer 不接受 name kwarg（签名仅
+            # interval/function/args/kwargs）——原写法 TypeError 致 start() 整体
+            # 失败→主线程结束→futures 全局 _shutdown 置位→进程滞留半死状态
+            # （fastrag/GSV 全挂，见 main() os._exit 兜底注释）。Timer 是 Thread
+            # 子类：name 于创建后赋值；daemon 化使冒烟线程不阻止进程退出。
+            _smoke_timer = threading.Timer(3.0, _run_startup_smoke)
+            _smoke_timer.name = "startup-smoke"
+            _smoke_timer.daemon = True
+            _smoke_timer.start()
 
             # 启动输入监听
             if self.config.get("talk", "key_listener_enable"):
@@ -301,6 +310,7 @@ class MainApplication:
             self._main_loop()
             
         except Exception as e:
+            self._start_failed = True
             logger.error(f"应用程序启动失败: {traceback.format_exc()}")
             self.stop()
     
@@ -340,10 +350,17 @@ class MainApplication:
             self.web_server.stop_all()
 
         # 停止托管服务（P1-1）：优雅 terminate→kill，状态条随 ServiceRegistry 清空
+        # 2026-11-03：逐服务隔离 try——原整循环单 try 曾被单服务 stop 异常
+        # （GptSovitsInproc 无 stop 的 AttributeError）打断，其后服务全部不停
         try:
             from utils.service_orchestrator import ServiceRegistry
             for svc in ServiceRegistry.instance().all():
-                svc.stop()
+                try:
+                    svc.stop()
+                except Exception:
+                    logger.error(
+                        f"托管服务 {getattr(svc, 'name', type(svc).__name__)} 停止异常: "
+                        f"{traceback.format_exc()}")
         except Exception:
             logger.error(f"托管服务停止异常: {traceback.format_exc()}")
 
@@ -412,6 +429,17 @@ def main():
         logger.error(f"应用程序运行失败: {traceback.format_exc()}")
         app.stop()
         sys.exit(1)
+    finally:
+        # 半死状态阻断（2026-11-03）：启动失败路径 start() 内部吞异常并 stop() 后
+        # 正常返回——主线程随 main() 结束会置 concurrent.futures 全局 _shutdown，
+        # 进程若被任一非守护线程（TTS 引擎/观测线程等）吊住不退出，将滞留
+        # "uvicorn 仍在收单表观运行中、但所有线程池提交永久失败（cannot schedule
+        # new futures after interpreter shutdown）"状态——本轮 fastrag(LLM)/
+        # GPT-SoVITS(TTS) 全挂的次生根源。启动失败必须显式退出进程让 webui
+        # 检测并可重启；正常 Ctrl+C 退出不受影响（_start_failed 仅启动异常/
+        # 未初始化两条路径置位）。
+        if getattr(app, "_start_failed", False):
+            os._exit(1)
 
 
 if __name__ == "__main__":

@@ -149,7 +149,10 @@ class My_handle(metaclass=SingletonMeta):
                     edtalk_client=getattr(My_handle.audio, "edtalk_client", None),
                     audio_enqueue=self.audio_synthesis_handle,
                     thanks_generate=self.event_handler._thanks_generate,
-                    audio_cancel=self.cancel_choreo_audio,  # O8：打断撤旧音轨
+                    # O8：打断撤旧音轨——cancel_choreo_audio 定义于 QueueMixin
+                    # （Audio 混入），宿主是 My_handle.audio 而非 My_handle 自身
+                    # （2026-11-03 修复：原写法 AttributeError 致编排器装配整体失败）
+                    audio_cancel=self.audio.cancel_choreo_audio,
                 )
                 register_choreographer(self.choreographer)
             except Exception as e:

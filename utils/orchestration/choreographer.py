@@ -206,8 +206,11 @@ class ChoreoEngine:
 
     # T4 三强制三（R-ceo5 弹幕源定向例外，Eng F1）：entrance/follow 引擎内类型
     # 专属最小触发间隔（按 trigger_type 全局计时——同类跨规则共享一个计时器，
-    # 间隔内同类全部触发静默忽略；DEFAULT 态与序列态统一生效）。事件流无弹幕层
-    # 去重覆盖，节流必需；常量起步不暴露配置键，实播反馈后评估可配置化。
+    # 间隔内同类全部触发静默忽略；DEFAULT 态与序列态统一生效）。事件流虽经
+    # process_data 六类限入&去重管线（2026-11-04 事实修正：原"无上游去重"表述
+    # 有误——danmaku_consumer 六类均走 process_data），但用户名键去重拦不住
+    # 不同用户集中进场、限入窗口参数可调宽——本节流为不依赖上游配置的防御
+    # 纵深；常量起步不暴露配置键，实播反馈后评估可配置化。
     ENTRANCE_FOLLOW_MIN_INTERVAL_S = 10.0
 
     def __init__(self, cfg: ChoreographyConfig, clock: Callable[[], float] = time.monotonic,

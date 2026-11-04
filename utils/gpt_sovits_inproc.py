@@ -80,6 +80,7 @@ class GptSovitsInproc:
         self._tts_cfg = None                   # TTS_Config 实例（换模复用）
         self._error: str = ""
         self._inferencing = False
+        self._stop_requested = False  # stop() 中止标志：加载完成后不置 READY（防停止后复活）
         self.on_state_change: Optional[Callable[[str, str], None]] = None
         # 合成观测（S8 增补：耗时+首块延迟）
         self.last_synth_ms: int = 0
@@ -111,6 +112,23 @@ class GptSovitsInproc:
             return True
         ok, _msg = self.switch_model("", "")
         return ok
+
+    def stop(self):
+        """托管停止协议（ManagedProcess.stop，main.stop 逐服务调用）：
+        卸载引擎引用释放显存。加载中先置中止标志——加载完成后不置 READY
+        （防停止后"复活"，见 _load）；TTS 引擎内部线程为第三方实现不强杀。
+        2026-11-03：缺失本方法曾致 main.stop() 托管循环 AttributeError 中断，
+        其后服务全部不停。"""
+        self._stop_requested = True
+        self._tts = None
+        self._tts_cfg = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        self._set_state(ST_UNINIT)
 
     @property
     def inferencing(self) -> bool:
@@ -287,8 +305,12 @@ class GptSovitsInproc:
 
     def start(self, blocking: bool = False):
         """异步加载模型（不阻塞主进程启动，胶囊显示 loading）。"""
-        if self.state in (ST_LOADING, ST_READY):
+        # raw_state 判定（2026-11-03 修复）：property state 返回胶囊映射词
+        # （starting/healthy/red），与 ST_LOADING/ST_READY 原词永不相等——
+        # 原守卫恒不拦截，重复 start 会并发起多个加载线程。
+        if self.raw_state() in (ST_LOADING, ST_READY):
             return
+        self._stop_requested = False
         self._set_state(ST_LOADING)
         threading.Thread(target=self._load, daemon=True,
                          name="gsv-inproc-load").start() if not blocking else self._load()
@@ -298,6 +320,12 @@ class GptSovitsInproc:
             t0 = time.time()
             self._tts = self._build_tts()
             self._tts_cfg = self._tts.configs
+            if self._stop_requested:
+                # 加载期间收到 stop()：释放新引擎引用，保持卸载态（防复活）
+                logger.info("[gsv-inproc] 加载完成但已请求停止——释放并保持卸载态")
+                self._tts = None
+                self._tts_cfg = None
+                return
             logger.info(f"[gsv-inproc] 模型加载完成 {time.time() - t0:.1f}s（v2ProPlus 四件套+SV）")
             self._set_state(ST_READY)
         except Exception as e:
