@@ -11,6 +11,11 @@ from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from utils.web_captions import get_captions_manager
 
+# 伴奏起播门等待上限（2026-11-04 人声对齐修复）：覆盖编排静默窗口上限
+# （_CHOREO_MUTE_MAX_WAIT=300s）+ push_full 受理开销；超时照常起播（宁可有
+# 伴奏不悬挂线程，与既有「人声照唱」降级语义对称）。
+_BACKING_START_MAX_WAIT = 360.0
+
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
 # 超上限按异常降级照推（宁可口型出现不丢语音）。
@@ -39,10 +44,17 @@ def routes_to_edtalk(data_json, config) -> bool:
     return is_edtalk_active(config)
 
 
-def _play_backing_local(backing_path: str, volume: float):
+def _play_backing_local(backing_path: str, volume: float, start_event=None):
     """R6 双轨伴奏外放（/autoplan 2026-10-23 批次，EDTalk 激活场景）：点歌伴奏轨
     独立 pyaudio 流本地播放（人声从数字人端出、伴奏本地出——双设备分工），随播完
-    自退。失败仅告警不抛（R6 降级语义=人声照唱，伴奏缺失不黑场；F-S5 可观测）。"""
+    自退。失败仅告警不抛（R6 降级语义=人声照唱，伴奏缺失不黑场；F-S5 可观测）。
+
+    2026-11-04 人声对齐修复：start_event 非 None 时两阶段起播——①准备阶段
+    （AudioSegment 加载/增益/导出/开流，耗时部分）立即执行，吸收人声侧上一句
+    飞行等待；②门放行后 start_stream 起播（playback_manager 在 push_full(vocal)
+    受理返回后置位）。原实现线程启动即写流：伴奏立刻响，而人声被 EDTalk 单飞行句
+    背压（_wait_flight_complete）挡在点歌应答播完之后（实测滞后 5~10s）——R6
+    <0.5s 同步义务被击穿。start_event=None 保持旧语义（open 即起播，兼容直调）。"""
     tmp_path = None
     pa = stream = wf = None
     try:
@@ -61,7 +73,14 @@ def _play_backing_local(backing_path: str, volume: float):
         pa = _pa.PyAudio()
         stream = pa.open(
             format=pa.get_format_from_width(wf.getsampwidth()),
-            channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
+            channels=wf.getnchannels(), rate=wf.getframerate(), output=True,
+            start=(start_event is None))
+        if start_event is not None:
+            # 起播门：等待人声受理锚点（push_full 返回）——超时兜底防悬挂
+            if not start_event.wait(timeout=_BACKING_START_MAX_WAIT):
+                logger.warning(
+                    f"[song] 伴奏起播门超时（{_BACKING_START_MAX_WAIT:.0f}s），照常起播：{backing_path}")
+            stream.start_stream()
         chunk = 1024 * wf.getnchannels() * wf.getsampwidth()
         data = wf.readframes(1024)
         while data:
@@ -162,11 +181,20 @@ class PlaybackMixin:
                         # 本地外放并行起播（粗同步，偏差判据 <0.5s=R6 义务）；伴奏线程
                         # 随文件播完自退，push_full 返回=人声飞行完成。R12 时序：伴奏与
                         # 人声同起，无三路并发（文案播报已在队列前序完成）。
+                        # 2026-11-04 人声对齐修复：两阶段起播——伴奏线程启动即进准备阶段
+                        # （加载/增益/导出/开流），起播门在 push_full(vocal) 受理返回后
+                        # 放行。原实现线程启动即写流（伴奏立刻响），而人声被 EDTalk 单
+                        # 飞行句背压挡在「点歌应答文案」播完之后（时长×1.05+buffer 回落，
+                        # 实测滞后 5~10s）——双轨脱节。现：应答播完 → vocal 受理即出声 →
+                        # 伴奏放行 → 双轨同步起播（偏差≈人声 preroll ~0.3s，<0.5s 恢复）。
                         _backing_path = data_json.get("backing_path") or ""
+                        _backing_gate = None
                         if _backing_path and os.path.isfile(_backing_path):
+                            _backing_gate = threading.Event()
                             threading.Thread(
                                 target=_play_backing_local,
-                                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8)),
+                                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8),
+                                      _backing_gate),
                                 name="song-backing", daemon=True).start()
                         elif data_json.get("backing_path"):
                             logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
@@ -258,9 +286,18 @@ class PlaybackMixin:
                                 if _remaining and _remaining > 0:
                                     _song_choreo.on_song_started(
                                         str(data_json.get("content", ""))[:40], _remaining)
-                        await self.edtalk_client.push_full(
-                            voice_tmp_path, content=data_json.get("content", "")
-                        )
+                        try:
+                            await self.edtalk_client.push_full(
+                                voice_tmp_path, content=data_json.get("content", "")
+                            )
+                        finally:
+                            if _backing_gate is not None:
+                                # 伴奏起播门放行（2026-11-04 人声对齐）：push_full 返回=
+                                # 人声受理（preroll ~0.3s 后出声）→ 伴奏此刻起播，双轨同步。
+                                # 失败也放行（对齐既有降级对称面「人声缺失伴奏照播」+ 防
+                                # 伴奏线程悬挂至超时）。push_full 内部全捕获不抛，finally
+                                # 兜底 CancelledError 等 BaseException 穿透场景。
+                                _backing_gate.set()
                         # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
                         # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
                         # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
@@ -299,10 +336,21 @@ class PlaybackMixin:
                         # 「音频播放器」选择配置退役移除——外部 AUDIO_PLAYER HTTP 客户端
                         # 与 pygame 直播分支随配置一并删除（消费回传/999 暂停-续播/
                         # F3 开播字幕均由 builtin 承接）。
+                        # 2026-11-04 本地整轨（用户优化）：EDTalk 未激活时 song 条目播
+                        # 完整混音成品（full_path，一键翻唱三产物之一，前端预览同源）——
+                        # 原实现仅播人声轨（清唱，伴奏轨在本地路径无消费方）。整轨降级/
+                        # 翻唱自动插播消息本身即整轨（full_path 空→不替换），行为不变；
+                        # full 文件缺失按防呆回退 voice_path。
+                        _local_voice = voice_tmp_path
+                        if data_json.get("type") == "song":
+                            _full = data_json.get("full_path") or ""
+                            if _full and os.path.isfile(_full):
+                                _local_voice = _full
+                                logger.info(f"[song] EDTalk 未激活，整轨播放（前端预览同源）：{_full}")
                         if "insert_index" in data_json:
                             data_json = {
                                 "type": data_json["type"],
-                                "voice_path": voice_tmp_path,
+                                "voice_path": _local_voice,
                                 "content": data_json["content"],
                                 "random_speed": {
                                     "enable": False,
@@ -315,7 +363,7 @@ class PlaybackMixin:
                         else:
                             data_json = {
                                 "type": data_json["type"],
-                                "voice_path": voice_tmp_path,
+                                "voice_path": _local_voice,
                                 "content": data_json["content"],
                                 "random_speed": {
                                     "enable": False,

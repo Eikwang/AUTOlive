@@ -219,7 +219,9 @@ class SynthesisMixin:
                             self.data_priority_insert("等待合成消息", data_json)
                     return
                 # 拼接json数据，存入队列（R6 双轨：backing_path 伴奏轨+音量透传，
-                # /autoplan 2026-10-23 批次——EDTalk 分支伴奏外放/builtin 分支 overlay 混音）
+                # /autoplan 2026-10-23 批次——EDTalk 分支伴奏外放；full_path 完整
+                # 混音成品透传（2026-11-04 本地整轨）：EDTalk 未激活时本地分支播
+                # 完整歌曲（前端预览同源），不再丢伴奏轨只出清唱）
                 data_json = {
                     "type": message['type'],
                     "tts_type": "none",
@@ -227,6 +229,7 @@ class SynthesisMixin:
                     "content": message.get("content", voice_path),
                     "backing_path": _backing,
                     "backing_volume": message.get("backing_volume", 0.8),
+                    "full_path": message.get("full_path") or "",
                 }
                 data_json.update(_choreo_keys)
 

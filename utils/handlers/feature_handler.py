@@ -607,9 +607,15 @@ class FeatureHandler:
                 return (full, None, None)
         return None
 
-    def _song_play_message(self, username, audio_path, backing_path, song_name):
+    def _song_play_message(self, username, audio_path, backing_path, song_name, full_path=""):
         """SongMode 播放入队（R6/R12：song 消息扩展 backing_path 伴奏轨；
-        编排订阅 on_song 保留 WP-10——画面序列接管，音频走 SongMode 原路）。"""
+        编排订阅 on_song 保留 WP-10——画面序列接管，音频走 SongMode 原路）。
+
+        2026-11-04 本地整轨：full_path=完整混音成品（<song>__<profile>.wav，
+        前端预览同源）随消息透传——EDTalk 未激活时播放侧本地分支播整轨而非
+        清唱人声轨（用户优化：一键翻唱三产物=伴奏/人声/完整歌曲，本地无数字人
+        口型需求，直接播完整歌曲）。仅分轨齐全时传值；整轨降级场景 audio_path
+        本身已是完整成品，留空（避免 builtin 收到 full 后仍混入伴奏双声）。"""
         try:
             from utils.orchestration import get_choreographer
             _choreo = get_choreographer()
@@ -627,6 +633,7 @@ class FeatureHandler:
             "voice_path": audio_path,
             "backing_path": backing_path or "",
             "backing_volume": self.my_handle.config.get("choose_song", "backing_volume") or 0.8,
+            "full_path": full_path or "",
         }
         self.my_handle.audio_synthesis_handle(message)
 
@@ -645,10 +652,12 @@ class FeatureHandler:
         hit = self._song_covers_hit(song_name)
         if hit is not None:
             cover_full, vocal, inst = hit
-            # R6 主方案：分轨齐全→人声轨驱动+伴奏外放；缺失→整轨自动降级
+            # R6 主方案：分轨齐全→人声轨驱动+伴奏外放（+整轨随消息透传供本地
+            # 分支播放）；缺失→整轨自动降级（full_path 留空，audio_path 即整轨）
             audio_path, backing = (vocal, inst) if vocal else (cover_full, None)
             logger.info(f"[点歌] 命中翻唱成品: {cover_full}（分轨={'有' if vocal else '无→整轨'}）")
-            self._song_play_message(username, audio_path, backing, song_name)
+            self._song_play_message(username, audio_path, backing, song_name,
+                                    full_path=(cover_full if vocal else ""))
             return True
         logger.info(f"[点歌] 无成品，入队翻唱: {song_name}")
         self._song_enqueue_cover(username, song_name)
