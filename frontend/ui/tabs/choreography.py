@@ -603,10 +603,12 @@ def create_choreography_tab(
                             tooltip="song 触发=接管（歌曲音频走既有链路，主线保持至歌终）；"
                                     "gift/keyword 新语义=不接管（原生答谢照常）；"
                                     "entrance/follow=入场/关注事件触发（T4：自动排队不打断，"
-                                    "10s 类型节流防风暴，权重恒最低档）",
+                                    "10s 类型节流防风暴，权重恒最低档）；"
+                                    "动态文案「关键词|文案」的关键词也走本类型触发——"
+                                    "动态文案播出时自动判定（无独立触发类型）",
                             style="width:100%;")
                         FormField.create_input(
-                            label='匹配值（gift=礼物名全等 / keyword=子串 / song·entrance·follow 可空=任意；非空=用户名等值）',
+                            label='匹配值（gift=礼物名全等 / keyword=弹幕或动态文案关键词子串 / song·entrance·follow 可空=任意；非空=用户名等值）',
                             value=str(rule.get("match", "")),
                             on_change=lambda e, r=rule: r.__setitem__("match", e.value or ""),
                             style="width:100%;")
@@ -670,6 +672,7 @@ def create_choreography_tab(
                             "过渡片段（可空=主线播完直接回默认画面）；固定播完接下一步，不设切换方式")
                     # 档位编辑器（R-dsg4 D2-1/2/3/4：第 1 行=基础档同源，第 2 行起=覆盖档）
                     ui.label("触发次数档位（第 1 行=基础档与上方三下拉同源；覆盖档留空=沿用基础档；"
+                             "覆盖档仅覆盖片段，切换方式等其余参数恒沿用基础档；"
                              "首覆盖档阈值须 ≥2——=1 会在首次触发即遮蔽基础档）").style(
                         "color: var(--text-hint); font-size: var(--font-size-body); margin-top:6px")
                     _render_tier_editor(rule)
@@ -726,10 +729,15 @@ def create_choreography_tab(
                         label={"enter": "上场", "main": "主线", "exit": "离场"}[n],
                         on_change=lambda e, o=ov, k=n: (
                             o.__setitem__(k, e.value) if e.value else o.pop(k, None)),
-                    ).style("min-width:170px").tooltip("留空=沿用基础档（部分覆盖语义）")
+                    ).style("min-width:170px").tooltip(
+                        "留空=沿用基础档（部分覆盖语义）；仅覆盖片段——"
+                        "切换方式/时长/音轨等非段参数恒沿用基础档设置")
                 FormField.create_input(
                     label='mood（可空）', value=str(tier.get("mood", "")),
                     on_change=lambda e, tr=tier: tr.__setitem__("mood", e.value or ""),
+                    tooltip="档位情绪标注（自由文本，如 happy/angry/breakdown）："
+                            "命中该档时显示在编排状态条（执行中：…· mood），"
+                            "纯观测字段，不影响画面/音频/文案行为",
                     style="width:110px;")
                 ui.button("删档", on_click=lambda i=ti: (_del_tier(rule, i))).props(
                     "outline color=negative dense")
