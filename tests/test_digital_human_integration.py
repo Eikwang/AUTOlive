@@ -279,6 +279,38 @@ class TestFrontendIntegration:
         # 画外音标注（步骤下拉）
         assert "画外音" in src
 
+    def test_choreography_fallback_persist_wiring(self):
+        """降级持久化接线守卫（2026-11-04 二批）：main 连接拒绝（10061）时
+        配置期改动此前无任何落盘路径——点应用永远失败且丢失。except 分支须
+        仅对 ConnectionError 走 webui 窄写（防 main 可达时其他异常覆盖活跃
+        写者）。"""
+        src = _src("frontend/ui/tabs/choreography.py")
+        assert "_persist_choreo_node_fallback" in src
+        assert "isinstance(e, _requests.exceptions.ConnectionError)" in src
+
+    def test_choreography_fallback_persist_unit(self, tmp_path):
+        """降级窄写单测：整节替换+其他节保留+原子写无残留+失败返回原因。"""
+        from frontend.ui.tabs.choreography import _persist_choreo_node_fallback
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps(
+            {"other_section": {"k": 1},
+             "choreography": {"enable": False, "default_segments": ["1", "55"]}},
+            ensure_ascii=False), encoding="utf-8")
+        node = {"enable": True, "default_mode": "single",
+                "default_segments": ["s1"], "default_single_segment": "s1",
+                "rules": []}
+        ok, err = _persist_choreo_node_fallback(node, config_path=str(cfg_file))
+        assert ok is True and err == ""
+        saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert saved["other_section"] == {"k": 1}          # 其他节保留
+        assert saved["choreography"]["default_segments"] == ["s1"]
+        assert saved["choreography"]["default_single_segment"] == "s1"
+        assert not list(tmp_path.glob("*.tmp-webui"))      # 无残留临时文件
+
+        bad = _persist_choreo_node_fallback(node, config_path=str(tmp_path / "no_dir" / "c.json"))
+        assert bad[0] is False and bad[1]                  # 失败带原因
+
     def test_layout_registers_choreography(self):
         src = _src("frontend/ui/layout.py")
         assert "train_voice, choreography" in src

@@ -22,6 +22,9 @@
 import asyncio
 import copy as _copy
 import json as _json
+import os
+import re
+import time
 
 from nicegui import ui
 from typing import Any, Callable, Dict
@@ -29,6 +32,34 @@ from typing import Any, Callable, Dict
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
 from frontend.ui.components.local_file_picker import LocalFilePicker
+
+
+def _persist_choreo_node_fallback(node: dict, config_path: str = None) -> tuple:
+    """main 进程不可达时的降级持久化（webui 进程窄写者；2026-11-04 二批）。
+
+    写者矩阵补充声明：choreography 节磁盘主写者=main 进程
+    orchestration.api._write_choreography_section（热应用链路）。本函数仅当
+    main 连接拒绝（进程未运行——此刻它不是该节写者）时由 webui 调用：
+    读磁盘 → 整节替换 → tmp+os.replace 原子写回（同款模式）。main 可达时
+    绝不走本路径——防 webui 旧快照覆盖 main 的活跃写入（沿 Settings.save
+    写者分配矩阵同纪律：运行期窄写者仅限于写者缺位时）。
+
+    Returns: (成功与否, 失败原因)
+    """
+    try:
+        if config_path is None:
+            from frontend.config.settings import get_config
+            config_path = str(get_config().config_path)
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+        cfg["choreography"] = node
+        tmp = config_path + ".tmp-webui"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            _json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, config_path)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 def create_choreography_tab(
@@ -64,14 +95,18 @@ def create_choreography_tab(
     # ==================================================================
     with ui.card().style(card_css):
         ui.label("动作素材创建（画面资产库）").style("font-size: var(--font-size-title)")
-        ui.label("选本地视频 → 指定类型（上场/主线/离场）→ 勾选口型推理决定预处理链"
-                 "（勾选=拆帧+人脸检测；不勾选=仅拆序列帧，播放时作画外音直通）→ 上线。"
-                 "预处理耗时与视频长度成正比，完成自动出现在下方素材列表").style(
+        ui.label("选本地视频（可多选批量处理）→ 指定类型（上场/主线/离场，整批共用）→ "
+                 "勾选口型推理决定预处理链（勾选=拆帧+人脸检测；不勾选=仅拆序列帧，"
+                 "播放时作画外音直通）→ 上线。素材段名可留空（用视频文件名作段名）；"
+                 "批量处理按队列逐个执行，预处理耗时与视频长度成正比，"
+                 "完成自动出现在下方素材列表").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
-        # 视频选择（文件选择器取代手输路径；防重入沿训练页 LocalFilePicker 模式）
-        _picked_video = [""]
+        # 视频选择（文件选择器取代手输路径；防重入沿训练页 LocalFilePicker 模式）。
+        # 多选批量：选择器可跨目录累计多个视频，添加时按队列逐个提交处理。
+        _picked_videos: list = []
         _picker_open = [False]
+        _batch_running = [False]
 
         async def _open_video_picker():
             if _picker_open[0]:
@@ -79,14 +114,35 @@ def create_choreography_tab(
             _picker_open[0] = True
             mat_pick_btn.set_enabled(False)
             try:
-                result = await LocalFilePicker(multiple=False, title="选择素材视频")
+                result = await LocalFilePicker(multiple=True, title="选择素材视频（可多选）")
             finally:
                 _picker_open[0] = False
                 mat_pick_btn.set_enabled(True)
             if result:
-                _picked_video[0] = str(result[0])
-                mat_picked_label.set_text(f"已选：{result[0].name}").tooltip(
-                    str(result[0])).style("color: var(--text-body); font-size: var(--font-size-body)")
+                _picked_videos[:] = [str(p) for p in result]
+                names = "、".join(p.name for p in result[:3])
+                if len(result) > 3:
+                    names += f" 等 {len(result)} 个"
+                mat_picked_label.set_text(f"已选 {len(result)} 个：{names}").tooltip(
+                    "\n".join(str(p) for p in result)).style(
+                    "color: var(--text-body); font-size: var(--font-size-body)")
+
+        def _derive_segment_name(video_path: str, used: set) -> str:
+            """段名缺省派生：视频文件名清洗为段名白名单字符（批内去重）。
+
+            后端段名白名单=^[A-Za-z0-9_-]{1,64}$，非白名单字符替换为下划线，
+            清洗后为空则用时间戳兜底。
+            """
+            stem = os.path.splitext(os.path.basename(video_path))[0]
+            name = re.sub(r"[^A-Za-z0-9_-]", "_", stem).strip("_")[:64]
+            if not name:
+                name = "mat_" + time.strftime("%Y%m%d%H%M%S")
+            candidate, i = name, 2
+            while candidate in used:
+                candidate = f"{name}_{i}"
+                i += 1
+            used.add(candidate)
+            return candidate
 
         with ui.row().style("width:100%;align-items:center;gap:10px"):
             mat_pick_btn = ui.button("选择视频文件", icon="movie", on_click=_open_video_picker).props("outline")
@@ -95,7 +151,7 @@ def create_choreography_tab(
                 "max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
         with ui.grid(columns=3):
             mat_seg_input = FormField.create_input(
-                label='素材段名（字母/数字/下划线/短横线；编排规则按此名引用）',
+                label='素材段名（可选：留空=用视频文件名；多选时填写=作段名前缀）',
                 value="", style="width:100%;")
             mat_type_select = FormField.create_select(
                 label='素材类型（规则步骤按此过滤候选）',
@@ -114,43 +170,103 @@ def create_choreography_tab(
         mat_task_label = ui.label("").style("color: var(--text-hint); white-space: pre-wrap")
 
         async def _publish_material():
-            video = _picked_video[0]
-            seg = (mat_seg_input.value or "").strip()
-            if not video or not seg:
-                ui.notify(position="top", type="warning", message="先选择视频文件并填写素材段名")
+            """批量添加：按队列逐个「提交→轮询至终态→下一个」。
+
+            素材类型/口型推理/预处理设备整批共用同一配置；后端单飞行任务
+            不变，由前端串行排队驱动（一次只有一个任务在跑）。
+            """
+            if _batch_running[0]:
                 return
+            videos = list(_picked_videos)
+            if not videos:
+                ui.notify(position="top", type="warning", message="先选择视频文件")
+                return
+            seg_input = (mat_seg_input.value or "").strip()
+            # 段名规划：留空=视频文件名派生（单选/多选一致）；
+            # 多选且填写=作为前缀（前缀_1.._N），单选且填写=直接使用
+            used: set = set()
+            prefix_mode = len(videos) > 1 and bool(seg_input)
+            plan = []
+            for i, v in enumerate(videos, start=1):
+                seg = f"{seg_input}_{i}" if prefix_mode else _derive_segment_name(v, used)
+                plan.append((v, seg))
+            if prefix_mode:
+                ui.notify(position="top", type="info", duration=6,
+                          message=f"批量模式：段名使用前缀 {seg_input}_1.._{len(videos)}")
+            total = len(plan)
+            _batch_running[0] = True
+            mat_add_btn.set_enabled(False)  # 整批单飞行：处理中禁用防叠发
+            ok_segs, fails = [], []
             try:
                 import requests
-                resp = await asyncio.to_thread(
-                    requests.post, f"{_webui_api_url()}/edtalk_materials/publish",
-                    json={"video_path": video, "segment": seg,
-                          "device": mat_device_select.value or "cuda",
-                          "material_type": mat_type_select.value or "main",
-                          "lip_flag": bool(mat_lip_checkbox.value)},
-                    timeout=8,
-                )
-            except Exception as e:
-                ui.notify(position="top", type="negative",
-                          message=f"提交失败（webui 服务异常？）：{e}")
-                return
-            if resp.status_code in (200, 202):
-                mat_task_label.set_text(f"任务已受理：{seg}（预处理耗时与视频长度成正比）").style(
-                    "color: var(--color-warning)")
-                mat_add_btn.set_enabled(False)  # 单飞行：处理中禁用防叠发（R-dsg6 忙碌指示）
-            else:
-                detail = ""
-                try:
-                    detail = (resp.json() or {}).get("detail", {})
-                    if isinstance(detail, dict):
-                        detail = detail.get("message") or str(detail)
-                except Exception:
-                    pass
-                # 人脸检测失败导流（R-dsg6：可行动文案指引不勾选口型推理）
-                ui.notify(position="top", type="warning",
-                          message=f"未受理（HTTP {resp.status_code}）：{detail}")
+                for idx, (video, seg) in enumerate(plan, start=1):
+                    mat_task_label.set_text(f"[{idx}/{total}] 提交：{seg}……")
+                    try:
+                        resp = await asyncio.to_thread(
+                            requests.post, f"{_webui_api_url()}/edtalk_materials/publish",
+                            json={"video_path": video, "segment": seg,
+                                  "device": mat_device_select.value or "cuda",
+                                  "material_type": mat_type_select.value or "main",
+                                  "lip_flag": bool(mat_lip_checkbox.value)},
+                            timeout=8,
+                        )
+                    except Exception as e:
+                        fails.append(f"{seg}：提交失败（webui 服务异常？）{e}")
+                        continue
+                    if resp.status_code not in (200, 202):
+                        detail = ""
+                        try:
+                            d = (resp.json() or {}).get("detail", {})
+                            detail = d.get("message") if isinstance(d, dict) else str(d)
+                        except Exception:
+                            pass
+                        fails.append(f"{seg}：未受理（HTTP {resp.status_code}）{detail}")
+                        continue
+                    # 轮询该任务至终态（批量循环自管，_poll_task 让位）
+                    state = "idle"
+                    while True:
+                        await asyncio.sleep(1.0)
+                        try:
+                            tr = await asyncio.to_thread(
+                                requests.get, f"{_webui_api_url()}/edtalk_materials/task",
+                                timeout=2)
+                            t = (tr.json() or {}) if tr.status_code == 200 else {}
+                        except Exception:
+                            t = {}
+                        state = t.get("state", "idle")
+                        if state == "running":
+                            mat_task_label.set_text(
+                                f"[{idx}/{total}] [{seg}] {t.get('stage', '')}……").style(
+                                "color: var(--color-warning)")
+                        else:
+                            break
+                    if state == "done":
+                        ok_segs.append(seg)
+                    else:
+                        fails.append(f"{seg}：{t.get('message') or '处理失败'}")
+            finally:
+                _batch_running[0] = False
+                mat_add_btn.set_enabled(True)
+                summary = f"批量完成：成功 {len(ok_segs)}/{total} 个"
+                if ok_segs:
+                    summary += f"（{'、'.join(ok_segs)}）"
+                if fails:
+                    summary += "\n失败 " + str(len(fails)) + " 个：\n" + "\n".join(fails)
+                mat_task_label.set_text(summary).style(
+                    "color: " + ("var(--color-warning)" if fails else "var(--color-positive)"))
+                if ok_segs:
+                    _picked_videos.clear()
+                    mat_picked_label.set_text("未选择视频").style(
+                        "color: var(--text-hint); font-size: var(--font-size-body)")
+                    await _refresh_materials()
 
         async def _poll_task():
-            """添加任务 2s 轮询：running 中更新进度行；终态提示+解锁+刷新清单。"""
+            """添加任务 2s 轮询：running 中更新进度行；终态提示+解锁+刷新清单。
+
+            批量处理运行中让位：轮询与按钮/清单管理由 _publish_material 循环自管。
+            """
+            if _batch_running[0]:
+                return
             try:
                 import requests
                 resp = await asyncio.to_thread(
@@ -172,7 +288,7 @@ def create_choreography_tab(
                     "color: " + ("var(--color-positive)" if ok else "var(--color-negative)"))
                 mat_add_btn.set_enabled(True)
                 if ok:
-                    _picked_video[0] = ""
+                    _picked_videos.clear()
                     mat_picked_label.set_text("未选择视频").style(
                         "color: var(--text-hint); font-size: var(--font-size-body)")
                 await _refresh_materials()
@@ -694,8 +810,31 @@ def create_choreography_tab(
                 ui.notify(position="top", type="warning",
                           message=f"未应用（HTTP {resp.status_code}）：{detail}")
         except Exception as e:
-            ui.notify(position="top", type="negative",
-                      message=f"应用失败（运行系统未启动？）：{e}")
+            # 降级持久化（2026-11-04 用户实测二批）：main 不可达（连接拒绝
+            # 10061）时规则端点根本不存在——配置期改动（默认画面池/单段段）
+            # 此前无任何落盘路径，点应用=永远失败且丢失。此刻 main 进程未
+            # 运行、不是 choreography 节写者 → webui 降级窄写（模块级
+            # _persist_choreo_node_fallback，写者矩阵补充声明见其 docstring）。
+            # main 可达时的其他异常（超时等）不落盘——防覆盖活跃写者。
+            import requests as _requests
+            if isinstance(e, _requests.exceptions.ConnectionError):
+                ok, err = _persist_choreo_node_fallback(choreo_node)
+                if ok:
+                    try:
+                        from frontend.config.settings import get_config
+                        get_config().set("choreography",
+                                         value=_copy.deepcopy(choreo_node))
+                    except Exception:
+                        pass
+                    ui.notify(position="top", type="warning", duration=10,
+                              message="已保存到配置文件（运行系统未启动，暂未生效；"
+                                      "启动系统后重试『应用』即校验+热生效）")
+                else:
+                    ui.notify(position="top", type="negative",
+                              message=f"保存失败（运行系统未启动且本地写盘异常）：{err}")
+            else:
+                ui.notify(position="top", type="negative",
+                          message=f"应用失败（运行系统未启动？）：{e}")
 
     async def _poll_choreo_status():
         """编排状态条 5s 轮询（main API；未装配/未启动=提示态，不报错刷屏）。"""
