@@ -1606,6 +1606,8 @@ class DrawerLayout:
 
     def render_config_page(self, function_name: str):
         """渲染配置页面 - 调用实际的tab模块函数"""
+        import time as _time
+        _t0 = _time.perf_counter()
         # 清除之前的内容（含页内 Timer 取消，见 _clear_config_page）
         if self.config_page is not None:
             self._clear_config_page()
@@ -1662,6 +1664,16 @@ class DrawerLayout:
                 '''):
                     # 根据 tab_key 调用对应的 tab 模块函数
                     self._render_tab_content(tab_key)
+        # 构建耗时观测（2026-11-04 实测三批：用户报「进入编排页卡死」——干净
+        # 环境未复现，埋点取证：构建在 socketio handler 内同步执行，超时即阻塞
+        # 事件循环=全页面无响应；>2s 必须定位该 tab 构建内的重活）
+        _elapsed = _time.perf_counter() - _t0
+        if _elapsed > 2.0:
+            logger.warning(
+                f"[页面构建] {function_name}（{tab_key}）耗时 {_elapsed:.2f}s"
+                "（>2s——同步构建阻塞事件循环，需定位该页重活）")
+        else:
+            logger.debug(f"[页面构建] {function_name}（{tab_key}）{_elapsed:.2f}s")
 
     def _render_tab_content(self, tab_key: str):
         """根据 tab_key 渲染对应的 tab 内容"""
@@ -1771,7 +1783,15 @@ class DrawerLayout:
             old_value = _container_get(config, keys[-1])
             _container_write(config, keys[-1], value)
             try:
-                self.save_config()
+                if tuple(keys) == ("choreography", "enable"):
+                    # choreography.enable 窄写特判（2026-11-04 实测三批）：该节
+                    # 磁盘权威（main 端点/降级窄写为整节写者），Settings.save 全量
+                    # dump 已整节回读保护——本节走全量 save 会被磁盘回读吞掉开关
+                    # 新值，单键变更须窄写直接落盘（内存已同步写入）。
+                    from frontend.config.settings import get_config
+                    get_config().narrow_write_choreography_enable(bool(value))
+                else:
+                    self.save_config()
             except Exception as e:
                 # 双回滚之一：内存字典恢复旧值（UI 回滚由调用方负责）
                 _container_write(config, keys[-1], old_value)

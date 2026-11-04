@@ -24,6 +24,7 @@ import copy as _copy
 import json as _json
 import os
 import re
+import threading
 import time
 
 from nicegui import ui
@@ -52,6 +53,17 @@ def _persist_choreo_node_fallback(node: dict, config_path: str = None) -> tuple:
             config_path = str(get_config().config_path)
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = _json.load(f)
+        # 写盘审计（2026-11-04 四批，写者矩阵三写点各记变更——丢失可溯源）
+        try:
+            _prev = cfg.get("choreography") or {}
+            from utils.my_log import logger
+            logger.info(
+                f"[choreography] 写盘审计（webui 降级窄写）：rules {len(_prev.get('rules') or [])}"
+                f"→{len(node.get('rules') or [])}，pool {_prev.get('default_segments')}"
+                f"→{node.get('default_segments')}，mode {_prev.get('default_mode')}"
+                f"→{node.get('default_mode')}，enable {_prev.get('enable')}→{node.get('enable')}")
+        except Exception:
+            pass
         cfg["choreography"] = node
         tmp = config_path + ".tmp-webui"
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
@@ -60,6 +72,16 @@ def _persist_choreo_node_fallback(node: dict, config_path: str = None) -> tuple:
         return True, ""
     except Exception as e:
         return False, str(e)
+
+
+# 素材清单模块级缓存（2026-11-04 用户反馈「进页等待几秒」优化，SWR 策略）：
+# 曾为 tab 闭包局部变量——每次进页清零重建，规则/覆盖档下拉先用空清单渲染、
+# 清单 task 到达后签名变化再全量重渲染（双倍构建=进页等待几秒的主因）。
+# 提升为模块级后跨页面/会话存活：进页直接用缓存渲染（秒开），后台仍恒校验
+# （签名比对防抖——清单无变化不重渲染）。webui 单用户场景，Lock 仅护写写并发。
+_CHOREO_AVAIL: dict = {"segments": [], "voiceover": set(), "typed": {},
+                       "typed_sig": None, "ts": 0.0}
+_CHOREO_AVAIL_LOCK = threading.Lock()
 
 
 def create_choreography_tab(
@@ -313,9 +335,18 @@ def create_choreography_tab(
                 return
             items = data.get("items") or []
             online = bool(data.get("service_online"))
-            # 素材类型化清单 → 规则卡下拉候选源（R-dsg12③：sidecar 主源按类型过滤）
+            # 素材类型化清单 → 规则卡下拉候选源（R-dsg12③：sidecar 主源按类型过滤；
+            # 模块级缓存写回带锁——8s timer 与进页 task 并发刷新的写写竞争）。
+            # prev_sig=写回前缓存签名（「清单变化→规则区重渲染」的比对基准——
+            # 曾在同函数写回后又与刚写值比较，恒等致重渲染永不触发）
+            prev_sig = _choreo_avail.get("typed_sig")
+            sig = tuple(sorted((str(it.get("segment")), str(it.get("type") or "main"))
+                               for it in items))
             try:
-                _choreo_avail["typed"] = {"items": items}
+                with _CHOREO_AVAIL_LOCK:
+                    _choreo_avail["typed"] = {"items": items}
+                    _choreo_avail["typed_sig"] = sig
+                    _choreo_avail["ts"] = time.time()
             except NameError:
                 pass
             # 片段池候选同步（typed 主源到达后刷新；池控件定义在卡片 2——
@@ -341,15 +372,19 @@ def create_choreography_tab(
             # 素材清单变化 → 规则区重渲染（_seg_options/_def_pool 选项源同步）。
             # 曾仅 8s timer 晚到且到达后不重渲染规则区——规则/覆盖档下拉停在
             # 构建期空集，「加一档」无法选择新片段（2026-11-04 erro 批次）。
-            # 签名比对：清单未变不重渲染，防 8s 心跳折叠/打断编辑中控件。
-            sig = tuple(sorted((str(it.get("segment")), str(it.get("type") or "main"))
-                               for it in items))
-            if sig != _choreo_avail.get("typed_sig"):
-                _choreo_avail["typed_sig"] = sig
-                try:
-                    _render_rules()
-                except NameError:
-                    pass
+            # 签名比对（对写回前 prev_sig）：清单未变不重渲染，防 8s 心跳折叠/
+            # 打断编辑中控件。全段异常捕获（三批观测）：本协程在裸 task 上下文
+            # 运行——曾仅 requests 段有 try，UI 重渲染段异常会静默炸 task 且零日志。
+            try:
+                if sig != prev_sig:
+                    try:
+                        _render_rules()
+                    except NameError:
+                        pass
+            except Exception:
+                from utils.my_log import logger
+                logger.error("[编排页] 素材清单触发的规则区同步异常（task 上下文）",
+                             exc_info=True)
 
         def _render_materials(items: list):
             """素材库三列显示（2026-10-27 用户裁决：上场/主线/离场三列分离，
@@ -495,12 +530,14 @@ def create_choreography_tab(
                  "「改类型」即时生效并同步规则步骤下拉候选").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
         mat_list_slot = ui.column().style("width:100%")
-        ui.timer(8.0, lambda: asyncio.create_task(_refresh_materials()))
+        # 8s 周期校验：直调 async 回调（禁 create_task 包装——裸 task 在 client
+        # 删除后不可取消，僵尸渲染警告同构建尾部；见 _render_rules 后注）
+        ui.timer(8.0, _refresh_materials)
 
     # ==================================================================
     # 卡片 2：编排规则管理（自画面设置页迁移；行为不变）
     # ==================================================================
-    _choreo_avail = {"segments": [], "voiceover": set(), "typed": {}}
+    _choreo_avail = _CHOREO_AVAIL   # 模块级缓存绑定（SWR——跨页面/会话存活）
     # 规则展开状态（重渲染保留——素材清单到达/变化触发 _render_rules 重渲染
     # 同步下拉选项源，不折叠用户正在编辑的规则）
     _rule_expanded: set = set()
@@ -549,13 +586,20 @@ def create_choreography_tab(
         _render_rules()
 
     def _seg_options(current: str, want_type: str = None) -> dict:
-        """步骤段下拉选项（R-dsg12③）：sidecar 素材清单按类型过滤 ∪ 规则已引用段
-        ∪ 服务可用段。EDTalk 不可达不阻塞编辑（素材清单为主源）。"""
+        """步骤段下拉选项（R-dsg12③）：sidecar 素材清单主源。
+
+        2026-11-04 用户裁决二批：指定 want_type 时**严格类型过滤**——仅列出该
+        类型素材（上场/主线/离场各归各类，避免片段多时选错类型）；EDTalk /status
+        全量段不再并入类型化候选（该来源无类型信息，曾把全部段混进每个步骤下拉）。
+        want_type=None（默认画面片段池等不分类型场景）保持全量并入。
+        current 恒保底——已选段不在候选时仍可显示（NiceGUI value 校验不炸）。
+        """
         opts = []
         for it in (_choreo_avail.get("typed") or {}).get("items", []):
             if want_type is None or it.get("type") == want_type:
                 opts.append(str(it.get("segment")))
-        opts += _choreo_avail["segments"] or []
+        if want_type is None:
+            opts += _choreo_avail["segments"] or []
         opts.append(current or "")
         seen, out = set(), {}
         for s in opts:
@@ -724,7 +768,8 @@ def create_choreography_tab(
                         # 曾反写为 ("（继承基础档）", "")，空覆盖档 value="" 不在键中
                         # → ValueError: Invalid value:（erro2.log；选中哨兵还会把字面
                         #   文本写进 segment_overrides）。留空=沿用基础档语义不变。
-                        options=dict([("", "（继承基础档）")] + list(_seg_options(cur).items())),
+                        # 候选同基础档严格类型过滤（二批：覆盖档也按步骤类型）。
+                        options=dict([("", "（继承基础档）")] + list(_seg_options(cur, n).items())),
                         value=cur,
                         label={"enter": "上场", "main": "主线", "exit": "离场"}[n],
                         on_change=lambda e, o=ov, k=n: (
@@ -780,6 +825,18 @@ def create_choreography_tab(
                 json=choreo_node, timeout=8,
             )
             data = (resp.json() or {}) if resp.status_code == 200 else {}
+
+            def _align_memory():
+                """webui 内存快照对齐（2026-11-04）：磁盘落盘后本进程 Settings
+                不自动 reload，刷新页面 deepcopy 到旧值。仅对齐内存不落盘——
+                choreography 节磁盘写者=main 端点/降级窄写（写者矩阵）。"""
+                try:
+                    from frontend.config.settings import get_config
+                    get_config().set("choreography",
+                                     value=_copy.deepcopy(choreo_node))
+                except Exception:
+                    pass
+
             if resp.status_code == 200 and data.get("applied"):
                 bad = data.get("rejected") or []
                 missing = data.get("missing_all") or []
@@ -791,23 +848,17 @@ def create_choreography_tab(
                 if not data.get("persisted"):
                     msg += "（⚠ 持久化失败：重启后丢失）"
                 else:
-                    # webui 内存快照对齐（2026-11-04）：main 进程落盘后本进程
-                    # Settings 不自动 reload，刷新页面 deepcopy 到旧值=「保存后
-                    # 又变默认」。仅对齐内存不落盘——choreography 节磁盘唯一
-                    # 写者=main 进程（写者矩阵），本进程 save 不触碰该节。
-                    try:
-                        from frontend.config.settings import get_config
-                        get_config().set("choreography",
-                                         value=_copy.deepcopy(choreo_node))
-                    except Exception:
-                        pass
+                    _align_memory()
                 ui.notify(position="top", type="positive", message=msg)  # 已生效
             elif resp.status_code == 503:
                 # C5-1 两态提示（2026-11-04 实测校正）：后端对 EDTalk 不可达已
                 # 持久化（reason=edtalk_unreachable），文案与实际对齐——曾无差别
-                # 报「已保存」而实际未写盘（假成功）
+                # 报「已保存」而实际未写盘（假成功）。persisted 分支同样对齐内存
+                # （三批：对齐缺失面——此路径曾漏对齐，叠加全量 save 无保护共同
+                # 造成「保存后又被旧快照覆盖」）
                 detail = data.get("message") or "EDTalk 不可达"
                 if data.get("persisted"):
+                    _align_memory()
                     ui.notify(position="top", type="warning", duration=8,
                               message=f"已保存、暂未生效（EDTalk 不可达，就绪后重试应用即生效）：{detail}")
                 else:
@@ -1023,6 +1074,21 @@ def create_choreography_tab(
             "color: var(--text-hint); font-size: var(--font-size-body)")
 
     _render_rules()
-    # 立即拉素材清单（不等 8s timer）：规则/覆盖档/默认池下拉的段候选主源
-    asyncio.create_task(_refresh_materials())
+    # SWR 渲染（2026-11-04 进页等待优化）：缓存有清单 → 构建上下文内直接渲染
+    # 素材列表（秒开——曾每次进页都空渲染+等 task 到达重渲染的双倍构建）。
+    _cached_items = (_CHOREO_AVAIL.get("typed") or {}).get("items") or []
+    if _cached_items:
+        try:
+            _render_materials(_cached_items)
+            mat_status_label.set_text(
+                f"共 {len(_cached_items)} 个素材（缓存显示，后台校验中）").style(
+                "color: var(--text-hint)")
+        except Exception:
+            pass
+    # 后台校验 timer 化（once）——禁用裸 create_task：task 无法取消，client
+    # 删除（切页/刷新/重连）后仍跑并向已删元素创建 UI =「Client has been
+    # deleted but is still being used」僵尸警告+无效渲染（2026-11-04 用户
+    # 实测栈，_refresh_materials→_render_materials→ui.grid）。ui.timer 挂
+    # client，_clear_config_page 统一取消（layout.py:1552 同款清理语义）。
+    ui.timer(0.1, _refresh_materials, once=True)
     ui.timer(5.0, _poll_choreo_status)

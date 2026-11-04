@@ -61,9 +61,22 @@ class Settings:
         旧快照覆盖其写入）。main.py 不可达时本进程是该节唯一写者——直接 dump 内存
         （R2 首版无条件回读会把 set_config 刚写入内存的新值用磁盘旧值覆盖回滚——
         实测导致房间/关键词/开关全部"保存后消失"）。
+
+        choreography 节（2026-11-04 实测三批）：**无条件整节磁盘回读（enable 也是）**。
+        该节磁盘写者=main 编排端点（applied/edtalk_unreachable）+webui 降级窄写
+        （main 不可达时）+二级菜单开关单键窄写（narrow_write_choreography_enable）
+        ——三者都直接落盘；webui 内存该节只是进页快照（含 enable），任何一次全量
+        save dump 都会用旧快照覆盖磁盘新值（实测「点应用保存成功→切二级菜单开关
+        →重启后编排配置全部还原」）。整节回读同时完成内存对齐；开关新值由窄写
+        先落盘，回读不吞（写者矩阵：webui 侧对该节零整节写入面）。
         """
         if not self._config:
             raise RuntimeError("内存配置为空，拒绝落盘（防止覆盖既有配置）")
+        # 耗时观测（2026-11-04 实测三批）：save 在 socketio handler 内同步执行，
+        # 曾报「保存后页面重启（点击无响应→回初始页）」——干净环境未复现，埋点
+        # 取证（含 _main_reachable TCP 探测 + 两节磁盘回读）。>2s 阻塞即断连级。
+        import time as _time
+        _t0 = _time.perf_counter()
         # 写者分配矩阵（Eng F-ENG-2；R2 实测修正）：danmaku_listener 节磁盘回读
         # 仅在 main.py 可达时执行（运行期窄端点是该节活跃写者——防旧快照覆盖）。
         # main.py 不可达时本进程是该节唯一写者——直接 dump 内存。
@@ -81,12 +94,66 @@ class Settings:
             except Exception:
                 from utils.my_log import logger
                 logger.warning("danmaku_listener 节磁盘回读失败——按内存快照落盘", exc_info=True)
+        # choreography 节保护（2026-11-04 实测三批，写者矩阵见 docstring）：
+        # 无条件整节磁盘回读（enable 也是——内存节整体只是快照）
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                disk_ch = json.load(f).get("choreography")
+            if isinstance(disk_ch, dict):
+                self._config["choreography"] = disk_ch
+        except FileNotFoundError:
+            pass
+        except Exception:
+            from utils.my_log import logger
+            logger.warning("choreography 节磁盘回读失败——按内存快照落盘", exc_info=True)
         tmp_path = self.config_path.with_suffix(
             self.config_path.suffix + f".tmp{os.getpid()}"
         )
         try:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.config_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        finally:
+            _elapsed = _time.perf_counter() - _t0
+            if _elapsed > 2.0:
+                from utils.my_log import logger
+                logger.warning(
+                    f"[配置保存] 耗时 {_elapsed:.2f}s（>2s——同步保存阻塞事件循环，"
+                    f"main 可达性探测与节回读在 handler 线程执行，需排查磁盘/进程锁）")
+
+    def narrow_write_choreography_enable(self, enable: bool) -> None:
+        """choreography.enable 单键窄写（2026-11-04 实测三批）。
+
+        写者矩阵：该节磁盘权威（main 编排端点/降级窄写为整节写者），save 全量
+        dump 已回读保护——本进程整节写入面为零。二级菜单启用开关的单键变更
+        走此处：读磁盘节 → 仅改 enable → tmp+os.replace 原子写回。异常上抛
+        （调用方 set_config 回滚内存+UI）。"""
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            disk = json.load(f)
+        node = disk.get("choreography")
+        if not isinstance(node, dict):
+            node = {}
+        try:
+            from utils.my_log import logger
+            logger.info(f"[choreography] 写盘审计（二级菜单开关窄写）："
+                        f"enable {node.get('enable')}→{bool(enable)}（其余键保持磁盘值）")
+        except Exception:
+            pass
+        node["enable"] = bool(enable)
+        disk["choreography"] = node
+        tmp_path = self.config_path.with_suffix(
+            self.config_path.suffix + f".tmp{os.getpid()}"
+        )
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(disk, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self.config_path)
         except Exception:
             try:

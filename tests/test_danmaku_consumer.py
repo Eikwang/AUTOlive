@@ -394,6 +394,88 @@ class TestConfigWriterMatrix(unittest.TestCase):
         self.assertEqual(after["danmaku_listener"]["keywords"], ["新词"])
 
 
+class TestChoreographyWriterMatrix(unittest.TestCase):
+    """choreography 节写者保护回归（2026-11-04 实测三批）：
+
+    该节磁盘写者=main 编排端点+webui 降级窄写（均直接落盘）；webui 内存只是
+    进页快照。Settings.save 全量 dump 曾无保护——实测「点应用保存成功→切二级
+    菜单开关（set_config 全量 dump）→重启后编排配置全部还原」。修复=save 时
+    无条件磁盘回读整节，enable 键以内存为准（webui 侧唯一合法写入面=二级菜单
+    开关单键）。"""
+
+    def _make(self, tmpdir: str, choreo_sec) -> Any:
+        import json
+        import tempfile
+        from frontend.config import settings as fs
+        cfg_file = os.path.join(tmpdir, "config.json")
+        disk_cfg = {"webui": {"port": 8086}, "other": {"keep": 1}}
+        if choreo_sec is not None:
+            disk_cfg["choreography"] = choreo_sec
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(disk_cfg, f, ensure_ascii=False)
+        return fs.Settings(cfg_file)
+
+    def _save(self, st):
+        import json
+        from unittest.mock import patch
+        from frontend.config import settings as fs
+        with patch.object(fs.Settings, "_main_reachable", return_value=False):
+            st.save()
+        return json.load(open(str(st.config_path), encoding="utf-8"))
+
+    def test_disk_new_section_survives_stale_memory_dump(self):
+        """核心场景：磁盘新节（应用已保存）+ webui 内存旧快照 → save 整节不覆盖
+        （enable 也是磁盘权威——内存 enable 同为陈旧快照，曾致「启用状态也还原」）。"""
+        import tempfile
+        disk_new = {"enable": True, "default_mode": "single",
+                    "default_segments": ["pool_new"], "default_single_segment": "pool_new",
+                    "rules": [{"rule_id": "r1"}, {"rule_id": "r2"}, {"rule_id": "r3"}]}
+        st = self._make(tempfile.mkdtemp(), disk_new)
+        st._config["choreography"] = {"enable": False, "default_mode": "rotate",
+                                      "default_segments": ["1", "55"],
+                                      "default_single_segment": None,
+                                      "rules": [{"rule_id": "girl_A"}]}  # 旧快照
+        after = self._save(st)
+        self.assertEqual(len(after["choreography"]["rules"]), 3)            # 新规则保留
+        self.assertEqual(after["choreography"]["default_segments"], ["pool_new"])
+        self.assertEqual(after["choreography"]["default_single_segment"], "pool_new")
+        self.assertTrue(after["choreography"]["enable"])                    # 磁盘权威
+
+    def test_enable_switch_narrow_write(self):
+        """二级菜单开关场景：窄写单键落盘——磁盘节 enable 翻转、其余键不动、
+        无临时文件残留；后续全量 save 回读该节不吞开关值。"""
+        import tempfile
+        st = self._make(tempfile.mkdtemp(), {"enable": False, "default_mode": "rotate",
+                                             "default_segments": ["1"], "rules": []})
+        st.narrow_write_choreography_enable(True)
+        after = json.load(open(str(st.config_path), encoding="utf-8"))
+        self.assertTrue(after["choreography"]["enable"])
+        self.assertEqual(after["choreography"]["default_segments"], ["1"])  # 其余键不动
+        self.assertEqual(after["choreography"]["rules"], [])
+        import glob as _glob
+        self.assertEqual(_glob.glob(str(st.config_path.parent / "*.tmp*")), [])  # 无残留
+        # 全量 save（内存快照旧）——窄写值经磁盘回读保留
+        st._config["choreography"]["enable"] = False  # 模拟内存陈旧
+        after2 = self._save(st)
+        self.assertTrue(after2["choreography"]["enable"])
+
+    def test_enable_narrow_write_creates_section(self):
+        """磁盘无该节（首次配置）：窄写创建节落盘。"""
+        import tempfile
+        st = self._make(tempfile.mkdtemp(), None)
+        st.narrow_write_choreography_enable(True)
+        after = json.load(open(str(st.config_path), encoding="utf-8"))
+        self.assertTrue(after["choreography"]["enable"])
+
+    def test_section_missing_on_disk_dumps_memory(self):
+        """磁盘无该节（首次配置）：内存节正常落盘（向后兼容）。"""
+        import tempfile
+        st = self._make(tempfile.mkdtemp(), None)
+        st._config["choreography"] = {"enable": True, "rules": [{"rule_id": "n1"}]}
+        after = self._save(st)
+        self.assertEqual(after["choreography"]["rules"][0]["rule_id"], "n1")
+
+
 class TestQrSafety(unittest.TestCase):
     def test_raw_b64_wrapped_as_png(self):
         from frontend.ui.components.danmaku_login import _safe_qr_data_url

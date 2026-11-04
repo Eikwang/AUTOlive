@@ -52,6 +52,15 @@ def _write_choreography_section(node: dict) -> bool:
     with _CONFIG_LOCK:
         try:
             cfg = _read_config_file()
+            # 写盘审计（2026-11-04 四批）：choreography 节曾两次被静默覆盖回
+            # 旧值——落盘前记变更摘要（rules 数/pool/mode），下次丢失可从此
+            # 日志直认写者与本节前后值
+            _prev = cfg.get("choreography") or {}
+            logger.info(
+                f"[choreography] 写盘审计（main 端点）：rules {len(_prev.get('rules') or [])}"
+                f"→{len(node.get('rules') or [])}，pool {_prev.get('default_segments')}"
+                f"→{node.get('default_segments')}，mode {_prev.get('default_mode')}"
+                f"→{node.get('default_mode')}，enable {_prev.get('enable')}→{node.get('enable')}")
             cfg["choreography"] = node
             tmp = _config_path() + ".tmp"
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
