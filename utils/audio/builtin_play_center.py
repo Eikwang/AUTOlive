@@ -105,6 +105,8 @@ class AUDIO_PLAY_CENTER:
 
         # A7（2026-10-22 审查批次）：999 暂停-续播状态（单一暂停机制，F-2/F-3/F-5）
         self._suspended_999 = None     # 挂起的 999 条目（播放器持有，不重新入队——R2-A7a）
+        self._suspended_999_at = None  # 挂起登记时刻（monotonic；d22/uc5b 看门狗锚点）
+        self._suspended_999_alarm_at = None  # 本挂起期看门狗已告警标记（去重）
         self._suspended_play = None    # 挂起现场 {"wf","tmp_audio_path"}（流=self.stream）
         self._playing_is_999 = False   # 当前播放条目是否 999（让位触发判定）
         self._current_output_rate = 0  # 输出采样率（F-5：回退 1 秒帧数折算基准）
@@ -215,9 +217,42 @@ class AUDIO_PLAY_CENTER:
         logger.error(f"builtin播放器错误：{msg}")
 
     # ---------- 主循环 ----------
+    def _watchdog_999_suspension(self):
+        """d22/uc5b 看门狗（2026-11-05 编排优化批次）：999 挂起超时告警，不强制回落。
+
+        999 挂起=插播者播放期间持有（正常秒级，R2-A7b 播毕即续播）；超阈值=
+        打断者链路卡死（builtin 播放挂死/EDTalk 背压不返回）——alarm_notifier
+        告警每挂起期一次。uc5b 用户裁决（严格字面语义）：不强制回落——长挂起
+        属合法态（低流量时段插播者可长于阈值），强制回落会吃掉 999 播报。
+        song 伴唱挂起/resident 挂起看门狗随 T4 挂起态同批落地（编排侧）。"""
+        if self._suspended_999 is None or self._suspended_999_at is None:
+            return
+        if self._suspended_999_alarm_at is not None:
+            return  # 本挂起期已告警（去重）
+        try:
+            threshold = float(self._hot_value("suspend_999_watchdog_s", 300) or 300)
+        except Exception:
+            threshold = 300.0
+        elapsed = time.monotonic() - self._suspended_999_at
+        if elapsed <= threshold:
+            return
+        self._suspended_999_alarm_at = elapsed
+        logger.warning(
+            f"[watchdog] 999 挂起超时：{elapsed:.0f}s > {threshold:g}s"
+            "（告警不强制回落，uc5b；插播者链路疑似卡死）")
+        try:
+            from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
+            alarm_error(MODULE_AUDIO_PLAYBACK,
+                        f"999 权重音频挂起超时（{elapsed:.0f}s，未强制回落）",
+                        fix_hint="检查打断者音频链路（builtin 播放/EDTalk 推送背压）是否卡死；"
+                                 "必要时跳过当前条（skip）触发续播")
+        except Exception:
+            pass  # 告警失败不影响播放主循环
+
     def play_audio(self):
         while not self._stop_flag.is_set():
             try:
+                self._watchdog_999_suspension()
                 if len(self.audio_json_list) <= 0:
                     if self._suspended_999 is not None:
                         # 队列空且仍有挂起 999（插播者已被消费/清空）→ 恢复
@@ -355,6 +390,8 @@ class AUDIO_PLAY_CENTER:
         item = self._suspended_999
         held = self._suspended_play
         self._suspended_999 = None
+        self._suspended_999_at = None
+        self._suspended_999_alarm_at = None
         self._suspended_play = None
         self._interruptor_pending = False
         try:
@@ -395,6 +432,8 @@ class AUDIO_PLAY_CENTER:
         held = self._suspended_play
         path = self._suspended_999.get("voice_path")
         self._suspended_999 = None
+        self._suspended_999_at = None
+        self._suspended_999_alarm_at = None
         self._suspended_play = None
         self._interruptor_pending = False
         self._release_999()
@@ -512,6 +551,8 @@ class AUDIO_PLAY_CENTER:
                 suspended = True
                 self._suspended_play = {"wf": wf, "tmp_audio_path": tmp_audio_path}
                 self._suspended_999 = data_json
+                self._suspended_999_at = time.monotonic()
+                self._suspended_999_alarm_at = None  # 新挂起期重置看门狗去重
                 self._interruptor_pending = True
                 return "suspended"
 

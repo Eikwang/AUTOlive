@@ -267,7 +267,9 @@ class TestTriggerAndState:
         assert h.engine.state == "sequence"
 
     def test_condition2_main_done_requeues_full_three(self):
-        h = EngineHarness()
+        # 窗口禁用（d7 语义由 test_choreo_t3_arbitration 专测）——本测推进时序
+        # 约 34s，窗口激活态会窗外清零干扰 WP-9 重排机制断言
+        h = EngineHarness(continuous_trigger_window_s=0)
         d = h.trigger_gift()
         cmds = h.engine.on_switch_result(switch_cmd(d["commands"]).step_id, True, h.now)
         h.advance(4.01)
@@ -571,29 +573,31 @@ class TestCompletionPredicate:
         assert h.engine.get_state()["pending_depth"] == 2
 
     def test_queue_overflow_evicts_lowest(self):
-        """多槽上限（G3+O2 消费批次）：满额挤最低优；新触发权重不高于最低优则舍弃。"""
-        q = make_rule(rule_id="q", match="", trigger_type="song",
+        """多槽上限（G3+O2 消费批次）：满额挤最低优；新触发权重不高于最低优则舍弃。
+        T3/d10（2026-11-05）：编排表 keyword=10 < song=20（原 song 10/keyword 20
+        方向对调——低权 keyword 填满队列，高权 song 触发挤最低优）。"""
+        q = make_rule(rule_id="q", match="魔法词", trigger_type="keyword",
                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
         q["interrupt"] = "queue"
-        kw = make_rule(rule_id="kw", match="魔法词", trigger_type="keyword",
-                       sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        kw["interrupt"] = "queue"
-        h = EngineHarness(rules=[make_rule(), q, kw],
+        s = make_rule(rule_id="s", match="", trigger_type="song",
+                      sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+        s["interrupt"] = "queue"
+        h = EngineHarness(rules=[make_rule(), q, s],
                           priority_mapping={"song": 10, "comment": 20, "gift": 30})
         h.trigger_gift()
         for i in range(ChoreoEngine.PENDING_QUEUE_MAX):
-            h.engine.decide_trigger("song", "", {"user": f"u{i}"})
+            h.engine.decide_trigger("keyword", "魔法词", {"user": f"u{i}"})
         assert [p["data"]["user"] for p in h.engine.pending_queue] == \
             [f"u{i}" for i in range(ChoreoEngine.PENDING_QUEUE_MAX)]
         # 同权重再触发：不高于最低优 → 舍弃（对齐音频队列规则4）
-        res = h.engine.decide_trigger("song", "", {"user": "ulow"})
+        res = h.engine.decide_trigger("keyword", "魔法词", {"user": "ulow"})
         assert res["reason"] == "queued_full"
         assert [p["data"]["user"] for p in h.engine.pending_queue] == \
             [f"u{i}" for i in range(ChoreoEngine.PENDING_QUEUE_MAX)]
         # 更高权重触发：挤掉最低优组最旧条目 u0，新条目插队首
-        h.engine.decide_trigger("keyword", "魔法词", {})
+        h.engine.decide_trigger("song", "", {"user": "uHigh"})
         assert [p["data"].get("user") for p in h.engine.pending_queue] == \
-            [None] + [f"u{i}" for i in range(1, ChoreoEngine.PENDING_QUEUE_MAX)]
+            ["uHigh"] + [f"u{i}" for i in range(1, ChoreoEngine.PENDING_QUEUE_MAX)]
 
     def test_queue_mode_default_state_starts_directly(self):
         """DEFAULT 态 queue 规则照常直接启动（排队仅作用于序列执行中）。"""
@@ -870,45 +874,47 @@ class TestPriorityLinkage:
     """O1/O3：编排排队位次与 standard 打断接入 filter.priority_mapping 权重。"""
 
     def test_queue_priority_order(self):
-        # 序列执行中：先排低权 song（10），再排高权 keyword（20）→ 高权插队首
-        rule_low = make_rule(rule_id="rB", match="", trigger_type="song",
+        # 序列执行中：先排低权 keyword（d10 表=10），再排高权 song（20）→ 高权插队首
+        # （T3/d10：编排面权重源=独立仲裁表，keyword 10 < song 20——与 legacy
+        # 映射 keyword→comment=20 方向相反）
+        rule_low = make_rule(rule_id="rB", match="魔法词", trigger_type="keyword",
                              sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        rule_high = make_rule(rule_id="rA", match="魔法词", trigger_type="keyword",
+        rule_high = make_rule(rule_id="rA", match="", trigger_type="song",
                               sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
         rule_low["interrupt"] = rule_high["interrupt"] = "queue"
         h = EngineHarness(rules=[make_rule(), rule_low, rule_high],
                           priority_mapping={"gift": 30, "song": 10, "comment": 20})
         h.trigger_gift()
-        d1 = h.engine.decide_trigger("song", "", {"user": "u1"})
-        d2 = h.engine.decide_trigger("keyword", "魔法词", {})
+        d1 = h.engine.decide_trigger("keyword", "魔法词", {"user": "u1"})
+        d2 = h.engine.decide_trigger("song", "", {"user": "u2"})
         assert d1["reason"] == "queued" and d2["reason"] == "queued"
         assert [e["priority"] for e in h.engine.pending_queue] == [20, 10]
         assert [e["rule_id"] for e in h.engine.pending_queue] == ["rA", "rB"]
-        # 同权重保持 FIFO（song 组尾追加）
-        h.engine.decide_trigger("song", "", {"user": "u2"})
+        # 同权重保持 FIFO（keyword 组尾追加）
+        h.engine.decide_trigger("keyword", "魔法词", {"user": "u3"})
         assert [e["rule_id"] for e in h.engine.pending_queue] == ["rA", "rB", "rB"]
 
     def test_standard_interrupt_weight_gate(self):
         # O3：低权 standard 触发不得打断高权序列（改排队）；同权保持抢占。
-        # 权重按触发类型取映射表——活动序列 keyword(comment=20)，低权 song(10)
-        # 让位排队，同权 keyword(20) 保持抢占。
-        act_k = make_rule(rule_id="act_k", match="启动词", trigger_type="keyword",
+        # 权重按 d10 编排仲裁表（T3/d10）——活动序列 song(20)，低权 keyword(10)
+        # 让位排队，同权 song(20) 保持抢占。
+        act_s = make_rule(rule_id="act_s", match="歌一", trigger_type="song",
                           sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        low_s = make_rule(rule_id="low_s", match="", trigger_type="song",
+        low_k = make_rule(rule_id="low_k", match="低权词", trigger_type="keyword",
                           sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        eq_k = make_rule(rule_id="eq_k", match="同权词", trigger_type="keyword",
+        eq_s = make_rule(rule_id="eq_s", match="歌二", trigger_type="song",
                          sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        h = EngineHarness(rules=[act_k, low_s, eq_k],
+        h = EngineHarness(rules=[act_s, low_k, eq_s],
                           priority_mapping={"gift": 30, "song": 10, "comment": 20})
-        d = h.engine.decide_trigger("keyword", "启动词", {})
-        assert d["reason"] == "accepted" and h.engine.seq["rule_id"] == "act_k"
-        res = h.engine.decide_trigger("song", "", {})
+        d = h.engine.decide_trigger("song", "歌一", {})
+        assert d["reason"] == "accepted" and h.engine.seq["rule_id"] == "act_s"
+        res = h.engine.decide_trigger("keyword", "低权词", {})
         assert res["reason"] == "queued"
-        assert h.engine.seq["rule_id"] == "act_k"  # 序列未被打断
+        assert h.engine.seq["rule_id"] == "act_s"  # 序列未被打断
         # 同权重 standard 触发仍抢占（既有语义保持）
-        res2 = h.engine.decide_trigger("keyword", "同权词", {})
+        res2 = h.engine.decide_trigger("song", "歌二", {})
         assert res2["reason"] == "interrupted"
-        assert h.engine.seq["rule_id"] == "eq_k"
+        assert h.engine.seq["rule_id"] == "eq_s"
 
 
 class TestCompletionStepIdMatching:
@@ -971,14 +977,18 @@ class TestCompletionStepIdMatching:
         assert h.engine.seq["inflight"] is not None  # 未被误推进
 
     def test_interrupt_cancels_old_inflight(self):
-        """O8（消费批次）：standard 打断旧序列时撤销未消费 inflight（CancelAudio）。"""
+        """O8（消费批次）：standard 打断旧序列时撤销未消费 inflight（CancelAudio）。
+        T3/d10（2026-11-05）：打断方向取编排仲裁表——本测以覆盖表令 keyword(30)>
+        gift(10) 保持「keyword 打断 gift」场景（默认表下 gift 30>keyword 10 会改排队，
+        打断方向语义见 test_standard_interrupt_weight_gate）。"""
         gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
                                    "main": {"segment": "A_跳舞", "duration_s": 30,
                                             "audio": {"mode": "tts"}},
                                    "exit": {"segment": "A_离场", "duration_s": 3}})
         kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",
                        sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        h = EngineHarness(rules=[gift, kw])  # 无权重表：同权（0）保持抢占语义
+        h = EngineHarness(rules=[gift, kw],
+                          arbitration_weights={"gift": 10, "keyword": 30})
         self._tts_inflight(h)
         d = h.engine.decide_trigger("keyword", "抢词", {"user": "u"})
         cancels = [c for c in d["commands"] if isinstance(c, CancelAudio)]
@@ -999,7 +1009,8 @@ class TestCompletionStepIdMatching:
                                    "exit": {"segment": "A_离场", "duration_s": 3}})
         kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",
                        sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
-        h = EngineHarness(rules=[gift, kw])
+        h = EngineHarness(rules=[gift, kw],
+                          arbitration_weights={"gift": 10, "keyword": 30})
         d = h.trigger_gift()
         h.engine.on_switch_result(switch_cmd(d["commands"]).step_id, True, h.now)
         h.advance(4.02)

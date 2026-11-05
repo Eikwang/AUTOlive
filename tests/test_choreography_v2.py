@@ -172,13 +172,18 @@ class TestPriorityClamp:
             assert h.engine._rule_priority(fw.rules[0]) == 0
 
     def test_gift_priority_unclamped(self):
-        """gift 权重照常映射（钳制仅 entrance/follow）。"""
+        """gift 权重照常取值（钳制仅 entrance/follow）。
+        T3/d10（2026-11-05）：编排面权重源=独立仲裁表（gift=30 内置值），与
+        filter.priority_mapping 解耦——映射表值仅 off 态（d22 回退）时读取。"""
         gift_rule = {"rule_id": "g", "trigger_type": "gift", "match": "小心心",
                      "min_price": 0,
                      "sequence": {"main": {"segment": "A_跳舞", "switch_at": "segment_end",
                                            "duration_s": 5}}}
         h = Harness(rules=[gift_rule], priority_mapping={"gift": 70})
-        assert h.engine._rule_priority(h.cfg.rules[0]) == 70
+        assert h.engine._rule_priority(h.cfg.rules[0]) == 30  # d10 编排表内置值
+        h_off = Harness(rules=[gift_rule], priority_mapping={"gift": 70},
+                        arbitration_enable=False)
+        assert h_off.engine._rule_priority(h_off.cfg.rules[0]) == 70  # off 回落 legacy 映射
 
 
 # ---------- 4. 类型全局节流组（Eng E3/F1/T-2） ----------

@@ -197,7 +197,16 @@ class ChoreoEngine:
 
     # 触发类型 → filter.priority_mapping 权重键映射（O1/O3，2026-10-28 消费批次）：
     # keyword 触发源=弹幕（语义同 comment 权重）；gift/song 与映射表同名直取
+    # （d22 off=整体回退现行为时仍走本表——d10 on 态改读编排仲裁表）。
     _TRIGGER_PRIORITY_KEY = {"gift": "gift", "song": "song", "keyword": "comment"}
+
+    # d10（2026-11-05 编排优化批次；S-1 修订取代 d5）：编排面独立仲裁权重表——
+    # 与 filter.priority_mapping 完全解耦（生产 trends_copywriting=999 会污染
+    # 编排面：礼物应打断动态文案却被挡排队，违背方案 §2/§3 优先级语义）。
+    # 覆盖粒度=类型键级（choreography.arbitration_weights 可覆盖单键，T1 装载
+    # 校验已限值域）；表外类型回退 0 保守（最低档=排队退化既有 FIFO 安全）。
+    # entrance/follow 恒 0 钳制不变（三强制二，优先级高于本表与开关）。
+    _ARBITRATION_WEIGHTS_DEFAULT = {"gift": 30, "song": 20, "dynamic_text": 15, "keyword": 10}
 
     # T4 三强制二（Eng A2）：entrance/follow 恒强制最低权重档——priority_mapping
     # 现成 entrance=55/follow=65（PRIORITY_PRESETS），不钳制则入场/关注天然获得
@@ -239,26 +248,65 @@ class ChoreoEngine:
                     "该值对编排不生效（entrance/follow 权重恒强制最低档 0——风暴防护"
                     "三强制，2026-11-01 批次）；如需调整请修改编排规则触发类型")
 
+    def _arbitration_active(self) -> bool:
+        """仲裁总开关（d22）：off=整体回退现行为（直播中出问题一键回退无需重启）。
+
+        off 域：d7 窗口清零、d10 编排表（回落 legacy _TRIGGER_PRIORITY_KEY→
+        filter.priority_mapping 读取）、T4 song 序列特判、d18 规则级 999 注入
+        （F-E：off 态 override 通道不注入——999 判定收敛回既有 type 映射单源）。"""
+        return bool(getattr(self.cfg, "arbitration_enable", True))
+
     def _rule_priority(self, rule: Optional[RuleCfg]) -> int:
-        """规则权重（O1/O3）：按触发类型映射 filter.priority_mapping 取值。
+        """规则权重（O1/O3 → d10 改读编排表，2026-11-05 批次）。
 
-        T4 三强制二（Eng A2）：entrance/follow 恒返回 0（钳制 priority_mapping
-        显式配置——风暴防护不可被配置破坏，装载期已告警）。
-
-        未配置/未知类型/非法值=0（最低档）——权重表缺省时排队退化为既有 FIFO、
-        打断不受限，行为安全（0 低于映射表常规域 10~30，仅影响排队位次与
-        standard 让位方向，不产生新异常路径）。"""
+        开关 on（d10）：编排仲裁表——内置默认（gift=30 > song=20 >
+        dynamic_text=15 > keyword=10）+ choreography.arbitration_weights 类型
+        键级覆盖（T1 装载已校验值域）；表外类型回退 0 保守（最低档：排队退化
+        既有 FIFO、打断不受限，行为安全）。
+        开关 off（d22）：整体回退现行为——legacy _TRIGGER_PRIORITY_KEY 映射
+        filter.priority_mapping 读取（keyword→comment 等，2026-10-28 语义）。
+        两态下 entrance/follow 恒返回 0（T4 三强制二——风暴防护优先于开关与
+        任何配置，装载期已告警）。"""
         if rule is None:
             return 0
         _tt = getattr(rule, "trigger_type", "")
         if _tt in self._CLAMPED_PRIORITY_TYPES:
             return 0
-        key = self._TRIGGER_PRIORITY_KEY.get(_tt)
-        p = self.priority_mapping.get(key) if key else None
+        if not self._arbitration_active():
+            key = self._TRIGGER_PRIORITY_KEY.get(_tt)
+            p = self.priority_mapping.get(key) if key else None
+            try:
+                return int(p) if p is not None else 0
+            except (TypeError, ValueError):
+                return 0
+        table = dict(self._ARBITRATION_WEIGHTS_DEFAULT)
+        table.update(getattr(self.cfg, "arbitration_weights", None) or {})
+        p = table.get(_tt)
         try:
             return int(p) if p is not None else 0
         except (TypeError, ValueError):
             return 0
+
+    def _expire_counter_window(self, rule_id: str, now: float) -> None:
+        """d7 连续触发窗口（滑动锚点，d24a）：窗外触发=该规则计数清零回落基础档。
+
+        窗口=choreography.continuous_trigger_window_s（T1 装载，默认 30；
+        0=禁用=永续累计——2026-10-31 退役 reset_after_s 后的现行为）；总开关
+        off 同样禁用（d22 整体回退）。清零是继 D-4 他键打断、配置重存换装之后
+        第三种计数清零源。调用点=decide_trigger 命中规则后、key_last 锚点刷新
+        前（此刻 key_last 仍持上一触发时刻；type_throttled 早退与未匹配不经过
+        此处=不刷新不判定——d7 终门标注语义）。"""
+        window = float(getattr(self.cfg, "continuous_trigger_window_s", 0.0) or 0.0)
+        if not (self._arbitration_active() and window > 0):
+            return
+        anchor = self.key_last.get(rule_id)
+        if anchor is None or (now - anchor) <= window:
+            return
+        if self.counters.get(rule_id):
+            logger.info(
+                f"[编排] 规则 {rule_id} 超出连续触发窗口（间隔 {now - anchor:.1f}s > "
+                f"{window:g}s）：计数 {self.counters[rule_id]}→0 回落基础档（d7 滑动窗口）")
+        self.counters[rule_id] = 0
 
     # ---------- 触发判定（同步纯内存，on_gift/on_keyword/on_song 路径） ----------
 
@@ -306,6 +354,12 @@ class ChoreoEngine:
                         "retry_after_s": retry}
             self._type_last[trigger_type] = now
 
+        # d7 连续触发窗口（2026-11-05 批次）：窗口判定在锚点刷新前——此刻
+        # key_last 仍持上一触发时刻，窗外=计数清零（本次触发随后从基础档重新
+        # 计数）。滑动锚点（d24a）：下一行的写入即锚点刷新，命中路径
+        # （in_progress/requeued/queued/interrupted/DEFAULT 启动）统一刷新——
+        # type_throttled 早退与未匹配不经过此处=不刷新（e6 断言锚定）。
+        self._expire_counter_window(rule.rule_id, now)
         self.key_last[rule.rule_id] = now
 
         if self.state == "sequence" and self.seq is not None:
@@ -381,6 +435,12 @@ class ChoreoEngine:
                 if _normalize_text(match_value).find(_normalize_text(rule.match)) >= 0:
                     return rule, None
             elif trigger_type == "song":
+                if not rule.match or _normalize_text(match_value).find(_normalize_text(rule.match)) >= 0:
+                    return rule, None
+            elif trigger_type == "dynamic_text":
+                # d4（2026-11-05 编排优化批次）：动态文案源直连——keyword_hub
+                # 动态文案源直接触发（不走关键词匹配链）；match 可空=任意源
+                # 事件命中，非空=match_value 子串过滤（多规则场景预留）。
                 if not rule.match or _normalize_text(match_value).find(_normalize_text(rule.match)) >= 0:
                     return rule, None
             elif trigger_type in ("entrance", "follow"):

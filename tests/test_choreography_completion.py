@@ -108,15 +108,19 @@ class TestResetAfterRetired:
 class TestCounterNoDecay:
     """计数衰减机制移除：触发计次不随时间清零（清零仅剩他键打断 D-4/配置重存）。"""
 
-    def test_counter_persists_over_long_idle(self):
-        h = _engine_harness()
+    def test_counter_persists_over_long_idle_window_disabled(self):
+        """计数持久性：窗口禁用（continuous_trigger_window_s=0）态跨超长间隔仍
+        累积（2026-10-31 衰减移除后的现行为）。d7 窗口激活态的窗外清零由
+        test_choreo_t3_arbitration::test_window_beyond_resets_to_base_tier 承担
+        （uc1a 终门裁决：滑动窗口为用户明示新语义）。"""
+        h = _engine_harness(continuous_trigger_window_s=0)
         h.trigger_gift()
         assert h.engine.counters["girl_A"] == 1
-        h.advance(100000)  # 旧语义此处已超窗清零
+        h.advance(100000)
         h.engine.state = "default"
         h.engine.seq = None
         h.trigger_gift()
-        assert h.engine.counters["girl_A"] == 2  # 跨超长间隔仍累积（衰减已移除）
+        assert h.engine.counters["girl_A"] == 2  # 窗口禁用=永续累计
 
     def test_counter_reset_by_other_rule_only(self):
         """保留的清零路径：他键触发打断清零（D-4，条件3 打断）。"""
