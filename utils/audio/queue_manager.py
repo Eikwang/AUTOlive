@@ -362,23 +362,21 @@ class QueueMixin:
             return priority_mapping.get(audio_type, None)
 
         def _entry_priority(item):
-            """条目有效权重（O7，2026-10-28 消费批次）：条目自带 priority_override
-            （编排插队音轨，choreographer 注入固定 500）优先于类型映射表——
+            """条目有效权重（O7，2026-10-28 消费批次；T2/e2 收敛）：条目自带
+            priority_override（编排插队 500/规则级 999，d18）优先于类型映射表——
             既有条目权重比较、同权重组定位、最低优驱逐都必须按插队权重判定，
-            否则 500 插队条目会被误当映射权重参与排序/驱逐。"""
-            ov = item.get("priority_override") if isinstance(item, dict) else None
-            if ov is not None:
-                try:
-                    return int(ov)
-                except (TypeError, ValueError):
-                    pass
-            return get_priority_level(item)
+            否则 500 插队条目会被误当映射权重参与排序/驱逐。判定经
+            audio_priority 单一源（与 playback/builtin 同源防漂移）。"""
+            from utils.audio.audio_priority import entry_priority
+            return entry_priority(item, priority_mapping)
 
         # 查找插入位置
         new_data_priority = get_priority_level(data_json)
 
-        # O7：新条目显式插队权重优先于类型映射表（固定 500，高于常规语音域
-        # 10~30、低于 999 复读专线，不触发 999 单实例约束）
+        # O7：新条目显式插队权重优先于类型映射表。通道值由注入方决定：
+        # 500=编排插队音轨（高于常规语音域 10~30，不触发 999 单实例约束）；
+        # 999=规则级 999 特殊机制（d18，2026-11-05 批次）——经下方单实例约束
+        # 与 _entry_priority 全链按 999 处置（单实例+让位+续播）。
         _override = data_json.get("priority_override") if isinstance(data_json, dict) else None
         if _override is not None:
             try:

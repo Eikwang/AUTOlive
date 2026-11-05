@@ -264,10 +264,12 @@ class AUDIO_PLAY_CENTER:
         return (self.config_data or {}).get("priority_mapping") or {}
 
     def _item_priority(self, data_json):
-        """条目权重（A7/T1/A5 单源）：见 _priority_mapping；未识别 → None。"""
+        """条目权重（A7/T1/A5 单源）：见 _priority_mapping；未识别 → None。
+        T2/e2（2026-11-05）：经 audio_priority 单一源——priority_override 优先
+        于类型映射（编排插队 500/规则级 999 条目在播放侧判定同样生效）。"""
         try:
-            p = self._priority_mapping().get(data_json.get("type"))
-            return int(p) if p is not None else None
+            from utils.audio.audio_priority import entry_priority
+            return entry_priority(data_json, self._priority_mapping())
         except Exception:
             return None
 
@@ -569,19 +571,20 @@ class AUDIO_PLAY_CENTER:
 
     def _data_priority_insert(self, audio_json):
         """按优先级插队（源 data_priority_insert 语义保真：未识别 type 落队尾）。
-        A5 单源：消费 filter.priority_mapping（经 _priority_mapping 三级回退）。"""
+        A5 单源：消费 filter.priority_mapping（经 _priority_mapping 三级回退）。
+        T2/e2（2026-11-05）：条目有效权重经 audio_priority 单一源——
+        priority_override 优先于类型映射（编排插队 500 与规则级 999 条目在
+        builtin 队列同样生效；与 queue_manager._entry_priority 同源防漂移）。"""
+        from utils.audio.audio_priority import entry_priority
         priority_mapping = self._priority_mapping()
 
-        def get_priority(item):
-            return priority_mapping.get(item.get("type"))
-
-        new_priority = get_priority(audio_json)
+        new_priority = entry_priority(audio_json, priority_mapping)
         if new_priority is None:
             insert_position = len(self.audio_json_list)
         else:
             insert_position = 0
             for i in range(len(self.audio_json_list) - 1, -1, -1):
-                item_priority = get_priority(self.audio_json_list[i])
+                item_priority = entry_priority(self.audio_json_list[i], priority_mapping)
                 if item_priority is not None and item_priority >= new_priority:
                     insert_position = i + 1
                     break

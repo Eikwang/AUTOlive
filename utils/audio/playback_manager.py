@@ -127,6 +127,16 @@ class PlaybackMixin:
             shutil.rmtree(seg_dir, ignore_errors=True)
             logger.info(f"[song] 切片目录已清理：{seg_dir}")
 
+    def _is_999_entry(self, data_json) -> bool:
+        """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
+        统一判定——type 映射==999 或 priority_override==999（d18 规则级 999
+        载体）均触发 999 机制（active 标记/让位/单实例）。"""
+        try:
+            from utils.audio.audio_priority import entry_is_999
+            return entry_is_999(data_json, self.config.get("filter", "priority_mapping") or {})
+        except Exception:
+            return False
+
     async def only_play_audio(self):
         """只进行普通音频播放"""
         try:
@@ -149,12 +159,9 @@ class PlaybackMixin:
                     # A7/T1（2026-10-22 审查批次）：999 单实例 active 标记——条目离开
                     # 待播放队列即视为进入播放系统；完成/跳过/清空时释放（EDTalk 在
                     # 本函数释放，builtin 经 release hook 在播放器线程释放）。
-                    _was_999 = False
-                    try:
-                        _p = self.config.get("filter", "priority_mapping").get(data_json.get("type"))
-                        _was_999 = (_p is not None and int(_p) == 999)
-                    except Exception:
-                        _was_999 = False
+                    # T2/e2：判定经 _is_999_entry 单一源（override==999 的规则级
+                    # 999 条目同样置位——让位门 active_reread_top_999 对其生效）。
+                    _was_999 = self._is_999_entry(data_json)
                     if _was_999:
                         self.active_reread_top_999 = True
 

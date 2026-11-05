@@ -129,10 +129,15 @@ class TestQueueMechanismWiring:
 
     def test_choreo_sync_wired(self):
         """排序同步动作编排：插队音轨（priority_override 固定权重，条目权重
-        判定优先于类型映射）+ 打断撤旧音轨（两队列清除）。"""
+        判定优先于类型映射）+ 打断撤旧音轨（两队列清除）。
+        T2/e2（2026-11-05）：有效权重判定收敛 utils/audio/audio_priority.py
+        单一源（queue 调用 entry_priority；override 抽取逻辑在该模块内）。"""
         qm = _src("utils/audio/queue_manager.py")
         assert "def _entry_priority" in qm
-        assert 'item.get("priority_override")' in qm
+        assert "entry_priority(item, priority_mapping)" in qm
+        ap = _src("utils/audio/audio_priority.py")
+        assert 'item.get("priority_override")' in ap
+        assert "def entry_is_999" in ap
         assert "def cancel_choreo_audio" in qm
         ch = _src("utils/orchestration/choreographer.py")
         assert '"priority_override": CHOREO_AUDIO_PRIORITY' in ch
