@@ -26,6 +26,7 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("gift", "礼物答谢"),
         ("follow", "关注答谢"),
         ("song", "点歌"),
+        ("dynamic_text", "动态文案"),
         ("integral", "积分"),
         ("key_mapping", "按键映射"),
     ]),
@@ -52,14 +53,15 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
 PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
     "互动优先": {
         "comment": 80, "read_comment": 75, "gift": 70, "follow": 65,
-        "entrance": 55, "song": 50, "integral": 45, "key_mapping": 40,
+        "entrance": 55, "song": 50, "dynamic_text": 48, "integral": 45, "key_mapping": 40,
         "talk": 35, "local_qa_audio": 30, "local_qa_text": 30, "reread": 25,
         "assistant_anchor_text": 20, "assistant_anchor_audio": 20,
         "schedule": 15, "trends_copywriting": 12, "idle_time_task": 10,
         "reread_top_priority": 999,
     },
     "内容优先": {
-        "schedule": 70, "trends_copywriting": 65, "song": 60, "idle_time_task": 55,
+        "schedule": 70, "trends_copywriting": 65, "song": 60, "dynamic_text": 58,
+        "idle_time_task": 55,
         "comment": 40, "read_comment": 35, "gift": 30, "follow": 28,
         "entrance": 25, "integral": 20, "key_mapping": 18,
         "talk": 15, "local_qa_audio": 15, "local_qa_text": 15, "reread": 12,
@@ -68,7 +70,7 @@ PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
     },
     "省资源": {
         "comment": 10, "read_comment": 10, "entrance": 10, "gift": 10,
-        "follow": 10, "song": 10, "integral": 10, "key_mapping": 10,
+        "follow": 10, "song": 10, "dynamic_text": 10, "integral": 10, "key_mapping": 10,
         "talk": 10, "local_qa_audio": 10, "local_qa_text": 10, "reread": 10,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
         "schedule": 10, "trends_copywriting": 10, "idle_time_task": 10,

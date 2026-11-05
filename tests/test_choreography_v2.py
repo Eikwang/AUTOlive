@@ -311,7 +311,8 @@ class TestApiSurface:
         from utils.orchestration import api as api_mod
         from utils.orchestration.config_model import VALID_TRIGGER_TYPES as SRC
         assert api_mod.VALID_TRIGGER_TYPES is SRC
-        assert set(SRC) == {"gift", "keyword", "song", "entrance", "follow"}
+        # dynamic_text（2026-11-05 编排优化批次 d4）：动态文案独立类型加入值域
+        assert set(SRC) == {"gift", "keyword", "song", "entrance", "follow", "dynamic_text"}
 
     def test_422_message_joins_value_domain(self):
         """422 fix 文案由值域拼接（api.py:167 不再硬编码）。"""

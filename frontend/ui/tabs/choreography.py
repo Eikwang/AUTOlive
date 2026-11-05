@@ -567,9 +567,12 @@ def create_choreography_tab(
     choreo_node = _copy.deepcopy(get_nested_value(config, "choreography", default={}) or {})
     if not isinstance(choreo_node, dict) or "enable" not in choreo_node:
         choreo_node = {"enable": False, "default_mode": "rotate", "default_segments": [],
-                       "step_timeout_s": 60, "rules": []}
+                       "step_timeout_s": 60, "continuous_trigger_window_s": 30, "rules": []}
     choreo_node.setdefault("rules", [])
     choreo_node.setdefault("default_segments", [])
+    # 连续触发周期（2026-11-05 编排优化批次 d14）：存量 config 缺键时补默认 30
+    # （下次「应用」随整节写回=迁移路径；0=禁用=永续累计语义）
+    choreo_node.setdefault("continuous_trigger_window_s", 30)
     # 退役键不再写出（R-ceo4/R-ceo5：min_retrigger_s/min_sequence_hold_s 已退役——
     # 旧 config 读取兼容一代（config_model 退役告警），本页应用即清除）
 
@@ -975,6 +978,29 @@ def create_choreography_tab(
             tooltip="序列结束后恢复的默认轮播方式（承载=EDTalk 段调度器）："
                     "轮播=片段池顺序循环 / 随机=片段池随机 / 单段=指定片段循环",
             style="width:60%;")
+        # 连续触发周期（2026-11-05 编排优化批次 d14）：所有规则共用的连续触发
+        # 窗口（滑动锚点=每次触发刷新；M3/d24a 终门确认语义）。输入非法时保留
+        # 原值，装载侧校验兜底回退 30+告警（config_model.load_choreography_config）。
+        try:
+            _win_init = float(choreo_node.get("continuous_trigger_window_s", 30))
+        except (TypeError, ValueError):
+            _win_init = 30.0
+
+        def _sync_window(v):
+            if v is None:
+                return  # 清空输入保留原值；装载侧兜底
+            try:
+                choreo_node["continuous_trigger_window_s"] = float(v)
+            except (TypeError, ValueError):
+                pass
+
+        ui.number(label='连续触发周期（秒，0=禁用）', value=_win_init,
+                  step=1, min=0, on_change=lambda e: _sync_window(e.value),
+                  ).style("width:60%").tooltip(
+            "同一规则在本窗口秒数内再次触发=连续触发（计次进档）；超出窗口=新一轮"
+            "触发（该规则计数清零回落基础档）。滑动窗口=每次触发都刷新计时——"
+            "每 29 秒触发一次将始终连续（终门确认语义，实播验收项）；"
+            "0=禁用（触发计次永续累计=2026-10-31 后现行为）；所有规则共用这一个窗口")
         # 默认画面（2026-10-27 动作编排完善批次）：段名池改选择模式（多选主线段）；
         # 一律立刻切换，无需设切换方式；单段模式=pingpong 首尾循环（可指定循环段，
         # 空=列表第一个）

@@ -52,6 +52,7 @@ PRODUCER_TYPES = frozenset({
     "local_qa_audio", "local_qa_text",
     "assistant_anchor_text", "assistant_anchor_audio",
     "trends_copywriting",
+    "dynamic_text",  # 2026-11-05 编排优化批次 d21：动态文案独立类型（权重 15 与编排面 d10 对齐）
 })
 
 # 允许的无生产者预留键（语义矩阵登记，不判死键失败）

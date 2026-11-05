@@ -89,6 +89,7 @@
       "entrance": 20,
       "comment": 20,
       "song": 10,
+      "dynamic_text": 15,
       "read_comment": 20,
       "gift": 20,
       "follow": 20,
@@ -1385,11 +1386,12 @@
     "default_mode": "rotate",
     "default_segments": [],
     "step_timeout_s": 60,
+    "continuous_trigger_window_s": 30,
     "rules": [
       {
         "rule_id": "girl_A_dance",
         "trigger_type": "gift",
-        "_trigger_type_comment": "值域 gift|keyword|song|entrance|follow；entrance/follow=观众入场/关注触发（T4）：match 可空=任意事件、非空=用户名等值；自动强制 interrupt=queue+权重恒最低档+10s 类型节流（三强制，无配置键）",
+        "_trigger_type_comment": "值域 gift|keyword|song|entrance|follow|dynamic_text；entrance/follow=观众入场/关注触发（T4）：match 可空=任意事件、非空=用户名等值；dynamic_text=动态文案独立类型（2026-11-05 批次 d4）：keyword_hub 源直连不走关键词匹配，match 可空；自动强制 interrupt=queue+权重恒最低档+10s 类型节流（三强制，无配置键）",
         "match": "小心心",
         "min_price": 0,
         "sequence": {

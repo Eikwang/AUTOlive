@@ -195,8 +195,8 @@ class TestChoreoTopology:
         """代码侧镜像断言（v2.10）：entrance/follow 触发实装+三强制落码。"""
         cfg_src = (REPO / "utils" / "orchestration" / "config_model.py").read_text(
             encoding="utf-8")
-        assert 'VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow")' in cfg_src, (
-            "触发类型值域缺少 entrance/follow（T4 案例二）")
+        assert 'VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow", "dynamic_text")' in cfg_src, (
+            "触发类型值域缺少 entrance/follow（T4 案例二）或 dynamic_text（2026-11-05 批次 d4）")
         engine_src = (REPO / "utils" / "orchestration" / "choreographer.py").read_text(
             encoding="utf-8")
         assert "ENTRANCE_FOLLOW_MIN_INTERVAL_S" in engine_src, "缺少类型专属节流常量（三强制三）"

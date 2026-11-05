@@ -15,7 +15,10 @@ from typing import Optional
 
 from utils.my_log import logger
 
-VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow")
+VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow", "dynamic_text")
+# dynamic_text（2026-11-05 编排优化批次 d4）：动态文案独立类型——keyword_hub
+# 动态文案源直连（不走关键词匹配，match 可空=源直连命中）；999 权重特殊机制
+# 载体之一（d18 规则级判定），编排面权重经 d10 仲裁表（不映射 trends_copywriting）。
 # entrance/follow（2026-11-01 动作编排优化批次 T4：设计文档案例二答谢三类型）：
 # 入场/关注事件订阅（感谢链同源 event_handler.entrance_handle/follow_handle）。
 # 三强制（风暴防护，CEO F7 豁免声明）：load 时强制 interrupt=queue、权重恒钳制
@@ -104,6 +107,9 @@ class ChoreographyConfig:
     min_sequence_hold_s: float = 5.0
     step_timeout_s: float = 60.0
     reset_after_s: float = 0.0              # 已退役（2026-10-31 动作编排审查批次）：计数窗口弃用，引擎不消费
+    continuous_trigger_window_s: float = 30.0  # 连续触发窗口秒（2026-11-05 批次 d14/d7：滑动锚点；0=禁用=永续累计；T3 消费）
+    arbitration_weights: dict = field(default_factory=dict)  # 类型键级仲裁权重覆盖（d10/e11；空=代码内置表；T3 消费）
+    arbitration_enable: bool = True         # 仲裁总开关（d22；off=整体回退现行为；T3 消费）
     rules: list = field(default_factory=list)  # list[RuleCfg]，已剔除被拒规则
 
     def rule_by_id(self, rule_id: str) -> Optional[RuleCfg]:
@@ -244,6 +250,71 @@ def load_choreography_config(config) -> ChoreographyConfig:
             "problem=退役配置键仍存在；cause=计数窗口弃用，触发计次不再随时间衰减；"
             "fix=从 config.json choreography 节删除该键")
 
+    # continuous_trigger_window_s（2026-11-05 编排优化批次 d14/d7）：连续触发
+    # 窗口秒数（滑动锚点=每次触发刷新；窗口内再触发=连续累计升档，窗外=该规则
+    # 计数清零回落基础档）。0=禁用=现行永续累计语义。非数/负值/NaN 回退默认 30
+    # 并告警（消费接线在 choreographer.decide_trigger，T3 任务）。
+    continuous_trigger_window_s = 30.0
+    _raw_win = node.get("continuous_trigger_window_s")
+    if _raw_win is not None:
+        try:
+            _win = float(_raw_win)
+            # NaN 参与比较恒 False=一并拒绝；inf 视为值域外（窗口永不超时无意义）
+            _win_ok = 0 <= _win < float("inf")
+        except (TypeError, ValueError):
+            _win_ok = False
+        if _win_ok:
+            continuous_trigger_window_s = _win
+        else:
+            logger.warning(
+                "choreography.continuous_trigger_window_s 值域外；problem=配置告警；"
+                f"cause={_raw_win!r}；fix=改为 ≥0 数值秒数（0=禁用=永续累计；已回退默认 30）")
+
+    # arbitration_weights（2026-11-05 编排优化批次 d10/e11）：编排面仲裁权重
+    # 覆盖，类型键级（键值域=VALID_TRIGGER_TYPES，值=非负有限数值）。非法键/值
+    # 拒绝=剔除+聚合告警（其余合法键照常生效，不整体拒绝防阻塞整节提交）；
+    # 空/缺省=代码内置表（d10）。消费接线在 choreographer._rule_priority（T3 任务）。
+    arbitration_weights: dict = {}
+    _raw_aw = node.get("arbitration_weights")
+    if _raw_aw is not None:
+        if not isinstance(_raw_aw, dict):
+            logger.warning(
+                "choreography.arbitration_weights 非对象；problem=配置告警；"
+                f"cause={type(_raw_aw).__name__}；fix=改为 {{类型: 权重}} 对象（已忽略该键，用内置表）")
+        else:
+            _dropped = []
+            for _k, _v in _raw_aw.items():
+                _w_ok = False
+                if _k in VALID_TRIGGER_TYPES:
+                    try:
+                        _w = float(_v)
+                        _w_ok = 0 <= _w < float("inf")
+                    except (TypeError, ValueError):
+                        _w_ok = False
+                if _w_ok:
+                    arbitration_weights[str(_k)] = _w
+                else:
+                    _dropped.append(f"{_k}={_v!r}")
+            if _dropped:
+                logger.warning(
+                    "choreography.arbitration_weights 非法键/值已剔除；problem=配置告警；"
+                    f"cause={'; '.join(_dropped)}；fix=键仅限 {'|'.join(VALID_TRIGGER_TYPES)}"
+                    "，值为非负数值（合法键已生效，其余用内置表）")
+
+    # arbitration_enable（2026-11-05 编排优化批次 d22）：仲裁总开关（消费接线在
+    # T3 任务；off=整体回退现行为——直播中出问题一键回退无需重启；F-E 裁决：
+    # off 时 priority_override 通道不注入=回退彻底性，消费侧义务）。
+    _raw_ae = node.get("arbitration_enable")
+    if _raw_ae is None:
+        arbitration_enable = True
+    elif isinstance(_raw_ae, bool):
+        arbitration_enable = _raw_ae
+    else:
+        arbitration_enable = True
+        logger.warning(
+            "choreography.arbitration_enable 非布尔；problem=配置告警；"
+            f"cause={_raw_ae!r}；fix=改为 true|false（已回退默认 true）")
+
     rules: list = []
     for raw in node.get("rules") or []:
         if not isinstance(raw, dict):
@@ -259,8 +330,9 @@ def load_choreography_config(config) -> ChoreographyConfig:
             _reject(rule_id, f"trigger_type 值域外：{trigger_type!r}{hint}", rejections)
             continue
         match = str(raw.get("match", "") or "")
-        if trigger_type not in ("song", "entrance", "follow") and not match:
-            _reject(rule_id, "match 缺失（gift/keyword 必填；song/entrance/follow 可空=任意事件）", rejections)
+        if trigger_type not in ("song", "entrance", "follow", "dynamic_text") and not match:
+            _reject(rule_id, "match 缺失（gift/keyword 必填；song/entrance/follow 可空=任意事件；"
+                             "dynamic_text 可空=keyword_hub 源直连不走关键词匹配）", rejections)
             continue
         try:
             min_price = float(raw.get("min_price", 0) or 0)
@@ -361,6 +433,9 @@ def load_choreography_config(config) -> ChoreographyConfig:
                              min_sequence_hold_s=0.0,   # 已退役（R-ceo5/uc2a）：保护窗移除
                              step_timeout_s=step_timeout_s,
                              reset_after_s=0.0,          # 已退役（2026-10-31 批次）：引擎不消费
+                             continuous_trigger_window_s=continuous_trigger_window_s,
+                             arbitration_weights=arbitration_weights,
+                             arbitration_enable=arbitration_enable,
                              rules=rules)
     cfg._rejections = rejections
     return cfg

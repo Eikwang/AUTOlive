@@ -56,6 +56,7 @@ KNOWN_PRODUCER_TYPES = frozenset({
     "integral", "key_mapping", "song",
     "local_qa_text", "local_qa_audio",
     "assistant_anchor_text", "assistant_anchor_audio",
+    "dynamic_text",  # 2026-11-05 编排优化批次 d21：动态文案独立类型（编排规则 TTS 音频 type；权重 15 与编排面 d10 对齐）
 })
 
 
