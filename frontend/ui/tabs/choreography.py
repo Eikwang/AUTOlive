@@ -118,7 +118,7 @@ def create_choreography_tab(
     with ui.card().style(card_css):
         ui.label("动作素材创建（画面资产库）").style("font-size: var(--font-size-title)")
         ui.label("选本地视频（可多选批量处理）→ 指定类型（上场/主线/离场，整批共用）→ "
-                 "勾选口型推理决定预处理链（勾选=拆帧+人脸检测；不勾选=仅拆序列帧，"
+                 "口型推理预处理开关决定预处理链（开启=拆帧+人脸检测；关闭=仅拆序列帧，"
                  "播放时作画外音直通）→ 上线。素材段名可留空（用视频文件名作段名）；"
                  "批量处理按队列逐个执行，预处理耗时与视频长度成正比，"
                  "完成自动出现在下方素材列表").style(
@@ -168,6 +168,9 @@ def create_choreography_tab(
 
         with ui.row().style("width:100%;align-items:center;gap:10px"):
             mat_pick_btn = ui.button("选择视频文件", icon="movie", on_click=_open_video_picker).props("outline")
+            # 「添加素材」与「选择视频文件」并列同行（2026-11-05 用户要求）；
+            # on_click 闭包运行期解析 _publish_material——定义在后不碍点击时已存在
+            mat_add_btn = ui.button("添加到素材库", on_click=lambda: _publish_material())
             mat_picked_label = ui.label("未选择视频").style(
                 "color: var(--text-hint); font-size: var(--font-size-body); "
                 "max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
@@ -185,9 +188,9 @@ def create_choreography_tab(
                 options={'cuda': 'cuda（推荐）', 'cpu': 'cpu（GPU 异常时排查用）'},
                 value="cuda", style="width:100%;")
         with ui.row().style("width:100%;align-items:center;gap:12px"):
-            mat_lip_checkbox = ui.checkbox(
-                "口型推理预处理（勾选=完整人脸链；不勾选=画外音直通素材）", value=True)
-            mat_add_btn = ui.button("添加素材", on_click=lambda: _publish_material())
+            mat_lip_switch = ui.switch(
+                "口型推理预处理", value=True).tooltip(
+                "开启=完整人脸链（拆帧+人脸检测四件套）；关闭=画外音直通素材（仅拆序列帧）")
 
         mat_task_label = ui.label("").style("color: var(--text-hint); white-space: pre-wrap")
 
@@ -229,7 +232,7 @@ def create_choreography_tab(
                             json={"video_path": video, "segment": seg,
                                   "device": mat_device_select.value or "cuda",
                                   "material_type": mat_type_select.value or "main",
-                                  "lip_flag": bool(mat_lip_checkbox.value)},
+                                  "lip_flag": bool(mat_lip_switch.value)},
                             timeout=8,
                         )
                     except Exception as e:
@@ -413,16 +416,19 @@ def create_choreography_tab(
                                     "color: var(--text-hint);font-size: var(--font-size-body);"
                                     "padding:2px 10px 8px")
                                 continue
+                            # 列宽固定（2026-11-05 用户要求：操作按钮统一靠左对齐——
+                            # 曾用 min/max-width 自适应宽度，引用文案长短不一导致
+                            # 每行「操作」按钮横向位置漂移）
                             with ui.row().style("width:100%;gap:10px;color: var(--text-hint);padding:0 10px"):
-                                for h in ("段名", "帧数", "引用/状态"):
-                                    ui.label(h).style("min-width:76px")
+                                for h, w in (("段名", "120px"), ("帧数", "76px"), ("引用/状态", "150px")):
+                                    ui.label(h).style(f"width:{w}")
                             for it in group:
                                 seg = it.get("segment", "?")
                                 with ui.row().style("width:100%;align-items:center;gap:10px;padding:2px 10px"):
                                     ui.label(seg).style(
-                                        "min-width:76px;max-width:120px;overflow:hidden;"
+                                        "width:120px;overflow:hidden;"
                                         "text-overflow:ellipsis;white-space:nowrap")
-                                    ui.label(str(it.get("total_frames") or "?")).style("min-width:76px")
+                                    ui.label(str(it.get("total_frames") or "?")).style("width:76px")
                                     refs = it.get("references") or []
                                     tags = []
                                     if it.get("is_current"):
@@ -431,8 +437,8 @@ def create_choreography_tab(
                                         tags.append("调度中")
                                     tags += refs[:2] + [f"等{len(refs)}处引用" if len(refs) > 2 else ""]
                                     ui.label(" · ".join(x for x in tags if x) or "未引用").style(
-                                        "min-width:76px;color: var(--text-hint);max-width:150px;"
-                                        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                                        "width:150px;color: var(--text-hint);overflow:hidden;"
+                                        "text-overflow:ellipsis;white-space:nowrap")
                                     # 操作菜单（改类型并入操作——2026-10-27 用户裁决）
                                     with ui.dropdown_button("操作", auto_close=True).props(
                                             "outline dense").style("min-width:70px"):
@@ -539,7 +545,12 @@ def create_choreography_tab(
     # ==================================================================
     _choreo_avail = _CHOREO_AVAIL   # 模块级缓存绑定（SWR——跨页面/会话存活）
     # 规则展开状态（重渲染保留——素材清单到达/变化触发 _render_rules 重渲染
-    # 同步下拉选项源，不折叠用户正在编辑的规则）
+    # 同步下拉选项源，不折叠用户正在编辑的规则）。
+    # 2026-11-05 修复「新增规则/加一档后规则折叠」：改用 id(rule) 对象标识
+    # 追踪——曾按 rule_id 文本追踪，新建规则（默认 new_rule）编辑「规则 ID」
+    # 后再点「加一档」，重渲染按新 ID 查不到记录 → 编辑中的规则折叠；空 ID
+    # 规则的 '#N' 兜底随列表序号位移同理失稳。对象标识跨重渲染稳定（规则
+    # dict 在 choreo_node 中持续存活），删除时显式回收防 id 复用误命中。
     _rule_expanded: set = set()
 
     def _default_rule():
@@ -622,11 +633,12 @@ def create_choreography_tab(
                     f"（{rule.get('trigger_type', '?')} · {rule.get('match') or '任意'}）"
                     f"{' · 新语义' if is_new else ' · 存量语义（重存后转新）'}{tier_note}"
                 ).style("width:100%") as _exp:
-                    # 展开状态保留（清单变化重渲染不折叠编辑中的规则）
-                    if rid in _rule_expanded:
+                    # 展开状态保留（清单变化重渲染不折叠编辑中的规则；
+                    # id(rule) 追踪——rule_id 编辑不丢状态，见 _rule_expanded 注）
+                    if id(rule) in _rule_expanded:
                         _exp.value = True
-                    _exp.on_value_change(lambda e, r=rid: (
-                        _rule_expanded.add(r) if e.value else _rule_expanded.discard(r)))
+                    _exp.on_value_change(lambda e, r=rule: (
+                        _rule_expanded.add(id(r)) if e.value else _rule_expanded.discard(id(r))))
                     if not is_new:
                         ui.label("⚠ 存量语义规则：维持旧时长/音轨判定直至本页重存；"
                                  "重存后转新语义（时长=素材时长，音轨由系统判断）").style(
@@ -805,9 +817,18 @@ def create_choreography_tab(
 
     def _delete_rule(idx: int):
         try:
-            choreo_node["rules"].pop(idx)
+            rule = choreo_node["rules"].pop(idx)
+            _rule_expanded.discard(id(rule))  # 显式回收，防 id 复用误命中
         except Exception:
             return
+        _render_rules()
+
+    def _add_rule():
+        """新增规则并自动展开进入编辑态（2026-11-05 修复：曾新建后呈折叠态
+        需手动打开——新规则标识未加入展开集，创建即登记后重渲染恒展开）。"""
+        rule = _default_rule()
+        choreo_node["rules"].append(rule)
+        _rule_expanded.add(id(rule))
         _render_rules()
 
     async def _apply_choreography():
@@ -958,11 +979,15 @@ def create_choreography_tab(
         # 一律立刻切换，无需设切换方式；单段模式=pingpong 首尾循环（可指定循环段，
         # 空=列表第一个）
         def _def_pool_options() -> dict:
-            """片段池候选=素材清单段 ∪ EDTalk 可用段 ∪ 已配置段（修复：此前仅
-            EDTalk /status 可用段——服务未跑时为空、已配置段被 value 过滤丢失）。"""
+            """片段池候选=「主线」类型素材（2026-11-05 用户裁决：片段多时全量
+            候选易选错类型——默认轮播语义本就是主线段循环，只列 type=main）
+            ∪ 已配置段（NiceGUI value 校验保底——历史已选非主线段仍显示，
+            可手动移除）。EDTalk /status 全量段不再并入（沿 _seg_options
+            类型过滤同款裁决：该来源无类型信息，并入会把上场/离场段混进
+            主线候选）。typed 清单未到时先显已配置段（SWR 到达后刷新补全）。"""
             opts = [str(it.get("segment"))
-                    for it in (_choreo_avail.get("typed") or {}).get("items", [])]
-            opts += _choreo_avail["segments"] or []
+                    for it in (_choreo_avail.get("typed") or {}).get("items", [])
+                    if it.get("type") == "main"]
             opts += [str(s) for s in (choreo_node.get("default_segments") or [])]
             seen, out = set(), {}
             for s in opts:
@@ -976,8 +1001,10 @@ def create_choreography_tab(
             options=_def_pool_options(),
             value=[str(s) for s in (choreo_node.get("default_segments") or [])],
             on_change=lambda e: choreo_node.__setitem__("default_segments", list(e.value or [])),
-            with_input=True,
-        ).style("width:60%").tooltip("候选=素材清单段∪EDTalk 可用段（「刷新可用段」同步）；"
+            with_input=True, clearable=True,
+        ).style("width:60%").tooltip("候选=「主线」类型素材（「刷新可用段」同步；"
+                                     "已选非主线段保留显示，可手动移除）；右侧清除叉=一键清空池"
+                                     "（单段模式循环段同步清空）；"
                                      "轮播=按列表顺序逐个 / 随机=随机播放 / 单段=循环指定片段")
 
         def _sync_default_single(v):
@@ -1023,8 +1050,7 @@ def create_choreography_tab(
         ui.label("规则列表").style("font-size: var(--font-size-body)")
         rules_container = ui.column().style("width:100%")
         with ui.row():
-            ui.button("新增规则", on_click=lambda: (choreo_node["rules"].append(_default_rule()),
-                                                    _render_rules())).props("outline")
+            ui.button("新增规则", on_click=_add_rule).props("outline")
             ui.button("刷新可用段", on_click=_fetch_avail_segments).props("outline")
             ui.button("应用（校验+热生效+写回）", on_click=_apply_choreography)
 
