@@ -254,16 +254,20 @@ def create_talk_tab(
             # 聊天页只留用户需要操作的面板
 
         # ===== 右 1/3：聊天记录面板（嵌入卡片；栏高锁定视口，滚动区独立滚动）=====
+        # 2026-11-05 修复「聊天记录与参数页联动滚动」：曾将 chat_log_container
+        # 创建为 scroll_area 的兄弟节点——滚动区恒空，聊天记录直接撑高卡片
+        # 溢出到页面级滚动容器，滚动页面时与左栏参数区联动。现移入
+        # scroll_area 内部：记录在右栏内部滚动，scroll_to 直达最新一条。
         with ui.column().style("flex:1 1 300px; min-width:280px; height:100%; gap:8px;"):
             with ui.card().style((card_css or "") + " width:100%; height:100%; display:flex; flex-direction:column;"):
                 with ui.row().style("align-items:center; gap:6px;"):
                     ui.icon("question_answer").style("color: var(--primary, #1976d2);")
                     ui.label('聊天记录').style('font-size:15px; font-weight:500;')
-                scroll_area_chat_box = ui.scroll_area().style(
-                    "width:100%; flex:1 1 0; min-height:0;")
-                chat_log_container = ui.column().style(
-                    "gap:8px; width:100%; padding:4px; display:flex; "
-                    "flex-direction:column; align-items:stretch;")
+                with ui.scroll_area().style(
+                        "width:100%; flex:1 1 0; min-height:0;") as scroll_area_chat_box:
+                    chat_log_container = ui.column().style(
+                        "gap:8px; width:100%; padding:4px; display:flex; "
+                        "flex-direction:column; align-items:stretch;")
 
     _chat_rendered_count = {"n": -1}
 
