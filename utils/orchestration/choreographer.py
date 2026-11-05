@@ -416,6 +416,15 @@ class ChoreoEngine:
                 reason = self._enqueue_pending(rule, trigger_type, match_value, data, commands)
                 return {"accepted": False, "takeover": False, "rule": rule,
                         "commands": commands, "reason": reason, "retry_after_s": None}
+            # T8/d13（resident 让位，镜像音频面 uc5b 字面语义）：999 resident
+            # 序列让位任意 standard 触发——权重门不适用（999 音频面被任何消息
+            # 暂停=画面同拍让位，打断者完成后切回播报画面）。§3 Case B：打赏
+            # 答谢(30) 须打断 999 文案(999) 视觉——权重比较在此失效。
+            if self._arbitration_active() and seq.get("resident"):
+                result = self._suspend_hold_for(rule, data, now, commands, "resident")
+                result["reason"] = "interrupted"
+                result["retry_after_s"] = None
+                return result
             # O3（2026-10-28 消费批次）：standard 打断权重门——低权重触发不得打断
             # 高权重序列（改走排队），同权重保持既有抢占语义（含打断清零 D-4）。
             cur_p = self._rule_priority(self.cfg.rule_by_id(seq["rule_id"]))
@@ -431,9 +440,14 @@ class ChoreoEngine:
             # （歌曲链路活跃）→ 不走 _interrupt_sequence 终止（歌曲伴奏/人声链路
             # 归音频侧不撤销；编排 inflight 仅答谢音轨——hold 步应为 None），转入
             # seq 旁路挂起态；打断者序列照常启动，播完后按 d2 画面归属恢复。
+            # T8/d13/N2/C3（resident 切回）：dynamic_text 999 序列同机制——打断者
+            # 完成后切回动态文案画面（编排队列切回=③机制；deadline=step_timeout
+            # 保险丝——播报时长不可知，fuse 到期回默认=播报已结束的诚实降级）。
             # 总开关 off=回退现行 standard 抢占终止语义（d22）。
-            if self._arbitration_active() and seq.get("hold_for_song"):
-                result = self._suspend_song_for(rule, data, now, commands)
+            if self._arbitration_active() and (seq.get("hold_for_song")
+                                               or seq.get("resident")):
+                _kind = "song" if seq.get("hold_for_song") else "resident"
+                result = self._suspend_hold_for(rule, data, now, commands, _kind)
                 result["reason"] = "interrupted"
                 result["retry_after_s"] = None
                 return result
@@ -548,6 +562,10 @@ class ChoreoEngine:
             "trigger_data": dict(data or {}),
             "tier_mood": (select_tier(rule, self.counters[rule.rule_id]).mood
                           if select_tier(rule, self.counters[rule.rule_id]) else ""),
+            # T8/d13/N2（resident 切回）：dynamic_text 999 序列=resident——
+            # 他键打断转挂起、打断者完成切回（③编排队列切回机制）
+            "resident": (rule.trigger_type == "dynamic_text"
+                         and self._rule_priority(rule) == 999),
         }
         self.state = "sequence"
         commands.append(LogCmd("info",
@@ -597,23 +615,33 @@ class ChoreoEngine:
         commands.extend(self._start_current_step(now, force_immediate=True))
         return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands}
 
-    def _suspend_song_for(self, rule: RuleCfg, data: dict, now: float,
-                          commands: List) -> dict:
-        """d9/e4：song hold 序列让位挂起（seq 旁路结构），打断者序列照常启动。
+    def _suspend_hold_for(self, rule: RuleCfg, data: dict, now: float,
+                          commands: List, kind: str = "song") -> dict:
+        """d9/e4（song）+T8/d13/N2/C3（resident 切回）——hold 序列让位挂起
+        （seq 旁路结构），打断者序列照常启动。
+
+        kind=song：deadline=歌曲锚（on_song_started 挂起分派刷新——F-B）；
+        kind=resident：deadline=step_timeout 保险丝（播报时长不可知的诚实
+        上限；到期回默认=播报已结束）。
 
         与 _interrupt_sequence 的差异：不撤销歌曲链路（伴奏/人声归音频侧；编排
         inflight 在 hold 步应为 None，残留答谢由既有完成回调静默忽略）；不重插
-        旧 exit（song 主视觉→打断者 enter 直切，旧序列离场段不重放）；旧序列
-        转入 song_suspended 挂起态（打断者完成后按 d2 恢复）。D-4 计数清零照常
+        旧 exit（主视觉→打断者 enter 直切，旧序列离场段不重放）；旧序列转入
+        song_suspended 挂起态（打断者完成后按 d2 恢复）。D-4 计数清零照常
         （e9：恢复重入=基础档画面）。总开关 off 时本方法不被调用（decide_trigger
         门控）。"""
         seq = self.seq
         old_rule_id = seq["rule_id"]
         self.counters[old_rule_id] = 0  # 他键触发清零（D-4；e9 恢复=基础档）
+        if kind == "song":
+            _deadline = seq.get("current_deadline")
+        else:
+            _deadline = now + float(getattr(self.cfg, "step_timeout_s", 60.0) or 60.0)
         self.song_suspended = {
             "rule_id": old_rule_id,
-            "deadline": seq.get("current_deadline"),
+            "deadline": _deadline,
             "entered_at": now,
+            "kind": kind,
         }
         self._seq_counter += 1
         self.counters[rule.rule_id] = self.counters.get(rule.rule_id, 0) + 1
@@ -634,23 +662,27 @@ class ChoreoEngine:
                           if select_tier(rule, self.counters[rule.rule_id]) else ""),
         }
         commands.append(LogCmd(
-            "info", f"[编排] song 伴唱挂起（{old_rule_id} 歌曲链路保留，"
-                    f"deadline 锚移交挂起态），切换 {rule.rule_id}；"
-                    f"打断者完成后回唱歌画面（d2/d9）"))
+            "info", f"[编排] {'song 伴唱' if kind == 'song' else 'dynamic_text resident'}"
+                    f"挂起（{old_rule_id} 保留，deadline 锚移交挂起态），"
+                    f"切换 {rule.rule_id}；打断者完成后切回（d2/d13）"))
         commands.extend(self._start_current_step(now, force_immediate=True))
         return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands}
 
-    def _recover_song_hold(self, rule: RuleCfg, deadline: float, now: float) -> List:
-        """d2/e9 恢复：回点歌主线画面（基础档 hold，deadline 续挂起锚）。
+    def _recover_song_hold(self, rule: RuleCfg, deadline: float, now: float,
+                           kind: str = "song") -> List:
+        """d2/e9 恢复（T8 泛化 resident 同构）：回主画面（基础档 hold，deadline
+        续挂起锚）。
 
-        恢复序列仅主线 hold 步（不重放入场/离场——歌曲主视觉连续；入场已播过，
-        离场留给歌曲自然结束后的默认轮播）；歌曲结束（deadline 到点）由既有
-        on_tick 超时机制走条件1 回默认池。e9：打断时 D-4 已清零，恢复=基础档
-        画面（select_tier(rule, 1) 与首次触发同档）。"""
+        恢复序列仅主线 hold 步（不重放入场/离场——主视觉连续；入场已播过，
+        离场留给自然结束后的默认轮播）；deadline 到点由既有 on_tick 超时机制
+        走条件1 回默认池。e9：打断时 D-4 已清零，恢复=基础档画面
+        （select_tier(rule, 1) 与首次触发同档）。kind=resident 时 deadline=
+        step_timeout 保险丝（播报时长不可知的诚实上限——到期即播报已结束）。"""
         self._seq_counter += 1
         tier = select_tier(rule, 1)
         overrides = tier.segment_overrides if tier else {}
         base = rule.name_step("main")
+        is_song = (kind == "song")
         hold_step = {
             "step_id": f"{rule.rule_id}:main#resume{self._seq_counter}",
             "name": "main",
@@ -661,7 +693,7 @@ class ChoreoEngine:
             "audio_path": base.audio_path if base else "",
             "pred_version": rule.pred_version,
             "lip_flag": base.lip_flag if base else True,
-            "hold_for_song": True,
+            "hold_for_song": is_song,
         }
         self.seq = {
             "rule_id": rule.rule_id,
@@ -676,12 +708,14 @@ class ChoreoEngine:
             "step_accepted": False,
             "trigger_data": {},
             "tier_mood": "base",
-            "hold_for_song": True,
+            "hold_for_song": is_song,
+            "resident": (not is_song),
         }
         self.state = "sequence"
         commands: List = [LogCmd(
-            "info", f"[编排] 打断者播完，恢复唱歌画面（{rule.rule_id} 基础档，"
-                    f"歌曲剩余 {deadline - now:.1f}s——d2/e9）")]
+            "info", f"[编排] 打断者播完，恢复{'唱歌' if is_song else '播报'}画面"
+                    f"（{rule.rule_id} 基础档，剩余 {deadline - now:.1f}s——"
+                    f"{'d2/e9' if is_song else 'd13/N2 resident'}）")]
         commands.extend(self._start_current_step(now, force_immediate=True))
         return commands
 
@@ -947,6 +981,8 @@ class ChoreoEngine:
         # 主线画面（恢复序列=基础档 hold，deadline 续挂起锚）；歌曲已结束
         # （deadline 过点/锚缺失/规则已删/硬上限超时）=清挂起走正常默认轮播
         # （e4：挂起期默认池不接管——恢复在此同步发生，不经 RestoreDefault）。
+        # T8：resident（dynamic_text 999 序列）同构恢复——切回播报画面，保险丝
+        # 到期回默认（d13/N2/C3）。
         susp = self.song_suspended
         if susp is not None and self._arbitration_active():
             self.song_suspended = None
@@ -955,22 +991,24 @@ class ChoreoEngine:
             if (susp_rule is not None and susp_deadline is not None
                     and now < susp_deadline
                     and now - susp["entered_at"] <= self.SONG_SUSPEND_MAX_S):
-                commands.extend(self._recover_song_hold(susp_rule, susp_deadline, now))
+                commands.extend(self._recover_song_hold(
+                    susp_rule, susp_deadline, now,
+                    kind=susp.get("kind") or "song"))
                 return commands
             if susp_rule is not None and susp_deadline is not None and now >= susp_deadline:
                 commands.append(LogCmd(
-                    "info", f"[编排] 挂起歌曲已结束，恢复正常默认轮播（d2，"
-                            f"{susp['rule_id']}）"))
+                    "info", f"[编排] 挂起{'歌曲' if susp.get('kind') == 'song' else '播报'}"
+                            f"已结束，恢复正常默认轮播（d2/d13，{susp['rule_id']}）"))
             elif now - susp["entered_at"] > self.SONG_SUSPEND_MAX_S:
                 logger.error(
-                    f"[编排] song 挂起超硬上限（{self.SONG_SUSPEND_MAX_S:g}s），"
+                    f"[编排] 挂起超硬上限（{self.SONG_SUSPEND_MAX_S:g}s），"
                     "强制回默认轮播（d22 看门狗）：problem=挂起锚异常；"
-                    "cause=歌曲链路死亡且无新切片起播（deadline 永不刷新）；"
+                    "cause=锚链路死亡且无刷新（deadline 永不到期）；"
                     "fix=检查歌曲链路（切片自校正/点歌队列）")
                 try:
                     alarm_notifier.alarm_error(
                         alarm_notifier.MODULE_ORCHESTRATION,
-                        "song 伴唱挂起超硬上限，强制回默认轮播",
+                        "编排挂起超硬上限，强制回默认轮播",
                         fix_hint="检查歌曲链路（切片自校正/点歌队列）是否异常")
                 except Exception:
                     pass
@@ -1692,6 +1730,15 @@ class ActionChoreographer:
         if not result.get("ok"):
             self._lip_linkage_fail(want, step_id, result, retried=False)
             return
+        # X4（2026-11-05 批次）：song 序列 lip_mode 切换观测（次数+距上次耗时）
+        _prev_ts = getattr(self, "_lip_switch_last_ts", None)
+        _now_ts = time.monotonic()
+        try:
+            from utils.obs_stats import record_lip_switch
+            record_lip_switch(want, (_now_ts - _prev_ts) if _prev_ts is not None else 0.0)
+        except Exception:
+            pass
+        self._lip_switch_last_ts = _now_ts
         self._lip_mode_cache = want
         # F-M5 off→on 读回断言（on 失败=数字人静止不张嘴=可见缺陷）
         if want == "on":

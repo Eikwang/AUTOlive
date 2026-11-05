@@ -88,7 +88,7 @@ def test_d9_interrupt_spares_song_chain_and_suspends():
     cancels = [c for c in d["commands"] if type(c).__name__ == "CancelAudio"]
     assert cancels == []  # 歌曲链路不撤销（d9）
     assert eng.song_suspended == {"rule_id": "song_a", "deadline": 1200.0,
-                                  "entered_at": 1000.0}
+                                  "entered_at": 1000.0, "kind": "song"}
     assert eng.seq["rule_id"] == "g1"  # 打断者序列照常启动
     assert eng.counters["song_a"] == 0  # D-4 清零（e9 前提）
     assert eng.state == "sequence"
@@ -99,7 +99,8 @@ def test_e4_suspension_fields_and_no_restore_default():
     eng = _engine([_song_rule(), _gift_rule()])
     _suspend_song(eng)
     # 挂起态字段完整（e4 契约三键）
-    assert set(eng.song_suspended.keys()) == {"rule_id", "deadline", "entered_at"}
+    assert set(eng.song_suspended.keys()) == {"rule_id", "deadline", "entered_at", "kind"}
+    assert eng.song_suspended["kind"] == "song"  # T8：kind 参数化（song/resident）
     # 打断者完成 → 恢复（不发 RestoreDefault——默认池不接管，e4）
     NOW[0] = 1006.0
     cmds = eng.on_tick(NOW[0])

@@ -34,6 +34,7 @@ _drop_total = 0
 _latency_samples = deque(maxlen=_LATENCY_WINDOW_MAX)   # 秒（float）
 _tts_samples = deque(maxlen=_TTS_WINDOW_MAX)           # {"s": 耗时秒, "ok": bool}
 _choreo_mute_events = deque(maxlen=50)                 # {"waited_s": ...}（超 60s 打点事件）
+_lip_switch_events: list = []  # X4：lip 联动切换事件（环形 50）
 _started_at = time.time()
 
 
@@ -62,6 +63,20 @@ def record_tts(seconds: float, ok: bool):
     try:
         with _lock:
             _tts_samples.append({"s": round(float(seconds), 3), "ok": bool(ok)})
+    except Exception:
+        pass
+
+
+def record_lip_switch(mode: str, since_last_s: float):
+    """X4（2026-11-05 编排优化批次）：song 序列 lip_mode 人声段/间奏段切换
+    观测（切换次数+距上次切换耗时）。观测失败不外抛。"""
+    try:
+        with _lock:
+            _lip_switch_events.append({"mode": str(mode),
+                                       "since_last_s": round(float(since_last_s), 2),
+                                       "ts": round(time.time(), 3)})
+            if len(_lip_switch_events) > 50:
+                _lip_switch_events.pop(0)
     except Exception:
         pass
 

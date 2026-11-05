@@ -440,6 +440,27 @@ class PlaybackMixin:
                             logger.info("[EDTalk] 答谢被切片替换（d3 人声起即停，"
                                         "视为消费完成）")
                         self._edtalk_prev_type = data_json.get("type")
+                        # T8/X1/e7（2026-11-05 批次）：间奏插播观测——
+                        # a) 插入事件：song 在播中非 song 条目推送（插播发生）
+                        # b) 积压条数：song 切片 push 时待播放队列中非 song 条目
+                        #    （e7 积压分摊观测维度；X1 等待时长=既有 record_latency
+                        #    消费延迟样本承担）
+                        if _prev_type == "song" and data_json.get("type") != "song":
+                            try:
+                                from utils.obs_stats import record_drop
+                                record_drop("song_interlude_insert")
+                            except Exception:
+                                pass
+                        if data_json.get("type") == "song":
+                            try:
+                                _backlog = sum(
+                                    1 for e in getattr(self, "voice_tmp_path_queue", [])
+                                    if isinstance(e, dict) and e.get("type") != "song")
+                                if _backlog:
+                                    from utils.obs_stats import record_drop
+                                    record_drop("song_interlude_backlog", _backlog)
+                            except Exception:
+                                pass
                         # T7/d19/uc2b：999 挂起剩余重推（答谢消费完→任意点恢复；
                         # flush 已清冻结段，剩余从冻结游标重推）
                         _pend = getattr(self, "_edtalk_resume_pending", None)
