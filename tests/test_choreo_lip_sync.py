@@ -123,7 +123,9 @@ class TestPlaybackGuardWiring:
     def test_guard_before_push(self):
         import inspect
         from utils.audio import playback_manager
-        src = inspect.getsource(playback_manager)
+        # 方法域源断言（T7 后模块源含 _repush_edtalk_999_remainder 的同型
+        # push 串——模块级 index 会被新方法抢先匹配）
+        src = inspect.getsource(playback_manager.PlaybackMixin.only_play_audio)
         push_pos = src.index("await self.edtalk_client.push_full(")
         guard_pos = src.index("in_mute_window()")
         assert guard_pos < push_pos  # 守卫判定先于推送

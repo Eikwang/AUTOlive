@@ -137,6 +137,91 @@ class PlaybackMixin:
         except Exception:
             return False
 
+    def _on_edtalk_yield(self) -> bool:
+        """d19/uc2b（T7，2026-11-05 批次）：EDTalk 路径 999 让位编排——
+
+        pause（服务端消费冻结）→读游标（output_frames 差=已播帧）→resume
+        （答谢 push 前解冻，否则答谢帧不被消费）→答谢照常 push（flush 冻结段）
+        →答谢消费完成后剩余段从冻结游标重推（_repush_edtalk_999_remainder）。
+
+        Returns: True=已受理（999 在 EDTalk 飞行中——queue 终止让位链）；
+        False=非本路径（builtin 让位由 queue_manager 原逻辑承担）。pause 失败
+        =d17 fallback 降级（维持排序：999 播完答谢自然轮到），仍返回 True
+        （让位链已消费——bucket edtalk_yield_degraded）。"""
+        flight = getattr(self, "_edtalk_999_flight", None)
+        if not (isinstance(flight, dict) and flight.get("is_999")):
+            return False
+        client = getattr(self, "edtalk_client", None)
+        if client is None or not hasattr(client, "pause_output"):
+            return False
+        try:
+            paused = client.pause_output()
+            if not paused.get("ok", False):
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("edtalk_yield_degraded")
+                except Exception:
+                    pass
+                logger.warning("[EDTalk] 999 让位降级维持排序（pause 失败——"
+                               "d17 fallback；999 播完答谢自然轮到）")
+                return True
+            cursor = client.get_output_frames()
+            start = flight.get("start_frames")
+            if cursor is not None and start is not None:
+                consumed = max(0, int(cursor) - int(start))
+                # 帧锁定音频切片：640 样本/帧（16000Hz / 25fps，render_loop 常量）
+                flight["resume_offset_samples"] = consumed * 640
+            client.resume_output()  # 答谢 push 前解冻
+            self._edtalk_resume_pending = flight
+            logger.info(f"[EDTalk] 999 让位受理（uc2b）：游标"
+                        f"={cursor if cursor is not None else '?'}, "
+                        f"答谢播毕重推剩余段（d19）")
+            return True
+        except Exception as e:
+            logger.warning(f"[EDTalk] 999 让位编排异常（降级维持排序）：{e}")
+            return True
+
+    async def _repush_edtalk_999_remainder(self, flight: dict):
+        """d19/uc2b：999 剩余 PCM 重推（从冻结游标切片→临时 wav→push_full）。
+        fail-soft：重推失败=999 尾段丢失（bucket+告警），不阻塞播放循环。"""
+        try:
+            import wave as _wave
+            path = flight.get("voice_path")
+            offset = int(flight.get("resume_offset_samples") or 0)
+            if not path or not os.path.isfile(path) or offset <= 0:
+                return  # 游标缺失/已播完（答谢期间自然播完）=无剩余
+            with _wave.open(path, "rb") as w:
+                total = w.getnframes()
+                if offset >= total:
+                    return
+                w.setpos(offset)
+                rest = w.readframes(total - offset)
+                rate, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            tmp = path + ".resume999.wav"
+            with _wave.open(tmp, "wb") as out:
+                out.setnchannels(ch)
+                out.setsampwidth(sw)
+                out.setframerate(rate)
+                out.writeframes(rest)
+            logger.info(f"[EDTalk] 999 剩余重推（uc2b 任意点恢复）："
+                        f"{offset}/{total} 帧（{rate}Hz）")
+            await self.edtalk_client.push_full(
+                tmp, content="999-remainder", wait_flight=True)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            # 重推条目的消费回执（d19 口径：剩余段=原 999 的延续，补一次回执）
+            self.report_consumed("reread_top_priority", "999-remainder")
+        except Exception:
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("edtalk_999_repush_fail")
+            except Exception:
+                pass
+            logger.error("[EDTalk] 999 剩余重推失败（尾段丢失）\n"
+                         + traceback.format_exc())
+
     async def only_play_audio(self):
         """只进行普通音频播放"""
         try:
@@ -293,9 +378,27 @@ class PlaybackMixin:
                                 if _remaining and _remaining > 0:
                                     _song_choreo.on_song_started(
                                         str(data_json.get("content", ""))[:40], _remaining)
+                        # T7/d19（uc2b 让位游标基座）：999 飞行登记——push 受理前
+                        # 读 output_frames 起点（consumed=pause 读数-起点=已播帧）
+                        if self._is_999_entry(data_json):
+                            try:
+                                _start_frames = self.edtalk_client.get_output_frames()
+                            except Exception:
+                                _start_frames = None
+                            self._edtalk_999_flight = {
+                                "voice_path": voice_tmp_path,
+                                "start_frames": _start_frames,
+                                "is_999": True,
+                            }
+                        # T7/d3（2026-11-05）：song 切片跳过飞行等待——切片时序
+                        # 锚定伴奏（uc4b），人声起即停答谢=push 即 flush 替换
+                        # （e5 口径：替换生效时刻=本次 push 受理时刻，非推送发起）
+                        _wait_flight = not (data_json.get("type") == "song"
+                                            and data_json.get("song_segment"))
                         try:
                             await self.edtalk_client.push_full(
-                                voice_tmp_path, content=data_json.get("content", "")
+                                voice_tmp_path, content=data_json.get("content", ""),
+                                wait_flight=_wait_flight,
                             )
                         finally:
                             if _backing_gate is not None:
@@ -322,6 +425,27 @@ class PlaybackMixin:
                         # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
                         self.report_consumed(
                             data_json.get("type", ""), data_json.get("content", ""))
+                        # T7/d3/e5：答谢被替换观测——song 切片 push 受理=上一非
+                        # song 条目被服务端 flush 替换（d3「人声起立即停止答谢」；
+                        # 替换视为消费完成——回执已在其 push 返回处上报，此处补
+                        # 替换事件分桶）。首条目（prev=None）不算替换。
+                        _prev_type = getattr(self, "_edtalk_prev_type", None)
+                        if (data_json.get("type") == "song"
+                                and _prev_type is not None and _prev_type != "song"):
+                            try:
+                                from utils.obs_stats import record_drop
+                                record_drop("edtalk_answer_replaced")
+                            except Exception:
+                                pass
+                            logger.info("[EDTalk] 答谢被切片替换（d3 人声起即停，"
+                                        "视为消费完成）")
+                        self._edtalk_prev_type = data_json.get("type")
+                        # T7/d19/uc2b：999 挂起剩余重推（答谢消费完→任意点恢复；
+                        # flush 已清冻结段，剩余从冻结游标重推）
+                        _pend = getattr(self, "_edtalk_resume_pending", None)
+                        if _pend is not None:
+                            self._edtalk_resume_pending = None
+                            await self._repush_edtalk_999_remainder(_pend)
                         # T1 观测：消费延迟样本（入队→完成；_enqueued_at 缺失=旧条目跳过）
                         try:
                             from utils.obs_stats import record_latency

@@ -612,25 +612,25 @@ class TaskScheduler:
                     }
                     if self.my_handle is not None:
                         if t3_keyword:
-                            # T3：格式化条目——关键词**无条件**投编排 on_keyword
-                            # （无论命中与否：no_match/enable=false/被拒只影响画面
-                            # 不影响文案——正交声明无条件适用，spec R2①）；文案部分
-                            # 一律不进 keyword_hub copywriting 源识别（设计文档 Q&A
-                            # 最狭义；其它 hub 消费者不接动态文案关键词）。直投
-                            # on_keyword 与 hub copywriting 源语义精确等价（hub 该源
-                            # 匹配器仅编排消费，keyword_hub.py:17/78），省整段子串扫描。
+                            # d4（2026-11-05 编排优化批次）：动态文案源直连——整段
+                            # 文案内容作为 match_value 触发 dynamic_text 规则（独立
+                            # 类型，不走关键词匹配/on_keyword；match 可空=任意源事
+                            # 件命中）。原 T3 关键词路径（t3_keyword→on_keyword）退
+                            # 役：动态文案归类"弹幕关键词"类型即用户方案 §3 明示的
+                            # 错误分类。正交声明无条件适用：no_match/enable=false/
+                            # 被拒只影响画面不影响文案（文案照常入播放链）。
                             try:
                                 from utils.orchestration import get_choreographer
                                 _choreo = get_choreographer()
                                 if _choreo is not None:
-                                    _accepted = bool(_choreo.on_keyword(t3_keyword))
+                                    _accepted = bool(_choreo.on_dynamic_text(resp_content))
                                     if _accepted:
-                                        logger.info(f"动态文案关键词已触发动作编排：{t3_keyword}")
+                                        logger.info("动态文案已直连触发动作编排（d4 dynamic_text）")
                                     else:
                                         # Eng H1：no_match/未启用分支降 debug 防刷屏
-                                        logger.debug(f"动态文案关键词未触发编排（未命中/未启用）：{t3_keyword}")
+                                        logger.debug("动态文案未触发编排（no_match/未启用）")
                                 else:
-                                    logger.debug("动态文案关键词编排器未装配（跳过画面触发）")
+                                    logger.debug("动态文案编排器未装配（跳过画面触发）")
                             except Exception as _t3_err:
                                 logger.debug(f"动态文案编排触发异常（忽略，文案照常播放）：{_t3_err}")
                         else:

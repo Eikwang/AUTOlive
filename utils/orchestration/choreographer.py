@@ -1259,6 +1259,22 @@ class ActionChoreographer:
             logger.error(f"[编排] on_keyword 异常（忽略）：problem=编排判定异常；cause={type(e).__name__}: {e}；fix=已降级忽略")
             return False
 
+    def on_dynamic_text(self, text: str) -> bool:
+        """d4（2026-11-05 编排优化批次）：动态文案源直连——动态文案内容整段作为
+        match_value 触发 dynamic_text 规则（不走关键词匹配；match 可空=任意源
+        事件命中，非空=content 子串过滤）。task_scheduler 格式化路径与
+        keyword_hub copywriting 源共用本入口。"""
+        try:
+            with self._lock:
+                decision = self.engine.decide_trigger(
+                    "dynamic_text", str(text or ""), {})
+                self._dispatch(decision["commands"])
+            return bool(decision["accepted"])
+        except Exception as e:
+            logger.error(f"[编排] on_dynamic_text 异常（忽略）：problem=编排判定异常；"
+                         f"cause={type(e).__name__}: {e}；fix=已降级忽略")
+            return False
+
     def on_song(self, song_name: str) -> bool:
         """SongMode 命中点调用。True=画面序列接管；点歌音频走 SongMode 原路（WP-10）。"""
         try:

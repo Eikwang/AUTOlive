@@ -200,7 +200,8 @@ class EDTalkClient:
 
     # ---------- 推送 ----------
 
-    async def push_full(self, pcm_path: str, content: str = "") -> bool:
+    async def push_full(self, pcm_path: str, content: str = "",
+                        wait_flight: bool = True) -> bool:
         """推送整句音频给 EDTalk（异步；供 playback 播放循环 await）。
 
         单飞行句：上一句完成判定（启发式）通过前阻塞——阻塞式背压，
@@ -209,6 +210,10 @@ class EDTalkClient:
         Args:
             pcm_path: wav 文件路径（TTS 落盘产物，可能已变速）
             content: 文本内容（仅日志用）
+            wait_flight: T7/d3（2026-11-05 批次）——song 切片传 False：跳过
+                上一句飞行等待（切片时序锚定伴奏，人声起即停答谢=push 即
+                flush 替换，d3 替换语义；服务端 _push_lock 串行+flush 兜底
+                服务侧安全）。答谢/普通语音保持 True（阻塞背压不丢台词）。
 
         Returns:
             True = 推送成功；False = 失败（已降级记录）
@@ -227,7 +232,8 @@ class EDTalkClient:
 
                 timeout = aiohttp.ClientTimeout(total=max(30, duration_s + 30))
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    await self._wait_flight_complete(session, self.last_duration_s)
+                    if wait_flight:
+                        await self._wait_flight_complete(session, self.last_duration_s)
                     async with session.post(
                         f"{self.api_ip_port}/audio/push_full",
                         json={"pcm_base64": payload},
@@ -307,6 +313,25 @@ class EDTalkClient:
         except Exception as e:
             logger.warning(f"EDTalk 暂停输出失败（降级维持排序）：{e}")
             return {"ok": False, "error": str(e)}
+
+    def get_output_frames(self):  # -> int | None（失败 None）
+        """F-A/uc2b（T7）：读 /status 的 output_frames（累计出帧数——让位冻结
+        时刻的续播游标基座：consumed = pause 时读数 - push 受理时读数）。
+        失败返回 None（调用方放弃精确续播=降级）。"""
+        try:
+            import requests
+            resp = requests.get(
+                f"{self.api_ip_port}/status",
+                headers=self._auth_headers(),
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                data = resp.json() or {}
+                frames = data.get("output_frames")
+                return int(frames) if frames is not None else None
+        except Exception as e:
+            logger.debug(f"EDTalk output_frames 读取失败（忽略）：{e}")
+        return None
 
     def resume_output(self) -> dict:
         """F-A/uc2b：从冻结帧位恢复输出。失败降级 {"ok": False}（恢复失败=

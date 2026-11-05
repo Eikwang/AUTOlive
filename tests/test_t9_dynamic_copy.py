@@ -235,7 +235,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_keyword.assert_called_once_with("一号链接")
+        fake.on_dynamic_text.assert_called_once_with("给大家介绍洗洁精")  # d4：内容整段直连
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "给大家介绍洗洁精"
 
@@ -246,7 +246,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_keyword.assert_called_once_with("关键词")
+        fake.on_dynamic_text.assert_called_once_with("第一段|第二段")  # d4：首分隔符后文案整段
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "第一段|第二段"
 
@@ -257,8 +257,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        expected = unicodedata.normalize("NFKC", "１号链接").strip()
-        fake.on_keyword.assert_called_once_with(expected)
+        fake.on_dynamic_text.assert_called_once_with("文案内容")  # d4：内容整段直连（关键词字段退役出编排链）
 
     def test_empty_keyword_falls_back_to_full_chain(self, config_chain_scheduler):
         """关键词为空=向下兼容：整行原文走既有全链（hub 识别照旧）。"""
@@ -294,7 +293,7 @@ class TestKeywordCopyOrthogonal:
         fake = _fake_choreo(False)  # no_match
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_keyword.assert_called_once_with("未命中词")
+        fake.on_dynamic_text.assert_called_once_with("照常播放的文案")  # d4：未命中仍无条件直通（spec R2①）
         mh.keyword_recognize.assert_not_called()  # 文案部分不进 hub
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "照常播放的文案"
@@ -387,6 +386,6 @@ class TestKeywordCopyDegrade:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_keyword.assert_called_once_with("关键词")
+        fake.on_dynamic_text.assert_called_once_with("改写后|含竖线|的输出")  # d4：LLM 改写后整段直连
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "改写后|含竖线|的输出"

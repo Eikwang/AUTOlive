@@ -321,6 +321,11 @@ class QueueMixin:
         """
         try:
             player = getattr(self, "audio_player", None)
+            # T7/d19：EDTalk 路径让位钩子优先（999 在 EDTalk 飞行中=uc2b 编排
+            # pause→游标→答谢→重推；返回 True=已受理，终止让位链）
+            hook = getattr(self, "_edtalk_yield_hook", None)
+            if callable(hook) and hook():
+                return
             if player is None or not hasattr(player, "request_yield"):
                 return
             if getattr(self, "active_reread_top_999", False):

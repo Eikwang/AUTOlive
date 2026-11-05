@@ -102,6 +102,10 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         # 保证 999 单实例约束在条目释放后恢复放行）
         Audio.audio_player.set_999_release_hook(
             lambda: setattr(self, "active_reread_top_999", False))
+        # T7/d19（2026-11-05 批次）：EDTalk 路径 999 让位钩子——queue_manager
+        # a 触发先询本钩子（999 在 EDTalk 飞行中=uc2b 编排 pause→游标→答谢
+        # →剩余重推；返回 False=非 EDTalk 路径，回落 builtin 让位）
+        self._edtalk_yield_hook = self._on_edtalk_yield
         # A5：权威优先级表读取器（Config 内存视图——合并迁移即时可见，不等落盘）
         Audio.audio_player.set_priority_provider(
             lambda: self.config.get("filter", "priority_mapping") or {})

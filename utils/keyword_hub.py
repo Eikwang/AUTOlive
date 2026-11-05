@@ -147,10 +147,16 @@ class KeywordHub:
 
     def _recognize_system_copy(self, data, source):
         """系统任务源识别（闲时/定时/动态文案）：仅编排关键词判定——
-        统一入链（流程图三源→Keyword→Queue），识别后照常入队播报。"""
+        统一入链（流程图三源→Keyword→Queue），识别后照常入队播报。
+        d4（2026-11-05 批次）：copywriting 源（动态文案）直连 dynamic_text
+        规则（不走关键词匹配）；schedule/idle 源保持关键词判定语义。"""
         content = str(data.get("content", "") or "")
         rec = KeywordResult(source=source, content=content)
-        rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
+        if source == "copywriting":
+            rec.choreo_accepted = self._safe(
+                lambda: self._match_choreo_dynamic_text(content), False)
+        else:
+            rec.choreo_accepted = self._safe(lambda: self._match_choreo_keyword(content), False)
         return rec
 
     # ==================== 匹配器（严格对照原实现语义） ====================
@@ -292,6 +298,20 @@ class KeywordHub:
             return bool(choreo.on_keyword(content))
         except Exception as e:
             logger.debug(f"编排关键词判定异常（忽略）：{e}")
+            return False
+
+    def _match_choreo_dynamic_text(self, content):
+        """d4（2026-11-05 编排优化批次）：copywriting 源直连——动态文案内容整段
+        触发 dynamic_text 规则（不走关键词匹配；hub copywriting 源识别仅编排
+        消费，与本入口语义精确等价）。"""
+        try:
+            from utils.orchestration import get_choreographer
+            choreo = get_choreographer()
+            if choreo is None:
+                return False
+            return bool(choreo.on_dynamic_text(content))
+        except Exception as e:
+            logger.debug(f"编排动态文案直连判定异常（忽略）：{e}")
             return False
 
     def _match_choreo_gift(self, data):
