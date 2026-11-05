@@ -108,7 +108,8 @@ class AUDIO_PLAY_CENTER:
         self._suspended_999_at = None  # 挂起登记时刻（monotonic；d22/uc5b 看门狗锚点）
         self._suspended_999_alarm_at = None  # 本挂起期看门狗已告警标记（去重）
         self._suspended_play = None    # 挂起现场 {"wf","tmp_audio_path"}（流=self.stream）
-        self._playing_is_999 = False   # 当前播放条目是否 999（让位触发判定）
+        self._playing_is_999 = False   # 当前播放条目是否 999（active 标记联动）
+        self._playing_weight = None    # 当前播放条目有效权重（e3/d12 泛化让位判定；None=空闲）
         self._current_output_rate = 0  # 输出采样率（F-5：回退 1 秒帧数折算基准）
         self._interrupt_999_event = threading.Event()  # 让位触发（design 情况1）
         self._interruptor_pending = False  # 挂起后待插播的打断者标记（播毕即续播）
@@ -324,11 +325,26 @@ class AUDIO_PLAY_CENTER:
         except Exception:
             logger.error("999 释放回调异常\n" + traceback.format_exc())
 
+    def request_yield(self):
+        """让位请求（e3 泛化，2026-11-05 批次）：正在播条目暂停挂起、让新条目
+        先播（播毕自动续播）。触发语义由调用方裁决（queue_manager
+        _maybe_interrupt_999_for）：a) 999 播放中+任意新音频（方案 §3 字面）；
+        b) 非 999 播放中+新音频有效权重严格更高（d12 builtin 降级——song 让位
+        给答谢，整曲暂停=伴奏人声同停近似）。已挂起则忽略（R2-A7c）。
+        request_999_interrupt 为兼容别名（999 既有调用面/测试域）。"""
+        if getattr(self, "_playing_is_999", False) or \
+                getattr(self, "_playing_weight", None) is not None:
+            # 有条目在播（999 或泛化条目）且未挂起 → 受理让位
+            if self._suspended_999 is None:
+                self._interrupt_999_event.set()
+
     def request_999_interrupt(self):
-        """队列插入侧调用（queue_manager._maybe_interrupt_999_for）：正在播 999 时
-        请求让位（design 情况1）。已挂起则忽略（情况 c 排队不打断，R2-A7c）。"""
-        if self._playing_is_999 and self._suspended_999 is None:
-            self._interrupt_999_event.set()
+        """兼容别名（e3 泛化前入口；语义=request_yield）。"""
+        self.request_yield()
+
+    def get_playing_weight(self):
+        """当前播放条目有效权重（d12 b 触发判定用；None=空闲/未知）。"""
+        return self._playing_weight
 
     def _wait_loop(self, is_999=False):
         """播放等待循环（A7 重构，F-2 修复）。
@@ -342,7 +358,10 @@ class AUDIO_PLAY_CENTER:
             str: "completed" | "skipped" | "suspended"
         """
         while True:
-            if is_999 and self._suspended_999 is None and self._interrupt_999_event.is_set():
+            # e3 泛化（2026-11-05）：让位分支不再限 999——任何在播条目受理让位
+            # （触发语义由 queue_manager._maybe_interrupt_999_for 裁决：a) 999
+            # 播放中任意新音频；b) 非 999 播放中+更高权重新音频 d12）
+            if self._suspended_999 is None and self._interrupt_999_event.is_set():
                 # 999 让位：暂停挂起（流停、wf 读位冻结；现场由调用方登记保留）。
                 # 同置 pause_event：get_status().paused 翻真 → E-4 字幕挂起同步
                 # （字幕批次 Eng E1 交界缝隙：否则让位窗口字幕继续走 keep_time，
@@ -380,6 +399,7 @@ class AUDIO_PLAY_CENTER:
                 pass
         self._current = None
         self._playing_is_999 = False
+        self._playing_weight = None
 
     def _resume_suspended_999(self):
         """A7 续播：回退 1 秒后从暂停点继续（打断者播毕即续播，不等队列排空——R2-A7b）。
@@ -414,6 +434,16 @@ class AUDIO_PLAY_CENTER:
 
             self._skip_event.clear()
             status = self._wait_loop(is_999=True)
+            if status == "suspended":
+                # e3 泛化（2026-11-05）：续播期间再次让位——重新登记挂起，
+                # 条目不丢（新打断者播毕后经 _interruptor_pending 再续播）
+                self._suspended_play = held
+                self._suspended_999 = item
+                self._suspended_999_at = time.monotonic()
+                self._suspended_999_alarm_at = None
+                self._interruptor_pending = True
+                logger.info(f"999 续播期再次让位（重新挂起）：{item.get('voice_path')}")
+                return
             if status == "completed":
                 self._fire_completion(item)
             self._release_999()
@@ -470,6 +500,7 @@ class AUDIO_PLAY_CENTER:
 
         is_999 = (self._item_priority(data_json) == 999)
         self._playing_is_999 = is_999
+        self._playing_weight = self._item_priority(data_json)  # e3/d12：泛化让位判定源
         self._interrupt_999_event.clear()  # 丢弃上个条目周期的陈旧让位事件
 
         # 解码统一转 wav（mp3 等格式依赖 ffmpeg，既有系统依赖）
@@ -500,6 +531,7 @@ class AUDIO_PLAY_CENTER:
         except Exception:
             self._record_error(f"解码失败：{voice_path}\n" + traceback.format_exc())
             self._playing_is_999 = False
+            self._playing_weight = None
             return "completed"
 
         wf = wave.open(tmp_audio_path, "rb")

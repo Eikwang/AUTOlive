@@ -163,6 +163,29 @@ def create_app(service: RealtimeService,
             _map_control_errors(e, "确认服务已 start() 且 render_loop 就绪")
 
     # ------------------------------------------------------------------
+    # Output pause/resume（控制面；F-A/uc2b 任意点暂停——2026-11-05 批次 T6）
+    # 端点纳入 app 级 _auth_guard 依赖（api_token 配置时全路由生效——F-I 义务）；
+    # 服务默认绑定 127.0.0.1 不变。
+    # ------------------------------------------------------------------
+
+    @app.post("/output/pause")
+    def pause_output():
+        """Freeze output consumption at the exact frame position (frame-locked
+        audio stops with it; the sink holds the last frame). Idempotent."""
+        try:
+            return service.pause_output()
+        except Exception as e:
+            _map_control_errors(e, "确认服务已 start() 且 output_streamer 就绪")
+
+    @app.post("/output/resume")
+    def resume_output():
+        """Resume output from the frozen frame position. Idempotent."""
+        try:
+            return service.resume_output()
+        except Exception as e:
+            _map_control_errors(e, "确认服务已 start() 且 output_streamer 就绪")
+
+    # ------------------------------------------------------------------
     # Segment control（控制面）
     # ------------------------------------------------------------------
 

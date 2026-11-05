@@ -176,6 +176,22 @@ class RealtimeService:
     # Segment control（R2）
     # ------------------------------------------------------------------
 
+    def pause_output(self) -> dict:
+        """F-A/uc2b（2026-11-05 编排优化批次 T6）：任意点暂停输出——消费冻结
+        （帧不弹出/音频同停/sink 持帧），精确帧位续播（flush/preroll 不触碰）。
+        幂等（重复暂停无副作用）。"""
+        if self.output_streamer is None:
+            raise NotEnabledError("output_streamer 未装配（服务未 start 或降级态）")
+        self.output_streamer.set_paused(True)
+        return {"paused": True}
+
+    def resume_output(self) -> dict:
+        """F-A/uc2b：从冻结帧位恢复输出（幂等）。"""
+        if self.output_streamer is None:
+            raise NotEnabledError("output_streamer 未装配（服务未 start 或降级态）")
+        self.output_streamer.set_paused(False)
+        return {"paused": False}
+
     def switch_segment(self, segment: str, at: str = 'immediate') -> dict:
         """Switch segments; at='segment_end' queues a boundary continuation.
 

@@ -239,6 +239,14 @@ class OutputStreamer:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
+        # F-A/uc2b 任意点暂停门（2026-11-05 编排优化批次 T6 spike）：消费冻结
+        # ——循环不弹出帧（FrameBuffer 内容与游标原样保留=精确帧位续播）、
+        # 音频 chunk 帧锁定天然同停、画面由 sink 持帧。生产者 put 满载阻塞=
+        # 背压等待（零丢帧）；恢复=从冻结帧位继续（flush/preroll 不触碰——
+        # 仅属段替换语义）。静态 spike 三承重点：拉式节拍钟/put 阻塞语义/
+        # 段内暂停不涉替换状态（详见批次计划 F-A 结论）。
+        self._paused = False
+
         self._underruns = 0
         self._output_frames = 0
         self._last_sent: Optional[np.ndarray] = None
@@ -272,6 +280,13 @@ class OutputStreamer:
         self.preroll_frames = frames
         self._preroll_ready.clear()
         self._preroll_progress = (0, frames)
+
+    def set_paused(self, paused: bool) -> None:
+        """F-A/uc2b：任意点暂停/恢复（消费冻结门；线程安全——GIL 布尔读）。"""
+        self._paused = bool(paused)
+
+    def is_paused(self) -> bool:
+        return self._paused
 
     def start(self) -> None:
         """Start the output pacing thread."""
@@ -320,6 +335,12 @@ class OutputStreamer:
         preroll_announced = False
 
         while self._running:
+            # F-A/uc2b 任意点暂停门（T6）：冻结消费——帧不弹出、音频不推、
+            # sink 持帧。置于 preroll 门之前：preroll 期间暂停同样冻结。
+            if self._paused:
+                time.sleep(0.02)
+                continue
+
             # Preroll gate (re-armable after flush / recovery).
             if self.preroll_frames > 0 and not self._preroll_ready.is_set():
                 if not preroll_announced:

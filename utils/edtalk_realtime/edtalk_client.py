@@ -291,6 +291,39 @@ class EDTalkClient:
 
     # ---------- 控制面（直调 HTTP，实时生效） ----------
 
+    def pause_output(self) -> dict:
+        """F-A/uc2b（2026-11-05 批次 T6）：任意点暂停输出（消费冻结，精确帧位
+        续播）。失败降级 {"ok": False}——调用方按 d17 fallback 维持排序语义
+        （运行时降级=999 按队列序播放，不阻塞入队主链）。"""
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/output/pause",
+                json={},
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            return resp.json() if resp.status_code == 200 else {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.warning(f"EDTalk 暂停输出失败（降级维持排序）：{e}")
+            return {"ok": False, "error": str(e)}
+
+    def resume_output(self) -> dict:
+        """F-A/uc2b：从冻结帧位恢复输出。失败降级 {"ok": False}（恢复失败=
+        输出持续冻结——alarm_notifier 告警由调用方处置，本方法不阻塞）。"""
+        try:
+            import requests
+            resp = requests.post(
+                f"{self.api_ip_port}/output/resume",
+                json={},
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            return resp.json() if resp.status_code == 200 else {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.error(f"EDTalk 恢复输出失败（输出将保持冻结）：{e}")
+            return {"ok": False, "error": str(e)}
+
     def switch_segment(self, segment: str, at: str = "segment_end") -> dict:
         """切换素材段（at=segment_end 边界无缝；immediate 硬切）。"""
         try:

@@ -180,8 +180,10 @@ class TestQueueFourRules:
         fx = self._fixture(6)
         fx.active_reread_top_999 = True
         called = []
+        # T3/e3（2026-11-05）：让位入口泛化为 request_yield（触发裁决在
+        # _maybe_interrupt_999_for a/b 双规则；999 active=a 触发）
         fx.audio_player = types.SimpleNamespace(
-            request_999_interrupt=lambda: called.append(1))
+            request_yield=lambda: called.append(1))
         fx.data_priority_insert("待播放音频列表", _item("w200", "interruptor"))
         assert called == [1]
 

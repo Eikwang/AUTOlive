@@ -307,17 +307,48 @@ class QueueMixin:
             logger.warning(f"连续对话待播舍弃判断异常（忽略）：{e}")
 
     def _maybe_interrupt_999_for(self, data_json):
-        """A7（design 情况1）：非 999 新音频入队成功后，若 999 正在播放则请求让位暂停。
+        """A7 999 让位 + d12 通用高优让位（e3 泛化，2026-11-05 编排优化批次）。
 
-        仅 builtin 播放器具备暂停-续播机制（UC1a 终门裁决：保留 builtin 为推荐
-        播放器；pygame 层不实现该机制——999 按普通最高优先级排队）；已挂起时
-        播放器侧自行忽略（情况 c 排队不打断，R2-A7c）。
+        触发裁决（builtin 播放器专属能力——UC1a 终门保留 builtin 为推荐播放器）：
+        a) 999 播放中（active 标记）+ 任意新音频入队成功 → 让位（方案 §3
+           「其它任何类型的消息到达都会暂停 999」字面语义，uc5b 严格形态）
+        b) 非 999 播放中 + 新音频有效权重严格高于在播条目 → 让位（d12：song
+           让位给答谢——builtin 整曲暂停=伴奏人声同停近似声明，e3；
+           同权重/更低=排队不打断，现行语义保持）
+        已挂起时播放器侧自行忽略（R2-A7c 排队不打断）。仅 builtin 具备暂停-
+        续播机制；pygame 层不实现；EDTalk 路径任意点暂停=T6 spike 主路径
+        （F-A 静态可行，服务端端点+客户端降级包装）。
         """
         try:
+            player = getattr(self, "audio_player", None)
+            if player is None or not hasattr(player, "request_yield"):
+                return
             if getattr(self, "active_reread_top_999", False):
-                player = getattr(self, "audio_player", None)
-                if player is not None and hasattr(player, "request_999_interrupt"):
-                    player.request_999_interrupt()
+                # a) 999 播放中：任意新音频触发让位（player 侧已挂起自忽略）
+                player.request_yield()
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("builtin_yield_999")
+                except Exception:
+                    pass
+                return
+            playing = (player.get_playing_weight()
+                       if hasattr(player, "get_playing_weight") else None)
+            new_p = None
+            try:
+                from utils.audio.audio_priority import entry_priority
+                new_p = entry_priority(
+                    data_json, self.config.get("filter", "priority_mapping") or {})
+            except Exception:
+                new_p = None
+            if new_p is not None and playing is not None and new_p > playing:
+                # b) d12：严格更高权重新音频 → 在播条目让位
+                player.request_yield()
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("builtin_yield_priority")
+                except Exception:
+                    pass
         except Exception:
             pass  # 让位触发失败不阻塞入队主流程（999 播完自然轮到插队音频）
 
