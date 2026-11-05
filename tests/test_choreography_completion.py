@@ -399,6 +399,16 @@ def _app_and_client(ch):
 
 class TestEndpoints:
     @pytest.fixture(autouse=True)
+    def _isolate_config_path(self, tmp_path, monkeypatch):
+        """POST rules applied→persisted 会写 _config_path()（默认=cwd 相对
+        "config.json"=真实生产配置，pytest cwd=项目根）——本类端点测试一律
+        重定向 tmp（2026-11-05 调查批次根修，对齐 test_choreography_p2.py
+        TestRoutes 惯例；会话级兜底另见 conftest._isolate_choreo_config_writer）。"""
+        import utils.orchestration.api as choreo_api
+        monkeypatch.setattr(choreo_api, "_config_path",
+                            lambda: str(tmp_path / "config.json"))
+
+    @pytest.fixture(autouse=True)
     def _clean_holder(self):
         """全局 holder 跨测试清理（register_choreographer 是模块级单例）。"""
         from utils.orchestration.choreographer import _choreographer_holder

@@ -201,12 +201,30 @@ def setup_test_environment():
     # Setup before test
     os.environ["TESTING"] = "true"
     os.environ["LOG_LEVEL"] = "DEBUG"
-    
+
     yield
-    
+
     # Cleanup after test
     os.environ.pop("TESTING", None)
     os.environ.pop("LOG_LEVEL", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_choreo_config_writer(tmp_path, monkeypatch):
+    """纵深防御（2026-11-05 调查批次）：choreography 端点写者
+    orchestration.api._write_choreography_section 的 _config_path() 默认返回
+    cwd 相对路径——pytest cwd=项目根=真实 config.json。任何无隔离的
+    POST /choreography/rules 测试（applied=True 分支）都会用测试固件整节
+    覆盖生产配置（实测事故：girl_A 固件覆盖用户编排规则，写者指纹=
+    test_choreography_completion.py::test_rules_endpoint_non_loopback_403_
+    with_allow，全字段与 _cfg_node(enable=False) 逐键吻合）。
+
+    测试会话内一律重定向 tmp；个别测试可再自行 monkeypatch 覆盖本默认
+    （monkeypatch 栈式生效，测试内 setattr 优先）。"""
+    from utils.orchestration import api as choreo_api
+    monkeypatch.setattr(choreo_api, "_config_path",
+                        lambda: str(tmp_path / "config.json"))
+    yield
 
 
 @pytest.fixture
