@@ -940,6 +940,8 @@ def create_choreography_tab(
     with ui.card().style(card_css):
         ui.label("默认画面（空闲轮播）").style("font-size: var(--font-size-title)")
         ui.label("无事件触发时数字人画面的承载方式（序列结束后恢复）。"
+                 "启动系统后编排器立即接管默认轮播（从片段池开播——启动时看到的"
+                 "画面切换属正常行为，非编排规则触发）。"
                  "改动后点『应用』= 校验 + 热生效 + 写回 config（与编排规则整节同一次提交）。").style(
             "color: var(--text-hint); font-size: var(--font-size-body)")
         # 默认画面模式（计数窗口已退役——2026-10-31 审查批次，

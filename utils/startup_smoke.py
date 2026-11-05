@@ -158,12 +158,87 @@ def check_priority_mapping_coverage(config):
     return warns
 
 
+def check_choreography_materials(config):
+    """编排素材/触发链自检（2026-11-04 erro3 批次 T6/R7/E5）——曾无任何启动期
+    校验：规则引用段不在素材 meta（60s 兜底卡序列）、song 触发挂点断链，全靠
+    实播踩坑暴露。三项可校验断言（E5，连通性不做静态证明只查装配面）：
+    ①编排器注册面+worker（get_choreographer/worker_alive——enable 时）
+    ②启用规则引用段在素材 meta 且 duration_s>0（缺=60s 兜底风险）
+    ③触发词/引用段名合法性（触发词低于最小长度的存量告知，F-6）。
+    enable=false/零启用规则=零输出（显式态）。"""
+    warns = []
+    try:
+        ch = _cfg_get(config, "choreography") or {}
+        if not ch.get("enable"):
+            return warns
+        rules = [r for r in (ch.get("rules") or []) if isinstance(r, dict)]
+        if not rules:
+            return warns
+        # ① 注册面+就绪面（E5-①②：编排器装配与 worker 线程）
+        try:
+            from utils.orchestration import get_choreographer
+            ch_obj = get_choreographer()
+            if ch_obj is None:
+                warns.append("[编排自检] 编排器未装配（get_choreographer=None）——"
+                             "主进程启动链编排模块缺失，规则将不会触发")
+            elif not ch_obj.worker_alive():
+                warns.append("[编排自检] 编排 worker 线程未运行——检查启动日志"
+                             "[编排] 三段式告警")
+        except Exception:
+            pass
+        # ② 启用规则引用段 ⊆ 素材 meta 且 duration_s>0（E3：0.0 病态值同判缺）
+        try:
+            from utils.edtalk_realtime.materials import get_material_meta
+            referenced = []
+            for rule in rules:
+                seq = rule.get("sequence") or {}
+                for step in ("enter", "main", "exit"):
+                    seg = str((seq.get(step) or {}).get("segment") or "")
+                    if seg:
+                        referenced.append((rule.get("rule_id") or "?", step, seg))
+                for tier in (rule.get("emotion_tiers") or []):
+                    for step, seg in ((tier.get("segment_overrides") or {}).items()):
+                        if seg:
+                            referenced.append((rule.get("rule_id") or "?", f"tier:{step}", str(seg)))
+            missing = []
+            for rid, step, seg in referenced:
+                meta = get_material_meta(seg)
+                if float(meta.get("duration_s") or 0) <= 0:
+                    missing.append(f"{rid}:{step}→{seg}")
+            if missing:
+                warns.append(
+                    f"[编排自检] {len(missing)} 个规则引用段在素材清单缺失或缺时长"
+                    f"（{'; '.join(missing[:8])}{'…' if len(missing) > 8 else ''}）——"
+                    f"触发将按 60s 兜底推进（画面卡步）；请在动作编排页核对这些段名，"
+                    f"或在素材管理重新处理对应素材")
+        except Exception:
+            pass
+        # ③ 触发词存量告知（F-6：低于最小长度的触发词在点歌意图收敛后静默失效）
+        # ——start_cmd 实存形态=换行分隔字符串（曾逐字符误报），先归一
+        try:
+            raw_tw = _cfg_get(config, "choose_song", "start_cmd") or []
+            if isinstance(raw_tw, str):
+                raw_tw = raw_tw.replace("；", "\n").replace(";", "\n") \
+                               .replace("，", "\n").replace(",", "\n").replace("、", "\n") \
+                               .split("\n")
+            tws = [str(t).strip() for t in raw_tw if str(t).strip()]
+            short = [t for t in tws if len(t) < 2]
+            if short:
+                warns.append(f"[编排自检] 点歌触发词低于 2 字：{short}——意图收敛后"
+                             f"短触发词不再可靠（误判敞口），建议在点歌页改为 ≥2 字")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return warns
+
+
 def run_startup_smoke(config):
     """运行全部冒烟检查，warn 一次并返回 warns（供测试断言与调用方日志）。"""
     warns = []
     for check in (check_badwords_files, check_song_audio_root,
                   check_assistant_kb_bridge, check_serial_refs,
-                  check_priority_mapping_coverage):
+                  check_priority_mapping_coverage, check_choreography_materials):
         try:
             warns.extend(check(config) or [])
         except Exception:
@@ -174,5 +249,5 @@ def run_startup_smoke(config):
         logger.warning(f"[启动冒烟] 共 {len(warns)} 项降级风险——以上为一次性提示，"
                        f"修复后重启复检")
     else:
-        logger.info("[启动冒烟] 全部通过（词表/曲源/词库/串口引用/优先级覆盖）")
+        logger.info("[启动冒烟] 全部通过（词表/曲源/词库/串口引用/优先级覆盖/编排）")
     return warns

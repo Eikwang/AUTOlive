@@ -643,7 +643,20 @@ class FeatureHandler:
         准备文案已退役，无成品场景播报后静默入队）；
         ② covers 成品命中→播放（分轨双轨或整轨降级）；
         ③ 无成品→异步入队翻唱（C-5 产出后自动插播）。
-        返回 True=已处理（礼物触发场景答谢照旧由调用方保证）。"""
+        返回 True=已处理（礼物触发场景答谢照旧由调用方保证）。
+        2026-11-04 erro3 批次 T2（R2）：song 类型编排规则的触发挂点——点歌
+        命中即调 choreo.on_song（decide_trigger("song", song_name)），命中
+        规则=画面序列接管（主线 hold 至歌终，由 on_song_started/playback
+        受理点承接）；未命中/编排未启用=原路播放零变化（on_song 内部全兜底）。"""
+        try:
+            from utils.orchestration import get_choreographer
+            _choreo = get_choreographer()
+            if _choreo is not None:
+                _accepted = bool(_choreo.on_song(song_name))
+                if _accepted:
+                    logger.info(f"[点歌] song 编排规则接管：{song_name}（画面序列+主线保持至歌终）")
+        except Exception as _song_err:
+            logger.debug(f"[点歌] 编排 on_song 调用异常（忽略，播放照常）：{_song_err}")
         copy_text = self._render_song_copy(
             self.my_handle.config.get("choose_song", "match_success_copy") or "",
             user=username, content=song_name, gift=gift_name or "")
@@ -780,8 +793,17 @@ class FeatureHandler:
         """C-5（/autoplan 2026-10-14 终门 uc1a=立即插播）：翻唱 done 回调——
         构造 song 消息走点歌播放通道（audio_synthesis_handle），成品自动入播放。
         播放通道互斥策略=通道既有行为（与点歌手动播放一致，排队等待当前播报）。
-        调用线程=cover-worker 线程（与弹幕线程同构，通道安全）。"""
+        调用线程=cover-worker 线程（与弹幕线程同构，通道安全）。
+        2026-11-04 erro3 批次 T2（R2）：翻唱命中点同挂 song 编排触发（R2②
+        「翻唱命中点」——异步翻唱完成时 song 规则接管判定，未命中零变化）。"""
         try:
+            try:
+                from utils.orchestration import get_choreographer
+                _choreo = get_choreographer()
+                if _choreo is not None and bool(_choreo.on_song(str(job.get("song") or ""))):
+                    logger.info(f"[翻唱] song 编排规则接管：{job.get('song')}")
+            except Exception as _choreo_err:
+                logger.debug(f"[翻唱] 编排 on_song 调用异常（忽略，插播照常）：{_choreo_err}")
             message = {
                 "type": "song",
                 "tts_type": self.my_handle.config.get("audio_synthesis_type"),

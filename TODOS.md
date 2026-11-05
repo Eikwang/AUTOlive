@@ -1,3 +1,8 @@
+## Deferred Items from /autoplan (2026-11-04) — 动作编排缺陷修复批次（main-20261104-211016，CEO/ENG 终门 rec 批准，T1-T6 已实施待验收）
+
+1. **启动默认轮播与就绪时序的观感交互**（P3, S；Native CEO F4）— 启动系统后编排器立即接管默认轮播（从片段池开播），用户观感"立刻切换第一个入场"；已确认属正常语义（RestoreDefault 下发，choreographer.py:107-113 用户裁决注释），tooltip 已澄清。**可选后续**：EDTalk 就绪延迟起播或渐入过渡——是否需要等实播反馈。依赖：无。
+2. **素材 meta sidecar 的 pytest 污染存量善后**（P3, S；T1 实证）— data/edtalk_materials_meta.json 曾被测试写入 291 条 `_migrated:<tmp路径>` 垃圾键；迁移标记已移 char_dir 本地 marker + 迁移重跑时自动剔除，**若历史文件未触发重跑，可手动删除该文件由下次迁移重建**。依赖：无。
+
 ## Deferred Items from /autoplan (2026-11-03) — 一键翻唱整合运行机制治理批次（main-20261103-102228，CEO/ENG/DX 三阶段审查完毕待终门）
 
 1. **P2 机制本体缺陷两项**（P2, M；D-5/spec Q3）— ServiceRegistry.register 同名覆盖不 stop 旧实例子进程 + ManagedProcess 健康检查探 URL 不认进程（utils/service_orchestrator.py:380-382/:296-309）——影响所有 ManagedProcess 用户（gpt_sovits/rvc-vc 共用）。**触发条件：任一托管服务再现孤儿/双拉即升 P0**。依赖：无。

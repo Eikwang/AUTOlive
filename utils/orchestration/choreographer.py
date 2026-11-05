@@ -924,6 +924,13 @@ class ActionChoreographer:
                  thanks_generate: Callable, clock: Callable[[], float] = time.monotonic,
                  audio_cancel: Optional[Callable] = None):
         self.cfg: ChoreographyConfig = load_choreography_config(config)
+        # R-ceo7 时长回填补链（2026-11-05 用户实测「测试二」批次）：管理页创建的
+        # new 规则 sequence 无 duration_s（R-ceo7 合法——时长=素材时长），apply
+        # 二段（apply_config→_resolve_new_rule_material_props）是唯一回填点——
+        # **启动装载路径（本 __init__）从未回填**：重启系统后规则以裸 None 进引
+        #擎，触发即 60s 兜底卡序列（sidecar 里时长明明都在——「测试二」实测）。
+        # 启动装载与热应用双链同源回填（sidecar 读取不依赖 EDTalk 就绪）。
+        self._resolve_new_rule_material_props(self.cfg)
         self._config = config                    # 原始配置引用（avatar 联动读初值用）
         self.edtalk_client = edtalk_client
         self._audio_enqueue = audio_enqueue      # my_handle.audio_synthesis_handle
@@ -1220,7 +1227,15 @@ class ActionChoreographer:
                     logger.warning(f"[编排] 素材元数据读取失败 seg={step.segment}: {e}")
                     continue
                 step.lip_flag = bool(meta.get("lip_flag", True))
-                step.duration_s = meta.get("duration_s")
+                # R-ceo4 系统接管时长：sidecar 有效值覆盖显式配置；sidecar 缺/
+                # 无效（None/0——erro3 批次 T1 实测根因）**保留 load 显式时长**
+                # ——曾无条件赋 None 把 load 校验过的时长覆盖掉，60s 兜底把序列
+                # 卡死 60s（erro3.log:221/369，期间同键重入全部被忽略=「编排
+                # 无法触发」）。load 的「无音轨+缺时长」结构拒绝保证显式时长
+                # 缺席时不静默（静默跳段防护）。
+                _meta_dur = meta.get("duration_s")
+                if _meta_dur is not None and float(_meta_dur) > 0:
+                    step.duration_s = float(_meta_dur)
                 if rule.trigger_type == "song" and step.name == "main":
                     step.hold_for_song = True
 

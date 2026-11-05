@@ -102,9 +102,20 @@ def match_song_intent(text: str, trigger_words, song_names, similarity: float = 
     text = (text or "").strip()
     if not text:
         return None
+    # 触发词归一（2026-11-05 用户实测「测试一」误触发根因）：config 的
+    # start_cmd 实存形态=换行分隔**字符串**（'点一首\n唱一首\n...'）——曾直接
+    # for 迭代=逐字符当触发词（弹幕含「一」「首」任一字即误触发点歌）。
+    # str → 按 \n/;/，/、拆列表；list 原样；单源归一惠及全部调用方
+    # （keyword_hub._match_song/choose_song_handle/前端预演）。
+    if isinstance(trigger_words, str):
+        trigger_words = [w for w in
+                         trigger_words.replace("；", "\n").replace(";", "\n")
+                         .replace("，", "\n").replace(",", "\n").replace("、", "\n")
+                         .split("\n") if w.strip()]
     hit_tw = None
-    for tw in sorted((t for t in (trigger_words or []) if t), key=len, reverse=True):
-        if tw in text:
+    for tw in sorted((str(t).strip() for t in (trigger_words or []) if t),
+                     key=len, reverse=True):
+        if tw and tw in text:
             hit_tw = tw
             break
     if hit_tw is None:
@@ -113,14 +124,32 @@ def match_song_intent(text: str, trigger_words, song_names, similarity: float = 
     rest_after = _QUESTION_SUFFIX_RE.sub("", text[idx + len(hit_tw):]).strip(" ，,、的")
     rest_before = _QUESTION_SUFFIX_RE.sub("", text[:idx]).strip(" ，,、的")
     names = [n for n in (song_names or []) if n]
+
+    def _candidate_ok(candidate: str) -> bool:
+        """候选段短串守卫（2026-11-04 erro3 批次 E1/R3④）：过短候选采信率
+        过高（1 字候选「一」对任意含「一」歌名的子串/相似度均可达阈值——
+        erro3.log:211 实测非歌名弹幕误入点歌链）。<2 字候选不参与①②两条
+        采信路径；精确相等不受限（1 字歌名全名点歌仍可用）。"""
+        return len(candidate) >= 2
+
     for candidate in (rest_after, rest_before):
         if not candidate:
             continue
-        # ① 互为子串直接采信（"你是我的眼" in "你是我的眼（Live）"）
+        # 精确相等豁免（E1：1 字歌名全名点歌仍可用——不受短串守卫限制）
         for name in names:
-            if name == candidate or name in candidate or candidate in name:
+            if name == candidate:
                 return ("matched", name, 1.0)
-        # ② 相似度兜底（与 find_best_match 同口径：最高 ratio 达阈值即命中）
+        if not _candidate_ok(candidate):
+            continue
+        # ① 互为子串直接采信（"你是我的眼" in "你是我的眼（Live）"）——
+        #    子串门槛作用于较短一侧（双向：name in candidate 与 candidate in
+        #    name 各自要求短侧 ≥2 字，E1）
+        for name in names:
+            shorter = min(name, candidate, key=len)
+            if len(shorter) >= 2 and (name in candidate or candidate in name):
+                return ("matched", name, 1.0)
+        # ② 相似度兜底（与 find_best_match 同口径：最高 ratio 达阈值即命中）——
+        #    短串守卫同门（F-1：「试一」对「一」ratio≈0.667≥0.5 会误命中）
         best, best_ratio = None, 0.0
         for name in names:
             ratio = difflib.SequenceMatcher(None, candidate, name).ratio()

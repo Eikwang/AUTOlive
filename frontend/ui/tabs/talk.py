@@ -43,9 +43,10 @@ def create_talk_tab(
     # talk.show_chat_log 已退役，来源白名单在 core 发送侧生效
 
     # ===== 两栏骨架：左 2/3 设置区 + 右 1/3 聊天记录（2026-10-25 用户要求
-    # 嵌入页面右侧 1/3，替代悬浮面板；窄窗口自动换行回落为上下布局）=====
-    with ui.row().style("width:100%; align-items:flex-start; gap:16px; flex-wrap:wrap;"):
-        with ui.column().style("flex:2 1 480px; min-width:0; gap:12px;"):
+    # 嵌入页面右侧 1/3，替代悬浮面板；2026-11-04 滚动分离：行高锁定视口，
+    # 左栏参数与右栏聊天记录各自内部滚动，互不干涉）=====
+    with ui.row().style("width:100%; align-items:stretch; gap:16px; flex-wrap:wrap; height:calc(100vh - 140px);"):
+        with ui.column().style("flex:2 1 480px; min-width:0; gap:12px; overflow-y:auto; height:100%; padding-right:4px;"):
 
             # ===== 互斥开关组（D-9，2026-10-30 聊天审查批次）：启用按键监听 与
             # 直接语音对话 互斥——开启其一自动关闭另一项，toast 明示不静默切换；
@@ -252,14 +253,14 @@ def create_talk_tab(
             # need_lang 选模型，引擎参数由 config 默认值驱动）四个配置区块移除，
             # 聊天页只留用户需要操作的面板
 
-        # ===== 右 1/3：聊天记录面板（嵌入卡片 + sticky 跟随滚动）=====
-        with ui.column().style("flex:1 1 300px; min-width:280px; position:sticky; top:12px; gap:8px;"):
-            with ui.card().style((card_css or "") + " width:100%;"):
+        # ===== 右 1/3：聊天记录面板（嵌入卡片；栏高锁定视口，滚动区独立滚动）=====
+        with ui.column().style("flex:1 1 300px; min-width:280px; height:100%; gap:8px;"):
+            with ui.card().style((card_css or "") + " width:100%; height:100%; display:flex; flex-direction:column;"):
                 with ui.row().style("align-items:center; gap:6px;"):
                     ui.icon("question_answer").style("color: var(--primary, #1976d2);")
                     ui.label('聊天记录').style('font-size:15px; font-weight:500;')
                 scroll_area_chat_box = ui.scroll_area().style(
-                    "width:100%; height:calc(100vh - 200px); min-height:360px; max-height:760px;")
+                    "width:100%; flex:1 1 0; min-height:0;")
                 chat_log_container = ui.column().style(
                     "gap:8px; width:100%; padding:4px; display:flex; "
                     "flex-direction:column; align-items:stretch;")
@@ -309,11 +310,14 @@ def create_talk_tab(
                     'font-size: var(--font-size-assist, 12px); color: var(--text-hint);')
             for _entry in entries:
                 _render_bubble(_entry)
-        # 新记录自动滚到底部（仅数量变化时触发；scroll_to 跨版本签名有差异，静默降级）
-        try:
-            scroll_area_chat_box.scroll_to(percent=1.0)
-        except Exception:
-            pass
+        # 新记录自动滚到底部（仅数量变化时触发；延迟执行确保客户端 DOM
+        # 已完成重渲染，否则 scroll_to 会在内容更新前触发而停不到底部）
+        def _scroll_to_latest():
+            try:
+                scroll_area_chat_box.scroll_to(percent=1.0)
+            except Exception:
+                pass
+        ui.timer(0.3, _scroll_to_latest, once=True)
 
     _refresh_chat_log()
     ui.timer(2.0, _refresh_chat_log)

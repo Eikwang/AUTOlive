@@ -254,10 +254,12 @@ def migrate_material_types(config: dict, cfg_override: dict = None) -> dict:
     with _META_LOCK:
         meta = _load_meta()
         char_dir = resolve_character_dir(config)
-        # 迁移标记按 character_dir 键控（隔离缺口教训：测试 tmp 角色目录与真实
-        # 目录共用 sidecar 时，全局标记会跳过真实素材的迁移）
-        migrate_key = f"_migrated:{char_dir}"
-        if meta.get(migrate_key):
+        # 迁移标记（2026-11-04 erro3 批次 T1）：按角色目录**本地 marker 文件**键控
+        # ——曾写入全局共享 meta（键 _migrated:<char_dir>），pytest tmp 角色目录
+        # 的每次测试运行都向生产 sidecar 持久化一条垃圾键（实测 291 条污染）；
+        # marker 放 char_dir 本地后隔离天然成立（tmp 目录的 marker 随 tmp 销毁）。
+        migrate_marker = os.path.join(char_dir, "_types_migrated.marker")
+        if os.path.isfile(migrate_marker):
             return {"typed": 0, "conflicts": 0, "conflict_segments": [],
                     "skipped": True}
         orifra_base = os.path.join(char_dir, "orifra")
@@ -319,7 +321,13 @@ def migrate_material_types(config: dict, cfg_override: dict = None) -> dict:
                 except Exception as e:
                     logger.warning(f"[materials] 迁移特写检测失败 seg={seg}: {e}")
             typed += 1
-        meta[migrate_key] = True
+        # 存量垃圾清理（2026-11-04 erro3 批次 T1）：历史 `_migrated:<char_dir>`
+        # 键一次性剔除（291 条 pytest tmp 污染实测）——marker 已移 char_dir 本地，
+        # meta 内不再有键控标记的合法形态
+        for stale in [k for k in meta if isinstance(k, str) and k.startswith("_migrated:")]:
+            del meta[stale]
+        with open(migrate_marker, "w", encoding="utf-8") as _mf:
+            _mf.write("typed\n")
         _save_meta(meta)
     logger.info(f"[materials] 素材类型迁移定型完成: typed={typed} "
                 f"conflicts={len(conflicts)} {conflicts}")
