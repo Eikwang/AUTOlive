@@ -8,10 +8,16 @@ import math
 import os
 import random
 import shutil
+import threading
 import time
 import traceback
 from copy import deepcopy
 from ..my_log import logger
+from ..edtalk_realtime import is_edtalk_active
+from .vocal_silences import silences_path_for as _silences_path_for
+from .vocal_silences import load_silences as _load_silences
+from .vocal_silences import compute_silences as _vs_compute
+from .vocal_silences import write_silences_file as _vs_write
 from ..edtalk_realtime import is_edtalk_active
 from ..audio_handle.tts_params import clamp_speed_factor
 from .. import alarm_notifier
@@ -95,6 +101,12 @@ class SynthesisMixin:
     _SONG_SEG_DIR_PREFIX = ".segs_"
     _SONG_SEG_STALE_S = 3600  # 泄漏兜底：切片目录超 1h 未清理则清扫
 
+    # T5/F-C 惰性解析（2026-11-05 编排优化批次）：存量翻唱首次点播后台解析
+    # vocal 静音段（类级 in-flight 注册表——多实例共享去重；超时=线程僵死放弃）
+    _silence_parse_inflight: dict = {}
+    _silence_parse_lock = threading.Lock()
+    _SILENCE_PARSE_TIMEOUT_S = 120.0
+
     def _song_segment_seconds(self):
         """点歌切片时长读侧（play_audio.song_segment_seconds，缺省 45s；
         ≤0 = 关闭切片维持整曲单条目）。"""
@@ -165,6 +177,129 @@ class SynthesisMixin:
             logger.error("点歌切片失败，降级整曲单条目播放\n" + traceback.format_exc())
             return None
 
+    def _semantic_or_fixed_slices(self, voice_path: str, message: dict):
+        """T5/d1/d15/d20（2026-11-05 批次）：EDTalk 路径切片策略——
+
+        - silences 数据文件存在（d15 旁挂）→ 语义切片（人声段=条目，间奏=
+          插入窗口）；空 silences=合法「无间奏」→ 整曲单段（人工边界不引入）。
+        - 无数据文件/损坏（e12 fail-soft）→ 45s 固定切片回退 + F-C 惰性解析
+          调度（后台，本播不等待；完成后下次点播走语义切片）。
+        - 切片关闭（song_segment_seconds≤0）→ None（整曲单条目）。
+
+        Returns: (segments, silences)——segments 与 _split_audio_segments 同构
+        （含 gap_after_s 间奏元数据），None=不可切片。
+        """
+        full = message.get("full_path") or ""
+        sp = _silences_path_for(full) if full and os.path.isfile(full) else None
+        silences = None
+        if sp:
+            silences = _load_silences(sp)
+        if silences is None:
+            self._schedule_lazy_silence_parse(full, voice_path)
+        else:
+            segs = self._split_by_silences(voice_path, silences)
+            if segs:
+                return segs, silences
+        _seg_seconds = self._song_segment_seconds()
+        if _seg_seconds > 0:
+            return self._split_audio_segments(voice_path, _seg_seconds), None
+        return None, silences
+
+    def _split_by_silences(self, voice_path: str, silences):
+        """d1：人声段=条目（silences 互补区间），间奏=插入窗口。目录/命名/
+        陈旧清扫复用 _split_audio_segments 既有机制；条目附 gap_after_s
+        （该段之后的间奏秒数——T7 插播窗口对齐与 X1 观测消费）。
+
+        Returns: list[dict]（恒非空：silences 空=整曲单段；导出失败=[]）。"""
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_file(voice_path)
+            total_s = len(seg) / 1000.0
+            # 人声段=silences 互补区间（钳制到音频实际时长内）
+            runs = []
+            cursor = 0.0
+            for gap in silences:
+                if gap["start_s"] > cursor:
+                    runs.append((cursor, min(gap["start_s"], total_s)))
+                cursor = max(cursor, gap["end_s"])
+                if cursor >= total_s:
+                    break
+            if cursor < total_s:
+                runs.append((cursor, total_s))
+            if not runs:
+                return []
+            self._purge_stale_song_segments(os.path.dirname(voice_path) or ".")
+            seg_dir = os.path.join(
+                os.path.dirname(voice_path) or ".",
+                f"{self._SONG_SEG_DIR_PREFIX}{time.time_ns()}")
+            os.makedirs(seg_dir, exist_ok=True)
+            out = []
+            total = len(runs)
+            for i, (s, e) in enumerate(runs):
+                piece = seg[int(s * 1000):int(e * 1000)]
+                p = os.path.join(seg_dir, f"seg_{i:02d}.mp3")
+                piece.export(p, format="mp3")
+                gap_after = 0.0
+                if i < total - 1:
+                    gap_after = round(runs[i + 1][0] - e, 3)
+                out.append({"voice_path": p, "seq": i, "total": total,
+                            "seg_dir": seg_dir, "gap_after_s": gap_after})
+            logger.info(
+                f"[song] 语义切片（d1/d15）：{total} 个人声段"
+                f"（间奏 {len(silences)} 段）：{voice_path}")
+            return out
+        except Exception:
+            logger.warning("[song] 语义切片失败，回退固定切片/整曲："
+                           + traceback.format_exc())
+            return []
+
+    def _schedule_lazy_silence_parse(self, full_path: str, vocal_path: str):
+        """F-C/d20：存量翻唱首次点播——后台解析 vocal 分轨静音段（本播 45s
+        固定切片立即起播不等待），完成后写 .silences.json 供后续点播语义切片。
+        守卫：仅 covers（full_path 成品旁存在 <base>_vocal.wav 分轨）——用户
+        上传原曲无分轨=无静音数据源（45s 永久回退，d20）。in-flight 去重+
+        超时放弃（观测桶 audio_silences_parse_timeout/fail）。"""
+        if not full_path or not vocal_path or not os.path.isfile(full_path):
+            return
+        base = os.path.splitext(full_path)[0]
+        vocal = f"{base}_vocal.wav"
+        if not os.path.isfile(vocal):
+            return
+        sp = _silences_path_for(full_path)
+        with self._silence_parse_lock:
+            started = self._silence_parse_inflight.get(sp)
+            if started is not None:
+                if time.monotonic() - started <= self._SILENCE_PARSE_TIMEOUT_S:
+                    return  # 解析中（去重，不重复调度）
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("audio_silences_parse_timeout")
+                except Exception:
+                    pass
+            self._silence_parse_inflight[sp] = time.monotonic()
+
+        def _work():
+            try:
+                silences = _vs_compute(vocal)
+                if _vs_write(sp, silences):
+                    logger.info(f"[silences] 惰性解析完成：{sp}"
+                                f"（{len(silences)} 段间奏，下次点播语义切片生效）")
+            except Exception:
+                try:
+                    from utils.obs_stats import record_drop
+                    record_drop("audio_silences_parse_fail")
+                except Exception:
+                    pass
+                logger.warning(f"[silences] 惰性解析失败（继续 45s 回退）：{sp}",
+                               exc_info=True)
+            finally:
+                with self._silence_parse_lock:
+                    self._silence_parse_inflight.pop(sp, None)
+
+        threading.Thread(target=_work, name="silences-lazy-parse",
+                         daemon=True).start()
+        logger.info(f"[silences] 惰性解析已调度（本播固定切片不等待——F-C）：{sp}")
+
     def audio_synthesis(self, message):
         """音频合成（edge-tts / vits_fast等）并播放"""
         try:
@@ -194,13 +329,27 @@ class SynthesisMixin:
                 # 直通链透传（整曲与切片两种 data_json 都要带，切片每片同 ID）
                 _choreo_keys = {k: message[k] for k in ("choreo_step_id", "priority_override")
                                 if message.get(k) is not None}
-                # ② 点歌切片插播（2026-10-27）：无伴奏轨且切片开启（>0）时按
-                # N 秒切片分条目入队——回复等更高优先级音频经优先级排序插播到
-                # 片段之间，点歌不再独占播放数分钟。带伴奏轨走原语义（R6 双轨
-                # 伴奏与整曲人声同步起播，逐段重启伴奏语义错误）。
-                _seg_seconds = self._song_segment_seconds() if not _backing else 0
-                segments = (self._split_audio_segments(voice_path, _seg_seconds)
-                            if _seg_seconds > 0 else None)
+                # ② 点歌切片插播（2026-10-27 基础上 T5/d1/d15/d20 升级，2026-11-05）：
+                # 切片策略三态——
+                # a) EDTalk 激活（人声推数字人）：语义切片优先（silences 数据文件
+                #    人声段=条目，间奏=插入窗口，d1/d15）；无数据文件/损坏→45s
+                #    固定切片回退（d1）+F-C 惰性解析调度（后台，本播不等待）
+                # b) 双轨（uc4b 终门裁决：伴奏继续+人声失步）：语义切片/固定切片
+                #    逐片入队，伴奏轨仅首片承载（起播门=首片 push_full 受理放行
+                #    ——2026-11-04 两阶段门保留），后继片无 backing_path=伴奏线程
+                #    不重启（「逐段重启伴奏语义错误」约束在 uc4b 语义下解除：
+                #    伴奏连续播放，人声逐片推 EDTalk，失步=插播时长+累积 e13 声明）
+                # c) EDTalk 未激活（builtin 本地 full_path 整轨）：维持 45s 固定
+                #    切片现行为（F-D：vocal 静音窗对整曲混音无意义；builtin 插播
+                #    机制重整=让位泛化，归 T6/e3）
+                _edtalk = is_edtalk_active(self.config)
+                segments = None
+                if _edtalk:
+                    segments, _silences = self._semantic_or_fixed_slices(voice_path, message)
+                else:
+                    _seg_seconds = self._song_segment_seconds()
+                    segments = (self._split_audio_segments(voice_path, _seg_seconds)
+                                if _seg_seconds > 0 else None)
                 if segments:
                     for s in segments:
                         data_json = {
@@ -213,6 +362,14 @@ class SynthesisMixin:
                                 "seg_dir": s["seg_dir"],
                             },
                         }
+                        # uc4b 双轨逐片：伴奏仅首片承载（后继片重启伴奏=已判死语义）
+                        if s["seq"] == 0 and _backing:
+                            data_json["backing_path"] = _backing
+                            data_json["backing_volume"] = message.get("backing_volume", 0.8)
+                        # 间奏窗口元数据（T7 插播窗口对齐与 X1 观测消费；切片无间
+                        # 奏语义时不带键=固定切片无窗口）
+                        if s.get("gap_after_s"):
+                            data_json["gap_after_s"] = s["gap_after_s"]
                         data_json.update(_choreo_keys)
                         # 是否开启了音频播放
                         if self.config.get("play_audio", "enable"):

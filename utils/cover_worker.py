@@ -444,6 +444,23 @@ class CoverQueue:
                            f"taskkill /F /T /PID {remaining[0].pid}；复核 nvidia-smi "
                            f"--query-compute-apps=pid,process_name,used_memory --format=csv")
 
+    def _generate_silences_file(self, base: str):
+        """d15（2026-11-05 编排优化批次 T5）：vocal 分轨 RMS 扫描 → 成品旁挂
+        .silences.json（消费端语义切片数据源）。fail-soft：任何异常仅告警——
+        静音数据缺失=消费端回退 45s 固定切片，不影响成品与分轨播放。"""
+        vocal = f"{base}_vocal.wav"
+        out = base + ".silences.json"
+        try:
+            from utils.audio.vocal_silences import (
+                compute_silences, write_silences_file,
+            )
+            silences = compute_silences(vocal)
+            if write_silences_file(out, silences):
+                logger.info(f"[cover] 静音段数据已生成：{out}（{len(silences)} 段间奏）")
+        except Exception:
+            logger.warning(f"[cover] 静音段数据生成失败（点歌回退固定切片）：{out}",
+                           exc_info=True)
+
     def _retain_split_tracks(self, job: Dict, cover: str):
         """分轨保留 v2（2026-11-03 补刀退役批次重写）：从 song_output 定位本次
         任务的 RVC 人声（参数链产物）与 *_Instrumental.wav（MDX 伴奏），复制为
@@ -511,6 +528,14 @@ class CoverQueue:
                     f"[cover] 分轨定位不全（vocal={vocal is not None}, "
                     f"inst={inst is not None}），播放将走整轨降级"
                     f"——stem={stem!r}；核对派发 -k 是否生效与 AICoverGen 产物命名")
+            # d15（2026-11-05 编排优化批次 T5）：人声静音段数据文件生成——
+            # vocal 分轨 RMS 扫描（-40dB/≥3s，C3 实测校准义务：参数经
+            # vocal_silences 常量起步）→ 成品旁挂 .silences.json（消费端
+            # 语义切片数据源；失败 fail-soft 不影响成品与分轨播放）
+            if vocal and os.path.isfile(f"{base}_vocal.wav"):
+                self._generate_silences_file(base)
+            else:
+                logger.info(f"[cover] 跳过 silences 生成（无 vocal 分轨）：{base}")
         except Exception:
             logger.error("[cover] 分轨保留异常（不影响成品）", exc_info=True)
 
