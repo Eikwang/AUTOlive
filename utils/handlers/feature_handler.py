@@ -598,6 +598,12 @@ class FeatureHandler:
             base, ext = os.path.splitext(fn)
             if ext.lower() not in (".wav", ".mp3") or base.endswith("_vocal") or base.endswith("_inst"):
                 continue
+            # 伴奏两阶段切片残留守卫（2026-11-04 用户实测：人声不播根因）——
+            # ".backing.tmp.wav" 为播放中间产物（正常流程播完清理，中断则残留），
+            # 倒序扫描先于主成品命中且其 _vocal/_inst 探测必失败 →「分轨=无」
+            # → 伴奏 tmp 被当整轨播出（纯伴奏无人声）。残留非成品，跳过。
+            if ".backing.tmp" in base or base.endswith(".tmp"):
+                continue
             if CoverQueue.normalize_song(base.split("__")[0]) == target:
                 vocal = os.path.join(covers_dir, base + "_vocal.wav")
                 inst = os.path.join(covers_dir, base + "_inst.wav")
