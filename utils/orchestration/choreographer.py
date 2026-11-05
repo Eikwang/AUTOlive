@@ -457,7 +457,7 @@ class ChoreoEngine:
         commands.append(LogCmd("info",
                                f"[编排] 触发 {rule.rule_id}（第 {self.counters[rule.rule_id]} 次，"
                                f"mood={self.seq['tier_mood'] or 'base'}），进入序列"))
-        commands.extend(self._start_current_step(now))
+        commands.extend(self._start_current_step(now, force_immediate=True))
         return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands}
 
     def _interrupt_sequence(self, rule: RuleCfg, data: dict, now: float, commands: List) -> dict:
@@ -498,20 +498,31 @@ class ChoreoEngine:
         commands.append(LogCmd("info",
                                f"[编排] 他键触发：{old_rule_id} 计数清零，切换至 {rule.rule_id}"
                                f"（{'含旧 exit 衔接' if not seq['exit_started'] else '旧 exit 已显示，直接入场'}）"))
-        commands.extend(self._start_current_step(now))
+        commands.extend(self._start_current_step(now, force_immediate=True))
         return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands}
 
     # ---------- 步骤执行推进 ----------
 
-    def _start_current_step(self, now: float) -> List:
-        """发出当前步切换指令（执行器收到后调 EDTalk，结果回填 on_switch_result）。"""
+    def _start_current_step(self, now: float, force_immediate: bool = False) -> List:
+        """发出当前步切换指令（执行器收到后调 EDTalk，结果回填 on_switch_result）。
+
+        force_immediate（2026-11-05 用户实测「触发后画面不切换」根修）：
+        序列启动的第一步（DEFAULT/打断→enter）强制 at='immediate'——
+        segment_end 是「当前段自然播完的边界衔接」，而触发时刻当前段是
+        默认池长素材（实测 22 段=15007 帧=600s），挂起切换要等 5-10 分钟
+        才到边界=画面永不切换（引擎按 sidecar 时长正常推进，双时钟漂移
+        静默）。编排接管=打断默认轮播，第一步必须立即硬切；序列内后续
+        步保持规则 switch_at（短段自然边界=引擎时长边界，无缝衔接）。
+        immediate 同时清服务端遗留的挂起切换（render_loop 语义）。
+        """
         commands: List = []
         if self.seq is None or self.state != "sequence":
             return commands
         step = self.seq["steps"][self.seq["idx"]]
         if step["name"] == "exit":
             self.seq["exit_started"] = True
-        commands.append(SwitchSegment(step["step_id"], step["segment"], step["switch_at"]))
+        at = "immediate" if force_immediate else step["switch_at"]
+        commands.append(SwitchSegment(step["step_id"], step["segment"], at))
         return commands
 
     def on_switch_result(self, step_id: str, ok: bool, now: float) -> List:
