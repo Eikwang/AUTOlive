@@ -140,8 +140,6 @@ flowchart TD
         DynamicCopy --> |关键词直投·格式化条目|Compile
         %% T4：入场/关注事件订阅（感谢链同源 event_handler.entrance/follow_handle；
         %% 三强制=10s 类型节流/强制 queue/权重恒钳 0）
-        EventEF[入场&关注<br>事件]:::subLogicNode
-        EventEF --> |entrance/follow 订阅|Compile
         Sort --> |权重&队列信息|Compile
         Frame(输出<br>画面&音频&字幕):::logicNode      
         Compile --> |需要口型|AvatarAI
@@ -157,5 +155,5 @@ flowchart TD
     subgraph 已消费信息回传 
         Frame --> lineout{已消费信息}:::logicNode
         lineout --> |回传|AudioList
-    end    
+    end     
 ```

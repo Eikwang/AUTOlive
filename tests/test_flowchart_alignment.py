@@ -148,7 +148,8 @@ class TestChoreoTopology:
         ("Compile --> |不需口型|Frame", "编排纯画面必须直出画面帧（Frame，不经口型）"),
         ("lineout --> |回传|AudioList", "已消费信息必须回传音频队列（v2.7 用户终版回传子图：消费完成驱动串行消费）"),
         ("DynamicCopy --> |关键词直投·格式化条目|Compile", "T3 动态文案格式化条目关键词直投编排（跳过中枢子串识别，v2.10）"),
-        ("EventEF --> |entrance/follow 订阅|Compile", "T4 入场/关注事件订阅编排（感谢链同源三强制，v2.10）"),
+        # EventEF 入场/关注订阅边：用户 2026-11-05 手改图移除（图面简化——
+        # 代码侧订阅不变，由 test_t4_entrance_follow_implemented 代码镜像承担）
     )
 
     # Compile 不允许的歧义形态：旧 Sort→Compile 裸边 / 标签漂移
