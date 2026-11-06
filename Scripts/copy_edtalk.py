@@ -21,6 +21,9 @@ import subprocess
 import sys
 import time
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')  # GBK 控制台安全输出（✓→?）
+
 SOURCE_ROOT = r"D:\AI\EDTalk"
 TARGET_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "edtalk")
 
@@ -30,6 +33,10 @@ COPY_ITEMS = [
     ("train_fine_tune.py", "train_fine_tune.py", "track", "底模微调入口"),
     ("demo_EDTalk_A.py", "demo_EDTalk_A.py", "track", "get_mel 依赖（冒烟发现的仓库根依赖）"),
     ("runtime312/ffmpeg/bin", "runtime312/ffmpeg/bin", "ignore", "ffmpeg 拆帧依赖（exe+DLL，crop_head_video 路径假设）"),
+    # T8（2026-11-06 批次）：完整 runtime312——解释器副本优先候选链的副本环节
+    # 产物（此前仅复制 ffmpeg/bin，edtalk/runtime312/python.exe 从未被生产）。
+    # GB 级（robocopy 增量幂等）；--skip-big 按阈值自然跳过（代码先行模式）。
+    ("runtime312", "runtime312", "ignore", "统一 Python 运行时（迁移核心，.gitignore 已排除）"),
     ("fine_tune", "fine_tune", "track", "底模微调模块"),
     ("data_preprocess", "data_preprocess", "track", "11 步预处理链"),
     ("datasets", "datasets", "track", "训练数据集模块"),
@@ -219,10 +226,66 @@ def step5_security_and_verify():
             print("  ✓ 模块解析检查通过（或不可判定，冒烟时复核）")
 
 
+def step_users_pth_cleanup():
+    """X4（TODOS #231 收编，2026-11-06 批次 T8）：副本 site-packages 的 users.pth 清查。
+
+    users.pth 硬编码注入外部 GPT-SoVITS 路径进所有进程（模块遮蔽风险）——
+    依赖注入已由 autolive_paths PYTHONPATH 收编，副本内的 users.pth 必须清除，
+    否则候选链切到副本后外部路径注入重新生效。"""
+    print("\n[5.5/5] users.pth 清查（TODOS #231）")
+    pth = os.path.join(TARGET_ROOT, "runtime312", "Lib", "site-packages", "users.pth")
+    if os.path.exists(pth):
+        try:
+            with open(pth, encoding="utf-8", errors="replace") as f:
+                head = f.read(120).replace("\n", " ")
+            os.remove(pth)
+            print(f"  ✓ 已删除副本 users.pth（内容开头: {head[:60]}...）——外部路径注入退役")
+        except OSError as e:
+            print(f"  ✗ users.pth 删除失败：{e}（请手动删除 {pth}）")
+            return False
+    else:
+        print("  ✓ 副本无 users.pth（无需清理）")
+    return True
+
+
+def smoke_check():
+    """E-1（2026-11-06 批次 T8 前置）：源路径映射现状校验——不复制，只验清单。"""
+    print("=== copy_edtalk --check（源映射现状校验，不复制） ===")
+    if not os.path.isdir(SOURCE_ROOT):
+        print(f"✗ SOURCE_ROOT 不存在: {SOURCE_ROOT}")
+        return False
+    ok = True
+    missing = []
+    for src_rel, dst_rel, git, desc in COPY_ITEMS:
+        src = os.path.join(SOURCE_ROOT, src_rel.replace("/", os.sep))
+        exists = os.path.exists(src)
+        if exists and os.path.isdir(src):
+            size = f"{_dir_size_gb(src):.1f}GB"
+        elif exists:
+            size = f"{os.path.getsize(src) / (1024 ** 3):.2f}GB"
+        else:
+            size = "-"
+        print(f"  {'✓' if exists else '✗'} {src_rel} [{desc}] {size}")
+        if not exists:
+            missing.append(src_rel)
+            ok = False
+    py = os.path.join(SOURCE_ROOT, "runtime312", "python.exe")
+    py_ok = os.path.isfile(py)
+    print(f"  {'✓' if py_ok else '✗'} runtime312/python.exe（迁移核心）")
+    ok = ok and py_ok
+    print("结论:", "全部源就绪，可执行迁移复制（python Scripts/copy_edtalk.py）"
+          if ok else f"缺失 {len(missing)} 项——先解决缺失再迁移")
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description="EDTalk → AUTOlive 一键复制脚本")
     parser.add_argument("--skip-big", action="store_true", help="跳过 >1GB 大目录（代码先行验证）")
+    parser.add_argument("--check", action="store_true", help="仅校验源路径映射现状（不复制）")
     args = parser.parse_args()
+
+    if args.check:
+        sys.exit(0 if smoke_check() else 1)
 
     print(f"=== EDTalk 一键复制：{SOURCE_ROOT} → {TARGET_ROOT} ===")
     if not os.path.isdir(SOURCE_ROOT):
@@ -234,6 +297,7 @@ def main():
     step3_manifest(manifest)
     step4_freeze()
     step5_security_and_verify()
+    step_users_pth_cleanup()
     print(f"\n=== 复制完成（{time.time()-t0:.0f}s）。下一步：")
     print("  1. 三入口冒烟（见 edtalk/README.md）：")
     print("     runtime312\\python.exe -m realtime_serve.main --no-unitycapture")

@@ -2,6 +2,8 @@
 rem AUTOlive 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
 rem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）
 rem 本文件为 ANSI/GBK 编码（与中文 Windows cmd 原生码页一致），请勿改存为 UTF-8
+rem T6: 解释器副本优先候选链——仓库副本 edtalk/runtime312 优先, 外部树兜底, RT 环境变量保留最高覆盖
+if not defined RT if exist "%~dp0edtalk\runtime312\python.exe" set "RT=%~dp0edtalk\runtime312"
 if not defined RT set "RT=D:\AI\EDTalk\runtime312"
 if not exist "%RT%\python.exe" (
   echo [预检失败] 未找到解释器: %RT%\python.exe

@@ -2,6 +2,8 @@
 rem AUTOlive 中枢 UI（nicegui，端口 8086）—— runtime312 统一环境版
 rem 自动化/无人值守场景可删除末尾 cmd /k（窗口保活仅为双击场景设计）
 chcp 65001 >nul
+rem T6: 同启动程序.bat——仓库副本优先
+if not defined RT if exist "%~dp0edtalk\runtime312\python.exe" set "RT=%~dp0edtalk\runtime312"
 if not defined RT set "RT=D:\AI\EDTalk\runtime312"
 if not exist "%RT%\python.exe" (
   echo [预检失败] 未找到解释器: %RT%\python.exe
