@@ -212,8 +212,8 @@ class EventHandler:
             logger.info(f"[{username}]进入了直播间")
 
             # 动作编排订阅（T4，2026-11-01 批次：设计文档案例二答谢三类型）：
-            # 入场触发编排画面——三强制（类型节流/queue/权重钳制）在引擎与装载
-            # 侧；编排拒绝/未启用不影响入场主流程（正交，异常全兜底）。
+            # 入场触发编排画面——权重=系统优先级/打断模式=规则配置（2026-11-06
+            # 三强制拆除）；编排拒绝/未启用不影响入场主流程（正交，异常全兜底）。
             try:
                 from utils.orchestration import get_choreographer
                 _choreo = get_choreographer()
@@ -251,7 +251,7 @@ class EventHandler:
 
             logger.info(f"[{username}]关注了直播间")
 
-            # 动作编排订阅（T4：关注触发编排画面，语义同入场——三强制在引擎侧）
+            # 动作编排订阅（T4：关注触发编排画面，语义同入场——权重/打断模式按配置，2026-11-06 三强制拆除）
             try:
                 from utils.orchestration import get_choreographer
                 _choreo = get_choreographer()

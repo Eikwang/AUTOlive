@@ -35,7 +35,7 @@
 | ~~`min_sequence_hold_s`~~ | — | **已退役**（2026-10-27 R-ceo5/uc2a 用户裁决）：触发命中立即切换，无最短保持保护 |
 | `step_timeout_s` | 60 | audio 步骤缺省完成上限（F1 看门狗：超时强制推进+降级计数） |
 | ~~`reset_after_s`~~ | — | **已退役**（2026-10-31 动作编排审查批次）：计数窗口弃用，触发计次不再随时间衰减（清零仅剩他键打断与配置重存） |
-| `rules[].trigger_type` | — | gift / keyword / song / entrance / follow（T4：入场/关注事件触发，2026-11-01 批次——三强制=自动 queue+权重恒最低档+10s 类型节流） |
+| `rules[].trigger_type` | — | gift / keyword / song / entrance / follow / dynamic_text（T4：入场/关注事件触发，2026-11-01 批次；2026-11-06 三强制拆除——权重=系统优先级 priority_mapping、打断模式=interrupt 配置、无类型节流） |
 | `rules[].match` | — | gift=礼物名全等；keyword=子串（NFKC+去空白+casefold 规范化）；song/entrance/follow=可空=任意事件，非空=用户名等值（entrance/follow，username 经 _normalize_text 归一） |
 | `rules[].min_price` | 0 | 仅 gift：最低价值门槛，与答谢链 lowest_price 同口径 |
 | `rules[].sequence` | — | enter/main/exit 三步：segment+switch_at+duration_s+audio{mode,path} |
@@ -91,12 +91,12 @@
 - [ ] 关闭回滚：enable=false 重启 → 全链零行为变化
 - [ ] （补完批次新增）热启用链：初始 enable=false → 管理页应用启用 → worker 热启动 → 模拟触发画面切换
 - [ ] （T2b 追加 2026-11-01 批次）案例一联动：动态文案「关键词|文案」条目触发→编排画面切换+文案部分照常播放
-- [ ] （T2b 追加 2026-11-01 批次）entrance/follow 触发：模拟触发入场/关注→编排排队→响应率可观测（分母含 queued_full 与 type_throttled 丢弃——Eng E5）
+- [ ] （T2b 追加 2026-11-01 批次；2026-11-06 拆除批次口径更新）entrance/follow 触发：模拟触发入场/关注→编排画面切换/排队→响应率可观测（分母含 queued_full——type_throttled 已随三强制拆除退役）
 - [x] ~~（补完批次新增）计数窗口：同礼物跨 reset_after_s 两次触发 → 情绪档回落第 1 档~~（2026-10-31 动作编排审查批次退役：计数窗口参数移除，触发计次不再随时间衰减，清零仅剩他键触发打断）
 
 ## 5. 模拟测试（GAP-3：配置后即时验证，无需等待真实礼物）
 
-**管理页方式（推荐）**：「动作编排」卡片 → 模拟触发分区 → 下拉选择已配置规则 → 点「模拟触发」（outline 弱化按钮与「应用」分行）。结果 notify：成功=已启动/已排队；失败=reason+fix 文案（reason 枚举见 decide_trigger docstring：no_match/below_min_price/type_throttled{retry_after_s}/disabled/queued/queued_full/in_progress——历史 throttled/hold 已退役）。
+**管理页方式（推荐）**：「动作编排」卡片 → 模拟触发分区 → 下拉选择已配置规则 → 点「模拟触发」（outline 弱化按钮与「应用」分行）。结果 notify：成功=已启动/已排队；失败=reason+fix 文案（reason 枚举见 decide_trigger docstring：no_match/below_min_price/disabled/queued/queued_full/in_progress——历史 throttled/hold 已退役 R-ceo5；type_throttled 已随 2026-11-06 三强制拆除退役）。
 
 **curl 方式（copy-paste，端口按 config api_port 调整）**：
 
@@ -117,7 +117,6 @@ curl -s -X POST http://127.0.0.1:8082/choreography/trigger \
 #   200 + accepted=true  + reason=accepted/interrupted/requeued → 画面切换（观察状态条）
 #   200 + accepted=false + reason=no_match            → 没有命中启用规则（检查 match/启用状态）
 #   200 + accepted=false + reason=below_min_price     → 价值未达门槛（rule_id 形态已合成达标载荷，不会出现）
-#   200 + accepted=false + reason=type_throttled{retry_after_s} → entrance/follow 类型节流（等 retry_after_s 重试；gift/keyword/song 无引擎节流——去重在弹幕层）
 #   200 + accepted=false + reason=hold{retry_after_s} / in_progress → 序列执行中（等待/观察）
 #   200 + accepted=false + reason=disabled            → enable=false 或 worker 未运行（检查配置与启动日志）
 #   403  → 非本机来源被拒（编排控制仅限本机；远程控制官方不支持，须自建反代+鉴权）
@@ -140,6 +139,6 @@ curl -s http://127.0.0.1:8082/choreography/status
 | 步骤跳得太快 | problem=降级计数增长；cause=切段失败或音频未入队（file 门拦截/文件缺失）；fix=查 play_audio.enable 与文件路径 |
 | 编排器无响应 | problem=worker 未启动；cause=enable=false 或 EDTalk 客户端缺失；fix=检查配置与 EDTalk 启用状态 |
 | 已启用但状态条显示 worker 未运行 | problem=worker 启动失败或死亡；cause=见启动日志 `[编排] worker 启动失败` 三段式；fix=按日志修复后管理页重新「应用」（热启动） |
-| 模拟触发未生效 | problem=模拟触发被拒绝；cause=reason 字段（no_match/below_min_price/type_throttled/queued/queued_full/in_progress/disabled——见 decide_trigger docstring）；fix=按响应体 fix 字段处置 |
+| 模拟触发未生效 | problem=模拟触发被拒绝；cause=reason 字段（no_match/below_min_price/queued/queued_full/in_progress/disabled——见 decide_trigger docstring；type_throttled 已退役）；fix=按响应体 fix 字段处置 |
 
 **回滚**：`choreography.enable=false` + 重启（分钟级）；模块隔离，git revert 可整体退役。

@@ -167,9 +167,10 @@ def register_choreography_routes(app, config) -> None:
           （min_price>0 规则不命中=below_min_price 诚实门槛语义）。
 
         运行期拒绝/接受语义见 choreographer.decide_trigger reason 枚举
-        （拒绝=no_match/below_min_price/type_throttled{retry_after_s}/disabled
+        （拒绝=no_match/below_min_price/disabled
         + queued/queued_full/in_progress；接受=accepted/interrupted/requeued；
-        历史 throttled/hold 已随 R-ceo5 退役——2026-11-01 T4 批次同步）。
+        历史 throttled/hold 已随 R-ceo5 退役（2026-11-01 T4 批次同步）；
+        type_throttled 已随 2026-11-06 三强制拆除批次退役）。
 
         HTTP 语义：422 入参校验失败；503 编排器未装配；非回环 403；
         enable=false/worker 未启动 → 200 + accepted=false + reason=disabled
