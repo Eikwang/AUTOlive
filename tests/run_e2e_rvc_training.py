@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """TST-2a E2E 驱动：RVC 六步训练全链路实跑（tests/sound → rvc_e2e 档案）。
 
-用法：D:/AI/EDTalk/runtime312/python.exe tests/run_e2e_rvc_training.py
+用法：runtime312/python.exe tests/run_e2e_rvc_training.py（2026-11-06 迁移：仓库根环境）
 输出：实时步骤状态+日志尾；失败即停（管线语义），退出码=成败。
 RESUME_FROM=preprocess|extract|train|index|export 预置前序步 SUCCESS（断点续跑）。
 """

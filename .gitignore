@@ -324,6 +324,7 @@ edtalk/fastrag/
 edtalk/fine_tune/
 edtalk/networks/
 edtalk/pytorch_gaze_redirection/
+/runtime312/
 edtalk/runtime312/
 edtalk/test_data/
 edtalk/tools/

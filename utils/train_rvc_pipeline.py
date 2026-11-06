@@ -85,7 +85,9 @@ class TrainRvcPipeline:
         self.rvc_root = getattr(paths, "rvc_root", None) or os.path.join(
             getattr(paths, "autolive_home", "") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "apps", "rvc")
-        self.python = getattr(paths, "rvc_python", None) or r"D:\AI\EDTalk\runtime312\python.exe"
+        # 2026-11-06 迁移：环境调用动态化——paths.rvc_python 已是候选链结果
+        # （config 覆盖→记忆→仓库根 runtime312→外部兜底），缺失时空串由启动校验三要素报错
+        self.python = getattr(paths, "rvc_python", None) or ""
         self.autolive_home = getattr(paths, "autolive_home", "") or os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))
         self.proc: Optional[subprocess.Popen] = None

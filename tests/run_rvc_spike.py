@@ -4,7 +4,7 @@
 目的：实证 py3.12/torch2.11 下 preprocess→f0→feature→train 六步前提可用，
 失败则整批重估（计划 D2 回退预案）。spike 记录时长/显存作 T-4 估算校准。
 
-用法：D:/AI/EDTalk/runtime312/python.exe tests/run_rvc_spike.py
+用法：runtime312/python.exe tests/run_rvc_spike.py（2026-11-06 迁移：仓库根环境）
 cwd 必须是 AUTOlive 根（脚本内部切到 RVC fork 根跑子进程）。
 """
 import os
@@ -17,7 +17,8 @@ import time
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 FORK = r"D:\AI\RVC20240604Nvidia"
-PY = r"D:\AI\EDTalk\runtime312\python.exe"
+import os as _os
+PY = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "runtime312", "python.exe")  # 2026-11-06 迁移：动态仓库根
 DATASET_SRC = os.path.join("tests", "sound", "sliced")
 SPIKE_DATASET = os.path.join(FORK, "spike_dataset")
 EXP_DIR = os.path.join(FORK, "logs", "spike0")

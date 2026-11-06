@@ -108,7 +108,7 @@ def resolve_python_interpreter(config, *, keys, repo_rel: str,
     Args:
         config: 双形态 config（dict 或 Config）。
         keys: [(section, key), ...] config 覆盖键候选（按序，指向真实文件才采纳）。
-        repo_rel: 仓库副本相对路径（如 edtalk/runtime312/python.exe；不存在自然跳过）。
+        repo_rel: 仓库副本相对路径（如 runtime312/python.exe；不存在自然跳过）。
         external_default: 外部树兜底（EDTalk 兄弟安装/clone）。
         memory_key: data/interpreter_memory.json 的记忆键。
 
@@ -228,15 +228,15 @@ class AutolivePaths:
             memory_key="gpt_sovits_python",
         )
         # RVC 运行副本与训练/变声 runtime（S-1/S-2：默认 apps/rvc 副本+
-        # runtime312 基准；T5 候选链：config paths 覆盖 → 记忆 → 仓库副本
-        # edtalk/runtime312（copy_edtalk 产物）→ EDTalk 兄弟安装兜底）
+        # runtime312 基准；T5+迁移批次（2026-11-06）：config paths 覆盖 → 记忆 →
+        # 仓库根 runtime312（物理迁移产物）→ EDTalk 兄弟安装兜底（过渡期安全网）
         self.rvc_root: str = self._resolve(
             KEY_RVC_ROOT, os.path.join(self.autolive_home, "apps", "rvc"),
         )
         self.rvc_python: str = resolve_python_interpreter(
             config,
             keys=[("paths", KEY_RVC_PYTHON)],
-            repo_rel=os.path.join("edtalk", "runtime312", "python.exe"),
+            repo_rel=os.path.join("runtime312", "python.exe"),
             external_default=r"D:\AI\EDTalk\runtime312\python.exe",
             memory_key="rvc_python",
         )

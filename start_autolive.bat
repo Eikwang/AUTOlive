@@ -14,8 +14,9 @@ cd /d "%AUTOLIVE_HOME%"
 rem 运行时：主程序用 EDTalk 共享环境（runtime312）；GPT-SoVITS 用 runtime312-clone
 rem T6: 解释器候选链——RT 环境变量 > 仓库副本 > 外部树兜底
 if defined RT set "MAIN_PY=%RT%\python.exe"
-if not defined MAIN_PY if exist "%~dp0edtalk\runtime312\python.exe" set "MAIN_PY=%~dp0edtalk\runtime312\python.exe"
-if not defined MAIN_PY set "MAIN_PY=D:\AI\EDTalk\runtime312\python.exe"
+if not defined MAIN_PY if exist "%~dp0runtime312\python.exe" set "MAIN_PY=%~dp0runtime312\python.exe"
+rem 2026-11-06 迁移：环境唯一正式位置=仓库根 runtime312
+if not defined MAIN_PY set "MAIN_PY=%~dp0runtime312\python.exe"
 
 echo [1/3] 启动 AUTOlive webui（托管服务将随系统自动拉起）...
 start "AUTOlive-webui" /MIN cmd /c ""%MAIN_PY%" webui.py > logs\webui_launcher.log 2>&1"

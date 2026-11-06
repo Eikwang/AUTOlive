@@ -6,8 +6,9 @@
   运行时文件，全部消费方（EDTalkClient / 素材管理 / 前端控制区 / 编排页）
   经 resolve_api_base() 统一解析——杜绝"配置端口与实际监听端口漂移"。
 - 解释器：自动探测 + 记忆。解析顺序 = 旧配置键（存量兼容，存在才用）→
-  运行时文件记忆（上次实际使用）→ 仓库副本 edtalk/runtime312 →
-  兄弟安装 D:\\AI\\EDTalk\\runtime312。解析结果回写运行时文件。
+  运行时文件记忆（上次实际使用）→ 仓库根 runtime312（2026-11-06 物理迁移，
+  项目内环境的唯一正式位置）→ 兄弟安装 D:\\AI\\EDTalk\\runtime312（过渡期
+  兜底，源已迁出后自然失效）。解析结果回写运行时文件。
 
 运行时文件：data/edtalk_runtime.json（get_base_path()/data，与素材暂存区
 同盘同根；每次拉起成功后重写，读取方对缺失/损坏一律降级默认值）。
@@ -128,12 +129,12 @@ def resolve_interpreter(config_data: dict = None) -> str:
     remembered = str(read_runtime().get("interpreter", "") or "").strip()
     if remembered:
         candidates.append(remembered)
-    # 3) 仓库副本（copy_edtalk 若复制了完整 runtime312）
-    # 4) 兄弟安装（copy_edtalk 源）
+    # 3) 仓库根 runtime312（2026-11-06 物理迁移——项目内环境的唯一正式位置）
+    # 4) 兄弟安装（迁移前源位置，过渡期兜底）
     try:
         from frontend.config.paths import get_base_path
         candidates.append(os.path.join(
-            str(get_base_path()), "edtalk", "runtime312", "python.exe"))
+            str(get_base_path()), "runtime312", "python.exe"))
     except Exception:
         pass
     candidates.append(_DEFAULT_INTERPRETER)

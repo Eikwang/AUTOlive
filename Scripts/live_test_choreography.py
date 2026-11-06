@@ -6,9 +6,9 @@
 驱动方式：构造真实 ActionChoreographer（真实 EDTalkClient HTTP 切段），按场景触发
 on_gift/on_keyword/on_song——与 handler 订阅点同构入口；none 步以 duration 完成真实链路。
 
-用法（仓库根，用 runtime312 解释器）：
-    <runtime312>/python.exe Scripts/live_test_choreography.py
-    （runtime312 默认 D:\AI\EDTalk\runtime312，见 docs/开发环境搭建.md）
+用法（仓库根，用项目内环境解释器）：
+    runtime312\python.exe Scripts/live_test_choreography.py
+    （2026-11-06 迁移：环境位于仓库根 runtime312/）
 """
 import io
 import json

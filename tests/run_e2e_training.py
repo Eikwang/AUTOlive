@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """TST-2 E2E 驱动：六步训练全链路实跑（tests/sound → soundtest 档案）。
 
-用法：runtime312 python tests/run_e2e_training.py
+用法：runtime312\python.exe tests/run_e2e_training.py（2026-11-06 迁移：仓库根环境）
 输出：实时步骤状态+日志尾；失败即停（管线语义），退出码=成败。
 """
 import os

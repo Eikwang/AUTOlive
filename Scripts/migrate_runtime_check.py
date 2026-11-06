@@ -32,7 +32,7 @@ if hasattr(sys.stdout, "reconfigure"):
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "config.json")
 BAK_PATH = CONFIG_PATH + ".migration.bak"
-REPO_RUNTIME = os.path.join(REPO_ROOT, "edtalk", "runtime312", "python.exe")
+REPO_RUNTIME = os.path.join(REPO_ROOT, "runtime312", "python.exe")
 EXTERNAL_RUNTIME = r"D:\AI\EDTalk\runtime312\python.exe"
 
 sys.path.insert(0, REPO_ROOT)
@@ -47,7 +47,7 @@ def check_1_repo_exists() -> bool:
     ok = os.path.isfile(REPO_RUNTIME)
     print(f"  {'[OK]' if ok else '[MISS]'} ① 副本解释器存在: {REPO_RUNTIME}")
     if not ok:
-        print("       修复=先运行 python Scripts/copy_edtalk.py（全量，含 runtime312 约 15.5GB）")
+        print("       修复=检查迁移是否完成（环境应位于仓库根 runtime312/）")
     return ok
 
 
@@ -155,7 +155,7 @@ def main():
           + ("（dry-run 未清键）" if args.dry_run else "") + " ===")
     if all(results):
         print("迁移校验完成。整合包发布检查单：")
-        print("  - edtalk/runtime312/ 已 .gitignore（不进 git，打包时附带）")
+        print("  - runtime312/ 已 .gitignore（不进 git，打包时附带）")
         print("  - config.json.migration.bak 保留至实播验收通过后删除")
         print("  - 实播：变声页反复进出+启停系统 20 轮，服务可自动恢复、无孤儿进程")
     sys.exit(0 if all(results) else 1)

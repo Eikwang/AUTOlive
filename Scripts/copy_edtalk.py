@@ -32,11 +32,8 @@ COPY_ITEMS = [
     ("realtime_serve", "realtime_serve", "ignore-weights", "实时推理服务代码"),
     ("train_fine_tune.py", "train_fine_tune.py", "track", "底模微调入口"),
     ("demo_EDTalk_A.py", "demo_EDTalk_A.py", "track", "get_mel 依赖（冒烟发现的仓库根依赖）"),
-    ("runtime312/ffmpeg/bin", "runtime312/ffmpeg/bin", "ignore", "ffmpeg 拆帧依赖（exe+DLL，crop_head_video 路径假设）"),
-    # T8（2026-11-06 批次）：完整 runtime312——解释器副本优先候选链的副本环节
-    # 产物（此前仅复制 ffmpeg/bin，edtalk/runtime312/python.exe 从未被生产）。
-    # GB 级（robocopy 增量幂等）；--skip-big 按阈值自然跳过（代码先行模式）。
-    ("runtime312", "runtime312", "ignore", "统一 Python 运行时（迁移核心，.gitignore 已排除）"),
+    # 2026-11-06 迁移批次：runtime312 环境已物理迁入仓库根（AUTOlive/runtime312），
+    # 不再来自 EDTalk 树——COPY_ITEMS 不再含 runtime312 项。
     ("fine_tune", "fine_tune", "track", "底模微调模块"),
     ("data_preprocess", "data_preprocess", "track", "11 步预处理链"),
     ("datasets", "datasets", "track", "训练数据集模块"),
@@ -164,7 +161,7 @@ def step3_manifest(manifest):
 def step4_freeze():
     """④ pip freeze + Python 版本快照（native F11：防环境升级静默断裂）。"""
     print("\n[4/5] 依赖快照")
-    py = os.path.join(SOURCE_ROOT, "runtime312", "python.exe")
+    py = os.path.join(os.path.dirname(TARGET_ROOT), "runtime312", "python.exe")  # 2026-11-06 迁移：环境在仓库根
     if not os.path.exists(py):
         print(f"  ⚠ 解释器不存在：{py}（快照跳过）")
         return
@@ -210,8 +207,8 @@ def step5_security_and_verify():
     else:
         print("  ✗ run_preprocess.py 缺失——复制不完整")
 
-    # H3：.pth 可编辑安装暗门——import 路径断言
-    py = os.path.join(SOURCE_ROOT, "runtime312", "python.exe")
+    # H3：.pth 可编辑安装暗门——import 路径断言（2026-11-06 迁移：用仓库根环境）
+    py = os.path.join(os.path.dirname(TARGET_ROOT), "runtime312", "python.exe")
     if os.path.exists(py):
         probe = run(
             [py, "-c",
@@ -233,7 +230,7 @@ def step_users_pth_cleanup():
     依赖注入已由 autolive_paths PYTHONPATH 收编，副本内的 users.pth 必须清除，
     否则候选链切到副本后外部路径注入重新生效。"""
     print("\n[5.5/5] users.pth 清查（TODOS #231）")
-    pth = os.path.join(TARGET_ROOT, "runtime312", "Lib", "site-packages", "users.pth")
+    pth = os.path.join(os.path.dirname(TARGET_ROOT), "runtime312", "Lib", "site-packages", "users.pth")  # 2026-11-06 迁移：仓库根环境
     if os.path.exists(pth):
         try:
             with open(pth, encoding="utf-8", errors="replace") as f:
@@ -269,9 +266,9 @@ def smoke_check():
         if not exists:
             missing.append(src_rel)
             ok = False
-    py = os.path.join(SOURCE_ROOT, "runtime312", "python.exe")
+    py = os.path.join(os.path.dirname(TARGET_ROOT), "runtime312", "python.exe")  # 迁移后环境位置
     py_ok = os.path.isfile(py)
-    print(f"  {'✓' if py_ok else '✗'} runtime312/python.exe（迁移核心）")
+    print(f"  {'✓' if py_ok else '✗'} 仓库根 runtime312/python.exe（迁移完成标志）")
     ok = ok and py_ok
     print("结论:", "全部源就绪，可执行迁移复制（python Scripts/copy_edtalk.py）"
           if ok else f"缺失 {len(missing)} 项——先解决缺失再迁移")

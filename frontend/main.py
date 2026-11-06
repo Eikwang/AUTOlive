@@ -522,10 +522,10 @@ class AutoliveApp:
         if not interpreter or not os.path.exists(interpreter):
             logger.error(
                 "EDTalk 解释器未找到。problem=runtime312 缺失；"
-                "cause=仓库副本与 D:\\AI\\EDTalk\\runtime312 均无 python.exe；"
-                "fix=运行 scripts/copy_edtalk.py 补齐，或安装 EDTalk 到 D:\\AI\\EDTalk"
+                "cause=项目根 runtime312 与 EDTalk 安装目录均无 python.exe；"
+                "fix=检查迁移（python Scripts/migrate_runtime_check.py --dry-run），或安装 EDTalk 到 D:\\AI\\EDTalk"
             )
-            return False, "EDTalk 解释器未找到（runtime312 缺失）", "请运行 scripts/copy_edtalk.py 或安装 EDTalk"
+            return False, "EDTalk 解释器未找到（runtime312 缺失）", "检查迁移：python Scripts/migrate_runtime_check.py --dry-run"
 
         # 虚拟摄像头启动检测（2026-10-31 画面设置批次，任务书：进入系统后检测
         # 是否安装摄像头——画面输出的基本支持，若没有安装则执行安装）。

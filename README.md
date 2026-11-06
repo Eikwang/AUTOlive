@@ -23,7 +23,7 @@
    git clone https://github.com/Eikwang/AUTOlive.git
    cd AUTOlive
    ```
-2. 准备统一 Python 运行时 `runtime312`（EDTalk 共享环境，`D:\AI\EDTalk\runtime312`），环境补丁清单见 [docs/开发环境搭建.md](./docs/开发环境搭建.md)；
+2. 统一 Python 运行时 `runtime312` **已内置于项目根**（`AUTOlive\runtime312\`，2026-11-06 自 EDTalk 物理迁入；`.gitignore` 排除，整合包打包时附带），环境补丁清单见 [docs/开发环境搭建.md](./docs/开发环境搭建.md)；
    - **ffmpeg**：安装后配置到系统环境变量 PATH（用于音频变速、变调等功能）。视频教程：https://www.bilibili.com/video/BV1S14y1Q799
 3. 双击 `启动程序.bat` 启动 WebUI（默认 `http://127.0.0.1:8086`）；
 4. 按 [docs/danmaku_module.md](./docs/danmaku_module.md) 的**三阶段上手**完成弹幕监听接入（环境自检 → 冒烟 → 添加房间到对话链）。
