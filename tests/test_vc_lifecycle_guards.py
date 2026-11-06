@@ -199,6 +199,139 @@ def test_stopped_state_still_starts_normally(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# 懒启动断链修复（2026-11-06 晚，用户实测：前端单独启动变声卡 starting）
+# ----------------------------------------------------------------------
+
+def test_ensure_boots_fresh_instance(tmp_path, monkeypatch):
+    """懒启动路径：新构造实例必须被 boot（start 被调用）——断链防回归。
+
+    回归场景：build 只构造（caller_starts 契约），ensure 对 state=starting 的
+    新实例落"在途"分支无人 start——服务卡 starting、端口无监听，必须先启动
+    主系统才由 main.py:166 承接。"""
+    from utils import rvc_service as rs
+
+    calls = {"built": 0, "started": 0, "idle": 0}
+
+    class _FakeRegistry:
+        def get(self, name):
+            return None  # 不在册——build 走新构造
+
+        def register(self, svc):
+            calls["built"] += 1
+
+    monkeypatch.setattr(rs.ServiceRegistry, "instance", classmethod(lambda cls: _FakeRegistry()))
+    monkeypatch.setattr(rs, "rvc_vc_alive", lambda config, paths, timeout=2.0: False)
+    monkeypatch.setattr(rs, "_remember_interpreter", lambda svc: None)
+    monkeypatch.setattr(rs, "start_idle_monitor", lambda svc, config: calls.__setitem__("idle", calls["idle"] + 1))
+
+    class _FakeSvc:
+        name = "rvc-vc"
+        state = rs.ST_STARTING
+        proc = None
+        command = [sys.executable, "-c", "pass"]
+
+        def start(self):
+            calls["started"] += 1
+            return True
+
+    def _fake_build(config, paths, on_state_change=None, *, caller_starts=True):
+        svc = _FakeSvc()
+        if not caller_starts:
+            def _boot():
+                if svc.start():
+                    rs.start_idle_monitor(svc, config)
+                    rs._remember_interpreter(svc)
+            import threading as _t
+            _t.Thread(target=_boot, daemon=True).start()
+        return svc
+
+    monkeypatch.setattr(rs, "build_rvc_vc_service", _fake_build)
+    svc = rs.ensure_rvc_vc({"rvc_vc": {"hosted": True}}, None)
+    assert svc is not None
+    deadline = time.time() + 5
+    while calls["started"] == 0 and time.time() < deadline:
+        time.sleep(0.05)
+    assert calls["started"] == 1, "懒启动新实例未被 boot（断链回归）"
+    assert calls["idle"] == 1, "boot 成功后未接 idle monitor"
+
+
+def test_build_caller_starts_default_contract(tmp_path, monkeypatch):
+    """main.py 契约保持：build 默认（caller_starts=True）只构造不自动 boot。"""
+    from utils import rvc_service as rs
+
+    started = {"n": 0}
+
+    class _FakeRegistry:
+        def get(self, name):
+            return None
+
+        def register(self, svc):
+            pass
+
+    monkeypatch.setattr(rs.ServiceRegistry, "instance", classmethod(lambda cls: _FakeRegistry()))
+    monkeypatch.setattr(rs, "rvc_vc_alive", lambda config, paths, timeout=2.0: False)
+
+    class _FakeSvc:
+        name = "rvc-vc"
+        state = rs.ST_STARTING
+        proc = None
+
+        def start(self):
+            started["n"] += 1
+            return True
+
+    monkeypatch.setattr(rs.ManagedProcess, "__init__",
+                        lambda self, **kw: None)  # 不真构造
+    monkeypatch.setattr(rs.ManagedProcess, "start",
+                        lambda self: started.__setitem__("n", started["n"] + 1) or True)
+    monkeypatch.setattr(rs, "rvc_runtime_python",
+                        lambda config, paths: sys.executable)
+    monkeypatch.setattr(rs, "_remember_interpreter", lambda svc: None)
+    monkeypatch.setattr(rs, "start_idle_monitor", lambda svc, config: None)
+
+    class _FakePaths:
+        autolive_home = str(tmp_path)
+        rvc_root = str(tmp_path)
+
+        def subprocess_env(self, extra=None):
+            return {}
+
+    svc = rs.build_rvc_vc_service({"rvc_vc": {"hosted": True}}, _FakePaths())
+    assert svc is not None
+    time.sleep(0.3)  # 给可能的错误 boot 线程时间（不应存在）
+    assert started["n"] == 0, "默认契约被破坏：build 自动 boot 了（main.py 会双拉）"
+
+
+def test_reused_starting_not_double_booted(tmp_path, monkeypatch):
+    """在册 starting 实例复用不得重复 boot（防双拉——别人已在 start 在途）。"""
+    from utils import rvc_service as rs
+
+    inflight = ManagedProcess(
+        name="rvc-vc",
+        command=[sys.executable, "-c", "pass"],
+        cwd=str(tmp_path),
+        health_url="http://127.0.0.1:1/status",
+        port=1,
+    )
+    inflight.state = rs.ST_STARTING
+    inflight.proc = None
+
+    class _FakeRegistry:
+        def get(self, name):
+            return inflight
+
+    monkeypatch.setattr(rs.ServiceRegistry, "instance", classmethod(lambda cls: _FakeRegistry()))
+
+    started = {"n": 0}
+    inflight.start = lambda: started.__setitem__("n", started["n"] + 1) or True  # type: ignore[method-assign]
+
+    svc = rs.ensure_rvc_vc({"rvc_vc": {"hosted": True}}, None)
+    assert svc is inflight
+    time.sleep(0.3)
+    assert started["n"] == 0, "在途 starting 实例被重复 start（双拉回归）"
+
+
+# ----------------------------------------------------------------------
 # T2/T3/T4/T9：svc.py 与文案源码锚点
 # ----------------------------------------------------------------------
 

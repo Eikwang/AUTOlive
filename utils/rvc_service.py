@@ -84,7 +84,8 @@ def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
 
 
 def build_rvc_vc_service(
-    config: Config, paths: AutolivePaths, on_state_change=None
+    config: Config, paths: AutolivePaths, on_state_change=None,
+    *, caller_starts: bool = True,
 ) -> Optional[ManagedProcess]:
     """构造（或复用在册实例）RVC 变声服务。config rvc_vc.hosted 默认 true。
 
@@ -98,7 +99,17 @@ def build_rvc_vc_service(
     真相=「拉起已在途」，堵 register→start 线程的 stopped 判定窗口）——
     调用方 start 线程在其后，register 恒先于 Popen。
 
-    返回：ManagedProcess（调用方负责 start）/ 已在线时 None / hosted=false None。
+    caller_starts（2026-11-06 懒启动断链修复）：
+      True（默认，main.py 主系统契约）——调用方自行起 start 线程，build 只构造；
+      False（ensure 懒启动路径）——新构造实例由 build 内部后台 boot（start 成功
+      接 idle monitor+解释器记忆）。**修复背景**：ensure 对新构造实例（state=
+      starting、proc=None）的判定只接 stopped/red——新实例落"在途"分支后无人
+      start，前端单独懒拉起自 C3 起即断链（服务卡 starting、端口无监听，必须
+      先启动主系统由 main.py 承接 start——与"变声独立进程可单独启动"设计不符，
+      用户 2026-11-06 晚实测确认）。复用分支（①/stopped/red）不受本参数影响。
+
+    返回：ManagedProcess（调用方负责 start，除非 caller_starts=False）/ 已在线
+    时 None / hosted=false None。
     """
     config = as_keyed_config(config)  # C3 双形态归一（svc 页 dict / main Config）
     hosted = config.get("rvc_vc", "hosted")
@@ -165,6 +176,18 @@ def build_rvc_vc_service(
     # 堵 register→start 线程之间 state==stopped 的判定窗口（spec E-1）。
     # 直接赋值跳过 _set_state 日志（start() 会再打一次 starting，避免重复行）。
     svc.state = ST_STARTING
+    if not caller_starts:
+        # 懒启动断链修复（2026-11-06）：ensure 路径的新构造实例由 build 内部
+        # boot——承接 start+idle monitor+解释器记忆（与 ensure stopped 分支同款）。
+        # 线程名独立（rvc-vc-boot），main.py 默认路径（caller_starts=True）零改动。
+        def _boot():
+            if svc.start():
+                start_idle_monitor(svc, config)
+                _remember_interpreter(svc)
+            else:
+                logger.error("[rvc-vc] 懒拉起失败——查看 logs/services/rvc-vc.log 定位")
+        threading.Thread(target=_boot, name="rvc-vc-boot", daemon=True).start()
+        logger.info("[rvc-vc] 新实例后台 boot 已启动（懒启动路径）")
     return svc
 
 
@@ -182,9 +205,15 @@ def ensure_rvc_vc(config: Config, paths: AutolivePaths,
     修复：红态且无进程时后台 manual_restart（清零失败计数+同步 start 留在
     后台线程——start 含 120s 就绪窗口同步阻塞，禁入事件循环/调用线程）。
 
-    返回：ManagedProcess（新拉起/复用中/复活中，状态条轮询就绪）或 None（已在线）。"""
+    返回：ManagedProcess（新拉起/复用中/复活中，状态条轮询就绪）或 None（已在线）。
+
+    懒启动断链修复（2026-11-06 晚，用户实测）：build 以 caller_starts=False 调用
+    ——新构造实例由 build 内部后台 boot（此前新实例 state=starting 落"在途"
+    分支后无人 start，服务卡死 starting、端口无监听，必须先启动主系统才由
+    main.py:166 承接 start——与"变声独立进程可单独手动启动"设计不符）。"""
     config = as_keyed_config(config)  # 双形态归一（idle_exit_min/透传 build）
-    svc = build_rvc_vc_service(config, paths, on_state_change=on_state_change)
+    svc = build_rvc_vc_service(config, paths, on_state_change=on_state_change,
+                               caller_starts=False)
     if svc is None:
         return None  # 已在线 / hosted=false
     if svc.proc is None and svc.state == ST_STOPPED:
