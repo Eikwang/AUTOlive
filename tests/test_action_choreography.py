@@ -144,10 +144,11 @@ class TestConfigModel:
 
     def test_entrance_trigger_type_now_valid(self):
         """T4（2026-11-01 批次）：entrance/follow 合法化（原预留拒绝语义退役），
-        match 可空=任意事件、load 强制 interrupt=queue（三强制）。"""
+        match 可空=任意事件、打断模式按规则配置（2026-11-06 三强制拆除——原强制
+        interrupt=queue 退役）。"""
         cfg = load_choreography_config(make_cfg(rules=[make_rule(trigger_type="entrance",
                                                                  sequence={"main": {"segment": "A_入场", "switch_at": "segment_end", "duration_s": 5}})]))
-        assert len(cfg.rules) == 1 and cfg.rules[0].interrupt == "queue"
+        assert len(cfg.rules) == 1 and cfg.rules[0].interrupt == "standard"
         # 值域外类型仍拒绝
         cfg2 = load_choreography_config(make_cfg(rules=[make_rule(trigger_type="bogus",
                                                                   sequence={"main": {"segment": "A_入场", "switch_at": "segment_end", "duration_s": 5}})]))

@@ -1,5 +1,6 @@
 ```mermaid
 flowchart TD
+    %% 图头 v2.12（2026-11-06 三强制拆除批次）：entrance/follow 权重两态回归系统优先级——on 态 d10 表外回读 filter.priority_mapping（覆盖顺序=arbitration_weights > priority_mapping）、off 态 _TRIGGER_PRIORITY_KEY 新增同名直取；打断模式回归规则配置（standard/queue 均合法）；10s 类型节流与装载告警退役（防御职责归上游 process_data 六类限入&去重管线）；username 清洗三件套保留
     %% 图头 v2.11（2026-11-06 协作机制流程审查批次 T3，uc1b 终门裁决）：消费回传语义澄清——回传=观测回执（QueueMixin.report_consumed 消费统计落账+编排实例匹配），不驱动下一消费（消费由播放循环自身串行推进）；本地（builtin）路径观测回执收敛至真实完成点单点（audio_core 完成回调），移交点仅保留编排实例匹配（W3 双计根修）；编排音轨条目重建透传 choreo_step_id（Q-1）
     %% 图头 v2.10（2026-11-01 动作编排优化批次）：T3 动态文案「关键词|文案」拆分——格式化条目关键词直投编排（DynamicCopy→Compile 直通边，跳过 Keyword 中枢子串识别）、文案部分直通播放链、copywriting 文件夹链与未格式化条目走既有链不变；T4 entrance/follow 触发实装——入场/关注事件（感谢链同源 event_handler）经编排订阅点直投 Compile（三强制：10s 类型节流/强制 queue/权重恒钳 0，username 清洗三件套）
     %% 图头 v2.9（2026-10-28 消费批次 P3）：打断撤旧音频（standard 打断撤销旧序列未消费编排音轨 CancelAudio→两队列按 choreo_step_id 移除）；消费回传补齐 pygame/外部播放器路径（三路共用 _notify_choreo_complete，M3 断链修复）；消息队列满载高优插入=插队+驱逐队尾净长度不变（M1）；完成匹配回退路径 content 归一化容差（O9）。拓扑与 v2.8 一致
@@ -140,7 +141,7 @@ flowchart TD
         %% 未格式化条目仍走 DynamicCopy→Keyword 既有链
         DynamicCopy --> |关键词直投·格式化条目|Compile
         %% T4：入场/关注事件订阅（感谢链同源 event_handler.entrance/follow_handle；
-        %% 三强制=10s 类型节流/强制 queue/权重恒钳 0）
+        %% 权重=系统优先级/打断模式=规则配置——2026-11-06 三强制拆除批次）
         Sort --> |权重&队列信息|Compile
         Frame(输出<br>画面&音频&字幕):::logicNode      
         Compile --> |需要口型|AvatarAI

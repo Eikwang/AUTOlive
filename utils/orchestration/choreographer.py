@@ -196,31 +196,22 @@ class ChoreoEngine:
     PENDING_QUEUE_MAX = 5  # queue 模式多槽上限（2026-10-28 G3；O2：满额挤最低优）
 
     # 触发类型 → filter.priority_mapping 权重键映射（O1/O3，2026-10-28 消费批次）：
-    # keyword 触发源=弹幕（语义同 comment 权重）；gift/song 与映射表同名直取
-    # （d22 off=整体回退现行为时仍走本表——d10 on 态改读编排仲裁表）。
-    _TRIGGER_PRIORITY_KEY = {"gift": "gift", "song": "song", "keyword": "comment"}
+    # gift/song/entrance/follow 与映射表同名直取（entrance/follow 直取=2026-11-06
+    # 三强制拆除批次——off 态回归系统优先级权重）；keyword 触发源=弹幕（语义同
+    # comment 权重）。（d22 off=整体回退现行为时仍走本表——d10 on 态改读编排仲裁表，
+    # entrance/follow 例外回读本表。）
+    _TRIGGER_PRIORITY_KEY = {"gift": "gift", "song": "song", "keyword": "comment",
+                             "entrance": "entrance", "follow": "follow"}
 
     # d10（2026-11-05 编排优化批次；S-1 修订取代 d5）：编排面独立仲裁权重表——
-    # 与 filter.priority_mapping 完全解耦（生产 trends_copywriting=999 会污染
-    # 编排面：礼物应打断动态文案却被挡排队，违背方案 §2/§3 优先级语义）。
-    # 覆盖粒度=类型键级（choreography.arbitration_weights 可覆盖单键，T1 装载
-    # 校验已限值域）；表外类型回退 0 保守（最低档=排队退化既有 FIFO 安全）。
-    # entrance/follow 恒 0 钳制不变（三强制二，优先级高于本表与开关）。
+    # 对 gift/song/dynamic_text/keyword 与 filter.priority_mapping 解耦（生产
+    # trends_copywriting=999 会污染编排面：礼物应打断动态文案却被挡排队，违背
+    # 方案 §2/§3 优先级语义）。覆盖粒度=类型键级（choreography.arbitration_weights
+    # 可覆盖单键，T1 装载校验已限值域）；表外类型回退 0 保守（最低档=排队退化
+    # 既有 FIFO 安全）。entrance/follow 例外：d10 表外时回读 priority_mapping
+    # （2026-11-06 三强制拆除批次——系统优先级权重直接生效，choreography 面
+    # 不设独立档，避免与用户 filter 配置静默分叉）。
     _ARBITRATION_WEIGHTS_DEFAULT = {"gift": 30, "song": 20, "dynamic_text": 15, "keyword": 10}
-
-    # T4 三强制二（Eng A2）：entrance/follow 恒强制最低权重档——priority_mapping
-    # 现成 entrance=55/follow=65（PRIORITY_PRESETS），不钳制则入场/关注天然获得
-    # 仅次于 comment(80)/gift(70) 的高权重，风暴防护失效。配置值仅 load 告警。
-    _CLAMPED_PRIORITY_TYPES = ("entrance", "follow")
-
-    # T4 三强制三（R-ceo5 弹幕源定向例外，Eng F1）：entrance/follow 引擎内类型
-    # 专属最小触发间隔（按 trigger_type 全局计时——同类跨规则共享一个计时器，
-    # 间隔内同类全部触发静默忽略；DEFAULT 态与序列态统一生效）。事件流虽经
-    # process_data 六类限入&去重管线（2026-11-04 事实修正：原"无上游去重"表述
-    # 有误——danmaku_consumer 六类均走 process_data），但用户名键去重拦不住
-    # 不同用户集中进场、限入窗口参数可调宽——本节流为不依赖上游配置的防御
-    # 纵深；常量起步不暴露配置键，实播反馈后评估可配置化。
-    ENTRANCE_FOLLOW_MIN_INTERVAL_S = 10.0
 
     # d22 看门狗（T4）：song 伴唱挂起硬上限——deadline（歌曲结束）为正常退出
     # 锚；本上限兜底「挂起锚永不刷新」的异常态（歌曲链路死亡且无新切片起播）。
@@ -241,7 +232,6 @@ class ChoreoEngine:
         self.degrade_total = 0
         self._seq_counter = 0
         self._restore_attempts = 0
-        self._type_last: dict = {}        # T4：trigger_type -> 上次放行时刻（类型专属节流）
         # 活动序列状态（state == "sequence" 时非 None）
         self.seq: Optional[dict] = None
         # song 伴唱挂起态（T4/d9/e4，2026-11-05 批次）：seq 之外的旁路跟踪结构
@@ -252,14 +242,6 @@ class ChoreoEngine:
         # 事件通道回写，防两份状态漂移）。单槽：后一次挂起覆盖前次（最新歌曲
         # 请求的 deadline 为活跃锚；前序歌曲经 d11 入歌曲队列由音频侧排序）。
         self.song_suspended: Optional[dict] = None
-
-        # T4/A2 装载告警（一次）：priority_mapping 显式配置 entrance/follow 时提示钳制
-        for _t in self._CLAMPED_PRIORITY_TYPES:
-            if _t in self.priority_mapping:
-                logger.warning(
-                    f"[编排] filter.priority_mapping 含 {_t}={self.priority_mapping[_t]}，"
-                    "该值对编排不生效（entrance/follow 权重恒强制最低档 0——风暴防护"
-                    "三强制，2026-11-01 批次）；如需调整请修改编排规则触发类型")
 
     def _arbitration_active(self) -> bool:
         """仲裁总开关（d22）：off=整体回退现行为（直播中出问题一键回退无需重启）。
@@ -275,16 +257,16 @@ class ChoreoEngine:
         开关 on（d10）：编排仲裁表——内置默认（gift=30 > song=20 >
         dynamic_text=15 > keyword=10）+ choreography.arbitration_weights 类型
         键级覆盖（T1 装载已校验值域）；表外类型回退 0 保守（最低档：排队退化
-        既有 FIFO、打断不受限，行为安全）。
+        既有 FIFO、打断不受限，行为安全）。entrance/follow 例外（2026-11-06
+        三强制拆除批次）：d10 表（含覆盖表）无键时回读 filter.priority_mapping
+        ——系统优先级权重直接生效，覆盖顺序=arbitration_weights > priority_mapping，
+        两处均无键回退 0。
         开关 off（d22）：整体回退现行为——legacy _TRIGGER_PRIORITY_KEY 映射
-        filter.priority_mapping 读取（keyword→comment 等，2026-10-28 语义）。
-        两态下 entrance/follow 恒返回 0（T4 三强制二——风暴防护优先于开关与
-        任何配置，装载期已告警）。"""
+        filter.priority_mapping 读取（gift/song/entrance/follow 同名直取、
+        keyword→comment，2026-10-28 语义+2026-11-06 直取扩展）。"""
         if rule is None:
             return 0
         _tt = getattr(rule, "trigger_type", "")
-        if _tt in self._CLAMPED_PRIORITY_TYPES:
-            return 0
         if not self._arbitration_active():
             key = self._TRIGGER_PRIORITY_KEY.get(_tt)
             p = self.priority_mapping.get(key) if key else None
@@ -295,6 +277,10 @@ class ChoreoEngine:
         table = dict(self._ARBITRATION_WEIGHTS_DEFAULT)
         table.update(getattr(self.cfg, "arbitration_weights", None) or {})
         p = table.get(_tt)
+        if p is None and _tt in ("entrance", "follow"):
+            # 2026-11-06 三强制拆除：d10 表外类型回读系统优先级权重（覆盖顺序
+            # =arbitration_weights > priority_mapping；两处均无键回退 0）。
+            p = self.priority_mapping.get(_tt)
         try:
             return int(p) if p is not None else 0
         except (TypeError, ValueError):
@@ -307,8 +293,8 @@ class ChoreoEngine:
         0=禁用=永续累计——2026-10-31 退役 reset_after_s 后的现行为）；总开关
         off 同样禁用（d22 整体回退）。清零是继 D-4 他键打断、配置重存换装之后
         第三种计数清零源。调用点=decide_trigger 命中规则后、key_last 锚点刷新
-        前（此刻 key_last 仍持上一触发时刻；type_throttled 早退与未匹配不经过
-        此处=不刷新不判定——d7 终门标注语义）。"""
+        前（此刻 key_last 仍持上一触发时刻；未匹配不经过此处=不刷新不判定——
+        d7 终门标注语义）。"""
         window = float(getattr(self.cfg, "continuous_trigger_window_s", 0.0) or 0.0)
         if not (self._arbitration_active() and window > 0):
             return
@@ -326,12 +312,12 @@ class ChoreoEngine:
     def decide_trigger(self, trigger_type: str, match_value: str, data: dict) -> dict:
         """触发判定。Returns: {accepted, takeover, rule, commands, reason, retry_after_s}
 
-        reason 枚举（GAP-3/F2 义务；T4 扩展+退役值见下）：拒绝值 =
-        no_match / below_min_price / type_throttled（T4：entrance/follow 类型
-        专属节流，retry_after_s=距放行秒数）/ disabled；
-        接受值 = accepted（DEFAULT 启动）/ interrupted（条件3 打断）/
-        requeued（条件2 重排，accepted=true 说明值）+ queued/queued_full（排队，
-        accepted=false）。历史值 throttled/hold 已随 R-ceo5 退役（Eng H3）。
+        reason 枚举（GAP-3/F2 义务；退役值见下）：拒绝值 =
+        no_match / below_min_price / disabled；接受值 = accepted（DEFAULT 启动）/
+        interrupted（条件3 打断）/ requeued（条件2 重排，accepted=true 说明值）+
+        queued/queued_full（排队，accepted=false）。历史值 throttled/hold 已随
+        R-ceo5 退役（Eng H3）；type_throttled 已随 2026-11-06 三强制拆除批次退役
+        （entrance/follow 类型节流移除，防御职责归上游 process_data 限入&去重管线）。
         模拟触发与观测消费。
         """
         now = self.clock()
@@ -349,29 +335,14 @@ class ChoreoEngine:
         # 弹幕层限时去重在上游拦截重复；触发计次不再随时间清零（清零仅剩
         # 他键打断 D-4 与配置重存换装）；同键重入走条件2 计数+重排。
         # key_last 保留作兼容锚点（测试旁路句柄；引擎内零消费）。
-        # T4 三强制三（Eng F1）：entrance/follow 类型专属节流——按 trigger_type
-        # 全局计时（同类跨规则共享窗口），间隔内同类全部触发静默忽略（不刷新
-        # 窗口：固定间隔，风暴持续也不会永久阻塞）；DEFAULT 态与序列态统一生效
-        # （风暴在 DEFAULT 态同样直通切换，队列防护不覆盖该面）。窗口外放行并
-        # 记时刻。计次不受节流影响（被节流触发不进 decide 后续=不计数）。
-        if trigger_type in ("entrance", "follow"):
-            last = self._type_last.get(trigger_type)
-            if last is not None and (now - last) < self.ENTRANCE_FOLLOW_MIN_INTERVAL_S:
-                retry = round(self.ENTRANCE_FOLLOW_MIN_INTERVAL_S - (now - last), 1)
-                commands.append(LogCmd(
-                    "debug", f"[编排] {trigger_type} 类型节流：窗口内静默忽略"
-                             f"（{rule.rule_id}，{retry}s 后放行同类下一个）"))
-                self._type_last[trigger_type] = last  # 固定窗口，不刷新
-                return {"accepted": False, "takeover": False, "rule": rule,
-                        "commands": commands, "reason": "type_throttled",
-                        "retry_after_s": retry}
-            self._type_last[trigger_type] = now
+        # T4 三强制三类型专属节流已随 2026-11-06 三强制拆除批次退役——防御职责
+        # 归上游 process_data 六类限入&去重管线（2026-11-04 事实修正自证）。
 
         # d7 连续触发窗口（2026-11-05 批次）：窗口判定在锚点刷新前——此刻
         # key_last 仍持上一触发时刻，窗外=计数清零（本次触发随后从基础档重新
         # 计数）。滑动锚点（d24a）：下一行的写入即锚点刷新，命中路径
         # （in_progress/requeued/queued/interrupted/DEFAULT 启动）统一刷新——
-        # type_throttled 早退与未匹配不经过此处=不刷新（e6 断言锚定）。
+        # 未匹配不经过此处=不刷新（e6 断言锚定）。
         self._expire_counter_window(rule.rule_id, now)
         self.key_last[rule.rule_id] = now
 
@@ -1330,7 +1301,8 @@ class ActionChoreographer:
         True=画面序列启动/排队受理；入场主流程（积分/答谢）不受影响（正交）。
         username 清洗三件套（Eng E4/S-1：去控制字符+截断 24 字符——不可信外部
         输入直通 TTS/字幕变量，清洗在编排侧副本上做，原 data 不动）。
-        节流/权重/queue 三强制在引擎与装载侧（Eng A2/E3/E5）。
+        权重=系统优先级（filter.priority_mapping，2026-11-06 三强制拆除批次）；
+        打断模式=规则配置（standard/queue 均合法）。
         """
         return self._on_entrance_follow("entrance", data)
 

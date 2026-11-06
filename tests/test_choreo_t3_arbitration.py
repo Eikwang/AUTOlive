@@ -18,7 +18,8 @@ from utils.orchestration.choreographer import ChoreoEngine
 from utils.orchestration.config_model import RuleCfg, load_choreography_config
 
 NOW = [1000.0]
-PM = {"comment": 20, "gift": 20, "song": 10, "trends_copywriting": 999}
+PM = {"comment": 20, "gift": 20, "song": 10, "trends_copywriting": 999,
+      "entrance": 20, "follow": 20}  # entrance/follow 键=2026-11-06 拆除批次（验收载体防空心化）
 
 
 def _rule(rid, t, match="x", interrupt="standard"):
@@ -76,11 +77,31 @@ def test_d10_unknown_type_falls_back_zero():
 
 
 @pytest.mark.parametrize("t", ["entrance", "follow"])
-def test_entrance_follow_clamped_zero_both_switch_states(t):
+def test_entrance_follow_two_state_priority(t):
+    """entrance/follow 两态取值路径（2026-11-06 三强制拆除——用户配置生效的验收
+    载体；三断言=spec r2 四-1 钉死）：①on 态无覆盖→priority_mapping 值生效
+    ②on 态 arbitration_weights 覆盖→覆盖胜（覆盖顺序 C8）③off 态→mapping 值
+    且 override 不注入（F-E 口径）。原「两态恒 0」断言随钳制拆除反向改写。"""
     on = _engine([_rule("e", t, match="")])
+    assert on._rule_priority(on.cfg.rule_by_id("e")) == 20  # ① mapping 值生效
+    on_covered = _engine([_rule("e", t, match="")], over={"arbitration_weights": {t: 8}})
+    assert on_covered._rule_priority(on_covered.cfg.rule_by_id("e")) == 8  # ② 覆盖胜
     off = _engine([_rule("e", t, match="")], over={"arbitration_enable": False})
-    assert on._rule_priority(on.cfg.rule_by_id("e")) == 0
-    assert off._rule_priority(off.cfg.rule_by_id("e")) == 0
+    assert off._rule_priority(off.cfg.rule_by_id("e")) == 20  # ③ off 直取 mapping
+    assert off.cfg.arbitration_enable is False  # override 不注入（F-E：off 态通道关闭）
+
+
+def test_off_state_entrance_standard_interrupts_lower_priority():
+    """F9 行为守卫（2026-11-06 拆除批次）：off 态入场 standard 规则以 mapping
+    权重打断低权在播序列——「用户配置实际生效」钉在行为层而非仅 _rule_priority
+    值层（song=10 < entrance=20 → 抢占）。"""
+    eng = _engine([_rule("s", "song", match=""), _rule("e", "entrance", match="")],
+                  over={"arbitration_enable": False})
+    d1 = _hit(eng, "song", "歌名")
+    assert d1["accepted"] is True and eng.state == "sequence"
+    d2 = _hit(eng, "entrance", "观众甲")
+    assert d2["reason"] == "interrupted"  # 20 >= 10 走抢占（O3 门仅低权才排队）
+    assert eng.seq["rule_id"] == "e"
 
 
 def test_d22_off_falls_back_to_legacy_mapping_source():

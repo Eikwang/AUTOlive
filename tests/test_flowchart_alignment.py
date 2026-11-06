@@ -193,17 +193,22 @@ class TestChoreoTopology:
         assert '"standard", "queue"' in cfg_src, "打断模式值域缺少 queue（排序联动语义）"
 
     def test_t4_entrance_follow_implemented(self):
-        """代码侧镜像断言（v2.10）：entrance/follow 触发实装+三强制落码。"""
+        """代码侧镜像断言（v2.10 T4 实装 + 2026-11-06 三强制拆除批次反向）：
+        entrance/follow 订阅点在位；三强制常量/节流退役（退役守卫形式，沿
+        throttled/hold 退役断言先例——防复活）。"""
         cfg_src = (REPO / "utils" / "orchestration" / "config_model.py").read_text(
             encoding="utf-8")
         assert 'VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow", "dynamic_text")' in cfg_src, (
             "触发类型值域缺少 entrance/follow（T4 案例二）或 dynamic_text（2026-11-05 批次 d4）")
+        assert "强制改判 queue" not in cfg_src, "强制 queue 残留——三强制拆除批次退役守卫"
         engine_src = (REPO / "utils" / "orchestration" / "choreographer.py").read_text(
             encoding="utf-8")
-        assert "ENTRANCE_FOLLOW_MIN_INTERVAL_S" in engine_src, "缺少类型专属节流常量（三强制三）"
-        assert "_CLAMPED_PRIORITY_TYPES" in engine_src, "缺少权重恒强制钳制（三强制二）"
         assert "on_entrance" in (REPO / "utils" / "handlers" / "event_handler.py").read_text(
             encoding="utf-8"), "入场事件缺编排订阅点（感谢链同源）"
+        assert "_CLAMPED_PRIORITY_TYPES" not in engine_src, "权重钳制常量复活——三强制拆除批次退役守卫"
+        assert "ENTRANCE_FOLLOW_MIN_INTERVAL_S" not in engine_src, "类型节流常量复活——三强制拆除批次退役守卫"
+        assert "两态取值路径" in engine_src or "priority_mapping" in engine_src, (
+            "两态权重路径缺失（2026-11-06 拆除批次核心机制）")
 
 
 class TestGraphHeader:
@@ -212,8 +217,9 @@ class TestGraphHeader:
     落码后随批次重落盘，版本升至 v2.9）。"""
 
     def test_version_line_present(self):
-        """v2.11（2026-11-06 协作机制流程审查批次 T3）；v2.10/v2.9 历史行保留。"""
-        assert "v2.11" in _graph_text(), "图头版本行（v2.11）缺失——疑 restore 回滚，须随批次重落盘"
+        """v2.12（2026-11-06 三强制拆除批次）；v2.11/v2.10/v2.9 历史行保留。"""
+        assert "v2.12" in _graph_text(), "图头版本行（v2.12）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.11" in _graph_text(), "图头 v2.11 历史行缺失——版本链断裂"
         assert "v2.10" in _graph_text(), "图头 v2.10 历史行缺失——版本链断裂"
         assert "v2.9" in _graph_text(), "图头 v2.9 历史行缺失——版本链断裂"
 

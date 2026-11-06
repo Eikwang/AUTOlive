@@ -21,11 +21,8 @@ VALID_TRIGGER_TYPES = ("gift", "keyword", "song", "entrance", "follow", "dynamic
 # 载体之一（d18 规则级判定），编排面权重经 d10 仲裁表（不映射 trends_copywriting）。
 # entrance/follow（2026-11-01 动作编排优化批次 T4：设计文档案例二答谢三类型）：
 # 入场/关注事件订阅（感谢链同源 event_handler.entrance_handle/follow_handle）。
-# 三强制（风暴防护，CEO F7 豁免声明）：load 时强制 interrupt=queue、权重恒钳制
-# 0（choreographer._rule_priority）、引擎内类型专属节流常量（无配置键——系
-# R-ceo5 弹幕源定向例外的防御纵深：事件流虽经 process_data 六类限入&去重管线，
-# 但用户名键去重拦不住不同用户集中进场，限入窗口参数亦可调宽，引擎内节流为
-# 不依赖上游配置的下限保护）。
+# 权重/打断模式回归规则与系统优先级配置（2026-11-06 三强制拆除批次——原风暴
+# 防护三强制退役，防御职责归上游 process_data 六类限入&去重管线）。
 VALID_SWITCH_AT = ("immediate", "segment_end")
 VALID_AUDIO_MODES = ("none", "tts", "file")
 # 打断模式（2026-10-27 动作编排完善批次：优先级排序联动）：standard=触发即打断
@@ -354,18 +351,8 @@ def load_choreography_config(config) -> ChoreographyConfig:
             continue  # 主线缺失（主线必选拒绝已记录）；enter/exit 可选步 None 照常生效
         interrupt = raw.get("interrupt", "standard")
         if interrupt not in VALID_INTERRUPT:
-            _reject(rule_id, f"interrupt 值域外：{interrupt!r}（仅 standard）", rejections)
+            _reject(rule_id, f"interrupt 值域外：{interrupt!r}（值域 {('|'.join(VALID_INTERRUPT))}）", rejections)
             continue
-        if trigger_type in ("entrance", "follow") and interrupt != "queue":
-            # T4 三强制一（CEO F7 豁免声明的新裁决）：入场/关注事件的限入&去重
-            # 只压流量不压单条打断权限，高热直播间风暴序列不得挤占礼物/关键词
-            # 序列——显式 standard 被覆盖并告警。
-            logger.warning(
-                f"编排规则 [{rule_id}] interrupt={interrupt!r} 被强制改判 queue："
-                "problem=entrance/follow 不允许打断档；cause=入场/关注限入&去重只压流量不压打断权限，"
-                "风暴防护为装载期强制（2026-11-01 批次三强制）；"
-                "fix=无需处理（该键对 entrance/follow 无效，可删除）")
-            interrupt = "queue"
         tiers: list = []
         tier_error = None
         prev_min = 0

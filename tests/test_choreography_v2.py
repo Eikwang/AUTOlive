@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-T4 entrance/follow 触发类型实装守卫（/autoplan main-20261101-213220 批次）。
+T4 entrance/follow 触发类型实装守卫（/autoplan main-20261101-213220 批次；
+2026-11-06 三强制拆除批次反向改写——权重/打断模式回归配置，节流退役）。
 
-覆盖义务块（ceo/eng v6）：
+覆盖义务块（ceo/eng v6 + 2026-11-06 拆除批次）：
 1. 匹配组：match 可空=任意事件 / 非空=用户名等值（_normalize_text 口径）/ 不匹配 no_match
-2. 强制 queue 组：load 时 entrance/follow+standard → queue+告警
-3. 恒强制权重组：三条 PRIORITY_PRESETS 映射下 _rule_priority(entrance/follow) 恒 0（Eng A2）
-4. 类型全局节流组：10s 同类共享窗口（跨规则互斥）/ 不同类互不影响 / 窗口外放行 /
-   DEFAULT 态与序列态统一生效（Eng E3/F1/T-2）
-5. username 清洗三件套：去控制字符+截断 24 字符（Eng E4/S-1）
+2. 打断模式组：显式 standard/queue 均按配置生效（三强制一拆除）；queue 冲突分支保留
+3. 权重组（反向）：三条 PRIORITY_PRESETS 映射下 _rule_priority(entrance/follow)=系统
+   优先级值（on 态回读 priority_mapping）；arbitration_weights 覆盖优先；缺键回退 0；
+   装载告警退役（F4 caplog）
+4. 类型全局节流组：已随 2026-11-06 三强制拆除退役（原 10s 窗口/type_throttled
+   断言组删除——防御职责归上游 process_data 六类限入&去重管线）
+5. username 清洗三件套：去控制字符+截断 24 字符（Eng E4/S-1，保留）
 6. 模拟触发组：api.VALID_TRIGGER_TYPES 单源+含新值域+422 文案拼接（A1）
 7. 存量零行为回归：gift/keyword 触发行为不变
 """
@@ -114,28 +117,27 @@ class TestMatchSemantics:
         assert d["accepted"] is True
 
     def test_follow_trigger_type(self):
-        """follow 类型同链（订阅点/匹配/节流共用）。"""
+        """follow 类型同链（订阅点/匹配/权重共用）。"""
         h = Harness(rules=[make_rule(rule_id="fw", trigger_type="follow")])
         d = h.trigger("follow", entrance_data())
         assert d["accepted"] is True
 
 
-# ---------- 2. 强制 queue 组 ----------
+# ---------- 2. 打断模式组（三强制一拆除——显式 standard/queue 均按配置生效） ----------
 
-class TestForcedQueue:
-    def test_standard_overridden_to_queue(self):
-        """entrance/follow+standard → 强制 queue+告警（三强制一）。"""
+class TestInterruptMode:
+    def test_explicit_standard_kept(self):
+        """entrance/follow+standard 按配置保留（三强制一拆除——不再强制改判）。"""
         cfg = load_choreography_config(make_cfg(rules=[make_rule(interrupt="standard")]))
-        rule = cfg.rules[0]
-        assert rule.interrupt == "queue"
+        assert cfg.rules[0].interrupt == "standard"
 
     def test_explicit_queue_unchanged(self):
-        """显式 queue 不变（无告警路径语义）。"""
+        """显式 queue 不变（原语义保留）。"""
         cfg = load_choreography_config(make_cfg(rules=[make_rule(interrupt="queue")]))
         assert cfg.rules[0].interrupt == "queue"
 
     def test_gift_standard_unchanged(self):
-        """gift 的 standard 不受强制影响（存量零回归）。"""
+        """gift 的 standard 不受影响（存量零回归）。"""
         gift_rule = {"rule_id": "g", "trigger_type": "gift", "match": "小心心",
                      "min_price": 0, "interrupt": "standard",
                      "sequence": {"main": {"segment": "A_跳舞", "switch_at": "segment_end",
@@ -144,18 +146,19 @@ class TestForcedQueue:
         assert cfg.rules[0].interrupt == "standard"
 
     def test_queued_on_sequence_conflict(self):
-        """序列进行中 entrance 触发走 queue 排队（强制 queue 生效于冲突分支）。"""
+        """序列进行中 entrance 触发走 queue 排队（显式 interrupt=queue 的冲突分支
+        ——r3 发现 1 裁决①：同类型规则权重恒等结构上无法构造权重差，排队覆盖
+        钉在显式 queue 配置上；spec C2/:146-153 义务）。"""
         h = Harness(rules=[make_rule(rule_id="e1", match="甲"),
-                           make_rule(rule_id="e2", match="乙")])
+                           make_rule(rule_id="e2", match="乙", interrupt="queue")])
         h.trigger("entrance", entrance_data("甲"))
-        h.advance(11)  # 过类型节流窗
-        d2 = h.trigger("entrance", entrance_data("乙"))  # 他键命中 e2
+        d2 = h.trigger("entrance", entrance_data("乙"))  # 他键命中 e2（显式 queue）
         assert d2["reason"] in ("queued", "queued_full")
 
 
-# ---------- 3. 恒强制权重组（Eng A2：三条预设映射） ----------
+# ---------- 3. 权重组（反向：三强制二拆除——系统优先级值直接生效） ----------
 
-class TestPriorityClamp:
+class TestPriorityUnclamped:
     # filter_queue.py PRIORITY_PRESETS 三预设的 entrance/follow 现成值
     PRESETS = [
         {"gift": 70, "comment": 80, "song": 60, "entrance": 55, "follow": 65},
@@ -163,18 +166,52 @@ class TestPriorityClamp:
         {"gift": 50, "comment": 60, "song": 40, "entrance": 20, "follow": 20},
     ]
 
-    def test_clamped_zero_across_presets(self):
-        """三条预设映射下 entrance/follow 权重恒 0（钳制 follow=65/entrance=55）。"""
+    def test_mapping_values_effective_across_presets(self):
+        """三条预设映射下 entrance/follow 权重=系统优先级值（on 态回读 priority_mapping
+        ——2026-11-06 拆除后用户配置实际生效的验收断言）。"""
         for pm in self.PRESETS:
             h = Harness(priority_mapping=dict(pm))
-            assert h.engine._rule_priority(h.cfg.rules[0]) == 0
+            assert h.engine._rule_priority(h.cfg.rules[0]) == pm["entrance"]
             fw = load_choreography_config(make_cfg(rules=[make_rule(rule_id="fw", trigger_type="follow")]))
-            assert h.engine._rule_priority(fw.rules[0]) == 0
+            assert h.engine._rule_priority(fw.rules[0]) == pm["follow"]
 
-    def test_gift_priority_unclamped(self):
-        """gift 权重照常取值（钳制仅 entrance/follow）。
+    def test_load_warning_retired(self):
+        """装载告警退役：entrance/follow 配置装载静默（F4——原 WARNING 本体随钳制退役，
+        防复活守卫）。"""
+        from unittest.mock import patch as _patch
+        from utils.orchestration import choreographer as ch_mod
+        with _patch.object(ch_mod.logger, "warning") as w:
+            Harness(priority_mapping={"entrance": 20, "follow": 20})
+        assert not any("该值对编排不生效" in str(c) for c in w.call_args_list), \
+            "装载告警复活（钳制残留）——三强制拆除批次 F4 守卫"
+
+    def test_clamped_constant_retired(self):
+        """钳制常量退役守卫（F3 退役守卫形式——沿 throttled/hold 退役先例）。"""
+        import inspect
+        from utils.orchestration import choreographer as ch_mod
+        src = inspect.getsource(ch_mod)
+        assert "_CLAMPED_PRIORITY_TYPES" not in src, "钳制常量复活——三强制拆除批次退役守卫"
+        assert "ENTRANCE_FOLLOW_MIN_INTERVAL_S" not in src, "节流常量复活——三强制拆除批次退役守卫"
+        assert "type_throttled" not in src.replace("type_throttled 已随", ""), \
+            "type_throttled reason 复活（退役记录注记除外）"
+
+    def test_arbitration_override_beats_mapping(self):
+        """覆盖顺序=arbitration_weights > priority_mapping（spec C8 一句话定义）。"""
+        h = Harness(priority_mapping={"entrance": 20},
+                    arbitration_weights={"entrance": 8})
+        assert h.engine._rule_priority(h.cfg.rules[0]) == 8
+
+    def test_missing_key_falls_back_zero(self):
+        """on 态 priority_mapping 缺 entrance 键→回退 0（spec C7——表外回退既有口径）。"""
+        h = Harness(priority_mapping={"comment": 20})
+        assert h.engine._rule_priority(h.cfg.rules[0]) == 0
+
+    def test_gift_priority_unchanged(self):
+        """gift 权重照常取值（d10 编排表保护语义不变）。
         T3/d10（2026-11-05）：编排面权重源=独立仲裁表（gift=30 内置值），与
-        filter.priority_mapping 解耦——映射表值仅 off 态（d22 回退）时读取。"""
+        filter.priority_mapping 解耦——映射表值仅 off 态（d22 回退）时读取；
+        entrance/follow 回读例外不波及 gift（防 trends_copywriting=999 污染
+        语义保留）。"""
         gift_rule = {"rule_id": "g", "trigger_type": "gift", "match": "小心心",
                      "min_price": 0,
                      "sequence": {"main": {"segment": "A_跳舞", "switch_at": "segment_end",
@@ -186,75 +223,10 @@ class TestPriorityClamp:
         assert h_off.engine._rule_priority(h_off.cfg.rules[0]) == 70  # off 回落 legacy 映射
 
 
-# ---------- 4. 类型全局节流组（Eng E3/F1/T-2） ----------
-
-class TestTypeThrottle:
-    def test_same_type_throttled_within_window(self):
-        """10s 内同类第二触发=type_throttled 静默（不启动序列）。"""
-        h = Harness()
-        d1 = h.trigger("entrance", entrance_data("甲"))
-        assert d1["accepted"] is True
-        h.advance(3)
-        d2 = h.trigger("entrance", entrance_data("乙"))
-        assert d2["accepted"] is False and d2["reason"] == "type_throttled"
-        # 序列仍是第一次触发的（未推进未打断——Harness 不驱动 on_tick）
-        assert h.engine.seq is not None and h.engine.seq["rule_id"] == "entr_welcome"
-
-    def test_throttle_shared_across_rules(self):
-        """同类跨规则共享计时器（Eng E3：两条不同 match 的同类规则互斥）。"""
-        h = Harness(rules=[make_rule(rule_id="e1", match="甲"),
-                           make_rule(rule_id="e2", match="乙")])
-        d1 = h.trigger("entrance", entrance_data("甲"))
-        assert d1["accepted"] is True
-        h.advance(3)
-        d2 = h.trigger("entrance", entrance_data("乙"))  # 另一规则同一类型
-        assert d2["reason"] == "type_throttled"  # 同类共享窗口
-
-    def test_other_type_unaffected(self):
-        """不同类型互不影响（entrance 触发后 follow 立即放行）。"""
-        h = Harness(rules=[make_rule(rule_id="e1"),
-                           make_rule(rule_id="f1", trigger_type="follow")])
-        h.trigger("entrance", entrance_data())
-        h.advance(1)
-        d = h.trigger("follow", entrance_data())
-        # follow 未被 entrance 的节流窗拦（不同类型独立计时）；强制 queue 下
-        # 对当前 entrance 序列走排队（reason=queued）而非节流拒绝
-        assert d["reason"] != "type_throttled"
-
-    def test_window_expiry_releases(self):
-        """窗口外放行（固定 10s 窗口，不因风暴刷新——义务块语义）。"""
-        h = Harness()
-        h.trigger("entrance", entrance_data("甲"))
-        h.advance(10.1)
-        d = h.trigger("entrance", entrance_data("乙"))
-        # 窗口外放行（固定窗口不刷新）；同键序列未完成=in_progress（on_tick
-        # 未驱动的 Harness 状态），关键断言=不再被类型节流拦
-        assert d["reason"] != "type_throttled"
-
-    def test_throttled_not_counted(self):
-        """被节流触发不进计数（风暴不推进情绪档）。"""
-        h = Harness()
-        h.trigger("entrance", entrance_data("甲"))
-        h.advance(3)
-        h.trigger("entrance", entrance_data("乙"))
-        assert h.engine.counters.get("entr_welcome", 0) == 1
-
-    def test_throttle_unified_across_states(self):
-        """节流跨 DEFAULT/序列态统一（Eng T-2 断言）：序列进行中同类触发先过
-        节流门（窗口内=type_throttled，窗口外=queue 排队）。"""
-        h = Harness(rules=[make_rule(rule_id="e1", match="甲"),
-                           make_rule(rule_id="e2", match="丙"),
-                           make_rule(rule_id="kw", trigger_type="keyword", match="跳舞")])
-        h.trigger("entrance", entrance_data("甲"))
-        assert h.engine.state == "sequence"
-        h.advance(1)
-        d = h.trigger("entrance", entrance_data("乙"))  # 未命中任何规则（e1 要甲/e2 要丙）
-        assert d["reason"] == "no_match"
-        d_th = h.trigger("entrance", entrance_data("甲"))  # 等值命中 e1（同类窗口内；节流门在状态分支前）
-        assert d_th["reason"] == "type_throttled"  # 序列态同样被类型节流拦
-        h.advance(10)
-        d2 = h.trigger("entrance", entrance_data("丙"))  # 命中 e2（窗口外）
-        assert d2["reason"] == "queued"  # 窗口外+强制 queue=排队（不打断）
+# ---------- 4. 类型节流组（已随 2026-11-06 三强制拆除批次退役） ----------
+# 原 TestTypeThrottle（10s 同类共享窗口/type_throttled reason 断言组）随引擎内
+# 节流移除整体退役——防御职责归上游 process_data 六类限入&去重管线（2026-11-04
+# 事实修正自证）；type_throttled reason 值同步退役（沿 R-ceo5 throttled/hold 先例）。
 
 
 # ---------- 5. username 清洗组（Eng E4/S-1） ----------
