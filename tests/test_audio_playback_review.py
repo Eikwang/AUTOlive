@@ -987,3 +987,96 @@ class TestPlaybackConsumptionHooks:
         assert "_notify_choreo_complete" in src
         # 两路完成回传统一走 helper（既有 mute 守卫/song 直通另有 2 处合法调用点）
         assert src.count("get_choreographer()") <= 3
+
+
+# ---------------------------------------------------------------------------
+# T1-批（2026-11-06 协作机制流程审查，W1 根修）：音频队列锁内化并发守卫
+# ---------------------------------------------------------------------------
+
+class TestT1ConcurrentInsert:
+    """音频队列 A1 四规则判定锁内化（对齐 message_queue 分支 M1/M2 模式）——
+    多生产者竞态关闭后的确定性守卫：999 单实例在任意交错下恰好 1 条、
+    满载并发驱逐净长度不变且权重序保持。"""
+
+    def _fixture(self, max_len, min_start_play=1):
+        mapping = {t: int(t[1:]) for t in ("w999", "w500", "w200", "w150", "w100", "w80", "w50", "w30", "w20")}
+        mapping["talk"] = 60
+        cfg = _FakeConfig(priority_mapping=mapping, min_start_play=min_start_play, max_len=max_len)
+        return _QueueFixture(config=cfg)
+
+    def test_concurrent_999_single_instance(self):
+        """双生产者并发 999 入队——单实例约束在任意交错下恰好放行 1 条（W1 竞态格）。
+        修复前：999 检查（锁外）与插入（锁内）分离，并发双检查双通过可产生 2 条。"""
+        host = self._fixture(max_len=100)
+        n = 8
+        barrier = threading.Barrier(n)
+        results = []
+
+        def producer(i):
+            barrier.wait()
+            results.append(host.data_priority_insert(
+                "待播放音频列表", _item("w999", f"p{i}")))
+
+        threads = [threading.Thread(target=producer, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        n999 = sum(1 for it in host.voice_tmp_path_queue if it.get("type") == "w999")
+        assert n999 == 1, f"999 单实例被并发突破：队列中 {n999} 条 999"
+        assert sum(1 for r in results if r.get("code") == 200) == 1
+
+    def test_concurrent_full_queue_eviction_invariant(self):
+        """满载并发混权重插入——净长度不变 + 定义权重条目降序不变量在任意交错下保持。
+        修复前：规则 2/3 组定位在锁外计算，并发下驱逐索引漂移可破坏序/错删。"""
+        max_len = 12
+        host = self._fixture(max_len=max_len)
+        for i in range(max_len):
+            host.data_priority_insert("待播放音频列表", _item("w50", f"seed{i}"))
+        weights = ["w100", "w30", "w200", "w20", "w150", "w80", "w100", "w30", "w200", "w20", "w150", "w80"]
+        barrier = threading.Barrier(len(weights))
+
+        def producer(i):
+            barrier.wait()
+            host.data_priority_insert("待播放音频列表", _item(weights[i], f"c{i}"))
+
+        threads = [threading.Thread(target=producer, args=(i,)) for i in range(len(weights))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        from utils.audio.audio_priority import entry_priority
+        mapping = host.config.get("filter", "priority_mapping")
+        prios = [entry_priority(it, mapping) for it in host.voice_tmp_path_queue]
+        assert len(host.voice_tmp_path_queue) == max_len, "满载并发插入后净长度必须不变"
+        defined = [p for p in prios if p is not None]
+        assert defined == sorted(defined, reverse=True), "权重降序不变量被并发破坏"
+
+    def test_discard_and_interrupt_fire_only_on_insert(self):
+        """锁外收尾语义：999 被单实例拒绝时不触发 D-22 舍弃通知与让位钩子；
+        成功插入时两者都触发（插入成功才触发的触发集合不变量）。"""
+        mapping = {t: int(t[1:]) for t in ("w999", "w50")}
+        mapping["talk"] = 60
+        cfg = _FakeConfig(priority_mapping=mapping, min_start_play=1, max_len=100,
+                          extra={("talk", "continuous_talk"): True})
+        host = _QueueFixture(config=cfg)
+        calls = {"discard": [], "interrupt": []}
+        host._continuous_talk_discard_notify = lambda count: calls["discard"].append(count)
+        host._maybe_interrupt_999_for = lambda dj: calls["interrupt"].append(dj.get("type"))
+
+        # 1) 首条 999 成功插入 → interrupt 触发、discard 不触发（非 talk）
+        r1 = host.data_priority_insert("待播放音频列表", _item("w999", "first"))
+        assert r1["code"] == 200
+        assert calls["interrupt"] == ["w999"] and calls["discard"] == []
+
+        # 2) 第二条 999 被单实例拒绝 → 两者都不触发
+        r2 = host.data_priority_insert("待播放音频列表", _item("w999", "second"))
+        assert r2["code"] == 1 and "999" in r2["msg"]
+        assert calls["interrupt"] == ["w999"] and calls["discard"] == []
+
+        # 3) talk 条目成功插入且待播 ≥2 → discard 触发（连续对话语义保留）
+        host.voice_tmp_path_queue.append(_item("w50", "pending1"))
+        r3 = host.data_priority_insert("待播放音频列表", {"type": "talk", "voice_path": "talk.wav"})
+        assert r3["code"] == 200
+        assert len(calls["discard"]) == 1 and calls["interrupt"][-1] == "talk"
