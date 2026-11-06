@@ -222,6 +222,226 @@ class PlaybackMixin:
             logger.error("[EDTalk] 999 剩余重推失败（尾段丢失）\n"
                          + traceback.format_exc())
 
+    async def _consume_edtalk_entry(self, data_json, voice_tmp_path):
+        """EDTalk 路由条目消费（T2-批 2026-11-06 自 only_play_audio 原样提取）：
+        双轨伴奏起播门/编排静默窗口等待/song 起播锚/999 飞行登记/push_full/
+        字幕与编排完成回执/消费回执/999 剩余重推/切片清理。异常交由调用方
+        try/finally 释放 999 active 标记（W2 根修）。
+        """
+        # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path
+        # 伴奏轨时——人声轨推 EDTalk 驱动对口型（数字人端出声），伴奏轨
+        # 本地外放并行起播（粗同步，偏差判据 <0.5s=R6 义务）；伴奏线程
+        # 随文件播完自退，push_full 返回=人声飞行完成。R12 时序：伴奏与
+        # 人声同起，无三路并发（文案播报已在队列前序完成）。
+        # 2026-11-04 人声对齐修复：两阶段起播——伴奏线程启动即进准备阶段
+        # （加载/增益/导出/开流），起播门在 push_full(vocal) 受理返回后
+        # 放行。原实现线程启动即写流（伴奏立刻响），而人声被 EDTalk 单
+        # 飞行句背压挡在「点歌应答文案」播完之后（时长×1.05+buffer 回落，
+        # 实测滞后 5~10s）——双轨脱节。现：应答播完 → vocal 受理即出声 →
+        # 伴奏放行 → 双轨同步起播（偏差≈人声 preroll ~0.3s，<0.5s 恢复）。
+        _backing_path = data_json.get("backing_path") or ""
+        _backing_gate = None
+        if _backing_path and os.path.isfile(_backing_path):
+            _backing_gate = threading.Event()
+            threading.Thread(
+                target=_play_backing_local,
+                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8),
+                      _backing_gate),
+                name="song-backing", daemon=True).start()
+        elif data_json.get("backing_path"):
+            logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
+            # T1 观测面补齐包（F6b 同型盲区）：伴奏轨文件缺失可见化
+            try:
+                from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
+                alarm_error(MODULE_AUDIO_PLAYBACK,
+                            f"伴奏轨文件缺失（人声照唱）：{_backing_path}",
+                            fix_hint="检查点歌歌曲的伴奏文件是否被移动/删除")
+            except Exception:
+                pass
+        # 口型推理联动（2026-10-25 goal）：编排纯画面窗口
+        # （audio_mode=none 的跳舞/转场片段）内延迟推送——数字人
+        # 只播画面不出声不做口型；音频在此等待（队列背压天然保序
+        # 不丢失），窗口由编排看门狗（F1 duration 上限）保证必然
+        # 结束。带语音步骤（tts/file）不构成窗口，正常驱动口型。
+        _choreo_guard = None
+        try:
+            from utils.orchestration import get_choreographer
+            _choreo_guard = get_choreographer()
+        except Exception:
+            _choreo_guard = None
+        if _choreo_guard is not None and _choreo_guard.in_mute_window():
+            _mute_remaining = _choreo_guard.mute_window_remaining_s()
+            logger.info(
+                f"[EDTalk] 编排纯画面窗口内，音频延迟推送"
+                f"（剩余约 {_mute_remaining if _mute_remaining is not None else '?'}s）："
+                f"{data_json.get('content', '')[:20]}")
+            _waited = 0.0
+            _mute_punch_done = False
+            while _choreo_guard.in_mute_window() and _waited < _CHOREO_MUTE_MAX_WAIT:
+                await asyncio.sleep(0.2)
+                _waited += 0.2
+                # T1 观测面补齐包（F6a）：等待 >60s 打点一次+计数（量化观测，
+                # 不报警——300s 上限降级已在位，此处补中间态可见性）
+                if _waited >= 60.0 and not _mute_punch_done:
+                    _mute_punch_done = True
+                    try:
+                        from utils.obs_stats import record_choreo_mute
+                        record_choreo_mute(_waited)
+                    except Exception:
+                        pass
+                    logger.warning(
+                        f"[EDTalk] 编排静默窗口等待已超 60s（当前 {_waited:.0f}s，"
+                        f"上限 {_CHOREO_MUTE_MAX_WAIT:.0f}s）——后续音频级联延迟，"
+                        f"排查编排窗口素材时长或看门狗状态")
+            if _mute_punch_done:
+                try:
+                    from utils.obs_stats import record_choreo_mute
+                    record_choreo_mute(_waited)
+                except Exception:
+                    pass
+            if _choreo_guard.in_mute_window():
+                # 防呆上限兜底：仍处窗口也照推（宁可口型出现不丢语音）
+                logger.warning(
+                    f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
+                    f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
+        # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
+        # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
+        # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
+        # 切片条目逐段刷新（自校正）；remaining≤0 或无 hold 段=幂等忽略。
+        if (data_json.get("type") == "song"):
+            try:
+                from utils.orchestration import get_choreographer
+                _song_choreo = get_choreographer()
+            except Exception:
+                _song_choreo = None
+            if _song_choreo is not None:
+                _remaining = None
+                _seg = data_json.get("song_segment") or {}
+                if _seg.get("total"):
+                    try:
+                        _seg_seconds = float(self.config.get(
+                            "play_audio", "song_segment_seconds"))
+                    except (TypeError, ValueError):
+                        _seg_seconds = 0.0
+                    if _seg_seconds <= 0:
+                        _seg_seconds = 45.0
+                    # 剩余=当前片+后续片（各片等长近似，逐段推送自校正）
+                    _remaining = (int(_seg.get("total", 1))
+                                  - int(_seg.get("seq", 0))) * _seg_seconds
+                else:
+                    try:
+                        import soundfile as _sf
+                        _remaining = float(
+                            _sf.info(voice_tmp_path).duration)
+                    except Exception:
+                        _remaining = None
+                if _remaining and _remaining > 0:
+                    _song_choreo.on_song_started(
+                        str(data_json.get("content", ""))[:40], _remaining)
+        # T7/d19（uc2b 让位游标基座）：999 飞行登记——push 受理前
+        # 读 output_frames 起点（consumed=pause 读数-起点=已播帧）
+        if self._is_999_entry(data_json):
+            try:
+                _start_frames = self.edtalk_client.get_output_frames()
+            except Exception:
+                _start_frames = None
+            self._edtalk_999_flight = {
+                "voice_path": voice_tmp_path,
+                "start_frames": _start_frames,
+                "is_999": True,
+            }
+        # T7/d3（2026-11-05）：song 切片跳过飞行等待——切片时序
+        # 锚定伴奏（uc4b），人声起即停答谢=push 即 flush 替换
+        # （e5 口径：替换生效时刻=本次 push 受理时刻，非推送发起）
+        _wait_flight = not (data_json.get("type") == "song"
+                            and data_json.get("song_segment"))
+        try:
+            await self.edtalk_client.push_full(
+                voice_tmp_path, content=data_json.get("content", ""),
+                wait_flight=_wait_flight,
+            )
+        finally:
+            if _backing_gate is not None:
+                # 伴奏起播门放行（2026-11-04 人声对齐）：push_full 返回=
+                # 人声受理（preroll ~0.3s 后出声）→ 伴奏此刻起播，双轨同步。
+                # 失败也放行（对齐既有降级对称面「人声缺失伴奏照播」+ 防
+                # 伴奏线程悬挂至超时）。push_full 内部全捕获不抛，finally
+                # 兜底 CancelledError 等 BaseException 穿透场景。
+                _backing_gate.set()
+        # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
+        # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
+        # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
+        # （时长×1.2 + buffer_depth 回落，edtalk_client
+        # ._wait_flight_complete），字幕系统性超前一句（字幕N 显示时
+        # 数字人正在播 N-1）。
+        await self._captions_push(data_json)
+        # 动作编排完成回调（/autoplan 2026-10-21 批次，义务 CL-2/D-2）：
+        # EDTalk push 路径每条目完成处（push_full 返回=单飞行句完成判定）。
+        # G1（2026-10-28）：builtin 播放器的完成回传已由 audio_core 注册
+        # 完成回调补齐（_fire_completion 携带条目 type/content）——两路
+        # 互斥不双报（EDTalk 激活走本路径，未激活走 builtin 播放回调）。
+        self._notify_choreo_complete(data_json)
+        # G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执
+        # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
+        self.report_consumed(
+            data_json.get("type", ""), data_json.get("content", ""))
+        # T7/d3/e5：答谢被替换观测——song 切片 push 受理=上一非
+        # song 条目被服务端 flush 替换（d3「人声起立即停止答谢」；
+        # 替换视为消费完成——回执已在其 push 返回处上报，此处补
+        # 替换事件分桶）。首条目（prev=None）不算替换。
+        _prev_type = getattr(self, "_edtalk_prev_type", None)
+        if (data_json.get("type") == "song"
+                and _prev_type is not None and _prev_type != "song"):
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("edtalk_answer_replaced")
+            except Exception:
+                pass
+            logger.info("[EDTalk] 答谢被切片替换（d3 人声起即停，"
+                        "视为消费完成）")
+        self._edtalk_prev_type = data_json.get("type")
+        # T8/X1/e7（2026-11-05 批次）：间奏插播观测——
+        # a) 插入事件：song 在播中非 song 条目推送（插播发生）
+        # b) 积压条数：song 切片 push 时待播放队列中非 song 条目
+        #    （e7 积压分摊观测维度；X1 等待时长=既有 record_latency
+        #    消费延迟样本承担）
+        if _prev_type == "song" and data_json.get("type") != "song":
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("song_interlude_insert")
+            except Exception:
+                pass
+        if data_json.get("type") == "song":
+            try:
+                _backlog = sum(
+                    1 for e in getattr(self, "voice_tmp_path_queue", [])
+                    if isinstance(e, dict) and e.get("type") != "song")
+                if _backlog:
+                    from utils.obs_stats import record_drop
+                    record_drop("song_interlude_backlog", _backlog)
+            except Exception:
+                pass
+        # T7/d19/uc2b：999 挂起剩余重推（答谢消费完→任意点恢复；
+        # flush 已清冻结段，剩余从冻结游标重推）
+        _pend = getattr(self, "_edtalk_resume_pending", None)
+        if _pend is not None:
+            self._edtalk_resume_pending = None
+            await self._repush_edtalk_999_remainder(_pend)
+        # T1 观测：消费延迟样本（入队→完成；_enqueued_at 缺失=旧条目跳过）
+        try:
+            from utils.obs_stats import record_latency
+            _enq = data_json.get("_enqueued_at")
+            if _enq:
+                import time as _t
+                record_latency(_t.time() - float(_enq))
+        except Exception:
+            pass
+        # ② 点歌切片末段清理（EDTalk 路径即时清）
+        self._cleanup_song_segment_if_last(data_json)
+        # A7/F-5 短路声明：EDTalk 激活时 999 暂停-续播链路显式不可达——
+        # 本分支不进 builtin 播放器（push_full 帧锁定播放），999 按队列
+        # 优先级自然排序推送；999 单实例约束仍由 queue_manager 层保证。
+
     async def only_play_audio(self):
         """只进行普通音频播放"""
         try:
@@ -268,221 +488,16 @@ class PlaybackMixin:
                     # 判定（背压），失败降级记录不阻塞直播主流程。
                     # v2.2 流程优化（flowchartTD |助播流程| 边）：助播条目绕过数字人。
                     if routes_to_edtalk(data_json, self.config):
-                        # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path
-                        # 伴奏轨时——人声轨推 EDTalk 驱动对口型（数字人端出声），伴奏轨
-                        # 本地外放并行起播（粗同步，偏差判据 <0.5s=R6 义务）；伴奏线程
-                        # 随文件播完自退，push_full 返回=人声飞行完成。R12 时序：伴奏与
-                        # 人声同起，无三路并发（文案播报已在队列前序完成）。
-                        # 2026-11-04 人声对齐修复：两阶段起播——伴奏线程启动即进准备阶段
-                        # （加载/增益/导出/开流），起播门在 push_full(vocal) 受理返回后
-                        # 放行。原实现线程启动即写流（伴奏立刻响），而人声被 EDTalk 单
-                        # 飞行句背压挡在「点歌应答文案」播完之后（时长×1.05+buffer 回落，
-                        # 实测滞后 5~10s）——双轨脱节。现：应答播完 → vocal 受理即出声 →
-                        # 伴奏放行 → 双轨同步起播（偏差≈人声 preroll ~0.3s，<0.5s 恢复）。
-                        _backing_path = data_json.get("backing_path") or ""
-                        _backing_gate = None
-                        if _backing_path and os.path.isfile(_backing_path):
-                            _backing_gate = threading.Event()
-                            threading.Thread(
-                                target=_play_backing_local,
-                                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8),
-                                      _backing_gate),
-                                name="song-backing", daemon=True).start()
-                        elif data_json.get("backing_path"):
-                            logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
-                            # T1 观测面补齐包（F6b 同型盲区）：伴奏轨文件缺失可见化
-                            try:
-                                from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
-                                alarm_error(MODULE_AUDIO_PLAYBACK,
-                                            f"伴奏轨文件缺失（人声照唱）：{_backing_path}",
-                                            fix_hint="检查点歌歌曲的伴奏文件是否被移动/删除")
-                            except Exception:
-                                pass
-                        # 口型推理联动（2026-10-25 goal）：编排纯画面窗口
-                        # （audio_mode=none 的跳舞/转场片段）内延迟推送——数字人
-                        # 只播画面不出声不做口型；音频在此等待（队列背压天然保序
-                        # 不丢失），窗口由编排看门狗（F1 duration 上限）保证必然
-                        # 结束。带语音步骤（tts/file）不构成窗口，正常驱动口型。
-                        _choreo_guard = None
+                        # T2-批（2026-11-06 协作机制流程审查，W2 根修）：999 active
+                        # 标记 finally 化——分支内任何异常逃逸（含 CancelledError 穿透）
+                        # 都释放标记，防 999 单实例门卡死复读专线（原释放点仅在正常
+                        # 完成路径，逃逸即悬挂）。分支体提取为 _consume_edtalk_entry
+                        # 逐字保持，仅移除正常路径内的冗余释放点——finally 统一承担。
                         try:
-                            from utils.orchestration import get_choreographer
-                            _choreo_guard = get_choreographer()
-                        except Exception:
-                            _choreo_guard = None
-                        if _choreo_guard is not None and _choreo_guard.in_mute_window():
-                            _mute_remaining = _choreo_guard.mute_window_remaining_s()
-                            logger.info(
-                                f"[EDTalk] 编排纯画面窗口内，音频延迟推送"
-                                f"（剩余约 {_mute_remaining if _mute_remaining is not None else '?'}s）："
-                                f"{data_json.get('content', '')[:20]}")
-                            _waited = 0.0
-                            _mute_punch_done = False
-                            while _choreo_guard.in_mute_window() and _waited < _CHOREO_MUTE_MAX_WAIT:
-                                await asyncio.sleep(0.2)
-                                _waited += 0.2
-                                # T1 观测面补齐包（F6a）：等待 >60s 打点一次+计数（量化观测，
-                                # 不报警——300s 上限降级已在位，此处补中间态可见性）
-                                if _waited >= 60.0 and not _mute_punch_done:
-                                    _mute_punch_done = True
-                                    try:
-                                        from utils.obs_stats import record_choreo_mute
-                                        record_choreo_mute(_waited)
-                                    except Exception:
-                                        pass
-                                    logger.warning(
-                                        f"[EDTalk] 编排静默窗口等待已超 60s（当前 {_waited:.0f}s，"
-                                        f"上限 {_CHOREO_MUTE_MAX_WAIT:.0f}s）——后续音频级联延迟，"
-                                        f"排查编排窗口素材时长或看门狗状态")
-                            if _mute_punch_done:
-                                try:
-                                    from utils.obs_stats import record_choreo_mute
-                                    record_choreo_mute(_waited)
-                                except Exception:
-                                    pass
-                            if _choreo_guard.in_mute_window():
-                                # 防呆上限兜底：仍处窗口也照推（宁可口型出现不丢语音）
-                                logger.warning(
-                                    f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
-                                    f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
-                        # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
-                        # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
-                        # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
-                        # 切片条目逐段刷新（自校正）；remaining≤0 或无 hold 段=幂等忽略。
-                        if (data_json.get("type") == "song"):
-                            try:
-                                from utils.orchestration import get_choreographer
-                                _song_choreo = get_choreographer()
-                            except Exception:
-                                _song_choreo = None
-                            if _song_choreo is not None:
-                                _remaining = None
-                                _seg = data_json.get("song_segment") or {}
-                                if _seg.get("total"):
-                                    try:
-                                        _seg_seconds = float(self.config.get(
-                                            "play_audio", "song_segment_seconds"))
-                                    except (TypeError, ValueError):
-                                        _seg_seconds = 0.0
-                                    if _seg_seconds <= 0:
-                                        _seg_seconds = 45.0
-                                    # 剩余=当前片+后续片（各片等长近似，逐段推送自校正）
-                                    _remaining = (int(_seg.get("total", 1))
-                                                  - int(_seg.get("seq", 0))) * _seg_seconds
-                                else:
-                                    try:
-                                        import soundfile as _sf
-                                        _remaining = float(
-                                            _sf.info(voice_tmp_path).duration)
-                                    except Exception:
-                                        _remaining = None
-                                if _remaining and _remaining > 0:
-                                    _song_choreo.on_song_started(
-                                        str(data_json.get("content", ""))[:40], _remaining)
-                        # T7/d19（uc2b 让位游标基座）：999 飞行登记——push 受理前
-                        # 读 output_frames 起点（consumed=pause 读数-起点=已播帧）
-                        if self._is_999_entry(data_json):
-                            try:
-                                _start_frames = self.edtalk_client.get_output_frames()
-                            except Exception:
-                                _start_frames = None
-                            self._edtalk_999_flight = {
-                                "voice_path": voice_tmp_path,
-                                "start_frames": _start_frames,
-                                "is_999": True,
-                            }
-                        # T7/d3（2026-11-05）：song 切片跳过飞行等待——切片时序
-                        # 锚定伴奏（uc4b），人声起即停答谢=push 即 flush 替换
-                        # （e5 口径：替换生效时刻=本次 push 受理时刻，非推送发起）
-                        _wait_flight = not (data_json.get("type") == "song"
-                                            and data_json.get("song_segment"))
-                        try:
-                            await self.edtalk_client.push_full(
-                                voice_tmp_path, content=data_json.get("content", ""),
-                                wait_flight=_wait_flight,
-                            )
+                            await self._consume_edtalk_entry(data_json, voice_tmp_path)
                         finally:
-                            if _backing_gate is not None:
-                                # 伴奏起播门放行（2026-11-04 人声对齐）：push_full 返回=
-                                # 人声受理（preroll ~0.3s 后出声）→ 伴奏此刻起播，双轨同步。
-                                # 失败也放行（对齐既有降级对称面「人声缺失伴奏照播」+ 防
-                                # 伴奏线程悬挂至超时）。push_full 内部全捕获不抛，finally
-                                # 兜底 CancelledError 等 BaseException 穿透场景。
-                                _backing_gate.set()
-                        # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
-                        # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
-                        # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
-                        # （时长×1.2 + buffer_depth 回落，edtalk_client
-                        # ._wait_flight_complete），字幕系统性超前一句（字幕N 显示时
-                        # 数字人正在播 N-1）。
-                        await self._captions_push(data_json)
-                        # 动作编排完成回调（/autoplan 2026-10-21 批次，义务 CL-2/D-2）：
-                        # EDTalk push 路径每条目完成处（push_full 返回=单飞行句完成判定）。
-                        # G1（2026-10-28）：builtin 播放器的完成回传已由 audio_core 注册
-                        # 完成回调补齐（_fire_completion 携带条目 type/content）——两路
-                        # 互斥不双报（EDTalk 激活走本路径，未激活走 builtin 播放回调）。
-                        self._notify_choreo_complete(data_json)
-                        # G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执
-                        # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）
-                        self.report_consumed(
-                            data_json.get("type", ""), data_json.get("content", ""))
-                        # T7/d3/e5：答谢被替换观测——song 切片 push 受理=上一非
-                        # song 条目被服务端 flush 替换（d3「人声起立即停止答谢」；
-                        # 替换视为消费完成——回执已在其 push 返回处上报，此处补
-                        # 替换事件分桶）。首条目（prev=None）不算替换。
-                        _prev_type = getattr(self, "_edtalk_prev_type", None)
-                        if (data_json.get("type") == "song"
-                                and _prev_type is not None and _prev_type != "song"):
-                            try:
-                                from utils.obs_stats import record_drop
-                                record_drop("edtalk_answer_replaced")
-                            except Exception:
-                                pass
-                            logger.info("[EDTalk] 答谢被切片替换（d3 人声起即停，"
-                                        "视为消费完成）")
-                        self._edtalk_prev_type = data_json.get("type")
-                        # T8/X1/e7（2026-11-05 批次）：间奏插播观测——
-                        # a) 插入事件：song 在播中非 song 条目推送（插播发生）
-                        # b) 积压条数：song 切片 push 时待播放队列中非 song 条目
-                        #    （e7 积压分摊观测维度；X1 等待时长=既有 record_latency
-                        #    消费延迟样本承担）
-                        if _prev_type == "song" and data_json.get("type") != "song":
-                            try:
-                                from utils.obs_stats import record_drop
-                                record_drop("song_interlude_insert")
-                            except Exception:
-                                pass
-                        if data_json.get("type") == "song":
-                            try:
-                                _backlog = sum(
-                                    1 for e in getattr(self, "voice_tmp_path_queue", [])
-                                    if isinstance(e, dict) and e.get("type") != "song")
-                                if _backlog:
-                                    from utils.obs_stats import record_drop
-                                    record_drop("song_interlude_backlog", _backlog)
-                            except Exception:
-                                pass
-                        # T7/d19/uc2b：999 挂起剩余重推（答谢消费完→任意点恢复；
-                        # flush 已清冻结段，剩余从冻结游标重推）
-                        _pend = getattr(self, "_edtalk_resume_pending", None)
-                        if _pend is not None:
-                            self._edtalk_resume_pending = None
-                            await self._repush_edtalk_999_remainder(_pend)
-                        # T1 观测：消费延迟样本（入队→完成；_enqueued_at 缺失=旧条目跳过）
-                        try:
-                            from utils.obs_stats import record_latency
-                            _enq = data_json.get("_enqueued_at")
-                            if _enq:
-                                import time as _t
-                                record_latency(_t.time() - float(_enq))
-                        except Exception:
-                            pass
-                        if _was_999:
-                            self.active_reread_top_999 = False
-                        # ② 点歌切片末段清理（EDTalk 路径即时清）
-                        self._cleanup_song_segment_if_last(data_json)
-                        # A7/F-5 短路声明：EDTalk 激活时 999 暂停-续播链路显式不可达——
-                        # 本分支不进 builtin 播放器（push_full 帧锁定播放），999 按队列
-                        # 优先级自然排序推送；999 单实例约束仍由 queue_manager 层保证。
+                            if _was_999:
+                                self.active_reread_top_999 = False
                     else:
                         # 本地播放统一 builtin 进程内播放器（2026-10-30 审查批次）：
                         # 「音频播放器」选择配置退役移除——外部 AUDIO_PLAYER HTTP 客户端

@@ -124,14 +124,21 @@ class TestPlaybackGuardWiring:
         import inspect
         from utils.audio import playback_manager
         # 方法域源断言（T7 后模块源含 _repush_edtalk_999_remainder 的同型
-        # push 串——模块级 index 会被新方法抢先匹配）
-        src = inspect.getsource(playback_manager.PlaybackMixin.only_play_audio)
+        # push 串——模块级 index 会被新方法抢先匹配）。
+        # T2-批（2026-11-06 协作审查 W2 根修）：EDTalk 分支体提取为
+        # _consume_edtalk_entry——守卫/推送/等待循环随迁，断言域改为
+        # only_play_audio + _consume_edtalk_entry 两方法联合源。
+        src = (inspect.getsource(playback_manager.PlaybackMixin.only_play_audio)
+               + inspect.getsource(playback_manager.PlaybackMixin._consume_edtalk_entry))
         push_pos = src.index("await self.edtalk_client.push_full(")
         guard_pos = src.index("in_mute_window()")
         assert guard_pos < push_pos  # 守卫判定先于推送
         assert "_CHOREO_MUTE_MAX_WAIT" in src  # 防呆上限常量在位
         # 等待循环消费 in_mute_window（窗口结束才放行推送）
         assert "while _choreo_guard.in_mute_window()" in src
+        # W2 finally 化守卫：999 active 标记在调用方 try/finally 释放
+        caller = inspect.getsource(playback_manager.PlaybackMixin.only_play_audio)
+        assert "finally:" in caller and "active_reread_top_999 = False" in caller
 
     def test_mute_wait_limit_defined(self):
         from utils.audio.playback_manager import _CHOREO_MUTE_MAX_WAIT

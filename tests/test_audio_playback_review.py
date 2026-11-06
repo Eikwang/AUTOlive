@@ -21,6 +21,7 @@ import types
 import pytest
 
 from utils.audio.queue_manager import QueueMixin
+from utils.audio.playback_manager import PlaybackMixin
 from utils.audio.synthesis_manager import SynthesisMixin
 from utils.audio_handle.tts_params import clamp_speed_factor, speed_to_edge_pitch, speed_to_edge_rate
 from utils.common.time_mixin import TimeMixin
@@ -1080,3 +1081,134 @@ class TestT1ConcurrentInsert:
         r3 = host.data_priority_insert("待播放音频列表", {"type": "talk", "voice_path": "talk.wav"})
         assert r3["code"] == 200
         assert len(calls["discard"]) == 1 and calls["interrupt"][-1] == "talk"
+
+
+# ---------------------------------------------------------------------------
+# T2-批（2026-11-06 协作机制流程审查，W2 根修）：only_play_audio 999 active
+# 标记 finally 化——异常逃逸不再悬挂复读专线
+# ---------------------------------------------------------------------------
+
+class _EdtalkConfig:
+    """only_play_audio 依赖的最小配置桩（EDTalk 激活态）"""
+
+    def __init__(self, max_len=100):
+        self._data = {
+            ("filter", "priority_mapping"): {"reread_top_priority": 999, "comment": 20},
+            ("filter", "voice_tmp_path_queue_max_len"): max_len,
+            ("filter", "voice_tmp_path_queue_min_start_play"): 1,
+            ("filter", "message_queue_max_len"): 100,
+            ("play_audio", "enable"): True,
+            ("play_audio", "song_segment_seconds"): 0,
+            ("visual_body"): "edtalk_realtime",
+            ("edtalk_realtime", "enable"): True,
+            ("talk", "continuous_talk"): False,
+            ("webui", "ip"): "127.0.0.1",
+            ("webui", "port"): 8086,
+        }
+
+    def get(self, *keys):
+        if len(keys) == 1:
+            return self._data.get(keys[0])
+        return self._data.get(keys)
+
+
+class _EdtalkClientStub:
+    """edtalk_client 桩：push_full 受理成功；get_output_frames 恒 0"""
+
+    def __init__(self):
+        self.push_fired = threading.Event()
+        self.flag_during_push = []
+
+    async def push_full(self, pcm_path, content="", wait_flight=True):
+        import time as _t
+        self.push_fired.set()
+        _t.sleep(0.05)
+        return True
+
+    def get_output_frames(self):
+        return 0
+
+    def pause_output(self):
+        return {"ok": True}
+
+    def resume_output(self):
+        return {"ok": True}
+
+
+class _PlaybackHost(QueueMixin, PlaybackMixin):
+    """only_play_audio 最小宿主（QueueMixin+PlaybackMixin 手工组装）"""
+
+    def __init__(self, config):
+        self.message_queue = []
+        self.message_queue_lock = threading.Lock()
+        self.message_queue_not_empty = threading.Condition(lock=self.message_queue_lock)
+        self.voice_tmp_path_queue = []
+        self.voice_tmp_path_queue_lock = threading.Lock()
+        self.voice_tmp_path_queue_not_empty = threading.Condition(lock=self.voice_tmp_path_queue_lock)
+        self.voice_tmp_path_queue_not_empty_flag = False
+        self.config = config
+        self.active_reread_top_999 = False
+        self.edtalk_client = _EdtalkClientStub()
+
+
+class TestT2NineRelease:
+    """驱动拓扑对齐生产：only_play_audio 在专用线程的自有事件循环中运行
+    （其空队列等待=threading.Condition.wait 阻塞调用，与 scenario 同线程
+    会冻结整个循环）；主线程以阻塞轮询断言，结束时依赖 daemon 线程退场。"""
+
+    def _wait_until(self, cond, timeout=5.0):
+        import time as _t
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            if cond():
+                return True
+            _t.sleep(0.01)
+        return False
+
+    def _start_worker(self, host):
+        def _run():
+            asyncio.new_event_loop().run_until_complete(host.only_play_audio())
+        t = threading.Thread(target=_run, daemon=True, name="t2-playback-worker")
+        t.start()
+        return t
+
+    def test_exception_escape_releases_999_flag(self):
+        """W2：EDTalk 分支异常逃逸（push 成功后字幕推送注入失败）→ 999 active
+        标记必须释放（finally）。修复前：释放点仅在正常完成路径，逃逸即悬挂，
+        后续 999 全部被单实例约束拒绝=复读专线死链。"""
+        host = _PlaybackHost(_EdtalkConfig())
+
+        async def _boom(_data):
+            raise RuntimeError("injected failure after push")
+        host._captions_push = _boom
+
+        self._start_worker(host)
+        # 先入队（worker 已起，condition notify 正常唤醒）
+        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "999"})
+        assert r["code"] == 200
+        assert host.edtalk_client.push_fired.wait(5), "push_full 未被受理"
+        assert self._wait_until(lambda: host.active_reread_top_999 is False), \
+            "异常逃逸后 999 active 标记未释放（finally 缺失）"
+        # 逃逸后单实例约束已解除（可直接再入队 999）
+        r2 = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "y.wav", "content": "999-again"})
+        assert r2["code"] == 200, "999 标记悬挂导致单实例约束误拒（W2 复现）"
+        assert self._wait_until(lambda: host.active_reread_top_999 is False and host.edtalk_client.push_fired.is_set())
+
+    def test_normal_path_releases_after_complete(self):
+        """正常路径回归：push 时标记为 True（播放中持有）、完成后释放（原语义不变）。"""
+        host = _PlaybackHost(_EdtalkConfig())
+        flag_seen = {}
+
+        orig_push = host.edtalk_client.push_full
+
+        async def push_full(pcm_path, content="", wait_flight=True):
+            flag_seen["during"] = host.active_reread_top_999
+            return await orig_push(pcm_path, content, wait_flight)
+        host.edtalk_client.push_full = push_full
+
+        self._start_worker(host)
+        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "999"})
+        assert r["code"] == 200
+        assert host.edtalk_client.push_fired.wait(5)
+        assert self._wait_until(lambda: host.active_reread_top_999 is False)
+        assert flag_seen.get("during") is True, "push 受理时刻 999 active 标记应已置位"
