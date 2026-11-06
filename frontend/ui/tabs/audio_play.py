@@ -18,11 +18,11 @@
   手改逃生门注明 dx7）+ queue_max
 - 控制区（D5/D6/D7/D9）：状态回显行 + 四按钮 + 1s 轮询 + 错误条
 """
-import json
+import asyncio
+from typing import Any, Callable, Dict
 
 import requests
 from nicegui import ui
-from typing import Dict, Any, Callable
 
 from frontend.ui.components.config_helper import get_nested_value
 from utils.my_log import logger
@@ -100,10 +100,10 @@ def create_audio_play_tab(
         error_label = ui.label('').style(
             'color: var(--color-danger, #dc2626); font-size: var(--font-size-assist, 12px); display:none;')
         with ui.row():
-            btn_pause = ui.button('暂停', on_click=lambda: _control('pause'))
-            btn_resume = ui.button('续播', on_click=lambda: _control('resume'))
-            btn_skip = ui.button('跳过当前', on_click=lambda: _control('skip'))
-            btn_clear = ui.button('清空队列', on_click=lambda: _control('clear'))
+            btn_pause = ui.button('暂停', on_click=lambda: _control_async('pause'))
+            btn_resume = ui.button('续播', on_click=lambda: _control_async('resume'))
+            btn_skip = ui.button('跳过当前', on_click=lambda: _control_async('skip'))
+            btn_clear = ui.button('清空队列', on_click=lambda: _control_async('clear'))
         for b in (btn_pause, btn_resume, btn_skip, btn_clear):
             b.props('dense outline')
 
@@ -115,41 +115,59 @@ def create_audio_play_tab(
         _load_devices_once()
 
     def _load_devices_once():
-        """设备枚举（D8：loading 态→空态/列表；只在打开页面首次枚举）"""
+        """设备枚举（D8：loading 态→空态/列表；只在打开页面首次枚举）
+
+        2026-11-06 断联根修：HTTP 全部移出事件循环（asyncio.to_thread）——
+        NiceGUI 3.16 默认 ping_timeout=2.0s（reconnect_timeout=3.0 推导），
+        本页 0.5s 枚举（timeout=2+5）与 1s 轮询（timeout=1.5）原为同步 requests，
+        主进程响应迟滞时背靠背阻塞事件循环 >2s → WebSocket 判死 → 断联重载
+        循环（实测复现：3s 延迟下进入页面 ~10-20s 断联）。修后即使主进程完全
+        挂起，页面也只显示「运行系统后可用」，不再断联。
+        """
         if getattr(_load_devices_once, "_done", False):
             return
         _load_devices_once._done = True
         device_select.options = {'-1': '正在枚举设备…'}
         device_select.update()
 
-        def _job():
+        def _fetch_devices():
+            """worker 线程：同步 HTTP（不触碰任何 UI 元素——非线程安全）"""
             try:
                 resp = requests.get(f"{api_base}/builtin_status", timeout=2)
                 data = resp.json()
                 if not data.get("builtin"):
-                    device_select.options = {'-1': '运行系统后可用（当前未运行）'}
-                    device_select.value = '-1'
-                    device_select.update()
-                    return
+                    return {"state": "not_running", "devices": []}
                 try:
                     resp2 = requests.post(f"{api_base}/builtin_control",
                                           json={"action": "list_devices"}, timeout=5)
-                    devices = resp2.json().get("devices", [])
+                    return {"state": "ok", "devices": resp2.json().get("devices", [])}
                 except Exception:
-                    devices = []
-                if devices:
-                    options = {str(d["device_index"]): str(d["device_info"]) for d in devices}
-                    options["-1"] = "系统默认"
-                else:
-                    options = {'-1': '未检测到音频设备，将使用系统默认'}
-                device_select.options = options
-                saved = str(get_nested_value(config, "audio_player", "device_index", default=-1))
-                device_select.value = saved if saved in options else '-1'
-                device_select.update()
+                    return {"state": "ok", "devices": []}
             except Exception:
+                return {"state": "unreachable", "devices": []}
+
+        async def _job():
+            result = await asyncio.to_thread(_fetch_devices)
+            if result["state"] == "not_running":
+                device_select.options = {'-1': '运行系统后可用（当前未运行）'}
+                device_select.value = '-1'
+                device_select.update()
+                return
+            if result["state"] == "unreachable":
                 device_select.options = {'-1': '系统默认（枚举失败：主系统未运行）'}
                 device_select.value = '-1'
                 device_select.update()
+                return
+            devices = result["devices"]
+            if devices:
+                options = {str(d["device_index"]): str(d["device_info"]) for d in devices}
+                options["-1"] = "系统默认"
+            else:
+                options = {'-1': '未检测到音频设备，将使用系统默认'}
+            device_select.options = options
+            saved = str(get_nested_value(config, "audio_player", "device_index", default=-1))
+            device_select.value = saved if saved in options else '-1'
+            device_select.update()
 
         ui.timer(0.5, _job, once=True)
 
@@ -159,39 +177,57 @@ def create_audio_play_tab(
         except Exception:
             pass  # 失败由 1s 轮询的状态/错误条反映，不打断 UI 线程
 
-    def _poll_status():
-        """1s 轮询（D7：轻量摘要，不持锁全量拷贝；builtin 常驻）"""
+    async def _control_async(action: str):
+        # 2026-11-06 断联根修：控制请求同移出事件循环（同 _poll_status 注释）
+        await asyncio.to_thread(_control, action)
+
+    def _fetch_status():
+        """worker 线程：同步 HTTP 拉取状态（不触碰任何 UI 元素——非线程安全）"""
         try:
             resp = requests.get(f"{api_base}/builtin_status", timeout=1.5)
-            data = resp.json()
-            if not data.get("builtin"):
-                status_label.text = '运行系统后可用（内置播放器随主系统启动）'
-                return
-            status = data.get("status") or {}
-            current = status.get("current") or {}
-            if status.get("paused"):
-                status_label.text = '已暂停'
-            elif status.get("playing"):
-                content = current.get("content", "")
-                status_label.text = f'播放中：[{current.get("type", "")}] {content}…（队列 {status.get("queue_len", 0)} 条）'
-            else:
-                status_label.text = f'空闲（队列 {status.get("queue_len", 0)} 条）'
-            btn_pause.disable(status.get("paused"))
-            btn_resume.enable(status.get("paused"))
-            btn_skip.disable(not (status.get("playing") or status.get("paused")))
-
-            # 错误条（D9）：最近一次播放器错误/字幕推送失败浮出
-            err = status.get("last_error") or {}
-            if data.get("captions_failures", 0) >= 3:
-                error_label.text = '字幕推送失败（连续 3 次）——请检查字幕页/OBS 源'
-                error_label.style('color: var(--color-danger, #dc2626); font-size: var(--font-size-assist, 12px);')
-            elif err.get("message"):
-                error_label.text = f'最近错误：{err.get("message", "")[:120]}'
-                error_label.style('color: var(--color-danger, #dc2626); font-size: var(--font-size-assist, 12px);')
-            else:
-                error_label.style('display:none;')
+            return resp.json()
         except Exception:
+            return None
+
+    async def _poll_status():
+        """1s 轮询（D7：轻量摘要，不持锁全量拷贝；builtin 常驻）
+
+        2026-11-06 断联根修：HTTP 在 worker 线程执行，本协程只在事件循环上
+        更新 UI——主进程迟滞/挂起不再阻塞事件循环（ping_timeout=2.0s 语义）。
+        """
+        data = await asyncio.to_thread(_fetch_status)
+        if data is None:
             status_label.text = '运行系统后可用（内置播放器随主系统启动）'
+            return
+        if not data.get("builtin"):
+            status_label.text = '运行系统后可用（内置播放器随主系统启动）'
+            return
+        status = data.get("status") or {}
+        current = status.get("current") or {}
+        if status.get("paused"):
+            status_label.text = '已暂停'
+        elif status.get("playing"):
+            content = current.get("content", "")
+            status_label.text = f'播放中：[{current.get("type", "")}] {content}…（队列 {status.get("queue_len", 0)} 条）'
+        else:
+            status_label.text = f'空闲（队列 {status.get("queue_len", 0)} 条）'
+        # 2026-11-06：原代码 btn_pause.disable(bool)/enable(bool) 在 NiceGUI 3.x
+        # 是 TypeError（disable/enable 无参），被旧版 blanket-except 每秒吞掉——
+        # 按钮态与 D9 错误条从未实际生效。改 set_enabled 单一 API 并让异常可见。
+        btn_pause.set_enabled(not bool(status.get("paused")))
+        btn_resume.set_enabled(bool(status.get("paused")))
+        btn_skip.set_enabled(bool(status.get("playing") or status.get("paused")))
+
+        # 错误条（D9）：最近一次播放器错误/字幕推送失败浮出
+        err = status.get("last_error") or {}
+        if data.get("captions_failures", 0) >= 3:
+            error_label.text = '字幕推送失败（连续 3 次）——请检查字幕页/OBS 源'
+            error_label.style('color: var(--color-danger, #dc2626); font-size: var(--font-size-assist, 12px);')
+        elif err.get("message"):
+            error_label.text = f'最近错误：{err.get("message", "")[:120]}'
+            error_label.style('color: var(--color-danger, #dc2626); font-size: var(--font-size-assist, 12px);')
+        else:
+            error_label.style('display:none;')
 
     # 设备选择写回 config（自动保存绑定之外的动态控件）
     # on_value_change（有 .value）；底层 .on('update:value') 的事件对象无 .value，
