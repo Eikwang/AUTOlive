@@ -30,7 +30,11 @@ class TestSvcTabServiceRecovery:
         src = _svc_source()
         assert "设备枚举失败（服务未就绪？）" not in src, \
             "旧裸报文案已退役；若有意回退须同步删除本守卫"
-        assert "请点侧边栏「启动系统」" in src
+        # 2026-11-06 批次（T2/缺陷4/5b）：启动系统指向退役——失败路径自动后台
+        # 重拉（_ensure_backend 幂等）+错误三要素化（问题/原因/修复+就绪时序）
+        assert "请点侧边栏「启动系统」" not in src,             "启动系统指向已退役；若有意回退须同步删除本守卫"
+        assert "问题=" in src and "修复=" in src, "错误三要素行动指引"
+        assert "_ensure_backend()" in src, "失败路径自动重拉接线"
 
     def test_poll_unready_message_has_start_guidance(self):
         """状态轮询未就绪文案同样给行动指引（2026-10-30 变声独立化：服务由

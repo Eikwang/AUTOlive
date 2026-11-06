@@ -7,6 +7,7 @@ P1-6 单元测试：AutolivePaths 路径解析（P1-2）
 """
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -35,6 +36,8 @@ def test_config_overrides_apply(tmp_path, monkeypatch):
     """config paths 节显式配置 → 覆盖缺省（去硬编码的核心验收）。"""
     custom_root = str(tmp_path / "custom-gsv")
     custom_py = str(tmp_path / "custom-python.exe")
+    # T5 候选链语义：覆盖键指向真实文件才采纳——测试补一个真实文件
+    Path(custom_py).write_bytes(b"")
     p = _paths(tmp_path, monkeypatch, {
         "gpt_sovits_root": custom_root,
         "gpt_sovits_python": custom_py,
