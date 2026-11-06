@@ -82,7 +82,34 @@ class QueueMixin:
                 logger.info(f"编排打断撤销未消费音轨 {removed} 条（step_id={step_id}）")
         except Exception:
             logger.error(f"撤销编排音轨异常（忽略）：{traceback.format_exc()}")
+        # F-ENG-3（T6-批）：撤销登记——无论扫描是否命中都登记（竞态窗口面正是
+        # 「扫描时条目尚未入队，合成完成后才到」的迟到孤儿）；锁顺序与
+        # data_priority_insert 拦截点一致（队列锁→登记锁，无反向嵌套）。
+        self._register_cancelled_step(step_id)
         return removed
+
+    def _register_cancelled_step(self, step_id: str):
+        """登记已撤销编排 step_id（懒清理过期项；异常吞掉——登记失败不阻塞撤旧）"""
+        try:
+            now = time.monotonic()
+            with QueueMixin._cancelled_choreo_lock:
+                steps = QueueMixin._cancelled_choreo_steps
+                for k in [k for k, ts in steps.items()
+                          if now - ts > QueueMixin._CANCELLED_STEP_TTL_S]:
+                    del steps[k]
+                steps[str(step_id)] = now
+        except Exception:
+            logger.debug(f"撤销登记异常（忽略）：{traceback.format_exc()}")
+
+    def _is_step_cancelled(self, step_id) -> bool:
+        """step_id 是否处于撤销登记 TTL 内（异常保守 False——拦截失败退既有扫描语义）"""
+        try:
+            now = time.monotonic()
+            with QueueMixin._cancelled_choreo_lock:
+                ts = QueueMixin._cancelled_choreo_steps.get(str(step_id))
+                return ts is not None and (now - ts) <= QueueMixin._CANCELLED_STEP_TTL_S
+        except Exception:
+            return False
 
     def is_queue_less_or_greater_than(self, type: str="message_queue", less: int=None, greater: int=None):
         """判断 等待合成消息队列|待播放音频队列 数是否小于或大于某个值，就返回True"""
@@ -144,6 +171,15 @@ class QueueMixin:
     _consumed_total = 0           # 累计消费回执数
     _consumed_by_type = {}        # 累计分类型计数
     _consumed_lock = threading.Lock()
+
+    # F-ENG-3（T6-批 2026-11-06 协作机制流程审查）：编排撤销登记表——
+    # CancelAudio 撤旧扫描（打断时刻）与 inflight 音轨合成完成入队（异步）
+    # 之间存在竞态窗口：扫描后入队的迟到条目成孤儿音轨照常播出（画面/音频
+    # 错配）。登记语义根治：cancel 时登记 step_id，此后 TTL 内该 step_id 的
+    # 入队（两队列分支）一律按已撤销拦截。类属性沿 _consumed_* 模式。
+    _cancelled_choreo_steps = {}  # step_id -> monotonic 撤销时刻
+    _cancelled_choreo_lock = threading.Lock()
+    _CANCELLED_STEP_TTL_S = 300.0  # 覆盖最长音轨生命周期（编排答谢为短音轨，300s 冗余）
 
     def report_consumed(self, qtype: str = "", content: str = ""):
         """音频条目真实消费完成回执。
@@ -428,6 +464,18 @@ class QueueMixin:
             # 插入改为"插队+驱逐队尾"（净长度不变，队尾=最低优组 FIFO 尾），
             # 根治满载高优插入无界超长
             with self.message_queue_lock:
+                # F-ENG-3（T6-批）：编排撤销登记拦截（消息面同音频面——撤旧扫描后
+                # 迟到入队的已撤销 step_id 条目按已撤销语义丢弃）
+                _sid_msg = data_json.get("choreo_step_id") if isinstance(data_json, dict) else None
+                if _sid_msg and self._is_step_cancelled(_sid_msg):
+                    logger.info(f"编排已撤销消息迟到入队拦截（step_id={_sid_msg}）：【{data_json.get('content', '')}】")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("choreo_cancelled_late")
+                    except Exception:
+                        pass
+                    return {"code": 1, "msg": f"编排已撤销消息，丢弃迟到条目（step_id={_sid_msg}）"}
+
                 # 如果新数据没有 'type' 键或其类型不在 priority_mapping 中，直接插入到末尾
                 if new_data_priority is None:
                     insert_position = len(self.message_queue)
@@ -525,6 +573,18 @@ class QueueMixin:
             inserted = False
             insert_msg = None
             with self.voice_tmp_path_queue_lock:
+                # F-ENG-3（T6-批）：编排撤销登记拦截——合成完成晚于撤旧扫描的
+                # 迟到音轨（竞态窗口孤儿）按已撤销语义丢弃（先于全部插入规则）
+                _sid = data_json.get("choreo_step_id") if isinstance(data_json, dict) else None
+                if _sid and self._is_step_cancelled(_sid):
+                    logger.info(f"编排已撤销音轨迟到入队拦截（step_id={_sid}）：【{data_json.get('voice_path')}】")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("choreo_cancelled_late")
+                    except Exception:
+                        pass
+                    return {"code": 1, "msg": f"编排已撤销音轨，丢弃迟到条目（step_id={_sid}）"}
+
                 # 999 单实例约束（R2-A1，优先于四规则）——检查与插入同锁原子化
                 if new_data_priority is not None and int(new_data_priority) == 999:
                     active_999 = getattr(self, "active_reread_top_999", False)

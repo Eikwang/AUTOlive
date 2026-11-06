@@ -1256,3 +1256,70 @@ class TestT3ReceiptSingleSource:
         from tests.test_flowchart_alignment import _graph_text
         text = _graph_text()
         assert "v2.11" in text and "不驱动下一消费" in text, "图头 v2.11 回传语义注记缺失"
+
+
+# ---------------------------------------------------------------------------
+# T6-批（2026-11-06 协作机制流程审查，F-ENG-3 根修）：CancelAudio×合成完成
+# 竞态拦截——撤销登记表 + 迟到入队丢弃
+# ---------------------------------------------------------------------------
+
+class TestT6CancelLateEnqueue:
+    """撤销登记语义：cancel 后（无论扫描是否命中）TTL 内同 step_id 入队一律拦截——
+    撤旧扫描与合成完成入队之间的竞态窗口孤儿音轨在任意交错下被拦截。"""
+
+    def setup_method(self):
+        QueueMixin._cancelled_choreo_steps.clear()
+
+    def teardown_method(self):
+        QueueMixin._cancelled_choreo_steps.clear()
+
+    def _fixture(self, max_len=100):
+        mapping = {"comment": 20, "reread_top_priority": 999}
+        cfg = _FakeConfig(priority_mapping=mapping, min_start_play=1, max_len=max_len,
+                          extra={("filter", "message_queue_max_len"): max_len})
+        return _QueueFixture(config=cfg)
+
+    def test_cancelled_step_blocks_late_enqueue_both_queues(self):
+        """撤旧登记后迟到入队（音频面+消息面）一律丢弃（竞态窗口孤儿拦截）。"""
+        host = self._fixture()
+        removed = host.cancel_choreo_audio("s1")  # 队列为空也登记（竞态面本体）
+        assert removed == 0
+        r_audio = host.data_priority_insert("待播放音频列表", {
+            "type": "comment", "voice_path": "late.wav", "choreo_step_id": "s1"})
+        assert r_audio["code"] == 1 and "已撤销" in r_audio["msg"]
+        r_msg = host.data_priority_insert("等待合成消息", {
+            "type": "comment", "content": "迟到答谢", "choreo_step_id": "s1"})
+        assert r_msg["code"] == 1 and "已撤销" in r_msg["msg"]
+
+    def test_unrelated_step_and_no_step_unaffected(self):
+        host = self._fixture()
+        host.cancel_choreo_audio("s1")
+        r_other = host.data_priority_insert("待播放音频列表", {
+            "type": "comment", "voice_path": "other.wav", "choreo_step_id": "s2"})
+        assert r_other["code"] == 200
+        r_plain = host.data_priority_insert("待播放音频列表", {
+            "type": "comment", "voice_path": "plain.wav"})
+        assert r_plain["code"] == 200
+
+    def test_ttl_expiry_allows_reuse(self):
+        """TTL 过期后登记失效（同 step_id 复用不误拦——序列序号防跨序列撞车，
+        TTL 兜底防御登记表无界）。"""
+        import time as _t
+        host = self._fixture()
+        host.cancel_choreo_audio("s1")
+        QueueMixin._cancelled_choreo_steps["s1"] = _t.monotonic() - QueueMixin._CANCELLED_STEP_TTL_S - 1
+        r = host.data_priority_insert("待播放音频列表", {
+            "type": "comment", "voice_path": "after-ttl.wav", "choreo_step_id": "s1"})
+        assert r["code"] == 200
+
+    def test_scan_still_removes_queued_entries(self):
+        """既有 O8 扫描语义回归：队列内匹配条目仍被同步移除+登记。"""
+        host = self._fixture()
+        host.data_priority_insert("待播放音频列表", {
+            "type": "comment", "voice_path": "inflight.wav", "choreo_step_id": "s1"})
+        host.data_priority_insert("等待合成消息", {
+            "type": "comment", "content": "queued", "choreo_step_id": "s1"})
+        removed = host.cancel_choreo_audio("s1")
+        assert removed == 2
+        assert all(d.get("choreo_step_id") != "s1" for d in host.voice_tmp_path_queue)
+        assert all(d.get("choreo_step_id") != "s1" for d in host.message_queue)
