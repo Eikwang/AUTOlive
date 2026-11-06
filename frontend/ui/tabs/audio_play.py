@@ -71,7 +71,10 @@ def create_audio_play_tab(
             device_select = ui.select(
                 label='输出设备', options={'-1': '系统默认'}, value='-1',
             ).style("width:100%;").tooltip('枚举系统输出声卡；打开失败时自动回退系统默认设备并报错（R1）')
-            _auto_save(ui.input(label='待播队列上限', value=str(get_nested_value(config, "audio_player", "queue_max", default=50) or 50)).style("width:100%;").tooltip('满载后新音频阻塞等待消费（背压，不丢弃台词）'), ("audio_player", "queue_max"))
+            # X8（2026-11-06 批次）：文案标注队列环节与机制——本参数约束 builtin
+            # 播放器内部缓冲队列（audio_json_list），与互动设置页的合成产物队列
+            # 上限（filter.voice_tmp_path_queue_max_len）是链路相邻的两层
+            _auto_save(ui.input(label='播放缓冲队列上限（背压）', value=str(get_nested_value(config, "audio_player", "queue_max", default=50) or 50)).style("width:100%;").tooltip('播放器内部缓冲队列的容量上限，满载后新音频阻塞等待播放消费（背压，不丢弃台词）。合成产物队列上限另见互动设置-消息队列&音频队列'), ("audio_player", "queue_max"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.switch('播放后随机间隔', value=get_nested_value(config, "audio_player", "random_audio_interval", "enable", default=False)).style(switch_internal_css).tooltip('每条播放完后在上下限之间随机休眠（秒）。默认关闭：下一条音频由播放完成回执驱动立即取用'), ("audio_player", "random_audio_interval", "enable"))
                 _auto_save(ui.input(label='随机间隔下限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "min", default=0.1)).style("width:100%;"), ("audio_player", "random_audio_interval", "min"))

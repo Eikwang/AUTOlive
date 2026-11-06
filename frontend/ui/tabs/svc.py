@@ -29,6 +29,44 @@ _switch_state: Dict[str, Any] = {"busy": False, "error": None}
 _stream_state: Dict[str, Any] = {"state": "idle", "error": None}  # D-4 四态
 _active_timers: list = []  # A-7：进出页面显式停旧 timer（clear() 不 cancel）
 _client: RvcVcClient | None = None
+# T3（2026-11-06 批次，缺陷5a 可见面）：ManagedProcess 状态回调写入的最近
+# 状态描述（拉起中/就绪/异常重启/置红/休眠）——_poll 服务不可达时呈现真实
+# 生命周期态，替代"主系统未启动或服务初始化中"的含糊旧文案。
+_svc_state_text: str = ""
+
+
+def _on_svc_state_change(state: str, proc) -> None:
+    """ManagedProcess.on_state_change 回调（ensure 拉起时挂接）。
+    缺陷5a：置红/休眠/拉起对用户可见——状态迁移同步到模块级文本供 _poll 呈现。"""
+    global _svc_state_text
+    mapping = {
+        "starting": "服务拉起中（首次 import 约 10-60 秒就绪）",
+        "healthy": "服务就绪",
+        "crashed": "服务异常，自动重启中",
+        "red": "服务置红（连续失败）——点「启动变声」将尝试恢复",
+        # D-D2（Design）：闲置休眠是正常行为——不提示会误判为故障
+        "stopped": "服务已停止（闲置休眠，使用变声时自动唤醒）",
+    }
+    _svc_state_text = mapping.get(state, f"服务状态: {state}")
+    logger.info(f"[svc] rvc-vc 状态迁移: {state}")
+
+
+def _format_vc_error(e: Exception) -> str:
+    """变声服务错误三要素化（T2，缺陷5b+Native CEO F-N3）：
+    问题（发生了什么）｜原因（根因指向）｜修复（行动指引）。"""
+    s = str(e)
+    lowered = s.lower()
+    if "10061" in s or "connectionrefused" in lowered or "拒绝" in s:
+        return ("问题=变声服务未运行（端口无监听）"
+                "｜原因=服务死亡后置红或尚未拉起（已自动触发后台重拉）"
+                "｜修复=等 10-60s 服务就绪后重试；持续失败看 logs/services/rvc-vc.log")
+    if "timed out" in lowered or "timeout" in lowered:
+        return ("问题=变声服务响应超时"
+                "｜原因=服务拉起中（首次加载模型需 10-60s）或已卡死"
+                "｜修复=稍候重试；反复超时看 logs/services/rvc-vc.log")
+    if "HTTPError" in type(e).__name__:
+        return f"问题=服务端处理出错｜原因={s[:100]}｜修复=按返回 detail 处理后重试"
+    return f"问题=请求失败｜原因={s[:120]}｜修复=检查服务状态后重试（logs/services/rvc-vc.log）"
 
 _PARAM_KEYS_HOT = ("threhold", "rms_mix_rate", "f0method",
                    "I_noise_reduce", "O_noise_reduce", "use_pv")
@@ -108,7 +146,9 @@ def create_svc_tab(
             from utils.autolive_paths import AutolivePaths
             from utils.rvc_service import ensure_rvc_vc
             _paths = AutolivePaths(config)
-            _svc = await run.io_bound(ensure_rvc_vc, config, _paths)
+            # T3（缺陷5a）：挂状态回调——拉起中/置红/休眠迁移到 _svc_state_text
+            _svc = await run.io_bound(ensure_rvc_vc, config, _paths,
+                                      on_state_change=_on_svc_state_change)
             if _svc is None:
                 logger.info("[svc] rvc-vc 已在线，直连使用")
         except Exception as _ensure_err:
@@ -206,14 +246,20 @@ def create_svc_tab(
         _saved_out_dev = get_nested_value(config, "rvc_vc", "output_device")
         with ui.row().style("width:100%;align-items:center;gap:8px;flex-wrap:wrap"):
             ui.label("输入麦克风").style("min-width:80px;font-size:12px")
+            # X9（2026-11-06 批次）：new_value_mode 允许服务离线时直接键入设备名——
+            # 设备名本质是字符串，枚举只是辅助（spec C1：验收标准 2 方向不可收窄）
             in_sel = ui.select([],
                                label="选择输入麦克风",
+                               with_input=True,
+                               new_value_mode='add-unique',
                                on_change=lambda e: set_config_callback(
                                    "rvc_vc", "input_device", value=e.value),
                                ).style("min-width:220px")
             ui.label("输出设备").style("min-width:80px;font-size:12px")
             out_sel = ui.select([],
                                 label="选择输出设备",
+                                with_input=True,
+                                new_value_mode='add-unique',
                                 on_change=lambda e: set_config_callback(
                                     "rvc_vc", "output_device", value=e.value),
                                 ).style("min-width:220px")
@@ -234,9 +280,34 @@ def create_svc_tab(
         # _poll 探测到服务上线后自动补枚举+就绪清错，不再依赖手动刷新。
         _devices_state = {"loaded": False, "pending": False}
 
+        _ensure_lock = {"busy": False}
+
+        def _ensure_backend():
+            """T2（缺陷4 根修）：前端失败路径的后台重拉入口——ensure_rvc_vc
+            幂等（在线返回 None/在途复用/置红 manual_restart 复活/离线拉起）。
+            _ensure_lock 防抖：枚举失败×N 与 _start 失败并发只触发一路。"""
+            if _ensure_lock["busy"]:
+                return
+            _ensure_lock["busy"] = True
+
+            def _work():
+                try:
+                    from utils.autolive_paths import AutolivePaths
+                    from utils.rvc_service import ensure_rvc_vc
+                    _paths = AutolivePaths(config)
+                    await_unused = ensure_rvc_vc(config, _paths,
+                                                 on_state_change=_on_svc_state_change)
+                except Exception as e:
+                    logger.warning(f"[svc] 失败路径后台重拉异常（忽略，可重试）：{e}")
+                finally:
+                    _ensure_lock["busy"] = False
+            threading.Thread(target=_work, daemon=True).start()
+
         async def _refresh_devices():
             """E-9：/devices 枚举（io_bound 卸载）→ 填充下拉；空态禁用启动。
-            pending 防并发（首次枚举/补枚举在途时跳过）；失败给行动指引不锁死。"""
+            pending 防并发（首次枚举/补枚举在途时跳过）；失败给行动指引不锁死。
+            T2（缺陷4）：失败分支自动触发后台 ensure 重拉（幂等——在线/在途
+            自动跳过；置红实例走 manual_restart 复活）。"""
             def _enum():
                 d = client.devices()
                 out = {"input": [], "output": []}
@@ -255,9 +326,8 @@ def create_svc_tab(
             try:
                 devs = await run.io_bound(_enum)
             except Exception as e:
-                _show_error(f"变声服务未连接——主系统未启动或服务初始化中。"
-                            f"请点侧边栏「启动系统」，服务就绪后设备将自动加载"
-                            f"（也可稍后点「刷新设备」重试）[{str(e)[:80]}]")
+                _show_error(f"变声服务未连接——{_format_vc_error(e)}")
+                _ensure_backend()  # 缺陷4 根修：失败即后台重拉（幂等）
                 return
             finally:
                 _devices_state["pending"] = False
@@ -269,14 +339,24 @@ def create_svc_tab(
             # 2026-10-30：保存值校验回填（options 就绪后才设 value——构建时设
             # 空表外 value 会抛 Invalid value 中断 tab 构建）。保存设备已拔出
             # → 输入侧回落第一个可用设备（启动即用），输出侧留空由系统默认。
-            if _saved_in_dev and _saved_in_dev in in_sel.options:
-                in_sel.value = _saved_in_dev
-            elif in_sel.options:
-                in_sel.value = in_sel.options[0]
-            if _saved_out_dev and _saved_out_dev in out_sel.options:
-                out_sel.value = _saved_out_dev
-            empty = not in_sel.options
-            no_device_label.set_text("未检测到输入设备（请检查麦克风连接）")
+            # S4-A3（2026-11-06 批次）：手输值保护——用户在服务离线期键入的
+            # 设备名不在新枚举中时不覆盖（manual 标志），出现在枚举中则清除
+            # 手输态正常回填。
+            if in_sel.value and in_sel.value not in in_sel.options:
+                _devices_state["manual"] = True
+            if in_sel.value and in_sel.value in in_sel.options:
+                _devices_state["manual"] = False
+            if not _devices_state.get("manual"):
+                if _saved_in_dev and _saved_in_dev in in_sel.options:
+                    in_sel.value = _saved_in_dev
+                elif in_sel.options:
+                    in_sel.value = in_sel.options[0]
+            if not _devices_state.get("manual"):
+                if _saved_out_dev and _saved_out_dev in out_sel.options:
+                    out_sel.value = _saved_out_dev
+            empty = not in_sel.options and not in_sel.value
+            no_device_label.set_text(
+                "未检测到输入设备（可检查麦克风连接，或在上方直接键入设备名）")
             no_device_label.set_visibility(empty)
             stream_btn.set_enabled(not empty or _stream_state["state"] == "running")
 
@@ -349,7 +429,10 @@ def create_svc_tab(
                 _rebuild_dirty.clear(); _update_rebuild_badge()
             except Exception as e:
                 _set_btn("error")
-                _show_error(f"启动失败：{str(e)[:160]}（修正后可直接再点启动）")
+                # T2（缺陷4/5b）：三要素文案替代旧误导文案（"再点启动"暗示用户侧可修——
+                # 旧链下点多少次都 10061）；并自动触发后台重拉（幂等）
+                _show_error(f"启动失败：{_format_vc_error(e)}")
+                _ensure_backend()
 
         # ---- A-7 修复：单 timer + async 回调（io_bound 卸载）----
         model_label_cache = {"pth": None}
@@ -360,11 +443,14 @@ def create_svc_tab(
                     if False else await run.io_bound(client.status)
             except Exception:
                 _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
-                # 2026-10-30 变声独立化：服务由前端进程托管（enabled=true 时进入
-                # 前端即拉起），提示不再指向「启动系统」
-                if bool(get_nested_value(config, "rvc_vc", "enabled")):
+                # T3（缺陷5a）：优先呈现真实生命周期态（拉起中/置红/休眠——
+                # _on_svc_state_change 写入），替代含糊的"主系统未启动"旧文案
+                if _svc_state_text:
+                    suffix = "（服务离线，已手输设备名）" if _devices_state.get("manual") else ""
+                    status_label.set_text(f"○ {_svc_state_text}{suffix}")
+                elif bool(get_nested_value(config, "rvc_vc", "enabled")):
                     status_label.set_text(
-                        "○ 变声服务启动中...（前端已托管拉起，约 10 秒就绪；拉起失败见 webui 日志 [rvc-vc]）")
+                        "○ 变声服务启动中...（前端已托管拉起，约 10-60 秒就绪；拉起失败见 webui 日志 [rvc-vc]）")
                 else:
                     status_label.set_text(
                         "○ 变声未启用——打开左侧二级菜单「变声」开关并重启前端即自动拉起服务；页面配置仍可用")

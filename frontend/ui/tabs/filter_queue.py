@@ -118,8 +118,11 @@ def create_filter_queue_tab(
     with ui.card().style(card_css):
         with ui.expansion('待合成音频的消息&待播放音频队列', icon="settings", value=True).classes('w-full'):
             with ui.grid(columns=3):
+                # X8（2026-11-06 批次）：文案标注队列环节与机制——本参数约束
+                # 合成产物队列（voice_tmp_path_queue），与音频播放页的播放缓冲
+                # 上限（audio_player.queue_max）是链路相邻的两层
                 _auto_save(ui.input(label='消息队列最大保留长度', placeholder='收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃', value=get_nested_value(config, "filter", "message_queue_max_len")).style("width:100%;").tooltip('收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃'), keys=("filter", "message_queue_max_len"))
-                _auto_save(ui.input(label='音频播放队列最大保留长度', placeholder='合成后的音频，会根据优先级存入待播放音频队列，当新音频的优先级低于队列中所有的音频且超过此长度时，此音频将被丢弃', value=get_nested_value(config, "filter", "voice_tmp_path_queue_max_len")).style("width:100%;").tooltip('合成后的音频，会根据优先级存入待播放音频队列，当新音频的优先级低于队列中所有的音频且超过此长度时，此音频将被丢弃'), keys=("filter", "voice_tmp_path_queue_max_len"))
+                _auto_save(ui.input(label='待播音频队列容量（优先级丢弃）', placeholder='合成完成的音频，会根据优先级存入待播音频队列，当新音频的优先级低于队列中所有的音频且超过此长度时，此音频将被丢弃', value=get_nested_value(config, "filter", "voice_tmp_path_queue_max_len")).style("width:100%;").tooltip('合成完成音频等待分发的队列容量，满载时低优先级音频被丢弃、高优先级插队驱逐队尾（不阻塞合成）。播放缓冲上限另见基础功能-音频播放'), keys=("filter", "voice_tmp_path_queue_max_len"))
                 _auto_save(ui.input(
                     label='音频播放队列首次触发播放阈值',
                     placeholder='正整数 例如：20，如果你不想开播前缓冲一定数量的音频，请配置0',
