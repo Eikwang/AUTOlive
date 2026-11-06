@@ -1,5 +1,6 @@
 ```mermaid
 flowchart TD
+    %% 图头 v2.11（2026-11-06 协作机制流程审查批次 T3，uc1b 终门裁决）：消费回传语义澄清——回传=观测回执（QueueMixin.report_consumed 消费统计落账+编排实例匹配），不驱动下一消费（消费由播放循环自身串行推进）；本地（builtin）路径观测回执收敛至真实完成点单点（audio_core 完成回调），移交点仅保留编排实例匹配（W3 双计根修）；编排音轨条目重建透传 choreo_step_id（Q-1）
     %% 图头 v2.10（2026-11-01 动作编排优化批次）：T3 动态文案「关键词|文案」拆分——格式化条目关键词直投编排（DynamicCopy→Compile 直通边，跳过 Keyword 中枢子串识别）、文案部分直通播放链、copywriting 文件夹链与未格式化条目走既有链不变；T4 entrance/follow 触发实装——入场/关注事件（感谢链同源 event_handler）经编排订阅点直投 Compile（三强制：10s 类型节流/强制 queue/权重恒钳 0，username 清洗三件套）
     %% 图头 v2.9（2026-10-28 消费批次 P3）：打断撤旧音频（standard 打断撤销旧序列未消费编排音轨 CancelAudio→两队列按 choreo_step_id 移除）；消费回传补齐 pygame/外部播放器路径（三路共用 _notify_choreo_complete，M3 断链修复）；消息队列满载高优插入=插队+驱逐队尾净长度不变（M1）；完成匹配回退路径 content 归一化容差（O9）。拓扑与 v2.8 一致
     %% 图头 v2.8（2026-10-28 消费批次 O1/O3/O6/O7）：编排接入 Sort 权重表——queue 排队按 filter.priority_mapping 权重降序出队、standard 打断加权重门（低权让位排队）、满额挤最低优；消费回传携带编排实例序号 choreo_step_id（同内容重复触发按实例精确匹配，未透传路径退回 type+content）；编排音轨（tts 答谢/file 歌曲）注入 priority_override=500 于两级队列插队（低于 999 专线）。拓扑与 v2.7 一致

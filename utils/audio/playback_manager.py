@@ -525,7 +525,11 @@ class PlaybackMixin:
                                     "min": 0.8
                                 },
                                 "speed": 1,
-                                "insert_index": data_json["insert_index"]
+                                "insert_index": data_json["insert_index"],
+                                # Q-1（T3-批 2026-11-06 协作审查顺带）：choreo_step_id
+                                # 透传——重建原丢弃扩展键，编排实例精确匹配（O6）退化
+                                # (type,content) 容差；builtin 完成回调按此回传 step_id。
+                                "choreo_step_id": data_json.get("choreo_step_id", ""),
                             }
                         else:
                             data_json = {
@@ -537,17 +541,19 @@ class PlaybackMixin:
                                     "max": 1.3,
                                     "min": 0.8
                                 },
-                                "speed": 1
+                                "speed": 1,
+                                "choreo_step_id": data_json.get("choreo_step_id", ""),
                             }
                         # 字幕由 F3 开播回调在真实起播时刻推送（play()=入队非同步
                         # 播放，此处推会随队列积压超前）——builtin 播放器专属接线。
                         self.audio_player.play(data_json)
-                        # M3（2026-10-28 消费批次）：本地播放器路径消费回传——以移交点
-                        # （play() 返回=条目脱离本队列）为近似消费完成点：Sort 侧回执 +
-                        # 编排实例匹配（保证编排序列可推进，对齐推进语义优先于精确播放
-                        # 时点）；builtin 的真实完成点经完成回调二次回执（G1，互斥不双报
-                        # 由回调注册点保证——playback_manager 侧仅移交回执）。
-                        self.report_consumed(data_json.get("type", ""), data_json.get("content", ""))
+                        # W3（T3-批 2026-11-06 协作审查，uc1b 裁决落地）：本地路径
+                        # 观测回执收敛至 builtin 真实完成点单点（audio_core
+                        # _choreo_completion_cb 完成点②）——移交点不再发观测回执，
+                        # 根修 builtin 路径 total_consumed/by_type 双计。M3 原双报
+                        # 语义（移交点+真实完成点各一）退役；编排实例匹配
+                        # （_notify_choreo_complete，下方）保留在移交点——编排序列
+                        # 推进语义不变（inflight 重置对完成点二次回调幂等）。
                         try:
                             from utils.obs_stats import record_latency
                             _enq = data_json.get("_enqueued_at")

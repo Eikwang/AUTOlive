@@ -1212,3 +1212,47 @@ class TestT2NineRelease:
         assert host.edtalk_client.push_fired.wait(5)
         assert self._wait_until(lambda: host.active_reread_top_999 is False)
         assert flag_seen.get("during") is True, "push 受理时刻 999 active 标记应已置位"
+
+
+# ---------------------------------------------------------------------------
+# T3-批（2026-11-06 协作机制流程审查，W3 根修+uc1b 裁决落地）：消费回执单源
+# ---------------------------------------------------------------------------
+
+class TestT3ReceiptSingleSource:
+    """本地（builtin）路径观测回执收敛至真实完成点单点——移交点不再双报。
+    源级断言钉死调用点面：playback_manager 仅 EDTalk 两路（主路径+999 重推）、
+    audio_core 完成回调一处。"""
+
+    def test_local_branch_has_no_observation_receipt(self):
+        import inspect
+        from utils.audio import playback_manager
+        src = inspect.getsource(playback_manager)
+        # 模块内 report_consumed 调用点=2：EDTalk 主路径 + 999 重推条目（均为
+        # EDTalk 路）；本地（builtin 移交）分支必须为零（W3 双计根修）
+        count = src.count("self.report_consumed(")
+        assert count == 2, f"playback_manager report_consumed 调用点应恰 2（EDTalk 主路径+重推），实为 {count}"
+        # 本地分支无观测回执（移交点仅编排实例匹配）
+        local_src = src[src.index("本地整轨（用户优化）"):]
+        assert "self.report_consumed(" not in local_src, "本地分支残留观测回执（双计复现）"
+
+    def test_audio_core_completion_receipt_single_point(self):
+        import inspect
+        from utils.audio import audio_core
+        src = inspect.getsource(audio_core)
+        # audio_core 完成回调一处（G2 完成点②）——builtin 真实完成回执单点
+        count = src.count("self.report_consumed(")
+        assert count == 1, f"audio_core report_consumed 调用点应恰 1（完成回调），实为 {count}"
+
+    def test_choreo_step_id_passthrough_on_rebuild(self):
+        """Q-1：本地分支条目重建透传 choreo_step_id（编排实例精确匹配不再退化）。"""
+        import inspect
+        from utils.audio import playback_manager
+        src = inspect.getsource(playback_manager)
+        assert src.count('"choreo_step_id": data_json.get("choreo_step_id", "")') == 2, \
+            "insert_index/常规两条重建分支均须透传 choreo_step_id"
+
+    def test_flowchart_v211_receipt_semantics(self):
+        """uc1b 裁决落图：v2.11 图头在位+回传边语义=观测回执。"""
+        from tests.test_flowchart_alignment import _graph_text
+        text = _graph_text()
+        assert "v2.11" in text and "不驱动下一消费" in text, "图头 v2.11 回传语义注记缺失"

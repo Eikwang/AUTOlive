@@ -146,7 +146,7 @@ class TestChoreoTopology:
         ("Sort --> |权重&队列信息|Compile", "优先级排序必须向编排提供权重&队列信息（v2.6 用户终版边）"),
         ("Compile --> |需要口型|AvatarAI", "编排口型音频必须直达数字人服务（AvatarAI）"),
         ("Compile --> |不需口型|Frame", "编排纯画面必须直出画面帧（Frame，不经口型）"),
-        ("lineout --> |回传|AudioList", "已消费信息必须回传音频队列（v2.7 用户终版回传子图：消费完成驱动串行消费）"),
+        ("lineout --> |回传|AudioList", "已消费信息必须回传音频队列（v2.7 用户终版回传子图；uc1b 语义澄清：回传=观测回执落账，不驱动下一消费——消费由播放循环自身串行推进）"),
         ("DynamicCopy --> |关键词直投·格式化条目|Compile", "T3 动态文案格式化条目关键词直投编排（跳过中枢子串识别，v2.10）"),
         # EventEF 入场/关注订阅边：用户 2026-11-05 手改图移除（图面简化——
         # 代码侧订阅不变，由 test_t4_entrance_follow_implemented 代码镜像承担）
@@ -212,8 +212,9 @@ class TestGraphHeader:
     落码后随批次重落盘，版本升至 v2.9）。"""
 
     def test_version_line_present(self):
-        """v2.10（2026-11-01 动作编排优化批次 T3/T4）；v2.9 历史行保留。"""
-        assert "v2.10" in _graph_text(), "图头版本行（v2.10）缺失——疑 restore 回滚，须随批次重落盘"
+        """v2.11（2026-11-06 协作机制流程审查批次 T3）；v2.10/v2.9 历史行保留。"""
+        assert "v2.11" in _graph_text(), "图头版本行（v2.11）缺失——疑 restore 回滚，须随批次重落盘"
+        assert "v2.10" in _graph_text(), "图头 v2.10 历史行缺失——版本链断裂"
         assert "v2.9" in _graph_text(), "图头 v2.9 历史行缺失——版本链断裂"
 
     def test_discipline_line_present(self):
