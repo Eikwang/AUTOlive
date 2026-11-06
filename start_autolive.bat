@@ -13,11 +13,15 @@ cd /d "%AUTOLIVE_HOME%"
 
 rem 运行时：主程序用 EDTalk 共享环境（runtime312）；GPT-SoVITS 用 runtime312-clone
 rem T6: 解释器候选链——RT 环境变量 > 仓库副本 > 外部树兜底
+rem 2026-11-06 迁移：环境唯一正式位置=仓库根 runtime312（RT 环境变量可覆盖）
+if not defined RT set "RT=%~dp0runtime312"
 if defined RT set "MAIN_PY=%RT%\python.exe"
-if not defined MAIN_PY if exist "%~dp0runtime312\python.exe" set "MAIN_PY=%~dp0runtime312\python.exe"
-rem 2026-11-06 迁移：环境唯一正式位置=仓库根 runtime312
 if not defined MAIN_PY set "MAIN_PY=%~dp0runtime312\python.exe"
 
+set FFMPEG_PATH=%RT%\ffmpeg\bin
+set PATH=%RT%;%RT%\Scripts;%RT%\Library\bin;%FFMPEG_PATH%;%PATH%
+SET KMP_DUPLICATE_LIB_OK=TRUE
+SET HF_ENDPOINT=https://hf-mirror.com
 echo [1/3] 启动 AUTOlive webui（托管服务将随系统自动拉起）...
 start "AUTOlive-webui" /MIN cmd /c ""%MAIN_PY%" webui.py > logs\webui_launcher.log 2>&1"
 
