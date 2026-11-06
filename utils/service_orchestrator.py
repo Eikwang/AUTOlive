@@ -309,6 +309,15 @@ class ManagedProcess:
             return False
 
     def _start_monitor(self):
+        # 缺陷1 根修（2026-11-06 批次，/autoplan main-20261106-173018 T1）：幂等——
+        # 仅当无存活监控线程时才新建。原实现无条件重建：_monitor_loop 内
+        # _auto_restart→start() 成功路径再次 _start_monitor，而调用者（旧监控
+        # 线程）continue 后仍存活→线程增殖→共享 fail_count 一次死亡多次累加→
+        # 快速达 crash_loop_max 静默置红。stop() 已将 _monitor_thread 置 None，
+        # 死亡线程 is_alive()=False，均正确落入新建分支。
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            logger.debug(f"[{self.name}] 监控线程存活，跳过重复启动（幂等）")
+            return
         self._monitor_stop.clear()
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop, name=f"svc-monitor-{self.name}", daemon=True
@@ -378,6 +387,18 @@ class ServiceRegistry:
             return cls._instance
 
     def register(self, svc: ManagedProcess):
+        # TODOS #18 收编（2026-11-06 批次 T1）：同名覆盖时先停止旧实例——
+        # 原实现直接覆盖引用，旧实例的子进程失去唯一管理入口成孤儿（前端/主
+        # 进程双进程拓扑下同名 rvc-vc/gpt-sovits 重复 build 场景实证触发）。
+        old = self.services.get(svc.name)
+        if old is not None and old is not svc:
+            logger.warning(
+                f"[registry] 同名服务重复注册: {svc.name}——停止旧实例（state={old.state}）后覆盖")
+            try:
+                old.stop()
+            except Exception:
+                logger.error(f"[registry] 旧实例 {svc.name} 停止失败（忽略，继续覆盖注册）",
+                             exc_info=True)
         self.services[svc.name] = svc
         logger.info(f"[registry] 注册托管服务: {svc.name}")
 

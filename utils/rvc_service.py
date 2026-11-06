@@ -17,11 +17,13 @@ import time
 import urllib.request
 from typing import Optional
 
-from utils.autolive_paths import AutolivePaths, as_keyed_config
+from utils.autolive_paths import (AutolivePaths, as_keyed_config,
+                                  write_interpreter_memory)
 from utils.config import Config
 from utils.my_log import logger
-from utils.service_orchestrator import (DEFAULT_POLICIES, ST_STOPPED, ST_STARTING,
-                                        ManagedProcess, ServiceRegistry)
+from utils.service_orchestrator import (DEFAULT_POLICIES, ST_RED, ST_STOPPED,
+                                        ST_STARTING, ManagedProcess,
+                                        ServiceRegistry)
 
 HTTP_PORT_DEFAULT = 9391
 
@@ -62,13 +64,23 @@ def _verify_port_owner(config: Config) -> str:
 
 
 def rvc_runtime_python(config: Config, paths: AutolivePaths) -> str:
-    """变声服务解释器（S-1/R-1 收敛，/autoplan 2026-10-14）：优先 paths.rvc_python
-    （runtime312 基准），rvc_vc.runtime_python 覆盖，最后 py39 外部树兜底——
-    禁止再从 rvc_root 派生（apps/rvc 副本翻转后派生值不存在）。"""
-    v = paths.rvc_python or None
-    if not v:
-        v = config.get("rvc_vc", "runtime_python")
-    return v or r"D:\AI\EDTalk\runtime312\python.exe"
+    """变声服务解释器（T5 候选链收敛，/autoplan main-20261106-173018）：
+
+    顺序：rvc_vc.runtime_python（rvc_vc 节显式覆盖，指向真实文件才采纳——
+    迁移清键对象 X3-T7，实盘迁移前该键指外部、语义不变）→ paths.rvc_python
+    （已候选链化：config paths 覆盖 → 记忆 → edtalk/runtime312 仓库副本 →
+    EDTalk 兄弟安装兜底，见 autolive_paths.resolve_python_interpreter）。
+    全部缺失返回空串（调用方三要素报错；禁止再从 rvc_root 派生——apps/rvc
+    副本翻转后派生值不存在）。"""
+    config = as_keyed_config(config)  # 双形态归一（dict 直调场景）
+    v = config.get("rvc_vc", "runtime_python")
+    if v and str(v).strip() and os.path.isfile(str(v).strip()):
+        return os.path.abspath(str(v).strip())
+    if v and str(v).strip():
+        logger.warning(
+            f"[rvc-vc] rvc_vc.runtime_python 指向不存在的路径（忽略走候选链）: {v}"
+            "——迁移场景请运行 Scripts/migrate_runtime_check.py 清键校验")
+    return paths.rvc_python or ""
 
 
 def build_rvc_vc_service(
@@ -164,7 +176,13 @@ def ensure_rvc_vc(config: Config, paths: AutolivePaths,
     拉起中，直接返回）；stopped 在册 → 复用实例后台 start（不新建）；不在册
     且离线 → build+后台 start；在线 → 返回 None（调用方按 None 走在线直连）。
 
-    返回：ManagedProcess（新拉起/复用中，状态条轮询就绪）或 None（已在线）。"""
+    缺陷3 根修（2026-11-06 批次 T1，/autoplan main-20261106-173018）：ST_RED
+    在册实例原被 build ①分支"非 stopped 复用跳过"静默吞掉——监控线程置红后
+    已全部退出，复用=永不重拉，前端所有调用 10061 死循环（用户报障实证）。
+    修复：红态且无进程时后台 manual_restart（清零失败计数+同步 start 留在
+    后台线程——start 含 120s 就绪窗口同步阻塞，禁入事件循环/调用线程）。
+
+    返回：ManagedProcess（新拉起/复用中/复活中，状态条轮询就绪）或 None（已在线）。"""
     config = as_keyed_config(config)  # 双形态归一（idle_exit_min/透传 build）
     svc = build_rvc_vc_service(config, paths, on_state_change=on_state_change)
     if svc is None:
@@ -173,12 +191,37 @@ def ensure_rvc_vc(config: Config, paths: AutolivePaths,
         # C3：stopped 复用实例（idle 休眠后重拉/懒占位首拉）
         def _start():
             if svc.start():
-                start_idle_monitor(svc, config)
+                start_idle_monitor(svc, config)  # 关键路径先行
+                _remember_interpreter(svc)       # T5 记忆写入（best-effort）
         threading.Thread(target=_start, name="rvc-vc-ensure", daemon=True).start()
         logger.info("[rvc-vc] 首次使用/闲置唤醒：后台拉起变声服务（状态条可查进度）")
         return svc
+    if svc.proc is None and svc.state == ST_RED:
+        # 缺陷3 根修：置红实例复活（唯一出路 manual_restart，D10；后台线程）
+        def _revive():
+            logger.warning("[rvc-vc] 检测到置红实例——手动重启恢复中（清零失败计数）")
+            if svc.manual_restart():
+                start_idle_monitor(svc, config)
+                _remember_interpreter(svc)
+                logger.info("[rvc-vc] 置红实例恢复成功")
+            else:
+                logger.error("[rvc-vc] 置红实例重启仍失败——查看 logs/services/rvc-vc.log 定位")
+        threading.Thread(target=_revive, name="rvc-vc-revive", daemon=True).start()
+        return svc
     # 在途（starting/healthy/...）——build 分支已返回在册实例
     return svc
+
+
+def _remember_interpreter(svc) -> None:
+    """T5（F-N2 配套）：拉起成功后记录实际使用的解释器（best-effort）。
+    getattr 守卫：测试/mock 实例可能无 command 属性，静默跳过不干扰关键路径。"""
+    cmd = getattr(svc, "command", None)
+    if not cmd:
+        return
+    try:
+        write_interpreter_memory("rvc_python", cmd[0])
+    except Exception:
+        pass
 
 
 def start_idle_monitor(svc: ManagedProcess, config: Config,

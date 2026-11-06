@@ -60,6 +60,88 @@ def config_get(config, *keys):
     return config.get(*keys)
 
 
+# ----------------------------------------------------------------------
+# 解释器副本优先候选链（T5，/autoplan main-20261106-173018）
+# 顺序：config 覆盖键（按序、存在才采纳）→ 上次记忆 → 仓库副本 → 外部树兜底。
+# 样板对齐 utils/edtalk_realtime/runtime.py resolve_interpreter（116-144）；
+# 记忆文件独立（data/interpreter_memory.json，同款容错语义），edtalk 的
+# data/edtalk_runtime.json 不动——Shape B（全量统一）登记 TODOS 二步收敛。
+# ----------------------------------------------------------------------
+
+_REPO_ROOT_FALLBACK = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _interpreter_memory_file() -> str:
+    return os.path.join(_REPO_ROOT_FALLBACK, "data", "interpreter_memory.json")
+
+
+def read_interpreter_memory() -> dict:
+    """解释器记忆快照（缺失/损坏 → {}，不抛错——消费方降级候选链）。"""
+    import json
+    try:
+        with open(_interpreter_memory_file(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_interpreter_memory(key: str, value: str) -> None:
+    """服务拉起成功后记录实际使用的解释器（失败仅告警，不影响结果）。"""
+    import json
+    try:
+        path = _interpreter_memory_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = read_interpreter_memory()
+        data[key] = str(value)
+        data["updated_at"] = Common().get_bj_time(0)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"[interpreter] 记忆写入失败（不影响服务）：{e}")
+
+
+def resolve_python_interpreter(config, *, keys, repo_rel: str,
+                               external_default: str, memory_key: str) -> str:
+    """解释器副本优先候选链（单函数参数化，A4 防第 4 处复制）。
+
+    Args:
+        config: 双形态 config（dict 或 Config）。
+        keys: [(section, key), ...] config 覆盖键候选（按序，指向真实文件才采纳）。
+        repo_rel: 仓库副本相对路径（如 edtalk/runtime312/python.exe；不存在自然跳过）。
+        external_default: 外部树兜底（EDTalk 兄弟安装/clone）。
+        memory_key: data/interpreter_memory.json 的记忆键。
+
+    Returns:
+        第一个真实存在的绝对路径；全缺失返回空串（调用方三要素报错，不抛异常）。
+    每次解析落 debug 日志（F-N2：防"静默回落外部路径"用户无感知）。
+    """
+    candidates = []
+    for section, key in keys:
+        v = config_get(config, section, key)
+        if v and str(v).strip():
+            candidates.append((f"config.{section}.{key}", str(v).strip()))
+    mem = read_interpreter_memory().get(memory_key)
+    if mem and str(mem).strip():
+        candidates.append((f"memory[{memory_key}]", str(mem).strip()))
+    try:
+        from frontend.config.paths import get_base_path
+        base = str(get_base_path())
+    except Exception:
+        base = _REPO_ROOT_FALLBACK
+    candidates.append(("repo copy", os.path.join(base, repo_rel)))
+    candidates.append(("external default", external_default))
+
+    for source, cand in candidates:
+        if cand and os.path.isfile(cand):
+            logger.debug(f"[interpreter] {memory_key}: {source} → {cand}")
+            return os.path.abspath(cand)
+    logger.warning(
+        f"[interpreter] {memory_key} 全候选缺失: "
+        + "；".join(f"{s}={c}" for s, c in candidates))
+    return ""
+
+
 class KeyedConfigView:
     """dict → Config 变长键语义视图（2026-11-03 治理批次 erro6.log 实测修复）。
 
@@ -135,17 +217,28 @@ class AutolivePaths:
             KEY_GPT_SOVITS_ROOT,
             os.path.join(self.autolive_home, "apps", "gpt-sovits"),
         )
-        self.gpt_sovits_python: str = self._resolve(
-            KEY_GPT_SOVITS_PYTHON, r"D:\AI\runtime312-clone\python.exe"
+        # T5（2026-11-06 批次）：解释器走副本优先候选链——config paths 覆盖 →
+        # 记忆 → 仓库副本（apps/gpt-sovits/runtime，X7 边界：clone 暂不复制，
+        # 不存在自然跳过）→ runtime312-clone 外部兜底
+        self.gpt_sovits_python: str = resolve_python_interpreter(
+            config,
+            keys=[("paths", KEY_GPT_SOVITS_PYTHON)],
+            repo_rel=os.path.join("apps", "gpt-sovits", "runtime", "python.exe"),
+            external_default=r"D:\AI\runtime312-clone\python.exe",
+            memory_key="gpt_sovits_python",
         )
         # RVC 运行副本与训练/变声 runtime（S-1/S-2：默认 apps/rvc 副本+
-        # EDTalk\runtime312 基准——RVC fork 本地改造全针对该环境，py39 嵌入式
-        # 已被 fork 弃用；config 可覆盖回外部树）
+        # runtime312 基准；T5 候选链：config paths 覆盖 → 记忆 → 仓库副本
+        # edtalk/runtime312（copy_edtalk 产物）→ EDTalk 兄弟安装兜底）
         self.rvc_root: str = self._resolve(
             KEY_RVC_ROOT, os.path.join(self.autolive_home, "apps", "rvc"),
         )
-        self.rvc_python: str = self._resolve(
-            KEY_RVC_PYTHON, r"D:\AI\EDTalk\runtime312\python.exe",
+        self.rvc_python: str = resolve_python_interpreter(
+            config,
+            keys=[("paths", KEY_RVC_PYTHON)],
+            repo_rel=os.path.join("edtalk", "runtime312", "python.exe"),
+            external_default=r"D:\AI\EDTalk\runtime312\python.exe",
+            memory_key="rvc_python",
         )
         # AICoverGen 运行副本根（C-4 收敛：cover_worker 的模型共享目录基根）
         self.aicovergen_root: str = self._resolve(
