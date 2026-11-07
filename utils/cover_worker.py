@@ -108,13 +108,41 @@ class CoverQueue:
         """翻唱子进程解释器（2026-11-07 迁移收尾修复）：统一项目内环境——
 
         取值序：rvc_vc.runtime_python 显式覆盖（指向真实文件才采纳）→
-        paths.rvc_python 候选链（config 覆盖→记忆→仓库根 runtime312→外部
+        候选链 paths.rvc_python（config 覆盖→记忆→仓库根 runtime312→外部
         兜底）。**历史**：原实现回退硬编码 py39 外部嵌入式环境
-        （py39 外部嵌入式环境，S-2 时代钉子），统一项目内候选链。"""
+        （py39 外部嵌入式环境，S-2 时代钉子），统一项目内候选链。
+        **2026-11-07 二次修复**：paths 构造参数两个调用点均传 None
+        （cover_endpoints.py:92 / feature_handler.py:691）——上一版
+        getattr(self.paths,...) 返回空 cmd[0] → Popen WinError 87（用户
+        实测）。修复=paths 为 None 时内部自建 AutolivePaths（进程级缓存）。"""
         v = self.config.get("rvc_vc", "runtime_python")
         if v and str(v).strip() and os.path.isfile(str(v).strip()):
             return str(v).strip()
-        return getattr(self.paths, "rvc_python", None) or ""
+        try:
+            paths = self.paths
+            if paths is None:
+                from utils.autolive_paths import AutolivePaths
+                paths = CoverQueue._cached_paths()
+            return getattr(paths, "rvc_python", None) or ""
+        except Exception as e:
+            logger.error(f"[cover] 解释器候选链解析失败: {e}")
+            return ""
+
+    @staticmethod
+    def _cached_paths():
+        """AutolivePaths 进程级缓存（构造有文件探测 IO——每任务一次不划算）。"""
+        inst = getattr(CoverQueue, "_paths_cache", None)
+        if inst is None:
+            from utils.autolive_paths import AutolivePaths
+            inst = AutolivePaths(CoverQueue._config_for_paths())
+            CoverQueue._paths_cache = inst
+        return inst
+
+    @staticmethod
+    def _config_for_paths():
+        from utils.config import Config
+        return Config(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"))
 
     # ---------- 归一化匹配（B-6）----------
 

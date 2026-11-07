@@ -62,4 +62,4 @@ def test_cover_rt_python_project_env():
     迁移清键暴露 WinError 2），收敛到 paths.rvc_python 候选链。"""
     src = _read(os.path.join("utils", "cover_worker.py"))
     assert "RVC20240604Nvidia" not in src, "py39 外部硬编码残留"
-    assert "paths.rvc_python" in src or 'getattr(self.paths, "rvc_python"' in src,         "缺候选链接线"
+    assert "_cached_paths" in src, "缺 paths=None 内部自建（构造点两处传 None——WinError 87 防回归）"
