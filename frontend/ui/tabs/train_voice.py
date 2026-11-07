@@ -358,4 +358,83 @@ def create_train_voice_tab(
 
         threading.Thread(target=_watch, name="train-voice-rerun", daemon=True).start()
 
+    # ---------- 声音模型管理（2026-11-07 模型管理批次：GSV/RVC 统一删除面） ----------
+    # 用户诉求：模型文件管理统一收口到训练页——档案页退役删除按钮（只选不删）；
+    # 变声/翻唱页无管理面不变（仍只选）。数据层 utils/voice_models（全链清单
+    # +全链删除+档案联动+GSV 当前模型保护）；删除后整卡重绘（修复原档案页
+    # "删了不刷新=不能生效"的感知根因）。
+    with ui.card().style(card_css):
+        ui.label("声音模型管理").style("font-weight:var(--font-weight-emphasis)")
+        ui.label(
+            "GPT-SoVITS 与 RVC 训练产物的统一管理。删除会移除模型文件"
+            "（含训练副本与翻唱共享件）并从引用档案解除挂接（档案本身保留）；"
+            "GPT-SoVITS 当前选用模型受保护，请先在「文本转语音」页切换。").style(
+            "font-size:12px;color:var(--text-secondary)")
+        models_body = ui.column().style("width:100%")
+
+    _MODEL_ROW_CSS = ("width:100%;align-items:center;border:1px solid var(--border-color);"
+                      "border-radius:var(--radius-md);padding:6px 10px;")
+
+    def _render_models():
+        """整卡重绘（container.clear+填充——删除后即时反馈，无幽灵行）。"""
+        from utils.voice_models import list_voice_models
+        data = list_voice_models(config, gsv_root=paths.gpt_sovits_root)
+        models_body.clear()
+        with models_body:
+            if not data["gsv"] and not data["rvc"]:
+                ui.label("暂无可管理的模型——完成一次「声音训练」后此处会出现训练产物").style(
+                    "font-size:12px;color:var(--text-hint)")
+                return
+            for group, title, empty in (
+                    ("gsv", "GPT-SoVITS（TTS）", "（无 GPT-SoVITS 权重对）"),
+                    ("rvc", "RVC（变声/翻唱）", "（无 RVC 模型）")):
+                items = data[group]
+                ui.label(title).style(
+                    "font-weight:var(--font-weight-emphasis);margin-top:4px")
+                if not items:
+                    ui.label(empty).style("font-size:12px;color:var(--text-hint)")
+                    continue
+                for it in items:
+                    with ui.row().style(_MODEL_ROW_CSS):
+                        mark = "● " if it.get("current") else ""
+                        ui.label(f"{mark}{it['exp']}").style(
+                            "flex:1;font-weight:var(--font-weight-title)")
+                        refs = (f"引用档案 {len(it['ref_profiles'])} 个"
+                                if it["ref_profiles"] else "无档案引用")
+                        ui.label(f"{it['size_mb']:.1f} MB · {refs}").style(
+                            "font-size:11px;color:var(--text-secondary)")
+                        ui.button(icon="delete", on_click=lambda _, g=group, x=it: _confirm_delete(g, x)) \
+                            .props("dense flat no-caps").tooltip("删除该组模型文件（含全部链路副本）")
+
+    def _confirm_delete(group: str, item: dict):
+        """删除确认对话框（破坏性动作必须确认；展示删除范围与档案联动）。"""
+        refs = item.get("ref_profiles") or []
+        desc = (f"将删除 {item['size_mb']:.1f} MB 模型文件（含训练副本与翻唱共享件），"
+                + (f"并从 {len(refs)} 个引用档案解除挂接（档案保留）。" if refs else "无档案引用该模型。")
+                + "此操作不可恢复。")
+        with ui.dialog() as dlg, ui.card():
+            ui.label(f"删除模型 {item['exp']}？").style("font-weight:var(--font-weight-emphasis)")
+            ui.label(desc).style("font-size:12px;color:var(--text-secondary)")
+            with ui.row().style("justify-content:flex-end;gap:8px;width:100%"):
+                ui.button("取消", on_click=dlg.close).props("flat no-caps")
+                ui.button("删除", on_click=lambda: _do_delete(group, item, dlg)) \
+                    .props("unelevated no-caps color=negative")
+        dlg.open()
+
+    def _do_delete(group: str, item: dict, dlg):
+        from utils.voice_models import delete_voice_model
+        r = delete_voice_model(group, item["exp"], config, gsv_root=paths.gpt_sovits_root)
+        dlg.close()
+        if r.get("ok"):
+            extra = (f"，已解除 {len(r['unlinked_profiles'])} 个档案的引用"
+                     if r.get("unlinked_profiles") else "")
+            ui.notify(position="top", type="positive",
+                      message=f"模型 {item['exp']} 已删除（{len(r['deleted'])} 个文件{extra}）")
+        else:
+            ui.notify(position="top", type="negative",
+                      message=r.get("error") or f"删除 {item['exp']} 失败")
+        _render_models()
+
+    _render_models()
+
     ui.timer(0.5, _poll)

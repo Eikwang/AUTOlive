@@ -363,8 +363,10 @@ def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
     """P2-4/D7/D8/B-6：声音档案分组选择器 + 模型对写入 gpt_sovits 节。
 
     - 2026-10-30 审查批次：仅显示「数字人-声音训练-gpt-sovits」管线训练的档案
-      （gpt_model/sovits_model 非空；RVC 管线档案不显示）+ 每行删除按钮
-      （delete_profile 原子删除；删除当前选用档案时清除选用标记，模型保持不动）
+      （gpt_model/sovits_model 非空；RVC 管线档案不显示）
+    - 2026-11-07 模型管理批次：删除按钮退役——模型文件管理统一收口到
+      「数字人-声音训练-声音模型管理」区块（本页只选不删；原删除按钮删的是
+      档案记录且 UI 不刷新，用户感知"不能生效"，语义与预期不符）
     - 点选档案 → 把 GPT-SoVITS 模型对/参考音频写入 gpt_sovits 节
     - 零档案 → 空态卡片指向训练页
     """
@@ -402,37 +404,6 @@ def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
                                on_click=lambda pid=pid, prof=prof: _apply_profile(
                                    config, pid, prof),
                                ).props("dense unelevated no-caps")
-                    _ui.button(icon="delete", on_click=lambda pid=pid: _delete_profile(
-                        pid, is_current, config)).props("dense flat no-caps").tooltip(
-                        '删除该档案（仅移除档案记录，不删除模型文件）')
-
-
-def _delete_profile(pid: str, is_current: bool, config: Dict[str, Any]):
-    """删除声音档案（2026-10-30 审查批次）：voice_profiles.delete_profile 原子写。
-    当前选用档案被删时清除 gpt_sovits.voice_profile_id 标记（模型文件保持不动，
-    正在使用的模型不受影响）。UI 刷新经 ui.notify + 页面刷新（NiceGUI 局部行
-    移除复杂度高，整卡重绘交由用户刷新或重新进入页面——列表数据源已即时落盘）。"""
-    from nicegui import ui as _ui
-    from utils.voice_profiles import delete_profile
-    if not delete_profile(pid):
-        _ui.notify(position="top", type="negative", message=f"删除失败：档案 {pid} 不存在")
-        return
-    if is_current:
-        # 清除选用标记（直接改 config dict + 落盘，与 _apply_profile 同款机制）
-        import json, tempfile, os as _os
-        from utils.config import Config
-        cfg_path = _os.path.join(_os.path.dirname(_os.path.dirname(
-            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))), "config.json")
-        with open(cfg_path, encoding="utf-8") as f:
-            data = json.load(f)
-        data.get("gpt_sovits", {}).pop("voice_profile_id", None)
-        fd, tmp = tempfile.mkstemp(dir=_os.path.dirname(cfg_path), suffix=".json")
-        with _os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        _os.replace(tmp, cfg_path)
-        Config.reload(cfg_path)
-    _ui.notify(position="top", type="positive",
-               message=f"档案已删除：{pid}" + ("（选用标记已清除，模型不受影响）" if is_current else ""))
 
 
 def _apply_profile(config: Dict[str, Any], pid: str, prof: dict):
