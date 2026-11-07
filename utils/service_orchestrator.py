@@ -255,15 +255,24 @@ class ManagedProcess:
             logger.error(f"[{self.name}] 预热钩子异常", exc_info=True)
 
     def stop(self):
-        """优雅停止：terminate → 5s → kill。停止监控线程，状态回 stopped。"""
+        """停止：Windows 树杀（taskkill /F /T——子进程树如 harvest 进程池、
+        EDTalk 渲染子进程连带终止，防孤儿残留；2026-11-07 进程治理批次）。
+        原 terminate 在 Windows=TerminateProcess 强杀且不带子树——服务主进程死、
+        子进程成孤儿继续占 GPU/端口。停止监控线程，状态回 stopped。"""
         self._monitor_stop.set()
         if self._monitor_thread:
             self._monitor_thread.join(timeout=3)
             self._monitor_thread = None
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.terminate()
-                self.proc.wait(timeout=5)
+                if os.name == "nt":
+                    # 树杀：/T 连带全部子进程（terminate 不带子树=孤儿根源）
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                        capture_output=True, timeout=15)
+                else:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, psutil.NoSuchProcess):
                 try:
                     self.proc.kill()
@@ -349,8 +358,13 @@ class ManagedProcess:
         self._set_state(ST_CRASHED)
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.terminate()
-                self.proc.wait(timeout=5)
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                        capture_output=True, timeout=15)  # 树杀（同 stop）
+                else:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, psutil.NoSuchProcess):
                 try:
                     self.proc.kill()

@@ -828,9 +828,68 @@ class AutoliveApp:
             logger.warning(f"程序 {name} 没有在运行.")
 
     def stop_programs(self):
-        """停止所有已启动程序（coordination 循环随模块退役移除）。"""
-        # 停止主程序
+        """停止一切由 AUTOlive 调度的进程（2026-11-07 进程治理批次，用户诉求：
+        前端「停止」=零残留）。四层顺序：
+        ①托管服务（ServiceRegistry 全实例 stop——rvc-vc 等 ManagedProcess，
+          stop 内含 Windows 树杀，harvest 池/渲染子进程连带）；
+        ②外围程序（my_subprocesses 的 edtalk_realtime/fastrag——原实现只停
+          main，此二者有 pid 记录却从不停止=残留直接根源）；
+        ③主系统树（taskkill /F /T——main 进程内的 inproc GSV/DanmakuListener
+          及 main 拉起的 ManagedProcess 子进程按树连带终止）；
+        ④残留收尸兜底（psutil 按命令行特征扫孤儿——registry 丢失/异常路径
+          漏网的进程，特征=仓库根路径+模块标记，排除自身；api_v2 用户自备
+          不在收尸范围，F11 不拉起不托管语义）。
+        重启=本方法+启动链（layout 既有串联），全部重启自动成立。"""
+        # ①托管服务全停
+        try:
+            from utils.service_orchestrator import ServiceRegistry
+            for svc in ServiceRegistry.instance().all():
+                try:
+                    logger.info(f"[stop] 停止托管服务: {svc.name}（state={svc.state}）")
+                    svc.stop()
+                except Exception as e:
+                    logger.error(f"[stop] 托管服务 {svc.name} 停止失败（继续）: {e}")
+        except Exception as e:
+            logger.warning(f"[stop] ServiceRegistry 不可用（跳过①）: {e}")
+        # ②外围程序（edtalk/fastrag——原实现漏停的直接根源）
+        for name in ("edtalk_realtime", "fastrag"):
+            self.stop_program(name)
+        # ③主系统树
         self.stop_program("main")
+        # ④收尸兜底
+        try:
+            self._reap_orphan_processes()
+        except Exception as e:
+            logger.warning(f"[stop] 收尸扫描异常（忽略）: {e}")
+
+    def _reap_orphan_processes(self) -> list:
+        """残留收尸兜底：psutil 按命令行特征扫孤儿进程。
+
+        特征 = cmdline 同时含【仓库根绝对路径】与【AUTOlive 托管模块标记】
+        （rvc_adapter.py / realtime_serve / fastrag）；排除自身进程。
+        api_v2.py 不在标记内（backend=api 用户自备，F11 不拉起不托管——杀
+        用户自备服务违背预期）。返回被收尸的 pid 列表。"""
+        import psutil
+        home = str(get_base_path()).lower()
+        markers = ("rvc_adapter.py", "realtime_serve", "fastrag")
+        me = os.getpid()
+        reaped = []
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                if proc.info["pid"] == me:
+                    continue
+                cmd = " ".join(proc.info["cmdline"] or []).lower()
+                if not cmd:
+                    continue
+                if home in cmd and any(m in cmd for m in markers):
+                    proc.kill()
+                    reaped.append(proc.info["pid"])
+                    logger.warning(f"[stop] 收尸残留进程 PID {proc.info['pid']}: {cmd[:120]}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if not reaped:
+            logger.info("[stop] 无残留进程")
+        return reaped
 
     def run_external_program(self, type="webui"):
         """运行外部程序（与原文件 webui-bak.py L357-382 一致）"""
