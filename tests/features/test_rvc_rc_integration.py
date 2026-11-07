@@ -156,6 +156,16 @@ def test_share_channel_reads_profile_then_scan(tmp_path):
         q2._prepare_rvc_model_dir({"profile_id": "q"})
     assert os.path.isfile(os.path.join(q2._rvc_models_root(), "autolive_q", "q.pth")), \
         "兜底必须命中 models/rvc/ 第一个 .pth（DX-5 预取路径）"
+    # ③ 消费面已就绪先短路（B 修 2026-11-07 训练链审查批）：dest 有 pth 时
+    # 档案/共享面悬空不阻断——get_profile 炸弹也不得被触发（断链防回归）
+    (tmp_path / "aicovergen" / "rvc_models" / "autolive_r").mkdir(parents=True,
+                                                                  exist_ok=True)
+    (tmp_path / "aicovergen" / "rvc_models" / "autolive_r" / "r.pth").write_bytes(b"m")
+    q3 = _queue(tmp_path, {"paths": {"aicovergen_root": str(tmp_path / "aicovergen")}})
+    with patch("utils.voice_profiles.get_profile",
+               side_effect=AssertionError("dest 就绪时不得触碰档案")):
+        q3._prepare_rvc_model_dir({"profile_id": "r"})
+    assert os.path.isfile(os.path.join(q3._rvc_models_root(), "autolive_r", "r.pth"))
 
 
 # ---------- 断言 16/19/20：参数链契约 ----------

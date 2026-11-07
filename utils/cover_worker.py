@@ -595,7 +595,15 @@ class CoverQueue:
             logger.error(f"[cover] 最终失败: {job['song']}（超时={timeout}）")
 
     def _prepare_rvc_model_dir(self, job: Dict):
-        """AICoverGen 约定 rvc_models/<dirname>/{pth,index}——硬链/复制共享目录文件。"""
+        """AICoverGen 约定 rvc_models/<dirname>/{pth,index}——硬链/复制共享目录文件。
+
+        B 修（2026-11-07 训练链审查批）：消费面已就绪先短路——档案/共享面悬空
+        不阻断翻唱（硬链件独立存活语义）。原顺序先校验档案 rvc_model→回退
+        models/rvc 扫描→最后才查 dest，共享面断链时 dest 齐备也必炸。"""
+        dest = os.path.join(self._rvc_models_root(), f"autolive_{job['profile_id']}")
+        dst_pth = os.path.join(dest, f"{job['profile_id']}.pth")
+        if os.path.isfile(dst_pth):
+            return
         from utils.voice_profiles import get_profile
         prof = get_profile(job["profile_id"]) or {}
         pth = prof.get("rvc_model") or ""
@@ -612,7 +620,6 @@ class CoverQueue:
                 raise FileNotFoundError("models/rvc/ 无可用 RVC 模型（DX-5 预取路径）")
             pth = os.path.join(models_dir, pths[0])
             index = ""
-        dest = os.path.join(self._rvc_models_root(), f"autolive_{job['profile_id']}")
         os.makedirs(dest, exist_ok=True)
         dst_pth = os.path.join(dest, f"{job['profile_id']}.pth")
         if not os.path.isfile(dst_pth):
