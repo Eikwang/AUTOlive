@@ -449,3 +449,12 @@ def test_svc_module_imports_clean():
     assert hasattr(mod, "create_svc_tab")
     assert hasattr(mod, "_format_vc_error")
     assert hasattr(mod, "_on_svc_state_change")
+
+
+def test_gsv_inproc_import_injection():
+    """runtime312 迁移遗留根修（2026-11-07）：GPT_SoVITS 包可达性显式注入
+    （users.pth 清除后的等价物）——gsv_root 六条路径进 sys.path，双层 import
+    语义（repo 根+内层 AR）不再依赖环境注入。"""
+    src = _read(os.path.join("utils", "gpt_sovits_inproc.py"))
+    assert "gpt_sovits_pythonpath_entries()" in src, "缺六条路径显式注入"
+    assert "self._paths = paths" in src, "缺 paths 引用"

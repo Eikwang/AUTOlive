@@ -73,6 +73,7 @@ class GptSovitsInproc:
         self.config = config
         self.paths = paths
         self._gsv_root = paths.gpt_sovits_root
+        self._paths = paths  # 2026-11-07：_import_tts 六条路径注入用
         self._lock = threading.Lock()          # 合成与换模互斥（整个消费过程）
         self._state_lock = threading.Lock()    # 状态字段读写
         self._state = ST_UNINIT
@@ -204,7 +205,20 @@ class GptSovitsInproc:
     # ---------- 加载 / 换模 ----------
 
     def _import_tts(self):
-        """import GPT-SoVITS TTS（PYTHONPATH 契约：调用前 autolive_paths 注入已生效）。"""
+        """import GPT-SoVITS TTS。
+
+        2026-11-07 根修（runtime312 迁移批次遗留）：GPT_SoVITS 包可达性此前
+        依赖 runtime312 site-packages 的 users.pth 环境注入（指向外部树
+        D:\\AI\\GPT-SoVITS）——迁移批次按 TODOS #231 清除 users.pth 后注入源
+        消失，主进程 sys.path 无 gpt_sovits_root → No module named
+        'GPT_SoVITS.TTS_infer_pack'（引擎 error 态）。修复=按 S-1 副本语义
+        **显式注入 autolive_paths.gpt_sovits_pythonpath_entries 的六条路径**
+        （users.pth 六条的显式化等价物：repo 根+GPT_SoVITS 内层+BigVGAN+tools
+        ——GPT-SoVITS 双层 import 语义：`from GPT_SoVITS...` 要 repo 根，
+        `from AR...` 要内层目录），不再依赖环境注入。"""
+        for _p in self._paths.gpt_sovits_pythonpath_entries() or []:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
         # sv.py:2 按 os.getcwd() 拼 eres2net 路径（上游预期 cwd=gsv_root）——主进程
         # cwd=AUTOlive 根，故预注入正确绝对路径（上游 append 的坏路径无害）
         eres = os.path.join(self._gsv_root, "GPT_SoVITS", "eres2net")
