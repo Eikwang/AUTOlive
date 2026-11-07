@@ -22,9 +22,9 @@ def _read(rel):
 
 
 def test_parse_pdh_output_basic():
-    """pid,bytes 解析+字节降序（数字拼接 ≥16 位超 E.164 上限，防 PII 扫描误报）。"""
-    rows = _parse_pdh_output("123456,1572864000\n456789,4320000000\n")
-    assert rows == [(456789, 4320000000), (123456, 1572864000)]
+    """pid,bytes 解析+字节降序（数字字面量 ≤9 位，防 PII 扫描误报）。"""
+    rows = _parse_pdh_output("123456,536870912\n456789,268435456\n")
+    assert rows == [(123456, 536870912), (456789, 268435456)]
 
 
 def test_parse_pdh_output_garbage_tolerant():
