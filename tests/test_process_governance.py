@@ -54,3 +54,12 @@ def test_restart_chain_reuses_stop_programs():
     # main.py 停止按钮也走 stop_programs
     src2 = _read("frontend/main.py")
     assert "self.stop_programs()" in src2
+
+
+def test_cover_rt_python_project_env():
+    """迁移收尾（2026-11-07，用户实测）：翻唱主跑解释器统一项目内环境——
+    py39 外部硬编码退役（此前由 rvc_vc.runtime_python 实盘覆盖键掩盖，
+    迁移清键暴露 WinError 2），收敛到 paths.rvc_python 候选链。"""
+    src = _read(os.path.join("utils", "cover_worker.py"))
+    assert "RVC20240604Nvidia" not in src, "py39 外部硬编码残留"
+    assert "paths.rvc_python" in src or 'getattr(self.paths, "rvc_python"' in src,         "缺候选链接线"

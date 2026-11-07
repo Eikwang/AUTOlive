@@ -105,13 +105,16 @@ class CoverQueue:
         return os.path.join(self._aicovergen_root(), "src")
 
     def _rt_python(self) -> str:
-        """翻唱子进程解释器（S-2 显式钉住）：默认=外部树 py3.9 嵌入式 runtime
-        （AICoverGen 依赖全齐的唯一 runtime；不得从 rvc_root 派生——S-1 根翻转
-        apps/rvc 后派生值指向不存在的 apps/rvc/runtime，/autoplan outside 发现 3）。"""
+        """翻唱子进程解释器（2026-11-07 迁移收尾修复）：统一项目内环境——
+
+        取值序：rvc_vc.runtime_python 显式覆盖（指向真实文件才采纳）→
+        paths.rvc_python 候选链（config 覆盖→记忆→仓库根 runtime312→外部
+        兜底）。**历史**：原实现回退硬编码 py39 外部嵌入式环境
+        （py39 外部嵌入式环境，S-2 时代钉子），统一项目内候选链。"""
         v = self.config.get("rvc_vc", "runtime_python")
-        if v and str(v).strip():
+        if v and str(v).strip() and os.path.isfile(str(v).strip()):
             return str(v).strip()
-        return r"D:\AI\RVC20240604Nvidia\runtime\python.exe"
+        return getattr(self.paths, "rvc_python", None) or ""
 
     # ---------- 归一化匹配（B-6）----------
 
