@@ -67,10 +67,14 @@ def test_dispatch_has_oformat_wav(tmp_path):
 
         return P()
 
-    # GPU 门=函数内 import → patch 来源模块；模型准备打桩（cmd 在其后构造）
+    # GPU 门=函数内 import → patch 来源模块；模型准备打桩（cmd 在其后构造）。
+    # 挂死根修（2026-11-07 全量 timeout 栈实锤）：_process 实际调 background_task_gate
+    # （三元组），原 patch 的 is_background_task_allowed 是平行包装不在调用链——
+    # 真实显存判定泄漏：显存余量不足时 _stop.wait(30) 无限循环（历史绿=当时显存空闲）。
     import utils.gpu_policy as gp
     with patch("utils.cover_worker.subprocess.Popen", fake_popen), \
-         patch.object(gp, "is_background_task_allowed", lambda *a, **k: (True, "")), \
+         patch.object(gp, "background_task_gate", lambda *a, **k: (True, "", "")), \
+         patch.object(CoverQueue, "_gpu_compute_snapshot", lambda *a, **k: "(测试 stub)"), \
          patch.object(CoverQueue, "_prepare_rvc_model_dir", lambda self, job: None), \
          patch.object(CoverQueue, "_find_produced_wav", lambda self, job: None):
         q._process(job, {"vram_reserve_gb": 4, "job_timeout_min": 1})
@@ -109,7 +113,8 @@ def test_pitch_passthrough_no_pre_multiply(tmp_path):
             return P()
 
         with patch("utils.cover_worker.subprocess.Popen", fake_popen), \
-             patch.object(gp, "is_background_task_allowed", lambda *a, **k: (True, "")), \
+             patch.object(gp, "background_task_gate", lambda *a, **k: (True, "", "")), \
+             patch.object(CoverQueue, "_gpu_compute_snapshot", lambda *a, **k: "(测试 stub)"), \
              patch.object(CoverQueue, "_prepare_rvc_model_dir", lambda self, job: None), \
              patch.object(CoverQueue, "_find_produced_wav", lambda self, job: None):
             q._process(job, {"vram_reserve_gb": 4, "job_timeout_min": 1})

@@ -311,6 +311,7 @@ untime\sox\`(main.py:12-14 的 sys.prefix/sox PATH 约定目录,Eng H-1);探测�
 1. **~~全量测试套件 149 项存量失败（features 历史验收测试漂移）~~（已完成 2026-10-20）**— 门禁 A 批次（74b932d1）150 失败→0：asyncio.run 根因修复×4+独立路径防竞争+按现行功能现实重写/退役过期断言，最终套件 619 passed + 72 retired skip。
 2. **虚拟摄像头"已安装"态无重装/改名入口**（P3, S）— visual_body 摄像头卡仅在未安装态渲染安装按钮；改名/重装需手动 regsvr32。旧安装 dll 指向 D:\AI\EDTalk\UNITYC~1（仍有效），清理该目录前须先重装（安装件在 edtalk/UnityCapture-master/Install/）。
 3. **test_cover_queue GPU 环境依赖**【2026-10-23 核实已闭环：test_cover_queue 6 passed（GPU 断言已 mock 化），台账过时】（P3, S）— test_gpu_policy_returns_tuple 断言拒绝理由含"显存"，realtime_serve 运行时显存被占导致失败；测试应 mock GPU 查询或标注 needs-idle-gpu。
+4. **~~test_rvc_rc_integration GPU 门 patch 脱链挂死~~（已修 2026-11-07）**— 全量实跑 35 分钟卡 5%：patch 的是 is_background_task_allowed 而 _process 实调 background_task_gate（平行包装不在调用链）→ 真实显存判定泄漏（显存余量 <4GB 时 _stop.wait(30) 无限循环，历史绿=当时显存空闲）；同文件两处另修 _gpu_compute_snapshot 快照对 fake_popen 捕获的污染（c17293e2 快照新增的 subprocess 调用在 patch 环境同被劫持覆盖 cmds）。防御面：pytest.ini 全局 --timeout=180 --timeout_method=thread（挂死 180s 切断+栈 dump）。**遗留观察项**：test_gptsovits_deep_integration.py:82/102 的 is_background_task_allowed patch 同样无效（train_voice_pipeline 模块级 import 绑定脱链）——当前绿=准入被 fake _run 链覆盖不触发，无害；未来触碰训练链测试时一并改 patch train_voice_pipeline 命名空间。
 
 ## Deferred Items from /autoplan (2026-10-22) — 音频播放功能审查批次（CEO/Eng 两阶段收官，待 Phase 4 终门）
 
