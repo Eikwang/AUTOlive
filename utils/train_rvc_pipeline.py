@@ -477,10 +477,12 @@ class TrainRvcPipeline:
         dst_idx = os.path.join(dst_dir, f"{exp_name}.index")
         shutil.copy2(final_pth, dst_pth)
         shutil.copy2(idx_src, dst_idx)
-        # py39 翻唱 runtime 双冒烟（P-11+outside 发现 5：.pth load+faiss.read_index）
+        # 翻唱 runtime 双冒烟（P-11+outside 发现 5：.pth load+faiss.read_index）
         # config_get：前端 dict config 下 dict.get("rvc_vc", "x") 会返回整个节
+        # 2026-11-07 迁移收尾：解释器统一项目内候选链（py39 外部环境已不存在；
+        # 翻唱主跑同款语义，见 cover_worker._rt_python）——冒烟环境=实际消费环境
         smoke_py = (config_get(self.config, "rvc_vc", "runtime_python")
-                    or r"D:\AI\RVC20240604Nvidia\runtime\python.exe")
+                    or getattr(self.paths, "rvc_python", None) or "")
         code = ("import sys, torch, faiss\n"
                 f"torch.load(r'{dst_pth}', map_location='cpu')\n"
                 f"faiss.read_index(r'{dst_idx}')\n"
