@@ -448,7 +448,11 @@ def create_choose_song_tab(
             with ui.grid(columns=2).style("width:100%;margin-top:8px"):
                 from utils.voice_profiles import load_profiles
                 profs = load_profiles()
-                opts = {pid: (p.get("name") or pid) for pid, p in profs.items() if p.get("rvc_model")}
+                # 2026-11-07 模型管理批次：模型文件存在性过滤——档案记录指向的
+                # RVC 模型已删（手动删文件不产生档案联动）时不再出现在音色下拉
+                # （选中必炸）；悬空档案由档案页「模型缺失」标记提示清理
+                opts = {pid: (p.get("name") or pid) for pid, p in profs.items()
+                        if p.get("rvc_model") and os.path.isfile(p["rvc_model"])}
                 if not opts:
                     opts = {"default": "（默认：models/rvc/ 第一个模型）"}
                 # NiceGUI select 的 value 必须是 options 的键：config 未存过档案 id 时

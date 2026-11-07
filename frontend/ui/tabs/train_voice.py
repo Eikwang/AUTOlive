@@ -304,7 +304,23 @@ def create_train_voice_tab(
         ui.notify(position="top", type="warning", message="已请求停止（当前步骤跑完即止）")
 
     # ---------- 状态轮询（0.5s，train_streamer 同款；多管线分组渲染） ----------
+    # 2026-11-07 模型管理批次：页面被 layout clear 后 timer 自杀（同 svc._poll
+    # 防御——NiceGUI timer 不随元素删除取消，slot deleted 异常循环根修）。
+    _poll_timer_ref: list = [None]
+
     def _poll():
+        global _pipeline
+        try:
+            _poll_body()
+        except RuntimeError as e:
+            if "has been deleted" in str(e):
+                t = _poll_timer_ref[0]
+                if t is not None:
+                    t.active = False
+                return
+            raise
+
+    def _poll_body():
         global _pipeline
         if not _pipes:
             return
@@ -437,4 +453,5 @@ def create_train_voice_tab(
 
     _render_models()
 
-    ui.timer(0.5, _poll)
+    _t_poll = ui.timer(0.5, _poll)
+    _poll_timer_ref[0] = _t_poll

@@ -360,32 +360,33 @@ def _load_gpt_sovits_model(config: Dict[str, Any]):
         _th.Thread(target=lambda: _aio.run(_do()), daemon=True).start()
 
 def _render_voice_profile_selector(config: Dict[str, Any], card_css: str):
-    """P2-4/D7/D8/B-6：声音档案分组选择器 + 模型对写入 gpt_sovits 节。
+    """声音模型选择器（GPT-SoVITS）+ 模型对写入 gpt_sovits 节。
 
-    - 2026-10-30 审查批次：仅显示「数字人-声音训练-gpt-sovits」管线训练的档案
-      （gpt_model/sovits_model 非空；RVC 管线档案不显示）
-    - 2026-11-07 模型管理批次：删除按钮退役——模型文件管理统一收口到
-      「数字人-声音训练-声音模型管理」区块（本页只选不删；原删除按钮删的是
-      档案记录且 UI 不刷新，用户感知"不能生效"，语义与预期不符）
-    - 点选档案 → 把 GPT-SoVITS 模型对/参考音频写入 gpt_sovits 节
-    - 零档案 → 空态卡片指向训练页
+    - 2026-11-07 模型管理批次（用户裁决）：呈现层退役「档案」概念——只显示
+      **可用声音**（gpt/sovits 模型文件双件齐存），用户语义=「训练了小美就
+      显示小美，选用即推理」；模型文件管理统一在训练页声音模型管理区块
+    - 数据层 voice_profiles 保留（承载参考音频/提示文本等推理配置，
+      合成链必需），仅前端过滤
+    - 点选声音 → 把 GPT-SoVITS 模型对/参考音频写入 gpt_sovits 节
+    - 零可用声音 → 空态卡片指向训练页
     """
     from nicegui import ui as _ui
     from utils.voice_profiles import load_profiles
 
     all_profiles = load_profiles()
-    # 管线过滤：仅 gpt-sovits 训练管线产出的档案（gpt_model 或 sovits_model 非空）
+    # 可用性过滤：gpt/sovits 双件模型文件都真实存在才显示（半对/悬空不出现）
     profiles = {pid: p for pid, p in all_profiles.items()
-                if p.get("gpt_model") or p.get("sovits_model")}
+                if p.get("gpt_model") and p.get("sovits_model")
+                and os.path.isfile(p["gpt_model"]) and os.path.isfile(p["sovits_model"])}
     if not profiles:
         with _ui.card().style(card_css):
-            _ui.label("声音档案").style("font-weight:var(--font-weight-emphasis)")
-            _ui.label("暂无 GPT-SoVITS 档案——「数字人-声音训练」完成后自动出现在此处").style(
+            _ui.label("声音模型").style("font-weight:var(--font-weight-emphasis)")
+            _ui.label("暂无可用声音模型——「数字人-声音训练」完成后自动出现在此处").style(
                 "font-size:12px;color:var(--text-secondary)")
         return
 
     with _ui.card().style(card_css):
-        _ui.label("声音档案（GPT-SoVITS）")
+        _ui.label("声音模型（GPT-SoVITS）")
         with _ui.grid(columns=2):
             current_gpt = get_nested_value(config, "gpt_sovits", "gpt_model_path") or ""
             for pid, prof in profiles.items():

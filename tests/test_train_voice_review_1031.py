@@ -123,11 +123,14 @@ def test_v2_v3_gsv_export_merges_and_preserves_rvc(tmp_path, monkeypatch):
 
 
 def test_goal2_consumers_filter_by_pipeline():
-    """②三端应用隔离：TTS 只看 gpt/sovits 字段，翻唱/变声只看 rvc 字段。"""
+    """②三端应用隔离：TTS 只看 gpt/sovits 字段，翻唱/变声只看 rvc 字段。
+    2026-11-07 模型管理批次：三端过滤全部强化为文件存在性过滤（呈现层只显示
+    可用模型——档案指向的模型文件已删时不再出现，选中必炸的幽灵项根除）。"""
     tts_src = _src("frontend/ui/tabs/tts.py")
-    assert 'if p.get("gpt_model") or p.get("sovits_model")}' in tts_src
+    assert 'and os.path.isfile(p["gpt_model"])' in tts_src
+    assert 'and os.path.isfile(p["sovits_model"])' in tts_src
     song_src = _src("frontend/ui/tabs/choose_song.py")
-    assert 'if p.get("rvc_model")}' in song_src
+    assert 'if p.get("rvc_model") and os.path.isfile(p["rvc_model"])}' in song_src
     rvc_svc_src = _src("utils/rvc_service.py")
     assert 'prof.get("rvc_model")' in rvc_svc_src  # 变声默认模型 RVC 档案优先（2026-11-07 公共化）
     # 产物保存隔离：GSV 权重目录 vs models/rvc

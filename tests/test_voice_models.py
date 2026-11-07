@@ -140,3 +140,31 @@ def test_ui_relocation_tts_retired_train_wired():
     for needle in ("list_voice_models", "delete_voice_model", "_confirm_delete",
                    "_render_models", "声音模型管理"):
         assert needle in train, f"训练页管理区块缺 {needle}"
+
+
+def test_ui_liveness_guards():
+    """UI 存活性守卫（2026-11-07 用户实报批次）：
+
+    - svc._poll：status 非 dict 防护（NoneType.get 实报根修）+ 页面删除后
+      timer 自杀（slot deleted 异常循环根修）+ 模型段动态重绘（存在性过滤）
+    - tts 档案行：模型缺失标记（悬空档案透明可见）
+    - choose_song：翻唱音色下拉文件存在性过滤（选中必炸的幽灵项不再出现）
+    - train_voice._poll：同款页面删除自杀防御
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    svc = open(os.path.join(root, "frontend", "ui", "tabs", "svc.py"), encoding="utf-8").read()
+    assert "if not isinstance(st, dict):" in svc, "svc._poll 缺 status 非 dict 防护"
+    assert '"has been deleted" in str(e)' in svc, "svc._poll 缺页面删除 timer 自杀"
+    assert "_render_model_section" in svc and "model_section_body.clear()" in svc, \
+        "变声模型段应容器化重绘（动态刷新）"
+    assert 'os.path.isfile(p["rvc_model"])' in svc, "档案引用行缺文件存在性过滤（幽灵行）"
+    tts = open(os.path.join(root, "frontend", "ui", "tabs", "tts.py"), encoding="utf-8").read()
+    assert 'and os.path.isfile(p["gpt_model"])' in tts, \
+        "tts 声音列表应只显示可用声音（模型双件齐存过滤，用户裁决 2026-11-07）"
+    assert "模型缺失" not in tts, "呈现层过滤后缺失标记分支应退役"
+    song = open(os.path.join(root, "frontend", "ui", "tabs", "choose_song.py"),
+                encoding="utf-8").read()
+    assert 'os.path.isfile(p["rvc_model"])' in song, "翻唱音色下拉缺存在性过滤"
+    train = open(os.path.join(root, "frontend", "ui", "tabs", "train_voice.py"),
+                 encoding="utf-8").read()
+    assert '"has been deleted" in str(e)' in train, "train_voice._poll 缺自杀防御"
