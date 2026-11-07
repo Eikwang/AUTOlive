@@ -129,6 +129,20 @@ class CoverQueue:
             return ""
 
     @staticmethod
+    def _gpu_compute_snapshot() -> str:
+        """GPU compute 进程快照（2026-11-07 诊断增强）：翻唱前/后各落一条——
+        ①证明主跑在 GPU（运行中快照含主跑 python 进程+显存）；②主跑退出后
+        的残留显存直接现形（PID+进程名+MB）。异常不阻断主流程。"""
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
+                 "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
+            out = (r.stdout or "").strip()
+            return out if out else "（无 compute 进程）"
+        except Exception as e:
+            return f"(nvidia-smi 不可用: {e})"
+
+    @staticmethod
     def _cached_paths():
         """AutolivePaths 进程级缓存（构造有文件探测 IO——每任务一次不划算）。"""
         inst = getattr(CoverQueue, "_paths_cache", None)
@@ -280,6 +294,7 @@ class CoverQueue:
         job["wait_code"] = ""  # C-2：准入通过置空（webui 轮询侧按 非空→空 转换 notify）
         if waited_once:
             logger.info(f"[cover] 等待结束，开始翻唱: {song}")
+        logger.info(f"[cover][GPU前] compute 进程快照: {self._gpu_compute_snapshot()}")
         if self._stop.is_set():
             return
         os.makedirs(self._covers_dir(), exist_ok=True)
@@ -346,6 +361,7 @@ class CoverQueue:
             self._fail(job, policies)
             return
         logger.info(f"[cover] 主跑结束 rc={rc}：{song}（输出: {run_log}）")
+        logger.info(f"[cover][GPU后] compute 进程快照: {self._gpu_compute_snapshot()}")
         if rc != 0:
             # C7 ②崩溃场景（spec CL-2 挂点）：主跑已死——psutil 双条件扫描收尸
             # （收尸与产物成败解耦：崩溃≠失败，produced 判定在下方）
