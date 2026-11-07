@@ -130,17 +130,15 @@ class CoverQueue:
 
     @staticmethod
     def _gpu_compute_snapshot() -> str:
-        """GPU compute 进程快照（2026-11-07 诊断增强）：翻唱前/后各落一条——
-        ①证明主跑在 GPU（运行中快照含主跑 python 进程+显存）；②主跑退出后
-        的残留显存直接现形（PID+进程名+MB）。异常不阻断主流程。"""
+        """GPU compute 显存快照（2026-11-07 二批升级）：委托 gpu_probe 双路——
+        PDH 路（任务管理器同源，PID+显存现形；补 nvidia-smi 显存列 Windows
+        WDDM 常为 N/A 的盲区——首批评实测快照 used_memory 全 [N/A]）+
+        nvidia-smi 路（compute 归属印证）。异常不阻断主流程。"""
         try:
-            r = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
-                 "--format=csv,noheader"], capture_output=True, text=True, timeout=10)
-            out = (r.stdout or "").strip()
-            return out if out else "（无 compute 进程）"
+            from utils.gpu_probe import gpu_memory_report
+            return gpu_memory_report()
         except Exception as e:
-            return f"(nvidia-smi 不可用: {e})"
+            return f"(GPU 快照不可用: {e})"
 
     @staticmethod
     def _cached_paths():

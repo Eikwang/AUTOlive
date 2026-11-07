@@ -838,7 +838,9 @@ class AutoliveApp:
           及 main 拉起的 ManagedProcess 子进程按树连带终止）；
         ④残留收尸兜底（psutil 按命令行特征扫孤儿——registry 丢失/异常路径
           漏网的进程，特征=仓库根路径+模块标记，排除自身；api_v2 用户自备
-          不在收尸范围，F11 不拉起不托管语义）。
+          不在收尸范围，F11 不拉起不托管语义）；
+        ⑤停止后 GPU 显存快照（PDH 路，2026-11-07 显存排查批次）——全停后
+          残留显存的进程归属直接现形，为「逐模块激活二分」提供基线。
         重启=本方法+启动链（layout 既有串联），全部重启自动成立。"""
         # ①托管服务全停
         try:
@@ -861,6 +863,14 @@ class AutoliveApp:
             self._reap_orphan_processes()
         except Exception as e:
             logger.warning(f"[stop] 收尸扫描异常（忽略）: {e}")
+        # ⑤停止后 GPU 显存快照（2026-11-07 显存排查批次）：PDH 路落一条
+        # 「谁还占着专用显存」——AUTOlive 全停后清零则残留归属本系统
+        # （下一步逐模块激活二分定位）；仍高则归属系统侧（OBS/驱动等）。
+        try:
+            from utils.gpu_probe import gpu_memory_report
+            logger.info(f"[stop] 停止后 GPU 显存快照:\n{gpu_memory_report()}")
+        except Exception as e:
+            logger.debug(f"[stop] GPU 快照不可用（忽略）: {e}")
 
     def _reap_orphan_processes(self) -> list:
         """残留收尸兜底：psutil 按命令行特征扫孤儿进程。

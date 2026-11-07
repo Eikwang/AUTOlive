@@ -16,7 +16,7 @@
 ## Deferred Items from /autoplan (2026-11-03) — 一键翻唱整合运行机制治理批次（main-20261103-102228，CEO/ENG/DX 三阶段审查完毕待终门）
 
 1. **P2 机制本体缺陷两项**（P2, M；D-5/spec Q3）— ServiceRegistry.register 同名覆盖不 stop 旧实例子进程 + ManagedProcess 健康检查探 URL 不认进程（utils/service_orchestrator.py:380-382/:296-309）——影响所有 ManagedProcess 用户（gpt_sovits/rvc-vc 共用）。**触发条件：任一托管服务再现孤儿/双拉即升 P0**。依赖：无。
-2. **「GPU 服务按需治理」命名批次**（P2, L；native F1）— GPT-SoVITS/rvc-vc/EDTalk/AICoverGen 统一按需策略引擎（用才拉/完即退/闲置自退）——12 个月理想态「GPU 服务全部按需」的承接批次，防 Dream State 无归属。依赖：uc1 终门裁决结果；C6 量化数据（rvc-vc 常驻成本基线）为输入。
+2. **「GPU 服务按需治理」命名批次**（P2, L；native F1）— GPT-SoVITS/rvc-vc/EDTalk/AICoverGen 统一按需策略引擎（用才拉/完即退/闲置自退）——12 个月理想态「GPU 服务全部按需」的承接批次，防 Dream State 无归属。依赖：uc1 终门裁决结果；C6 量化数据（rvc-vc 常驻成本基线）为输入。**【2026-11-07 显存残留排查并入】**用户曾报"翻唱后残留 1.5G 显存"：实测排除翻唱（cover.log GPU 前/后快照零 python 进程）+ 用户全流程复查零残留——疑似当时 GSV 等常驻消费者在跑（设计内）或瞬时波动，**未定案**；用户裁决留待办，再现时按既有工具定位：`Scripts/gpu_memory_report.py`（PDH 双路，PID+进程名+MB）+ 停止后自动快照（stop_programs ⑤层）+ 翻唱前/后快照（[cover][GPU前/后]）——冷基线 485~651 MB 全为系统桌面进程，模块排除矩阵见脚本 docstring。
 3. **跨进程双拉**（P3, S；ENG-4）— ServiceRegistry 进程内单例，主系统与 webui 注册表互不可见——webui starting 就绪窗内点「启动系统」仍会双拉（后绑定方端口冲突升级）。归入 GPU 治理批次。依赖：条目 2。
 4. **webui 事件循环阻塞源确诊可修项**（P2, ?；D-6）— 实施期 /investigate 确诊产出：S 级可修项已按 F2 规则入批顺手修；M 级以上落此（含 alive 复查 to_thread 记名，ENG-12——script mode 重入 __init__ 事件循环线程内同步 urlopen 至多阻塞 2s）。依赖：实施期确诊记录。
 5. **erro5.log 类实测日志卫生门禁**（P3, S；native F9）— tests/test_repo_hygiene 风格拦截实测日志快照入库。依赖：无。
