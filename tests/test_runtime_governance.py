@@ -316,10 +316,20 @@ def test_c3_no_placeholder_registration(rvc_env, tmp_path, monkeypatch):
     rs, install = rvc_env
     reg = install(None)
     monkeypatch.setattr(rs, "rvc_vc_alive", lambda *a, **k: False)
+    # 2026-11-07 懒启动断链修复：ensure 新实例由 build 内部 boot 线程 start——
+    # patch 掉真 start（测试环境 Popen 必失败→crashed 干扰断言），改记调用。
+    started = {"n": 0}
+    monkeypatch.setattr(rs.ManagedProcess, "start",
+                        lambda self: started.__setitem__("n", started["n"] + 1) or True)
     cfg, paths = _FakeConfig(), _fake_paths(tmp_path)
-    rs.ensure_rvc_vc(cfg, paths)  # 首用 ensure：注册并后台 start
+    rs.ensure_rvc_vc(cfg, paths)  # 首用 ensure：注册并后台 boot
     svc = reg.get("rvc-vc")
     assert svc is not None and svc.state == "starting"  # ensure 才注册（ENG-1 语义）
+    import time as _t
+    deadline = _t.time() + 5
+    while started["n"] == 0 and _t.time() < deadline:
+        _t.sleep(0.05)
+    assert started["n"] == 1, "懒路径新实例未被 boot（断链回归）"
     assert not hasattr(rs, "lazy_register_rvc_vc"), "占位登记死代码残留（用户裁决清理）"
     main_src = Path("frontend/main.py").read_text(encoding="utf-8")
     assert "lazy_register_rvc_vc" not in main_src, "main.py 占位调用残留"

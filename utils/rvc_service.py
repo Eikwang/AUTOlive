@@ -285,6 +285,37 @@ def pick_default_model(config=None, models_dir: str = None):
         return None
 
 
+def auto_start_stream(config, models_dir: str = None) -> None:
+    """开关语义执行器（2026-11-07 整合批次，用户预期 3）：预切默认模型+按
+    已保存设备开流——"启动即执行变声功能"，不管服务是谁拉的。
+
+    前置=服务在线（调用方保证：main.py 探活在线分支或 start() 成功后）。
+    流已在运行 → 幂等跳过。失败抛异常（调用方报警通知）。"""
+    client = RvcVcClient(config=config)
+    st = client.status()
+    if st.get("state") == "running":
+        logger.info("[rvc-vc] 流已在运行——跳过重复开流")
+        return
+    if not (st.get("model") or {}).get("pth"):
+        if not models_dir:
+            try:
+                paths = AutolivePaths(config)
+                models_dir = os.path.join(paths.autolive_home, "models", "rvc")
+            except Exception:
+                models_dir = None
+        picked = pick_default_model(config, models_dir)
+        if picked:
+            client.switch_model(
+                picked["pth"], picked["index"],
+                float(as_keyed_config(config).get("rvc_vc", "index_rate") or 0.75))
+        else:
+            logger.warning("[rvc-vc] 无可用 RVC 模型——开流继续（服务端可能拒绝，见日志）")
+    client.start_stream(
+        input_device=as_keyed_config(config).get("rvc_vc", "input_device") or None,
+        output_device=as_keyed_config(config).get("rvc_vc", "output_device") or None)
+    logger.info("[rvc-vc] 变声流已开启（开关语义=启动即执行）")
+
+
 def _remember_interpreter(svc) -> None:
     """T5（F-N2 配套）：拉起成功后记录实际使用的解释器（best-effort）。
     getattr 守卫：测试/mock 实例可能无 command 属性，静默跳过不干扰关键路径。"""

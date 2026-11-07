@@ -380,10 +380,13 @@ def test_svc_capsule_flip_and_quiet_copy():
 def test_main_auto_stream_on_switch():
     """整合批次（用户预期 3）：开关开+启动主系统=自动开流+失败报警。"""
     src = _read("main.py")
-    assert "def _boot_and_stream" in src, "缺自动开流"
-    assert "pick_default_model" in src, "自动开流缺预切模型"
-    assert "client.start_stream" in src, "自动开流缺开流"
+    assert "auto_start_stream" in src, "缺公共开流执行器调用"
+    assert src.count("_stream_with_alarm") >= 3, "helper 定义+两分支接线（已在线/拉起后）"
+    assert "服务已在线——开关语义=执行变声" in src, "已在线分支不得跳过开流"
     assert "MODULE_VOICE_CHANGE" in src, "开流失败缺报警（用户裁决）"
+    src2 = _read(os.path.join("utils", "rvc_service.py"))
+    assert "def auto_start_stream" in src2, "公共执行器缺失"
+    assert "state == \"running\"" in src2, "执行器缺幂等（流在跑跳过）"
     src2 = _read(os.path.join("utils", "alarm_notifier.py"))
     assert 'MODULE_VOICE_CHANGE: "实时变声"' in src2, "报警标签缺"
 
