@@ -137,26 +137,10 @@ def create_svc_tab(
     card_css = theme_config.get("card", "")
     client = _client_for(config)
 
-    # C3 懒触发（2026-11-03 终门 uc1c）：进变声页=首次使用变声功能——按 C2
-    # 终版单例判定后台拉起（在册/在线跳过；离线 build+start+idle 监控）。
-    # 全程后台任务（ENG-12：alive 探活至多 2s 同步会阻塞页构建，挪出事件循环）；
-    # 懒拉起失败不阻断页面渲染（状态条/启动按钮四态可见真实状态）。
-    async def _lazy_ensure():
-        try:
-            from utils.autolive_paths import AutolivePaths
-            from utils.rvc_service import ensure_rvc_vc
-            _paths = AutolivePaths(config)
-            # T3（缺陷5a）：挂状态回调——拉起中/置红/休眠迁移到 _svc_state_text
-            _svc = await run.io_bound(ensure_rvc_vc, config, _paths,
-                                      on_state_change=_on_svc_state_change)
-            if _svc is None:
-                logger.info("[svc] rvc-vc 已在线，直连使用")
-        except Exception as _ensure_err:
-            logger.warning(f"[svc] 变声服务懒拉起失败（不阻断页面）：{_ensure_err}")
-            ui.notify(f"变声服务自动拉起失败：{str(_ensure_err)[:80]}"
-                      f"——请查看服务状态条与 logs/services/rvc-vc.log", type="warning")
-
-    background_tasks.create(_lazy_ensure())
+    # 2026-11-07 整合批次（用户预期 1/4）：进页面=纯本地配置面——设备本地
+    # 枚举、模型本地扫描、参数本地读写，全部零服务依赖；不再自动拉起 rvc-vc
+    # 进程（原先进页即自动 ensure——违反"未执行变声时不要进程"）。
+    # 点「启动变声」才按需拉起+等就绪+开流（一条龙，见 _start）。
     _stop_stale_timers()
     models_dir = os.path.join(
         get_nested_value(config, "paths", "autolive_home")
@@ -280,35 +264,25 @@ def create_svc_tab(
         # _poll 探测到服务上线后自动补枚举+就绪清错，不再依赖手动刷新。
         _devices_state = {"loaded": False, "pending": False}
 
-        _ensure_lock = {"busy": False}
-
-        def _ensure_backend():
-            """T2（缺陷4 根修）：前端失败路径的后台重拉入口——ensure_rvc_vc
-            幂等（在线返回 None/在途复用/置红 manual_restart 复活/离线拉起）。
-            _ensure_lock 防抖：枚举失败×N 与 _start 失败并发只触发一路。"""
-            if _ensure_lock["busy"]:
-                return
-            _ensure_lock["busy"] = True
-
-            def _work():
-                try:
-                    from utils.autolive_paths import AutolivePaths
-                    from utils.rvc_service import ensure_rvc_vc
-                    _paths = AutolivePaths(config)
-                    await_unused = ensure_rvc_vc(config, _paths,
-                                                 on_state_change=_on_svc_state_change)
-                except Exception as e:
-                    logger.warning(f"[svc] 失败路径后台重拉异常（忽略，可重试）：{e}")
-                finally:
-                    _ensure_lock["busy"] = False
-            threading.Thread(target=_work, daemon=True).start()
-
         async def _refresh_devices():
-            """E-9：/devices 枚举（io_bound 卸载）→ 填充下拉；空态禁用启动。
-            pending 防并发（首次枚举/补枚举在途时跳过）；失败给行动指引不锁死。
-            T2（缺陷4）：失败分支自动触发后台 ensure 重拉（幂等——在线/在途
-            自动跳过；置红实例走 manual_restart 复活）。"""
-            def _enum():
+            """设备枚举（2026-11-07 整合批次，用户预期 1）：**本地 sounddevice
+            优先**——前端进程与 rvc-vc 服务同环境（sounddevice 0.5.5 实测在），
+            枚举零服务依赖，服务离线也可完整配置；服务枚举降为本地失败兜底，
+            再失败由手输兜底（new_value_mode）。pending 防并发。"""
+            def _enum_local():
+                import sounddevice as sd
+                out = {"input": [], "output": []}
+                for dev in sd.query_devices():
+                    name = dev.get("name")
+                    if not name:
+                        continue
+                    if dev.get("max_input_channels", 0) > 0:
+                        out["input"].append(name)
+                    if dev.get("max_output_channels", 0) > 0:
+                        out["output"].append(name)
+                return out
+
+            def _enum_via_service():
                 d = client.devices()
                 out = {"input": [], "output": []}
                 for dev in d.get("devices") or []:
@@ -320,14 +294,19 @@ def create_svc_tab(
                     if dev.get("max_output_channels", 0) > 0:
                         out["output"].append(name)
                 return out
+
             if _devices_state["pending"]:
                 return
             _devices_state["pending"] = True
             try:
-                devs = await run.io_bound(_enum)
+                try:
+                    devs = await run.io_bound(_enum_local)
+                except Exception as local_err:
+                    logger.debug(f"[svc] 本地设备枚举失败（回退服务枚举）: {local_err}")
+                    devs = await run.io_bound(_enum_via_service)
             except Exception as e:
-                _show_error(f"变声服务未连接——{_format_vc_error(e)}")
-                _ensure_backend()  # 缺陷4 根修：失败即后台重拉（幂等）
+                # 两路都失败：手输兜底仍可用（new_value_mode），不再锁死配置
+                _show_error(f"设备枚举失败（可手动键入设备名）[{str(e)[:80]}]")
                 return
             finally:
                 _devices_state["pending"] = False
@@ -397,42 +376,53 @@ def create_svc_tab(
             # 设备名显式传参（消除闭包时序依赖）。
             threading.Thread(target=_start, args=(in_name, out_name), daemon=True).start()
 
-        def _pick_default_model():
-            """启动预切默认模型（2026-10-30 修复启动 500「先 /switch 再 /start」）：
-            RVC 管线档案优先（任务书：声音模型使用 RVC 训练结果）→ 目录扫描序。"""
-            for pid, p in load_profiles().items():
-                if p.get("rvc_model"):
-                    return {"name": pid, "pth": p["rvc_model"],
-                            "index": p.get("rvc_index")}
-            return models[0] if models else None
+        def _wait_ready(timeout_s: float = 90.0) -> bool:
+            """一条龙步骤 2：等服务就绪（拉起异步 boot 在途——轮询至 200）。"""
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                try:
+                    client.status()
+                    return True
+                except Exception:
+                    time.sleep(1.0)
+            return False
 
         def _start(in_name, out_name):
+            """一条龙启动（2026-11-07 整合批次，用户预期 2）：点「启动变声」=
+            直接执行变声功能——拉服务→等就绪→预切模型→开流，全程按钮"启动中..."
+            反馈进度，任一步失败才报错。不再让用户面对中间态猜重试。"""
             try:
-                # 修复：服务端 /start 前置条件=模型已加载（未加载时 HTTP 500）。
-                # 首启（状态 model.pth 空）自动预切第一个可用 RVC 模型再开流；
-                # 无模型时给出行动指引而非裸 500。
+                from utils.autolive_paths import AutolivePaths
+                from utils.rvc_service import ensure_rvc_vc, pick_default_model
+                _set_btn("starting")
+                stream_btn.set_text("启动中...（服务准备）")
+                ensure_rvc_vc(config, AutolivePaths(config),
+                              on_state_change=_on_svc_state_change)  # 幂等：在线跳过
+                if not _wait_ready(90):
+                    raise TimeoutError(
+                        "变声服务 90 秒未就绪（拉起失败）——看 logs/services/rvc-vc.log")
+                # 服务端 /start 前置=模型已加载；首启自动预切默认模型
+                stream_btn.set_text("启动中...（准备模型）")
                 st = client.status()
                 if not (st.get("model") or {}).get("pth"):
-                    picked = _pick_default_model()
+                    picked = pick_default_model(config, models_dir)
                     if not picked:
                         _set_btn("error")
                         _show_error("无可用 RVC 模型——先在【数字人-训练声音】完成 RVC 训练，"
-                                    "或将 .pth+.index 放入 models/rvc/ 后刷新页面")
+                                    "或将 .pth+.index 放入 models/rvc/ 后重试")
                         return
                     client.switch_model(
                         picked["pth"], picked["index"],
                         _as_float(get_nested_value(
                             config, "rvc_vc", "index_rate") or 0.75))
+                stream_btn.set_text("启动中...（开启音频流）")
                 client.start_stream(input_device=in_name, output_device=out_name)
                 _stream_state["error"] = None
                 _set_btn("running"); _clear_error()
                 _rebuild_dirty.clear(); _update_rebuild_badge()
             except Exception as e:
                 _set_btn("error")
-                # T2（缺陷4/5b）：三要素文案替代旧误导文案（"再点启动"暗示用户侧可修——
-                # 旧链下点多少次都 10061）；并自动触发后台重拉（幂等）
                 _show_error(f"启动失败：{_format_vc_error(e)}")
-                _ensure_backend()
 
         # ---- A-7 修复：单 timer + async 回调（io_bound 卸载）----
         model_label_cache = {"pth": None}
@@ -443,19 +433,30 @@ def create_svc_tab(
                     if False else await run.io_bound(client.status)
             except Exception:
                 _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
-                # T3（缺陷5a）：优先呈现真实生命周期态（拉起中/置红/休眠——
-                # _on_svc_state_change 写入），替代含糊的"主系统未启动"旧文案
-                if _svc_state_text:
-                    suffix = "（服务离线，已手输设备名）" if _devices_state.get("manual") else ""
-                    status_label.set_text(f"○ {_svc_state_text}{suffix}")
-                elif bool(get_nested_value(config, "rvc_vc", "enabled")):
-                    status_label.set_text(
-                        "○ 变声服务启动中...（前端已托管拉起，约 10-60 秒就绪；拉起失败见 webui 日志 [rvc-vc]）")
+                # 胶囊翻转（2026-11-07 整合批次）：流不在跑 → 侧边栏不显示
+                try:
+                    from utils.service_orchestrator import ServiceRegistry as _SR
+                    _inst = _SR.instance().get("rvc-vc")
+                    if _inst is not None:
+                        _inst.show_in_statusbar = False
+                except Exception:
+                    pass
+                # 文案收敛（用户预期 4/5）：启动流程中显示真实生命周期态；
+                # 其余时刻一句安静文案（不提进程/主系统/重试指引）
+                if _stream_state["state"] == "starting":
+                    status_label.set_text(f"○ {_svc_state_text or '服务拉起中...（10-60s）'}")
                 else:
-                    status_label.set_text(
-                        "○ 变声未启用——打开左侧二级菜单「变声」开关并重启前端即自动拉起服务；页面配置仍可用")
+                    status_label.set_text("○ 变声未运行——配置后点「启动变声」开始")
                 return
             running = st.get("state") == "running"
+            # 胶囊翻转：流运行中显示「变声」胶囊；停止/待机不显示（懒实例）
+            try:
+                from utils.service_orchestrator import ServiceRegistry as _SR
+                _inst = _SR.instance().get("rvc-vc")
+                if _inst is not None:
+                    _inst.show_in_statusbar = bool(running)
+            except Exception:
+                pass
             model = (st.get("model") or {}).get("pth", "")
             model_short = os.path.basename(model) if model else "未加载"
             delay = st.get("algo_delay_ms") or 0

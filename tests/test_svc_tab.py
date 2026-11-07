@@ -59,8 +59,9 @@ class TestVoiceChangerIndependence:
         """svc.py 离线提示不再指向「启动系统」（前端托管语义）。"""
         src = _src()
         assert "点侧边栏「启动系统」后约 10-20 秒自动就绪" not in src
-        assert "前端已托管拉起" in src
-        assert "变声未启用" in src
+        assert "前端已托管拉起" not in src, "托管拉起中间态文案已退役（2026-11-07 一条龙）"
+        assert "变声未运行——配置后点「启动变声」开始" in src, "安静文案"
+        assert "变声未启用" not in src, "enabled 区分文案已退役（2026-11-07 一条龙）"
 
 
 def _src():
@@ -124,10 +125,11 @@ class TestAutoSwitchBeforeStart:
 
     def test_default_model_prefers_rvc_profiles(self):
         """任务书：声音模型使用 RVC 管线训练结果——档案（rvc_model）优先于目录扫描。"""
-        src = _src()
-        pick_seg = src[src.find("def _pick_default_model("):src.find("def _start(")]
-        assert pick_seg.index("rvc_model") < pick_seg.index("models[0]"), \
-            "档案优先序回归"
+        from utils.rvc_service import pick_default_model  # noqa: F401
+        src2 = _read_root("utils/rvc_service.py")
+        pick_seg = src2[src2.find("def pick_default_model("):]
+        assert pick_seg.index("rvc_model") < pick_seg.index("listdir(models_dir)"), \
+            "档案优先序回归（2026-11-07 公共化至 rvc_service）"
 
     def test_update_rebuild_badge_derefs_container(self):
         """2026-10-30 四次修复（启动成功却误报失败）：_update_rebuild_badge 对

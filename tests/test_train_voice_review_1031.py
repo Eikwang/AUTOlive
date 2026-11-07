@@ -128,8 +128,8 @@ def test_goal2_consumers_filter_by_pipeline():
     assert 'if p.get("gpt_model") or p.get("sovits_model")}' in tts_src
     song_src = _src("frontend/ui/tabs/choose_song.py")
     assert 'if p.get("rvc_model")}' in song_src
-    svc_src = _src("frontend/ui/tabs/svc.py")
-    assert 'if p.get("rvc_model"):' in svc_src  # 变声默认模型 RVC 档案优先
+    rvc_svc_src = _src("utils/rvc_service.py")
+    assert 'prof.get("rvc_model")' in rvc_svc_src  # 变声默认模型 RVC 档案优先（2026-11-07 公共化）
     # 产物保存隔离：GSV 权重目录 vs models/rvc
     gsv_src = _src("utils/train_voice_pipeline.py")
     assert "GPT_weights_v2ProPlus" in gsv_src and "SoVITS_weights_v2ProPlus" in gsv_src

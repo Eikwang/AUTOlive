@@ -163,8 +163,40 @@ class MainApplication:
                 else:
                     rvc_svc = build_rvc_vc_service(self.config, self.autolive_paths)
                     if rvc_svc is not None:
-                        threading.Thread(target=rvc_svc.start, name="svc-start-rvc-vc", daemon=True).start()
-                        logger.info("RVC 变声服务拉起已后台启动（rvc_vc.enabled=true）")
+                        # 2026-11-07 整合批次（用户预期 3）：开关开=启动系统同步
+                        # **执行变声功能**——服务就绪后预切默认模型+按已保存设备开流；
+                        # 开流失败报警通知（用户裁决）。
+                        def _boot_and_stream():
+                            if not rvc_svc.start():
+                                from utils.alarm_notifier import alarm_error, MODULE_VOICE_CHANGE
+                                alarm_error(MODULE_VOICE_CHANGE,
+                                            "变声服务拉起失败（rvc_vc.enabled=true）",
+                                            fix_hint="查看 logs/services/rvc-vc.log；进入变声页可手动重试")
+                                return
+                            try:
+                                from utils.rvc_service import RvcVcClient, pick_default_model
+                                client = RvcVcClient(config=self.config)
+                                st = client.status()  # start() 已含 120s 就绪窗口，此处即就绪
+                                if not (st.get("model") or {}).get("pth"):
+                                    import os as _os
+                                    models_dir = _os.path.join(
+                                        self.autolive_paths.autolive_home, "models", "rvc")
+                                    picked = pick_default_model(self.config, models_dir)
+                                    if picked:
+                                        client.switch_model(
+                                            picked["pth"], picked["index"],
+                                            float(self.config.get("rvc_vc", "index_rate") or 0.75))
+                                client.start_stream(
+                                    input_device=self.config.get("rvc_vc", "input_device") or None,
+                                    output_device=self.config.get("rvc_vc", "output_device") or None)
+                                logger.info("RVC 变声流已自动开启（开关语义=启动系统即执行变声）")
+                            except Exception as stream_err:
+                                from utils.alarm_notifier import alarm_error, MODULE_VOICE_CHANGE
+                                alarm_error(MODULE_VOICE_CHANGE,
+                                            f"变声自动开流失败（服务已在，流未开）：{stream_err}",
+                                            fix_hint="进入变声页手动点「启动变声」；常见原因=保存的设备已拔出")
+                        threading.Thread(target=_boot_and_stream, name="svc-start-rvc-vc", daemon=True).start()
+                        logger.info("RVC 变声拉起+自动开流已后台启动（rvc_vc.enabled=true）")
             else:
                 logger.info("rvc_vc.enabled=false：启动系统不同时启动变声（变声页仍可配置）")
             # DanmakuListener 弹幕监听（整合计划第二阶段·进程内化）：enabled=true 时进程内启动

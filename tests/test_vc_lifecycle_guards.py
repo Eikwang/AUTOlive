@@ -340,14 +340,52 @@ def _read(rel):
         return f.read()
 
 
-def test_svc_failure_paths_trigger_backend_ensure():
-    """缺陷4：枚举失败与启动失败分支都必须接线 _ensure_backend（后台重拉）。"""
+def test_svc_one_shot_start():
+    """整合批次（2026-11-07，用户预期 2）：一条龙启动语义——拉服务→等就绪→
+    切模型→开流，全程按钮进度反馈；不再裸 HTTP 立即报错让用户猜重试。"""
     src = _read(os.path.join("frontend", "ui", "tabs", "svc.py"))
-    assert "_ensure_backend()" in src, "缺少失败路径重拉接线"
-    assert src.count("_ensure_backend()") >= 3, "枚举失败/启动失败至少两处+定义"
-    assert "def _ensure_backend" in src
-    # 幂等防抖
-    assert "_ensure_lock" in src
+    assert "def _wait_ready" in src, "缺等服务就绪步骤"
+    assert "_wait_ready(90)" in src, "等待未接线"
+    assert "ensure_rvc_vc(config, AutolivePaths(config)" in src, "拉服务未接线"
+    assert "pick_default_model(config, models_dir)" in src, "预切模型未接线"
+    for step in ("启动中...（服务准备）", "启动中...（准备模型）", "启动中...（开启音频流）"):
+        assert step in src, f"按钮进度文案缺：{step}"
+    assert "_ensure_backend" not in src, "旧失败路径重拉残留（已内联一条龙）"
+
+
+def test_svc_local_device_enum():
+    """整合批次（用户预期 1）：设备枚举本地 sounddevice 优先——服务零依赖。"""
+    src = _read(os.path.join("frontend", "ui", "tabs", "svc.py"))
+    assert "def _enum_local" in src, "缺本地枚举"
+    assert "import sounddevice as sd" in src
+    assert "_enum_via_service" in src, "缺服务枚举兜底"
+    # 进页不再自动拉起（预期 4：未执行变声不要进程）
+    assert "_lazy_ensure" not in src, "进页自动拉起残留"
+    assert "background_tasks.create(_lazy_ensure())" not in src
+
+
+def test_svc_capsule_flip_and_quiet_copy():
+    """整合批次（用户预期 4）：胶囊按流状态翻转+安静文案。"""
+    src = _read(os.path.join("frontend", "ui", "tabs", "svc.py"))
+    assert "show_in_statusbar = bool(running)" in src, "运行中胶囊翻转缺失"
+    assert "变声未运行——配置后点「启动变声」开始" in src, "缺安静文案"
+    # 懒实例胶囊静默（rvc_service 侧）
+    src2 = _read(os.path.join("utils", "rvc_service.py"))
+    assert "svc.show_in_statusbar = False" in src2, "懒实例缺静默属性"
+    # 胶囊区过滤
+    src3 = _read(os.path.join("frontend", "ui", "components", "service_status.py"))
+    assert 'getattr(s, "show_in_statusbar", True)' in src3, "胶囊区缺过滤"
+
+
+def test_main_auto_stream_on_switch():
+    """整合批次（用户预期 3）：开关开+启动主系统=自动开流+失败报警。"""
+    src = _read("main.py")
+    assert "def _boot_and_stream" in src, "缺自动开流"
+    assert "pick_default_model" in src, "自动开流缺预切模型"
+    assert "client.start_stream" in src, "自动开流缺开流"
+    assert "MODULE_VOICE_CHANGE" in src, "开流失败缺报警（用户裁决）"
+    src2 = _read(os.path.join("utils", "alarm_notifier.py"))
+    assert 'MODULE_VOICE_CHANGE: "实时变声"' in src2, "报警标签缺"
 
 
 def test_svc_error_messages_three_part():
@@ -361,12 +399,11 @@ def test_svc_error_messages_three_part():
 
 
 def test_svc_manual_input_fallback_and_protection():
-    """X9+A3+D-D1：手输能力+手输值保护+手输态提示。"""
+    """X9+A3：手输能力+手输值保护（枚举本地化后手输为第三兜底）。"""
     src = _read(os.path.join("frontend", "ui", "tabs", "svc.py"))
     assert "new_value_mode='add-unique'" in src, "设备下拉缺手输能力"
     assert src.count("new_value_mode='add-unique'") == 2, "输入/输出两个下拉都要有"
     assert '"manual"' in src, "缺手输标志（A3 补枚举保护）"
-    assert "已手输设备名" in src, "缺手输态提示（D-D1）"
 
 
 def test_svc_lifecycle_state_visibility():

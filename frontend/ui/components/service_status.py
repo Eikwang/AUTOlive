@@ -57,8 +57,13 @@ class ServiceStatusStrip:
     # ---------- 排序与折叠 ----------
 
     def _sorted_services(self):
-        """D3 排序：异常优先（置红置顶）+ 启动顺序（注册顺序）稳定排序。"""
-        svcs = ServiceRegistry.instance().all()
+        """D3 排序：异常优先（置红置顶）+ 启动顺序（注册顺序）稳定排序。
+
+        2026-11-07 整合批次（用户预期 4）：实例可声明 show_in_statusbar=False
+        退出胶囊区（懒启动变声实例——svc.py _poll 按流状态翻转：运行中显示、
+        停止/离线消失；主系统路径实例默认 True 常显）。"""
+        svcs = [s for s in ServiceRegistry.instance().all()
+                if getattr(s, "show_in_statusbar", True)]
         return sorted(
             enumerate(svcs),
             key=lambda pair: (_STATE_ORDER.get(pair[1].state, 9), pair[0]),

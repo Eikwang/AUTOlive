@@ -81,6 +81,7 @@ def create_abnormal_alarm_tab(config, theme_config, set_config_callback):
         ("train_voice", "训练声音"),
         ("audio_playback", "音频播放（伴奏失败/缺失）"),
         ("danmaku_send", "弹幕发送（闲时发送失败）"),
+        ("voice_change", "实时变声（自动开流失败）"),
     ]
 
     with ui.card().style(card_css):

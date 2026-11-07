@@ -34,7 +34,8 @@ class TestSvcTabServiceRecovery:
         # 重拉（_ensure_backend 幂等）+错误三要素化（问题/原因/修复+就绪时序）
         assert "请点侧边栏「启动系统」" not in src,             "启动系统指向已退役；若有意回退须同步删除本守卫"
         assert "问题=" in src and "修复=" in src, "错误三要素行动指引"
-        assert "_ensure_backend()" in src, "失败路径自动重拉接线"
+        # 2026-11-07 整合批次：启动=一条龙（拉服务→等就绪→预切模型→开流）
+        assert "def _wait_ready" in src and "ensure_rvc_vc" in src, "一条龙启动接线"
 
     def test_poll_unready_message_has_start_guidance(self):
         """状态轮询未就绪文案同样给行动指引（2026-10-30 变声独立化：服务由
@@ -42,10 +43,12 @@ class TestSvcTabServiceRecovery:
         src = _svc_source()
         assert "服务未就绪（rvc-vc 未运行或端口不符）" not in src, \
             "旧文案已退役；若有意回退须同步删除本守卫"
+        assert "变声未运行——配置后点「启动变声」开始" in src, \
+            "安静文案（2026-11-07 整合批次：未执行变声时一句态）"
         assert "「启动系统」后约 10-20 秒自动就绪" not in src, \
             "启动系统指向已退役（前端托管语义，2026-10-30）"
-        assert "前端已托管拉起" in src
-        assert "变声未启用" in src
+        assert "变声未启用" not in src, \
+            "enabled 区分文案已退役（2026-11-07 一条龙：离线统一安静文案）"
 
     def test_auto_reenumeration_wiring(self):
         """_poll 成功路径须含补枚举守卫（loaded/pending 双条件），失败路径复位 loaded"""

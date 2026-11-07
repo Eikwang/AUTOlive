@@ -186,6 +186,9 @@ def build_rvc_vc_service(
                 _remember_interpreter(svc)
             else:
                 logger.error("[rvc-vc] 懒拉起失败——查看 logs/services/rvc-vc.log 定位")
+        # 胶囊静默（2026-11-07 整合批次，用户预期 4）：懒实例不常显侧边栏胶囊，
+        # svc.py _poll 按流状态翻转 show_in_statusbar（运行中显示/停止消失）
+        svc.show_in_statusbar = False
         threading.Thread(target=_boot, name="rvc-vc-boot", daemon=True).start()
         logger.info("[rvc-vc] 新实例后台 boot 已启动（懒启动路径）")
     return svc
@@ -239,6 +242,47 @@ def ensure_rvc_vc(config: Config, paths: AutolivePaths,
         return svc
     # 在途（starting/healthy/...）——build 分支已返回在册实例
     return svc
+
+
+def pick_default_model(config=None, models_dir: str = None):
+    """默认 RVC 模型选择（2026-11-07 整合批次：svc 页与 main.py 开关自动开流共用）。
+
+    档案优先（voice_profiles.rvc_model）→ models/rvc 目录扫描序。返回
+    {"name","pth","index"} 或 None（无可用模型——调用方按无模型指引处置）。"""
+    try:
+        from utils.voice_profiles import load_profiles
+        for pid, prof in (load_profiles() or {}).items():
+            if prof.get("rvc_model"):
+                return {"name": pid, "pth": prof["rvc_model"],
+                        "index": prof.get("rvc_index")}
+    except Exception:
+        pass
+    if not models_dir:
+        return None
+    try:
+        best = None
+        for fn in sorted(os.listdir(models_dir)):
+            if not fn.endswith(".pth"):
+                continue
+            name = fn[:-4]
+            base = os.path.join(models_dir, name)
+            index = None
+            for cand in (f"{base}.index",):
+                if os.path.isfile(cand):
+                    index = cand
+                    break
+            if index is None:
+                prefix = name + "_"
+                for other in sorted(os.listdir(models_dir)):
+                    if other.startswith(prefix) and other.endswith(".index"):
+                        index = os.path.join(models_dir, other)
+                        break
+            best = {"name": name, "pth": os.path.join(models_dir, fn),
+                    "index": index}
+            break  # 目录扫描序取第一个（与原 _scan_models 排序一致）
+        return best
+    except Exception:
+        return None
 
 
 def _remember_interpreter(svc) -> None:

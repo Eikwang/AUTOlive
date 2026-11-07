@@ -47,6 +47,8 @@ MODULE_TRAIN_VOICE = "train_voice"
 # 与伴奏轨缺失挂音频播放，闲时真实弹幕发送失败挂弹幕发送（原仅 logger 静默）。
 MODULE_AUDIO_PLAYBACK = "audio_playback"
 MODULE_DANMAKU_SEND = "danmaku_send"
+# 2026-11-07 整合批次：实时变声模块（开关自动开流失败报警——用户裁决）
+MODULE_VOICE_CHANGE = "voice_change"
 
 MODULE_LABELS = {
     MODULE_LLM: "LLM服务",
@@ -57,6 +59,7 @@ MODULE_LABELS = {
     MODULE_TRAIN_VOICE: "训练声音",
     MODULE_AUDIO_PLAYBACK: "音频播放",
     MODULE_DANMAKU_SEND: "弹幕发送",
+    MODULE_VOICE_CHANGE: "实时变声",
 }
 
 # 报警类消息模块级冷却（秒）
