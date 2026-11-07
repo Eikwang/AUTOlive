@@ -433,3 +433,16 @@ def test_queue_labels_distinct_mechanism():
     assert "另见" in play and "另见" in queue, "缺跨页互引"
     assert "待播队列上限" not in play, "旧混淆 label 残留"
     assert "音频播放队列最大保留长度" not in queue, "旧混淆 label 残留"
+
+
+def test_svc_module_imports_clean():
+    """运行时冒烟（2026-11-07 补）：模块级 import 成功——源码锚点守卫不执行
+    代码，NameError 类缺漏（如 _wait_ready 用 time 未导入）只有导入期才暴露。"""
+    import importlib.util
+    path = os.path.join(REPO, "frontend", "ui", "tabs", "svc.py")
+    spec = importlib.util.spec_from_file_location("svc_guard_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert hasattr(mod, "create_svc_tab")
+    assert hasattr(mod, "_format_vc_error")
+    assert hasattr(mod, "_on_svc_state_change")

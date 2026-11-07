@@ -15,6 +15,7 @@ A-7 诊断修复：单 timer + async 回调（run.io_bound 卸载网络调用，
 """
 import os
 import threading
+import time
 from typing import Any, Callable, Dict
 
 from nicegui import background_tasks, run, ui
