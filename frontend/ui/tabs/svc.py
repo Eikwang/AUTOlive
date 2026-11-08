@@ -426,106 +426,146 @@ def create_svc_tab(
                 _show_error(f"启动失败：{_format_vc_error(e)}")
 
         # ---- A-7 修复：单 timer + async 回调（io_bound 卸载）----
+        # 2026-11-07 模型管理批次加固：①status 非 dict（None）视同下线
+        # （实报 AttributeError: 'NoneType' object has no attribute 'get'）；
+        # ②页面被 layout clear 后 timer 自杀（slot deleted RuntimeError
+        # 循环根修——timer 不随元素删除而 cancel 的 NiceGUI 语义兜底）。
+        _poll_timer_ref: list = [None]
         model_label_cache = {"pth": None}
 
         async def _poll():
             try:
-                st = await run.io_bound(client.status, _timeout_none := None) \
-                    if False else await run.io_bound(client.status)
-            except Exception:
-                _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
-                # 胶囊翻转（2026-11-07 整合批次）：流不在跑 → 侧边栏不显示
+                try:
+                    st = await run.io_bound(client.status)
+                except Exception:
+                    _devices_state["loaded"] = False  # 服务下线：下次上线重新枚举
+                    # 胶囊翻转（2026-11-07 整合批次）：流不在跑 → 侧边栏不显示
+                    try:
+                        from utils.service_orchestrator import ServiceRegistry as _SR
+                        _inst = _SR.instance().get("rvc-vc")
+                        if _inst is not None:
+                            _inst.show_in_statusbar = False
+                    except Exception:
+                        pass
+                    # 文案收敛（用户预期 4/5）：启动流程中显示真实生命周期态；
+                    # 其余时刻一句安静文案（不提进程/主系统/重试指引）
+                    if _stream_state["state"] == "starting":
+                        status_label.set_text(f"○ {_svc_state_text or '服务拉起中...（10-60s）'}")
+                    else:
+                        status_label.set_text("○ 变声未运行——配置后点「启动变声」开始")
+                    return
+                if not isinstance(st, dict):
+                    # status 返回异常体（None/空）——视同下线，不再对 None 调 .get
+                    status_label.set_text("○ 变声未运行——配置后点「启动变声」开始")
+                    return
+                running = st.get("state") == "running"
+                # 胶囊翻转：流运行中显示「变声」胶囊；停止/待机不显示（懒实例）
                 try:
                     from utils.service_orchestrator import ServiceRegistry as _SR
                     _inst = _SR.instance().get("rvc-vc")
                     if _inst is not None:
-                        _inst.show_in_statusbar = False
+                        _inst.show_in_statusbar = bool(running)
                 except Exception:
                     pass
-                # 文案收敛（用户预期 4/5）：启动流程中显示真实生命周期态；
-                # 其余时刻一句安静文案（不提进程/主系统/重试指引）
-                if _stream_state["state"] == "starting":
-                    status_label.set_text(f"○ {_svc_state_text or '服务拉起中...（10-60s）'}")
-                else:
-                    status_label.set_text("○ 变声未运行——配置后点「启动变声」开始")
-                return
-            running = st.get("state") == "running"
-            # 胶囊翻转：流运行中显示「变声」胶囊；停止/待机不显示（懒实例）
-            try:
-                from utils.service_orchestrator import ServiceRegistry as _SR
-                _inst = _SR.instance().get("rvc-vc")
-                if _inst is not None:
-                    _inst.show_in_statusbar = bool(running)
-            except Exception:
-                pass
-            model = (st.get("model") or {}).get("pth", "")
-            model_short = os.path.basename(model) if model else "未加载"
-            delay = st.get("algo_delay_ms") or 0
-            infer_t = st.get("last_infer_time_s", 0)
-            last_err = st.get("last_error")
-            status_label.set_text(
-                f"{'● 运行中' if running else '○ 待机'} · 模型 {model_short} · "
-                f"算法延迟 {delay}ms · 单块推理 {infer_t*1000:.0f}ms")
-            if running and _stream_state["state"] != "running":
-                _set_btn("running")
-            elif not running and _stream_state["state"] == "running":
-                _set_btn("idle")
-            if last_err and not _stream_state.get("error_shown") == last_err:
-                _stream_state["error_shown"] = last_err
-                _show_error(f"服务端报告：{last_err}")
-            model_label_cache["pth"] = model
-            # 服务就绪自愈：设备未成功枚举过（服务晚于页面就绪/服务重启）→ 补枚举
-            if not _devices_state["loaded"] and not _devices_state["pending"]:
-                background_tasks.create(_refresh_devices())
+                model = (st.get("model") or {}).get("pth", "")
+                model_short = os.path.basename(model) if model else "未加载"
+                delay = st.get("algo_delay_ms") or 0
+                infer_t = st.get("last_infer_time_s", 0)
+                last_err = st.get("last_error")
+                status_label.set_text(
+                    f"{'● 运行中' if running else '○ 待机'} · 模型 {model_short} · "
+                    f"算法延迟 {delay}ms · 单块推理 {infer_t*1000:.0f}ms")
+                if running and _stream_state["state"] != "running":
+                    _set_btn("running")
+                elif not running and _stream_state["state"] == "running":
+                    _set_btn("idle")
+                if last_err and not _stream_state.get("error_shown") == last_err:
+                    _stream_state["error_shown"] = last_err
+                    _show_error(f"服务端报告：{last_err}")
+                model_label_cache["pth"] = model
+                # 服务就绪自愈：设备未成功枚举过（服务晚于页面就绪/服务重启）→ 补枚举
+                if not _devices_state["loaded"] and not _devices_state["pending"]:
+                    background_tasks.create(_refresh_devices())
+            except RuntimeError as e:
+                # 页面元素已被 layout clear（用户切走）：timer 自杀，终止
+                # 「parent element deleted」异常循环（NiceGUI timer 不随元素删除取消）
+                if "has been deleted" in str(e):
+                    t = _poll_timer_ref[0]
+                    if t is not None:
+                        t.active = False
+                    return
+                raise
 
-        _active_timers.append(ui.timer(2.0, _poll))
+        _t = ui.timer(2.0, _poll)
+        _poll_timer_ref[0] = _t
+        _active_timers.append(_t)
 
-    # ============ 模型段 ============
+    # ============ 模型段（2026-11-07 模型管理批次：动态刷新+存在性过滤） ============
+    # 用户诉求「模型列表根据已有模型动态刷新」：原实现=页面构建时一次性快照
+    # （档案引用行不校验文件存在——手动删除模型后幽灵行仍在）。现为容器重绘：
+    # 刷新按钮重读档案+重扫目录；档案引用行要求模型文件真实存在。
     with ui.card().style(card_css):
-        ui.label("声音模型（训练产物优先；只显示 RVC 管道来源）").style(
-            "font-weight:var(--font-weight-emphasis)")
-        profile_models = [
+        with ui.row().style("width:100%;align-items:center;gap:8px"):
+            ui.label("声音模型（训练产物优先；只显示 RVC 管道来源）").style(
+                "font-weight:var(--font-weight-emphasis)")
+            ui.space()
+            ui.button(icon="refresh", on_click=lambda: _render_model_section()) \
+                .props("dense flat round no-caps").tooltip(
+                "重新扫描模型（档案引用 + models/rvc 目录）；"
+                "删除模型请在「数字人-声音训练-声音模型管理」操作")
+        model_section_body = ui.column().style("width:100%")
+
+    def _render_model_section():
+        profiles_now = load_profiles()
+        prof_models = [
             {"name": pid, "display": (p.get("name") or pid),
              "pth": p.get("rvc_model"), "index": p.get("rvc_index"),
              "source": "档案"}
-            for pid, p in (profiles or {}).items() if p.get("rvc_model")
+            for pid, p in (profiles_now or {}).items()
+            # 文件存在性过滤（手动删除/管理区块删除后幽灵行不再出现）
+            if p.get("rvc_model") and os.path.isfile(p["rvc_model"])
         ]
-        scanned_names = {os.path.splitext(os.path.basename(m["pth"]))[0]
-                         for m in profile_models}
+        prof_names = {os.path.splitext(os.path.basename(m["pth"]))[0]
+                      for m in prof_models}
         scan_models = [
             {**m, "display": m["name"], "source": "目录"}
-            for m in models if m["name"] not in scanned_names
+            for m in _scan_models(models_dir) if m["name"] not in prof_names
         ]
-        if not profile_models and not scan_models:
-            # D-3：空态内联指引（A-2 来源过滤下唯一合法空态）
-            ui.label("暂无 RVC 模型——先在【数字人-训练声音】完成 RVC 训练，"
-                     "或将 .pth+.index 放入 models/rvc/（同前缀配对即被识别）"
-                     ).style("color:var(--text-secondary)")
-        else:
-            with ui.column().style("width:100%;gap:4px"):
-                for m in profile_models + scan_models:
-                    has_index = bool(m["index"])
-                    # D-8：缺 index 行内后缀+tooltip（A-2：不隐藏）
-                    name_text = m["display"] + ("" if has_index else "（缺 .index）")
-                    with ui.row().style(
-                        "width:100%;align-items:center;border:1px solid var(--border-color);"
-                        "border-radius:var(--radius-md);padding:6px 10px;"
-                    ):
-                        lbl = ui.label(name_text).style("flex:1")
-                        if not has_index:
-                            lbl.tooltip("缺少同名前缀 .index 检索文件：变声可运行，"
-                                        "但检索精度受限；补齐 .index 后刷新页面")
-                            lbl.style("color:var(--color-warning)")
-                        ui.label(f"{m['source']} · " +
-                                 (".pth + .index ✔" if has_index else "缺 index ⚠")
-                                 ).style("font-size:11px;color:var(--text-secondary)")
-                        switch_btn = ui.button(
-                            "切换",
-                            on_click=lambda m=m: _do_switch(m),
-                        ).props("dense unelevated no-caps")
-                        # E-12：按钮态并入单 timer 轮询（不再每行一个 ui.timer）
+        model_section_body.clear()
+        with model_section_body:
+            if not prof_models and not scan_models:
+                # D-3：空态内联指引（A-2 来源过滤下唯一合法空态）
+                ui.label("暂无 RVC 模型——先在【数字人-训练声音】完成 RVC 训练，"
+                         "或将 .pth+.index 放入 models/rvc/（同前缀配对即被识别）；"
+                         "模型删除请在【数字人-声音训练-声音模型管理】操作"
+                         ).style("color:var(--text-secondary)")
+            else:
+                with ui.column().style("width:100%;gap:4px"):
+                    for m in prof_models + scan_models:
+                        has_index = bool(m["index"])
+                        # D-8：缺 index 行内后缀+tooltip（A-2：不隐藏）
+                        name_text = m["display"] + ("" if has_index else "（缺 .index）")
+                        with ui.row().style(
+                            "width:100%;align-items:center;border:1px solid var(--border-color);"
+                            "border-radius:var(--radius-md);padding:6px 10px;"
+                        ):
+                            lbl = ui.label(name_text).style("flex:1")
+                            if not has_index:
+                                lbl.tooltip("缺少同名前缀 .index 检索文件：变声可运行，"
+                                            "但检索精度受限；补齐 .index 后点刷新")
+                                lbl.style("color:var(--color-warning)")
+                            ui.label(f"{m['source']} · " +
+                                     (".pth + .index ✔" if has_index else "缺 index ⚠")
+                                     ).style("font-size:11px;color:var(--text-secondary)")
+                            ui.button(
+                                "切换",
+                                on_click=lambda m=m: _do_switch(m),
+                            ).props("dense unelevated no-caps")
+                            # E-12：按钮态并入单 timer 轮询（不再每行一个 ui.timer）
 
-        def _do_switch(model: dict):
+    _render_model_section()
+
+    def _do_switch(model: dict):
             """D-2：/switch 事务热切换（busy 态；同 tgt_sr 零间隙，异采样率服务端
             自动重建管线毫秒缝隙）。"""
             if _switch_state["busy"]:
