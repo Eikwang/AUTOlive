@@ -464,15 +464,39 @@ class TrainPipeline:
             # 父进程按 utf-8 逐行解码必乱码（2026-10-15 用户实测）——统一强制
             # 子进程 UTF-8 输出（子进程内部再起的子进程继承 env）
             _env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+            # 二进制模式读（2026-11-09 用户实报死锁根修）：预处理/训练脚本大量
+            # 使用 tqdm 进度条（\r 刷新、无换行，stderr 合并进管道）——原
+            # readline 按行读永远等不到行尾，tqdm 写满管道缓冲（~64KB）后
+            # 父子进程互等死锁（实测 22.mp4 写到 6% 后 22 分钟零输出全灭）。
+            # 改为按块消费：\r 与 \n 都算行分隔——进度条实时可见，死锁解除。
             self._process = subprocess.Popen(
                 cmd, cwd=cwd or self.edtalk_dir, shell=False,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                encoding="utf-8", errors="replace", bufsize=1, env=_env,
+                bufsize=0, env=_env,
             )
             self._last_proc = self._process
-            for line in self._process.stdout:
-                line = line.rstrip("\n")
-                self._log(line, stage)
+
+            def _iter_chunks(stream):
+                while True:
+                    chunk = stream.read(512)
+                    if not chunk:
+                        return
+                    yield chunk
+
+            buf = b""
+            for chunk in _iter_chunks(self._process.stdout):
+                buf += chunk
+                if len(buf) > 1 << 20:  # 单行超 1MB 防护（防无分隔符刷屏撑爆内存）
+                    self._log(buf.decode("utf-8", errors="replace")[-2000:], stage)
+                    buf = b""
+                    continue
+                *lines, buf = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+                for ln in lines:
+                    text = ln.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        self._log(text, stage)
+            if buf.strip():  # 收尾：进程退出前无换行的最后一行
+                self._log(buf.decode("utf-8", errors="replace").rstrip(), stage)
             code = self._process.wait()
             self._process = None
             if self._stop_requested:

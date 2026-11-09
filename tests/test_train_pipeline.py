@@ -97,6 +97,38 @@ def test_get_interpreter_delegates_candidate_chain(tmp_path, monkeypatch):
 # ---------- 2. 步骤编排：失败即停 ----------
 
 
+def test_run_step_consumes_carriage_return_progress(tmp_path):
+    """tqdm 进度条（\\r 无换行）形态的子进程不死锁且进度行可见。
+
+    2026-11-09 用户实报根修：面部裁切（crop_video_HDTF.py 逐帧 tqdm）跑 22
+    分钟零 stdout 输出后父子进程全灭——原 readline 按行读等不到行尾，tqdm
+    写满管道缓冲后互等死锁。修复=按块消费（\\r 与 \\n 都算行分隔）——本用例
+    用打 \\r 刷屏的子进程复现 tqdm 形态，验证：正常完成+进度行进日志。"""
+    script = tmp_path / "fake_tqdm.py"
+    script.write_text(
+        "import sys, time\n"
+        "print('Found 3 videos', flush=True)\n"
+        "for i in range(40):\n"
+        "    print(f'Processing frames: {i}%|' + '#'*i, end='\\r', flush=True)\n"
+        "    time.sleep(0.002)\n"
+        "print('[OK] done', flush=True)\n",
+        encoding="utf-8")
+    video_dir = tmp_path / "videos"
+    (video_dir / "original_videos").mkdir(parents=True, exist_ok=True)
+    lines = []
+    p = TrainPipeline(
+        config_data={"edtalk_realtime": {}},
+        video_dir=str(video_dir), role_name="x",
+        on_log=lambda line, stage=None: lines.append(line),
+    )
+    ok = p._run_step([sys.executable, "-u", str(script)], 1)
+    assert ok is True, lines
+    log = "\n".join(lines)
+    assert "Processing frames" in log, "进度条行（\\r 形态）应被解析为日志行"
+    assert "[OK] done" in log, "子进程收尾行不应丢失"
+    assert any("[步骤 1/4] 完成" in ln for ln in lines)
+
+
 def test_run_step_failure_stops(tmp_path, monkeypatch):
     """子进程非零退出 → _run_step 返回 False 且记录 exit code。"""
     p = _make_pipeline(tmp_path)
@@ -105,7 +137,8 @@ def test_run_step_failure_stops(tmp_path, monkeypatch):
 
     class FakeProc:
         def __init__(self, *a, **kw):
-            self.stdout = iter([])
+            import io
+            self.stdout = io.BytesIO(b"")  # 新读法（read 块消费）：立即 EOF
             self.pid = 123
 
         def wait(self):
