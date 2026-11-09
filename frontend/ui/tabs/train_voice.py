@@ -103,7 +103,7 @@ def create_train_voice_tab(
             # 40k/v2/f0=true/CPU10/rmvpe_gpu/spk0=固定规格不暴露（管线内置）
             with ui.grid(columns=3).style("margin-top:6px"):
                 epoch_rvc_input = ui.number(label="RVC 轮数", value=20, min=1, max=200)
-                save_rvc_input = ui.number(label="RVC 每N轮保存", value=8, min=1, max=50)
+                save_rvc_input = ui.number(label="RVC 每N轮保存", value=10, min=1, max=50)
                 ui.label("RVC 规格：40k · v2 · f0 指导 · rmvpe_gpu · CPU 进程 10 · 说话人 0").style(
                     "font-size:11px;color:var(--text-secondary);align-self:center")
 
