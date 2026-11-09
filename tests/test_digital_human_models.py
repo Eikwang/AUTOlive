@@ -21,6 +21,8 @@ from utils.digital_human_models import (
     validate_switch,
 )
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _mk(tmp_path):
     """假环境（两套大小写：数据包 wy / 训练产物 WY）：
@@ -122,6 +124,17 @@ def test_delete_full_chain_independent_junction_target(tmp_path):
     assert not (ed / "logs" / "Audio2Lip" / "WY").exists(), "口型残余应删"
     assert not (ed / "train_progress" / "WY.json").exists()
     assert r["freed_gb"] > 0
+
+
+def test_preprocess_progress_visible_in_pipe():
+    """断联/假卡死审查守卫（2026-11-09 用户两度中止实报）：tqdm disable=None
+    在非 tty（webui 管道）下自动静默=预处理全程零进度可见。crop_video_HDTF
+    必须强制输出（disable=False）——训练管线按块读（\r 算行分隔）实时接住。"""
+    src = open(os.path.join(ROOT, "edtalk", "data_preprocess",
+                            "data_preprocess_for_train", "crop_video_HDTF.py"),
+               encoding="utf-8").read()
+    assert "disable=None" not in src, "tqdm disable=None 在管道下静默=零进度可见（假卡死）"
+    assert "disable=False" in src
 
 
 def test_ui_train_streamer_delete_only_visual_body_select(tmp_path):
