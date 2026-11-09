@@ -11,10 +11,11 @@
   主件（{exp}.pth+{exp}.index）。每组标注引用档案数与当前使用态。
 - 删除（delete_voice_model）：全链清理——GSV 权重对 / RVC 四面（models/rvc
   主件 + assets/weights 训练终态 + assets/indices 特征索引 + 翻唱消费面
-  autolive_{exp} 硬链目录）；引用档案字段联动清空（upsert_profile 合并写，
-  档案本身保留）；GSV 当前冷启动模型（gpt_sovits.params 指向）保护拒绝。
+  autolive_{exp} 硬链目录）；**引用档案记录整条删除**（2026-11-09 用户裁决：
+  档案=模型的档案，模型没了档案无意义，不留死记录）；GSV 当前冷启动模型
+  （gpt_sovits.params 指向）保护拒绝。
 
-单写者约束：voice_profiles 节写仍经 voice_profiles.upsert_profile（E-4）。
+单写者约束：voice_profiles 节写仍经 voice_profiles（E-4）。
 """
 import os
 import re
@@ -23,7 +24,7 @@ from typing import Dict, List
 
 from utils.autolive_paths import config_get
 from utils.my_log import logger
-from utils.voice_profiles import load_profiles, upsert_profile
+from utils.voice_profiles import delete_profile, load_profiles
 
 # GSV 产物命名（train_voice_pipeline：{exp}-e{N}.ckpt / {exp}_e{N}_s{M}.pth，
 # T-3"仅保存最新"保证通常单对；外部拷入多对时按组全删）
@@ -182,22 +183,20 @@ def delete_voice_model(kind: str, exp: str, config, gsv_root: str = None) -> dic
         if f not in cover_dirs:
             _unlink_safe(f, deleted, kept, errors)
 
-    # 档案联动：引用被删文件的档案字段清空（档案本身保留）
+    # 档案联动：引用被删文件的档案记录整条删除（2026-11-09 用户裁决——
+    # 档案=模型的档案（模型对+参考音频+提示文本），模型没了档案无意义；
+    # 重新训练会经 export 重建档案。此前"清字段留记录"产生死档案
+    #（isfile 过滤隐藏但记录层堆积），用户要求彻底删除）。
     unlinked = []
     if deleted:
         deleted_set = {_norm(d) for d in deleted}
         for pid, pr in (load_profiles() or {}).items():
-            merged = dict(pr)
-            hit = False
-            for field in ("gpt_model", "sovits_model", "rvc_model", "rvc_index"):
-                if pr.get(field) and _norm(pr[field]) in deleted_set:
-                    merged[field] = ""
-                    hit = True
+            hit = any(pr.get(field) and _norm(pr[field]) in deleted_set
+                      for field in ("gpt_model", "sovits_model", "rvc_model", "rvc_index"))
             if hit:
-                merged["id"] = pid
-                upsert_profile(merged)
+                delete_profile(pid)
                 unlinked.append(pid)
-                logger.info(f"[voice-models] 档案 {pid} 已解除对已删模型的引用")
+                logger.info(f"[voice-models] 档案 {pid} 引用已删模型，记录已整条删除")
 
     ok = not errors and (bool(deleted) or bool(kept))
     logger.info(f"[voice-models] 删除 {kind}/{exp}: 删 {len(deleted)} 件"

@@ -53,7 +53,7 @@ def test_list_gsv_pairs_refs_and_current(tmp_path):
     """GSV 清单：实验名配对/孤儿半对/引用聚合/params current 标记。"""
     home, config, profiles = _mk(tmp_path)
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile"):
+         patch("utils.voice_models.delete_profile"):
         data = list_voice_models(config, gsv_root=str(home / "apps" / "gpt-sovits"))
     gsv = {g["exp"]: g for g in data["gsv"]}
     assert "WY" in gsv and "solo" in gsv
@@ -66,46 +66,48 @@ def test_list_gsv_pairs_refs_and_current(tmp_path):
 
 
 def test_delete_gsv_group_and_unlink_profiles(tmp_path):
-    """GSV 删除：权重对全删+引用档案字段联动清空（档案保留）。"""
+    """GSV 删除：权重对全删+引用档案记录整条删除（2026-11-09 用户裁决：
+    档案=模型的档案，不留死记录）。"""
     home, config, profiles = _mk(tmp_path)
     config["gpt_sovits"]["params"]["gpt_model_path"] = str(
         home / "apps" / "gpt-sovits" / "GPT_weights_v2ProPlus" / "solo-e10.ckpt")
     config["gpt_sovits"]["params"]["sovits_model_path"] = ""
-    upserts = []
+    deleted_pids = []
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile", side_effect=lambda p: upserts.append(p)):
+         patch("utils.voice_models.delete_profile",
+               side_effect=lambda pid: deleted_pids.append(pid) or True):
         r = delete_voice_model("gsv", "WY", config,
                                gsv_root=str(home / "apps" / "gpt-sovits"))
     assert r["ok"] and len(r["deleted"]) == 2, r
     assert not (home / "apps" / "gpt-sovits" / "GPT_weights_v2ProPlus" / "WY-e20.ckpt").exists()
-    merged = next(p for p in upserts if p["id"] == "WY")
-    assert merged["gpt_model"] == "" and merged["sovits_model"] == ""
-    assert merged["rvc_model"] == profiles["WY"]["rvc_model"], "GSV 删除不得碰 RVC 字段"
+    assert deleted_pids == ["WY"], "引用已删模型的档案记录应整条删除"
+    assert r["unlinked_profiles"] == ["WY"]
 
 
 def test_delete_gsv_protected_when_current(tmp_path):
     """GSV 保护：params（冷启动当前）指向的实验删除被拒绝且文件不动。"""
     home, config, profiles = _mk(tmp_path)
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile"):
+         patch("utils.voice_models.delete_profile"):
         r = delete_voice_model("gsv", "WY", config,
                                gsv_root=str(home / "apps" / "gpt-sovits"))
     assert r["ok"] is False and "切换" in r["error"]
     assert (home / "apps" / "gpt-sovits" / "GPT_weights_v2ProPlus" / "WY-e20.ckpt").exists()
     # 非当前实验可删
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile"):
+         patch("utils.voice_models.delete_profile"):
         r2 = delete_voice_model("gsv", "solo", config,
                                 gsv_root=str(home / "apps" / "gpt-sovits"))
     assert r2["ok"] and r2["deleted"], "非 current 实验正常删除"
 
 
 def test_delete_rvc_full_chain(tmp_path):
-    """RVC 删除：四面全链（主件/训练终态/特征索引/翻唱消费面）+档案联动。"""
+    """RVC 删除：四面全链（主件/训练终态/特征索引/翻唱消费面）+档案整条删除。"""
     home, config, profiles = _mk(tmp_path)
-    upserts = []
+    deleted_pids = []
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile", side_effect=lambda p: upserts.append(p)):
+         patch("utils.voice_models.delete_profile",
+               side_effect=lambda pid: deleted_pids.append(pid) or True):
         r = delete_voice_model("rvc", "wy", config)
     assert r["ok"] and len(r["deleted"]) == 5, r  # pth+index+weights+added_index+autolive_wy/
     for gone in (home / "models" / "rvc" / "wy.pth",
@@ -115,16 +117,15 @@ def test_delete_rvc_full_chain(tmp_path):
         assert not gone.exists(), gone
     assert not (home / "apps" / "aicovergen" / "rvc_models" / "autolive_wy").exists()
     assert (home / "models" / "rvc" / "bare.pth").exists(), "其它实验不受影响"
-    merged = next(p for p in upserts if p["id"] == "WY")
-    assert merged["rvc_model"] == "" and merged["rvc_index"] == ""
-    assert merged["gpt_model"] == profiles["WY"]["gpt_model"], "RVC 删除不得碰 GSV 字段"
+    assert deleted_pids == ["WY"], "引用已删模型的档案记录应整条删除"
+    assert r["unlinked_profiles"] == ["WY"]
 
 
 def test_delete_missing_experiment_tolerant(tmp_path):
     """删除不存在的实验：文件缺失跳过（kept），不炸不误报。"""
     home, config, profiles = _mk(tmp_path)
     with patch("utils.voice_models.load_profiles", return_value=profiles), \
-         patch("utils.voice_models.upsert_profile"):
+         patch("utils.voice_models.delete_profile"):
         r = delete_voice_model("rvc", "ghost", config)
     assert r["ok"] is True and r["deleted"] == [] and r["errors"] == []
 

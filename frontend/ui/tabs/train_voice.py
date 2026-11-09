@@ -442,7 +442,7 @@ def create_train_voice_tab(
         r = delete_voice_model(group, item["exp"], config, gsv_root=paths.gpt_sovits_root)
         dlg.close()
         if r.get("ok"):
-            extra = (f"，已解除 {len(r['unlinked_profiles'])} 个档案的引用"
+            extra = (f"，已删除 {len(r['unlinked_profiles'])} 条档案记录"
                      if r.get("unlinked_profiles") else "")
             ui.notify(position="top", type="positive",
                       message=f"模型 {item['exp']} 已删除（{len(r['deleted'])} 个文件{extra}）")
