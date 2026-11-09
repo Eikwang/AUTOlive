@@ -14,6 +14,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from typing import Dict, Optional
 
 from utils.my_log import logger
@@ -81,17 +82,31 @@ def delete_profile(profile_id: str, config_path: str = CONFIG_PATH) -> bool:
     return True
 
 
-def _atomic_update(config_path: str, mutate):
-    """E-4：临时名+原子替换；只动 voice_profiles 节，其余字节结构重序列化。"""
-    with open(config_path, encoding="utf-8") as f:
-        data = json.load(f)
-    mutate(data)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path) or ".", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        os.replace(tmp, config_path)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+def _atomic_update(config_path: str, mutate, _retries: int = 3):
+    """E-4：临时名+原子替换；只动 voice_profiles 节，其余字节结构重序列化。
+
+    Windows 竞态重试（2026-11-08 授权留档失败实报）：webui 运行期 config.json
+    被并发读写，os.replace 目标被占用（PermissionError）偶发——每次整体
+    重读-变异-替换 重试；mutate 须为纯函数（现有调用方均满足：重放基于重读的
+    data 应用一次，不产生重复写入）。
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_retries):
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                data = json.load(f)
+            mutate(data)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path) or ".", suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+                os.replace(tmp, config_path)
+            except Exception:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
+            return
+        except (OSError, json.JSONDecodeError) as e:  # 文件锁占用/读取竞态——退避重试
+            last_exc = e
+            time.sleep(0.2 * (attempt + 1))
+    raise last_exc

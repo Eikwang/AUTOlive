@@ -60,6 +60,7 @@ REQUIRED_ASSETS = [
     ("assets/pretrained_v2/f0D40k.pth", "v2 40k 判别器底模"),
     ("configs/v1/40k.json", "v2+40k 训练超参模板（上游特判共用 v1）"),
     ("logs/mute/0_gt_wavs", "预置静音训练集（filelist mute 行依赖）"),
+    ("i18n/i18n.py", "i18n 翻译模块（process_ckpt.savee 导入链，2026-11-08 训练崩溃根因）"),
 ]
 ENV_KEYS = ("weight_root", "index_root", "outside_index_root")  # .env 三键（T-7 预检）
 
@@ -73,6 +74,7 @@ FORK_BASELINE_FILES = [
     "infer/modules/train/train.py",
     "configs/v1/40k.json",
     "infer/lib/rtrvc.py",
+    "i18n/i18n.py",
 ]
 
 
@@ -123,6 +125,42 @@ class TrainRvcPipeline:
         for sid in ids[ids.index(stage_id):]:
             self._states[sid] = PENDING
 
+    def _clean_stale_products(self):
+        """全链启动清旧实验产物（2026-11-08 用户实报根修）。
+
+        prepare 只在全链 _start 调用（单步重跑走 reset_from 不经此）——语义
+        =全新训练。Windows 大小写不敏感：exp_name 大小写变体（wy vs WY）命中
+        同一实验目录，旧四件套混入新数据集（实报交集 689 < gt 1448），filelist
+        交集防护虽剔除断链样本，但残留会让训练集不可信。清理五产物目录内容+
+        filelist.txt+added_*.index；mute 为共享资产不动。
+        """
+        exp = self._exp_dir()
+        if not os.path.isdir(exp):
+            return
+        cleaned = 0
+        for sub in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
+            d = os.path.join(exp, sub)
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                full = os.path.join(d, fn)
+                try:
+                    os.remove(full) if os.path.isfile(full) else shutil.rmtree(full)
+                    cleaned += 1
+                except OSError:
+                    pass
+        for fn in list(os.listdir(exp)):
+            if fn == "filelist.txt" or (fn.startswith("added_") and fn.endswith(".index")):
+                try:
+                    os.remove(os.path.join(exp, fn))
+                    cleaned += 1
+                except OSError:
+                    pass
+        if cleaned:
+            self.log_lines.append(
+                f"[清理] 已清除实验 '{self.params['exp_name']}' 的 {cleaned} 个旧产物"
+                "（全链=全新训练；若与历史实验仅大小写不同，Windows 视为同目录）")
+
     # ---------- 启动/停止 ----------
 
     def prepare(self, dataset_dir: str, exp_name: str, batch_size: int = None,
@@ -145,6 +183,7 @@ class TrainRvcPipeline:
         self._states = {}
         self.log_lines = []
         self.stop_requested = False
+        self._clean_stale_products()
         self.asset_issues = self.check_assets()
         if self.asset_issues:
             self.log_lines.append("[预检] 缺失资产（T-7）：")

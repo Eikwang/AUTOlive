@@ -19,6 +19,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -159,6 +160,7 @@ class TrainVoicePipeline:
         self._states = {}
         self.log_lines = []
         self.stop_requested = False
+        self._clean_stale_state()
         self.asset_issues = self.check_assets()
         if self.asset_issues:
             self.log_lines.append("[预检] 缺失资产（T-4）：")
@@ -302,6 +304,38 @@ class TrainVoicePipeline:
 
     def _opt_dir(self) -> str:
         return os.path.join(self.gsv_root, "logs", self.params["exp_name"])
+
+    def _clean_stale_state(self):
+        """全链启动清空实验产物目录（2026-11-08/09 两轮实报根修）。
+
+        prepare 只在全链 _start 调用（单步重跑走 reset_from 不经此）——语义
+        =全新训练，logs/{exp} 是纯产物目录（数据集在 dataset_dir 独立），整体
+        清空最彻底。两类陈旧产物都会致命：
+        ① 训练 ckpt（s2_train.py:218/226 固定名 G_/D_*.pth、s1 Lightning
+           ckpt/epoch=*.ckpt）——续训旧 ckpt 时 epoch 已满 → 零训练秒退 rc=0
+           且零产物（11-08 实报：exp_name='wy' 小写命中 10/16 'WY' 目录）；
+        ② prepare 中间产物（3-bert/4-cnhubert/5-wav32k/7-sv_cn/2-name2text/
+           6-name2semantic/asr_opt）——上游 prepare 对已存在文件增量跳过，
+           换数据集/重切分后文本面全新而特征面陈旧，s1 训练
+           `bert_feature.shape[-1] == len(phoneme_ids)` 断言崩溃（11-08 实报：
+           新 577 行 vs 旧 1144 个 bert，dataset.py:231 AssertionError）。
+        """
+        exp = self._opt_dir()
+        if not os.path.isdir(exp):
+            return
+        removed = 0
+        for fn in list(os.listdir(exp)):
+            full = os.path.join(exp, fn)
+            try:
+                shutil.rmtree(full) if os.path.isdir(full) else os.remove(full)
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            self.log_lines.append(
+                f"[清理] 已清空实验 '{self.params['exp_name']}' 产物目录（{removed} 项）"
+                "——全链=全新训练；陈旧 prepare 产物会使 s1 的 BERT 对齐断言崩溃、"
+                "陈旧训练 ckpt 会使 s2/s1 续训静默零产出")
 
     def _st_mdx(self) -> bool:
         """T-1：MDXNet 三阶段分离（共享实现 run_mdx_dry_vocals，2026-10-14 提取）。
@@ -448,6 +482,28 @@ class TrainVoicePipeline:
     def _pretrained(self, name: str) -> str:
         return os.path.join("GPT_SoVITS", "pretrained_models", name)
 
+    def _assert_new_product(self, weight_dir: str, t0: float, label: str) -> bool:
+        """训练步产物断言（2026-11-08 实报根修）：rc=0 不代表有产出——续训旧
+        ckpt（epoch 已满）会静默零训练退出。断言成品目录存在 mtime 晚于本步
+        启动时刻的 {exp}_e*.pth / {exp}-e*.ckpt（5s 容差吸收文件系统时戳粒度）。"""
+        exp = self.params["exp_name"]
+        found = ""
+        if os.path.isdir(weight_dir):
+            for fn in os.listdir(weight_dir):
+                if fn.startswith(exp) and (fn.endswith(".pth") or fn.endswith(".ckpt")):
+                    full = os.path.join(weight_dir, fn)
+                    if os.path.getmtime(full) >= t0 - 5:
+                        found = fn
+                        break
+        if not found:
+            self.log_lines.append(
+                f"[{label}失败] rc=0 但零成品权重（{weight_dir} 下无新 {exp}_e*）——"
+                "cause: 续训旧 ckpt 时 epoch 已满会静默跳过训练；"
+                "fix: 全链重跑（prepare 已自动清旧 ckpt）或加大 epoch 数")
+            return False
+        self.log_lines.append(f"[{label}] 成品 {found}")
+        return True
+
     def _st_s2(self) -> bool:
         if not self._gpu_gate():
             return False
@@ -477,7 +533,12 @@ class TrainVoicePipeline:
         os.makedirs(os.path.join(opt_dir, "logs_s2_v2ProPlus"), exist_ok=True)
         # savee() fp16 导出目录（my_save2 直写，同样需预建）
         os.makedirs(os.path.join(self.gsv_root, "SoVITS_weights_v2ProPlus"), exist_ok=True)
-        return self._run([self.python, "-s", "GPT_SoVITS/s2_train.py", "--config", tmp])
+        t0 = time.time()
+        ok = self._run([self.python, "-s", "GPT_SoVITS/s2_train.py", "--config", tmp])
+        if not ok:
+            return False
+        return self._assert_new_product(
+            os.path.join(self.gsv_root, "SoVITS_weights_v2ProPlus"), t0, "s2")
 
     def _st_s1(self) -> bool:
         if not self._gpu_gate():
@@ -514,7 +575,12 @@ class TrainVoicePipeline:
         os.makedirs(os.path.join(opt_dir, "logs_s1_v2ProPlus"), exist_ok=True)
         # savee() fp16 导出目录（my_save2 直写，同样需预建）
         os.makedirs(os.path.join(self.gsv_root, "GPT_weights_v2ProPlus"), exist_ok=True)
-        return self._run([self.python, "-s", "GPT_SoVITS/s1_train.py", "--config_file", tmp])
+        t0 = time.time()
+        ok = self._run([self.python, "-s", "GPT_SoVITS/s1_train.py", "--config_file", tmp])
+        if not ok:
+            return False
+        return self._assert_new_product(
+            os.path.join(self.gsv_root, "GPT_weights_v2ProPlus"), t0, "s1")
 
     def _st_export(self) -> bool:
         """导出声音档案：取最新产物模型对合并写入 voice_profiles（P2-4）。"""
@@ -554,6 +620,31 @@ class TrainVoicePipeline:
             "prompt_lang": existing.get("prompt_lang") or "zh",
         })
         upsert_profile(merged)
+        # 冷启动悬空联动（2026-11-09 实报根修）：gpt_sovits.params 指向的模型
+        # 文件缺失（用户删旧模型/权重清理后）时，重启冷启动必失败
+        #（gpt_sovits_inproc._build_tts_config 预检拦截）。此处仅当悬空时把
+        # params 切到本次成品——有效配置不抢占（训练新声音不改变当前启用模型）。
+        import utils.voice_profiles as _vp
+        fixed = {"v": False}
+
+        def _mutate(d):
+            params = (d.get("gpt_sovits") or {}).get("params")
+            if not isinstance(params, dict):
+                return
+            gp = params.get("gpt_model_path") or ""
+            sp = params.get("sovits_model_path") or ""
+            if gp and sp and os.path.isfile(gp) and os.path.isfile(sp):
+                return  # 有效配置不动
+            params["gpt_model_path"] = gpt_model
+            params["sovits_model_path"] = sovits_model
+            fixed["v"] = True
+
+        try:
+            _vp._atomic_update(_vp.CONFIG_PATH, _mutate)
+            if fixed["v"]:
+                self.log_lines.append("[导出] 冷启动参数悬空，已联动指向本次成品（重启后生效）")
+        except Exception as e:
+            logger.warning(f"[train-voice] 冷启动联动失败（不阻断导出）: {e}")
         # T-3"仅保存最新"（编排层 fp16 清理）：删除该实验其余历史权重，仅留已选用对
         removed = 0
         for weight_dir, keep in ((gsv_w, gpt_model), (vits_w, sovits_model)):
