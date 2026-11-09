@@ -745,6 +745,17 @@ class TrainPipeline:
                                                              ckpt_rel=self._ckpt_rel)
                     deploy_ok = True
                     self._log(f"[部署] {deploy_msg}", 4)
+                    # 统一保存语义（2026-11-09 用户设计）：最终模型落位后自动
+                    # 清训练中间文件（中间 iter ckpt/预览图/tfevents/口型微调
+                    # 时间戳目录）——避免占用磁盘；部署失败不清理（保留现场）。
+                    try:
+                        from utils.digital_human_models import (
+                            cleanup_training_intermediates)
+                        cr = cleanup_training_intermediates(self.role_name)
+                        self._log(f"[清理] 训练中间文件已清除（{cr['summary']}，"
+                                  f"释放 {cr['freed_mb']:.0f}MB）——角色目录仅保留最终模型", 4)
+                    except Exception as ce:
+                        self._log(f"[清理][跳过] 中间文件清理失败（不影响训练结果）：{ce}", 4)
                 except Exception as de:
                     self._log(
                         f"[部署][失败] problem=checkpoint 自动部署失败；cause={de}；"
@@ -1059,11 +1070,16 @@ class TrainPipeline:
         # 2) 口型权重：口型微调产物 → checkpoint/audio2lip.pt
         #    （get_model_paths 约定：checkpoint/ 下 audio2lip.pt + new.pt 并排；
         #    2026-10-16 实测曾错放角色包根 → "Audio2Lip model not found"）
+        #    统一落位（2026-11-09 用户设计）：ckpt_models/{role}/audio2lip.pt
+        #    =角色模型目录的权威口型权重（微调训练结果以角色名为单位保存）。
         a2l_src = TrainPipeline._find_latest_a2l_ckpt(edtalk_dir, role_name)
         if a2l_src:
             a2l_dst = os.path.join(ckpt_dir, "audio2lip.pt")
             shutil.copy2(a2l_src, a2l_dst)
-            a2l_msg = f"口型权重 {a2l_src} → {a2l_dst}"
+            unified = os.path.join(edtalk_dir, "ckpt_models", role_name, "audio2lip.pt")
+            os.makedirs(os.path.dirname(unified), exist_ok=True)
+            shutil.copy2(a2l_src, unified)
+            a2l_msg = f"口型权重 {a2l_src} → {a2l_dst} + {unified}"
         else:
             a2l_msg = "未找到口型微调产物（audio2lip.pt 保持不变）"
 

@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Callable, Dict
 
-from nicegui import ui
+from nicegui import run, ui
 
 from frontend.ui.components import FormField
 from frontend.ui.components.config_helper import get_nested_value
@@ -145,10 +145,15 @@ def create_train_voice_tab(
         ui.label("GPU 占用检查")
         gpu_label["text"] = ui.label("检查中...").style("font-size:12px;color:var(--text-secondary)")
 
-        def _poll_gpu():
+        async def _poll_gpu():
+            # 2026-11-09 断联审查修复：_gate 内 nvidia-smi subprocess（正常
+            # 200-500ms，驱动/负载卡顿可达秒级）原在事件循环上同步执行——
+            # 移出（run.io_bound，对齐 svc._poll 惯用形态）
             from utils.gpu_policy import is_background_task_allowed
-            ok, reason = is_background_task_allowed(float(
-                get_nested_value(config, "audio_integration", "policies", "vram_reserve_gb") or 4.0))
+            ok, reason = await run.io_bound(
+                is_background_task_allowed,
+                float(get_nested_value(config, "audio_integration", "policies",
+                                       "vram_reserve_gb") or 4.0))
             gpu_label["text"].set_text(
                 ("✔ 空闲：" if ok else "✖ 占用：") + reason)
 

@@ -193,6 +193,12 @@ _RETIRED_CONFIG_KEYS: list = [
 class AutoliveApp:
     """AUTOlive 应用程序类"""
 
+    # webui 单例注册（2026-11-09 数字人模型管理批）：tab 与本模块同进程，
+    # 函数内延迟 `from frontend.main import APP_HOLDER` 取实例——画面设置
+    # 切换角色后自动重启 edtalk 服务等进程操作走此句柄（模块级定义避免循环
+    # import：frontend.main → layout → tabs 的 import 链在本模块加载期闭合）。
+    APP_HOLDER = {"app": None}
+
     # script mode 运行态单例（启动链假启动修复 2026-10-12）：每个浏览器连接都会
     # 重跑 __init__（root page 重入，__init__:106 重入判定），实例字段的运行态会被
     # 重置——running_flag 刷新即"假停止"、my_subprocesses 丢失成孤儿进程。
@@ -314,6 +320,8 @@ class AutoliveApp:
         重入（server 已启动）时跳过 Audio/数据库/目录等重活，仅保留 config 与状态字段
         ——重活每次执行就是"前端不断重启"现象的根因（Audio init 约 12s）。
         """
+        # webui 单例注册（script mode 重入幂等：同实例逻辑，覆盖注册无害）
+        AutoliveApp.APP_HOLDER["app"] = self
         # 初始化基础路径
         self.base_path = get_base_path()
 
@@ -1660,6 +1668,34 @@ class AutoliveApp:
             logger.error(f"检查过期失败: {e}")
             return False
 
+    def _prewarm_tab_modules(self):
+        """后台预热全部 tab 模块（断联修复，见 run() 挂点注释）。
+
+        扫描 frontend/ui/tabs 包内全部 .py 逐个 importlib.import_module——
+        torch 链等重加载在 daemon 线程完成，进页构建只剩 UI 装配（毫秒级）。
+        磁盘扫描类（digital_human_models 清单）实测 ~2ms 无需预热。
+        """
+        import importlib
+        import time as _time
+        try:
+            from frontend.ui import tabs as _tabs_pkg
+            pkg_dir = os.path.dirname(_tabs_pkg.__file__)
+            mods = [f"frontend.ui.tabs.{fn[:-3]}"
+                    for fn in sorted(os.listdir(pkg_dir))
+                    if fn.endswith(".py") and not fn.startswith("_")]
+            t0 = _time.perf_counter()
+            loaded = 0
+            for m in mods:
+                try:
+                    importlib.import_module(m)
+                    loaded += 1
+                except Exception as e:
+                    logger.warning(f"[预热] tab 模块加载失败（行为同旧，不阻断）: {m}: {e}")
+            logger.info(f"[预热] tab 模块已后台加载 {loaded}/{len(mods)}"
+                        f"（{_time.perf_counter() - t0:.1f}s）——进页构建不再阻塞事件循环")
+        except Exception as e:
+            logger.warning(f"[预热] tab 模块预热失败（行为同旧）: {e}")
+
     def run(self):
         """运行应用程序"""
         # 注册API端点
@@ -1695,6 +1731,15 @@ class AutoliveApp:
         if getattr(_nicegui_core.app, "is_started", False):
             logger.debug("AutoliveApp.run() 重入——跳过 ui.run（server 已运行）")
             return
+
+        # tab 模块后台预热（2026-11-09 断联修复，用户实报：进训练主播页重置回
+        # 初始页+构建耗时 5.19s 警告）：NiceGUI 3.16 事件循环同步阻塞 >2s
+        # （socket.io ping_timeout=2.0s 推导）即 WS 判死→浏览器断联重载。
+        # train_streamer 等 tab 模块顶部 import torch 链秒级——首次进页在
+        # socketio handler 内同步加载必超时。daemon 线程提前把全部 tab 模块
+        # 拉进 sys.modules（进页构建只剩 UI 装配）；单模块失败静默（行为同旧）。
+        threading.Thread(target=self._prewarm_tab_modules, daemon=True,
+                         name="tab-prewarm").start()
 
         # C4-①（2026-11-03 治理批次，ENG-2 挂点修正）：Windows proactor 连接
         # 重置噪音过滤——挂点=on_startup（loop 就绪后恰执行一次；ui.run 之前

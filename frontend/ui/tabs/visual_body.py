@@ -168,6 +168,73 @@ def create_visual_body_tab(
                                  _update_combo_warning()),
         ).tooltip("开启后『运行系统』时自动拉起 realtime_serve；端口与解释器自动解析，无需配置")
 
+        # 数字人角色选择（2026-11-09 用户设计：以角色为单位切换微调模型；
+        # character_dir 内部量由本管理面受控接管——选择后服务运行中自动重启加载）
+        def _role_options() -> dict:
+            from utils.digital_human_models import list_digital_human_models
+            cur = str(get_nested_value(config, "edtalk_realtime", "character_dir",
+                                       default="wy") or "wy")
+            opts = {cur: f"{cur}（当前）"}
+            for m in list_digital_human_models(config)["models"]:
+                mark = "" if m["deployed"] else "（未部署）"
+                opts.setdefault(m["role"], f"{m['role']}{mark}")
+            return opts
+
+        _role_switching = {"busy": False}
+
+        async def _switch_role(e):
+            role = str(e.value or "").strip()
+            if not role or _role_switching["busy"]:
+                return
+            from utils.digital_human_models import validate_switch
+            err = validate_switch(config, role)
+            if err:
+                ui.notify(position="top", type="negative", message=err)
+                role_select.value = str(get_nested_value(
+                    config, "edtalk_realtime", "character_dir", default="wy") or "wy")
+                return
+            set_config_callback("edtalk_realtime", "character_dir", value=role,
+                                _notify=False)
+            from utils.edtalk_realtime.materials import service_status
+            online = service_status(config) is not None
+            if not online:
+                ui.notify(position="top", type="positive",
+                          message=f"已选择角色 {role}（服务未运行，下次启动生效）")
+                return
+            # 服务运行中：自动重启加载新角色（模型+推理帧都随角色切换）
+            from frontend.main import AutoliveApp
+            app = AutoliveApp.APP_HOLDER.get("app")
+            if app is None:
+                ui.notify(position="top", type="warning",
+                          message=f"已选择角色 {role}——请重启主系统生效（服务管理器不可达）")
+                return
+            _role_switching["busy"] = True
+            ui.notify(position="top", type="info", timeout=None,
+                      message=f"正在按角色 {role} 重启数字人服务（模型+画面加载约 20-40 秒）……")
+            try:
+                await asyncio.to_thread(app.stop_program, "edtalk_realtime")
+                ok, reason, fix_hint = await asyncio.to_thread(
+                    app._start_edtalk_realtime, config)
+                if ok:
+                    ui.notify(position="top", type="positive",
+                              message=f"数字人服务已按角色 {role} 重启完成")
+                else:
+                    ui.notify(position="top", type="negative", timeout=10,
+                              message=f"数字人服务重启失败：{reason}" +
+                                      (f"｜{fix_hint}" if fix_hint else ""))
+            finally:
+                _role_switching["busy"] = False
+
+        role_select = ui.select(
+            label="数字人角色（微调模型）",
+            options=_role_options(),
+            value=str(get_nested_value(config, "edtalk_realtime", "character_dir",
+                                       default="wy") or "wy"),
+            on_change=_switch_role,
+        ).style("width:100%;").tooltip(
+            "以角色名为单位切换数字人模型（训练主播流程的微调结果）；"
+            "服务运行中将自动重启加载，画面会中断约 20-40 秒").classes("w-full")
+
         with ui.grid(columns=3):
             # 角色素材目录已退役（2026-10-31 画面设置批次）：素材增删/清单由
             # 『动作编排』页接管，目录为内部量（默认 wy，materials.resolve_character_dir

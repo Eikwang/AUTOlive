@@ -106,10 +106,14 @@ def test_frontend_uses_shared_install_helper():
 
 
 def test_frontend_character_dir_retired():
-    """F4 守卫：角色素材目录 UI 配置项退役（编排页接管素材管理）。"""
+    """F4 守卫：角色素材目录**自由文本配置项**退役（编排页接管素材管理）。
+    2026-11-09 用户设计反转：画面设置新增「数字人角色」**受控下拉**
+    （选择器=训练部署角色的受控切换，管理面 validate_switch 校验）——
+    自由输入框形态仍退役（用户不再手填路径），选择器写 character_dir 合法。"""
     src = _FRONTEND_TAB.read_text(encoding="utf-8")
-    assert "label='角色素材目录'" not in src
-    assert '"character_dir"' not in src
+    assert "label='角色素材目录'" not in src, "自由文本配置项保持退役"
+    assert "数字人角色" in src, "受控角色选择器（用户设计 2026-11-09）应存在"
+    assert "validate_switch" in src, "切换须过管理面校验（数据包完整性）"
 
 
 def test_frontend_safe_int_parsing():

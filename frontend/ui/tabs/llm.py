@@ -6,6 +6,7 @@ from frontend.ui.components.config_helper import get_nested_value
 布局规范：
 - 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
 """
+import asyncio
 import os
 import shutil
 import subprocess
@@ -525,7 +526,7 @@ def _create_fastrag_card(
                 tpl_dirty_label.set_text("有未生效修改——点击『应用并重启 fastrag 服务』生效")
                 tpl_dirty_label.style("color: var(--color-warning); display:block")
 
-            def _apply_template_and_restart():
+            async def _apply_template_and_restart():
                 """模板生效（D6：保存落盘 override+显式重启+脏标记清零；DX F-7 失败回滚）。
 
                 2026-10-30 修复（回答规则重启丢失）：此前仅落盘 config_override.py
@@ -533,7 +534,11 @@ def _create_fastrag_card(
                 config.json 无此节 → 重启后 UI 回显默认值（看似丢失）；再次点应用
                 会把 override 覆盖回默认=真丢失。修复：落盘 override 的同时把六参
                 数写回 config（set_config_callback 支持任意深度路径并自动落盘），
-                UI 回显与服务端 override 双源一致。"""
+                UI 回显与服务端 override 双源一致。
+                2026-11-09 断联审查修复：停服（wmic subprocess timeout=15s，Win11
+                首调常 1-3s）+health 探测（timeout=2）原在事件循环上同步执行——
+                合计可达 5s 超 ping_timeout=2.0s → 断联重载；阻塞段移出
+                （asyncio.to_thread，对齐 audio_play 断联根修模式）。"""
                 try:
                     # 落盘 config_override.py（fastrag-python 侧 P3 补丁加载）
                     py_dir = os.path.join(_fastrag_dir(), "fastrag-python")
@@ -570,18 +575,27 @@ def _create_fastrag_card(
                     ui.notify(position="top", type="negative", message=f"模板落盘失败：{e}")
                     return
                 # 重启服务（python 路线：杀 server.py+由系统重启或手动拉起）
-                _stop_fastrag_server_if_running()
-                import requests
-                try:
-                    requests.get(f"http://127.0.0.1:{get_nested_value(config, 'fastrag', 'port', default=11420)}/health", timeout=2)
-                    # 仍在运行（其他实例）——回滚 override（DX F-7）
+                # 阻塞段（wmic 停服+health 探测）在 worker 线程执行——结果回
+                # 事件循环侧处置（回滚/通知）
+                def _blocking_restart() -> str:
+                    _stop_fastrag_server_if_running()
+                    import requests
+                    try:
+                        requests.get(
+                            f"http://127.0.0.1:{get_nested_value(config, 'fastrag', 'port', default=11420)}/health",
+                            timeout=2)
+                        return "still_running"  # 仍在运行（其他实例）
+                    except Exception:
+                        return "stopped"  # 已停止=正常
+
+                restart_state = await asyncio.to_thread(_blocking_restart)
+                if restart_state == "still_running":
+                    # 回滚 override（DX F-7）
                     if os.path.exists(backup):
                         shutil.copy2(backup, override)
                     ui.notify(position="top", type="negative",
                               message="problem=服务重启失败；cause=旧服务仍在运行；fix=停止系统后重新运行系统（模板已回滚）")
                     return
-                except Exception:
-                    pass  # 已停止=正常
                 tpl_dirty["v"] = False
                 tpl_dirty_label.style("display:none")
                 ui.notify(position="top", type="positive",

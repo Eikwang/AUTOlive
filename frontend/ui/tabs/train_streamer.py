@@ -667,4 +667,94 @@ def create_train_streamer_tab(
                 ui.button("仍要继续", on_click=_cont)
         dialog.open()
 
+    # ---------- 数字人模型管理（2026-11-09 用户设计二轮：以角色名为单位，
+    # 只管理微调训练后的模型；切换在『画面设置』页，此处=清单+删除） ----------
+    with ui.card().style(card_css):
+        with ui.row().style("width:100%;align-items:center;gap:8px"):
+            ui.label("数字人模型管理").style(
+                "font-weight:var(--font-weight-emphasis)")
+            ui.space()
+            ui.button(icon="refresh", on_click=lambda: _render_models()).props(
+                "dense flat no-caps").tooltip("重新扫描角色模型")
+        ui.label(
+            "以角色名为单位管理训练主播流程的微调训练结果（底模+口型权重）。"
+            "切换使用中的角色在『画面设置』页；删除=清除该角色全部"
+            "（模型+部署数据包+训练工作区，不可恢复）。").style(
+            "font-size:12px;color:var(--text-secondary)")
+        models_body = ui.column().style("width:100%")
+
+    def _render_models():
+        """整卡重绘（container.clear+填充）。"""
+        from utils.digital_human_models import list_digital_human_models
+        data = list_digital_human_models(config)
+        models_body.clear()
+        with models_body:
+            if not data["models"]:
+                ui.label("暂无角色模型（完成一次训练后在此出现）").style(
+                    "color:var(--text-hint);font-size:var(--font-size-body)")
+                return
+            for m in data["models"]:
+                with ui.row().style("width:100%;align-items:center;gap:8px;padding:4px 0"):
+                    marks = []
+                    if m["current"]:
+                        marks.append("当前使用")
+                    if m["deployed"]:
+                        marks.append("已部署")
+                    if m["cleanup_pending"]:
+                        marks.append(f"含 {m['intermediate_count']} 个中间文件")
+                    mark = f"（{'、'.join(marks)}）" if marks else ""
+                    ui.label(m["role"]).tooltip(m.get("model_dir") or m["role"]).style(
+                        "font-weight:500;min-width:110px;color:var(--text-primary)")
+                    model_state = "✔ 底模" if m["generator_ok"] else "✖ 无底模"
+                    a2l_state = "口型 ✔" if m["audio2lip_ok"] else "口型 ✖"
+                    ui.label(
+                        f"{model_state} · {a2l_state} · 模型 {m['model_gb']}GB").style(
+                        "font-size:11px;color:var(--text-secondary);flex:1;min-width:0;"
+                        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                    ui.button(icon="delete",
+                              on_click=lambda _, r=m["role"]: _confirm_delete(r)) \
+                        .props("dense flat no-caps") \
+                        .tooltip("删除该角色全部（模型+部署数据包+训练工作区，不可恢复）")
+
+    def _confirm_delete(role: str):
+        from utils.digital_human_models import list_digital_human_models
+        info = next((m for m in list_digital_human_models(config)["models"]
+                     if m["role"] == role), None)
+        model_gb = info["model_gb"] if info else 0.0
+        with ui.dialog() as dlg, ui.card().style(card_css):
+            ui.label(f"删除角色 {role}").style(
+                "font-weight:var(--font-weight-emphasis)")
+            ui.label(
+                f"将删除该角色的全部内容（模型目录约 {model_gb:.1f}GB，"
+                "另含部署数据包与训练工作区，不可恢复）：\n"
+                "① 微调训练模型（底模+口型权重）\n"
+                "② 部署数据包（推理帧链接+checkpoint）\n"
+                "③ 训练工作区（预处理帧/素材）与训练日志、进度\n\n"
+                "当前使用中的角色不可删除（请先在『画面设置』切换其它角色）。").style(
+                "white-space:pre-wrap;font-size:12px;color:var(--text-secondary)")
+            with ui.row():
+                ui.button("确认删除", color="negative",
+                          on_click=lambda: _do_delete(role, dlg))
+                ui.button("取消", on_click=dlg.close).props("flat")
+        dlg.open()
+
+    def _do_delete(role: str, dlg):
+        from utils.digital_human_models import delete_digital_human_model
+        dlg.close()
+
+        async def _run():
+            # to_thread：GB 级 rmtree 耗时分钟级，事件循环阻塞 >2s 会断联
+            r = await asyncio.to_thread(delete_digital_human_model, config, role)
+            if r["ok"]:
+                ui.notify(position="top", type="positive",
+                          message=f"已删除角色 {role}（释放 {r['freed_gb']}GB）")
+            else:
+                ui.notify(position="top", type="negative",
+                          message=r["error"] or "删除失败（详见日志）")
+            _render_models()
+
+        asyncio.create_task(_run())
+
+    _render_models()
+
     ui.timer(0.5, _poll)
