@@ -1457,7 +1457,7 @@
     "gpt_sovits_root": "D:\\AI\\AUTOlive\\apps\\gpt-sovits",
     "gpt_sovits_python": "D:\\AI\\runtime312-clone\\python.exe",
     "rvc_root": "D:\\AI\\AUTOlive\\apps\\rvc",
-    "rvc_python": "D:\\AI\\EDTalk\\runtime312\\python.exe",
+    "rvc_python": "",
     "aicovergen_root": "D:\\AI\\AUTOlive\\apps\\aicovergen"
   },
   "audio_integration": {

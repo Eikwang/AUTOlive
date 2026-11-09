@@ -66,9 +66,17 @@ def get_edtalk_dir() -> str:
 
 
 def get_interpreter(config_data: dict) -> str:
-    return (config_data.get("edtalk_realtime", {}) or {}).get(
-        "interpreter_path", "D:\\AI\\EDTalk\\runtime312\\python.exe"
-    )
+    """训练子进程解释器——与服务拉起链同源候选链（2026-11-09 用户实报根修）。
+
+    此前本函数对已退役键 interpreter_path 硬编码外部兜底
+    D:\\AI\\EDTalk\\runtime312\\python.exe（.get 默认值）——runtime312 物理迁入
+    仓库根后该键清空，get 落默认值必指向不存在路径（迁移批只改了服务拉起链
+    runtime.resolve_interpreter，训练链漏改=双代码路径陷阱再现）。现委托同源
+    候选链：legacy 键（存在才采纳）→ 运行时记忆 → 仓库根 runtime312 →
+    外部兜底；全缺失返回空串（preflight 三段式报错）。
+    """
+    from utils.edtalk_realtime.runtime import resolve_interpreter
+    return resolve_interpreter(config_data)
 
 
 def resolve_character_dir_name(config_data: dict) -> str:
@@ -369,9 +377,10 @@ class TrainPipeline:
             )
         if not os.path.exists(self.interpreter):
             return (
-                f"problem=解释器不存在：{self.interpreter}。"
-                f"cause=runtime312 未安装或路径变更（源目录结构债，见资源清单）；"
-                f"fix=修改画面设置页『解释器路径』配置项指向可用解释器"
+                f"problem=解释器不存在：{self.interpreter or '（候选链全缺失）'}。"
+                f"cause=仓库根 runtime312 与运行时记忆均无可用解释器（候选链已尽）；"
+                f"fix=确认仓库根 runtime312\\python.exe 在位（python Scripts/migrate_runtime_check.py --dry-run 校验迁移）；"
+                f"或在 edtalk_runtime.json 记忆一个可用解释器路径"
             )
         if not os.path.isfile(os.path.join(self.edtalk_dir, "data_preprocess", "data_preprocess_for_train", "run_preprocess.py")):
             return (

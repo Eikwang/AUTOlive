@@ -56,17 +56,42 @@ def test_preflight_missing_original_videos(tmp_path):
     assert "original_videos" in msg and "problem=" in msg
 
 
-def test_preflight_missing_interpreter(tmp_path):
-    """解释器缺失 → 三段式含修复动作（D7 义务+F3 报错验证）。"""
+def test_preflight_missing_interpreter(tmp_path, monkeypatch):
+    """解释器缺失 → 三段式含修复动作（D7 义务+F3 报错验证）。
+
+    2026-11-09 实报根修后语义：get_interpreter 委托同源候选链
+    （legacy 键指向不存在文件→忽略→记忆→仓库根兜底）——"候选链全缺失"
+    用 mock 造（真机仓库根 runtime312 存在，无法自然构造）。"""
     video_dir = tmp_path / "videos"
     (video_dir / "original_videos").mkdir(parents=True)
     p = TrainPipeline(
         config_data={"edtalk_realtime": {"interpreter_path": str(tmp_path / "nope.exe")}},
         video_dir=str(video_dir), role_name="x",
     )
+    monkeypatch.setattr("utils.train_streamer.pipeline.get_interpreter",
+                        lambda cfg: "")
+    p.interpreter = ""
     msg = p.preflight()
     assert "problem=" in msg and "cause=" in msg and "fix=" in msg  # 三段式（D7）
-    assert "解释器" in msg and ("解释器路径" in msg or "interpreter_path" in msg)
+    assert "解释器" in msg and "候选链" in msg
+    assert "『解释器路径』" not in msg, "退役配置项（书名号形态）不应再作为修复指引"
+
+
+def test_get_interpreter_delegates_candidate_chain(tmp_path, monkeypatch):
+    """2026-11-09 用户实报根修：interpreter_path 退役清空后，训练链不得再
+    硬编码外部 D:\\AI\\EDTalk\\runtime312 兜底——委托 runtime.resolve_interpreter
+    同源候选链（迁移批只改了服务拉起链的双代码路径陷阱）。"""
+    import utils.edtalk_realtime.runtime as rt
+    from utils.train_streamer.pipeline import get_interpreter
+
+    # ① 委托关系：resolve_interpreter 的返回值原样透传
+    monkeypatch.setattr(rt, "resolve_interpreter",
+                        lambda cfg=None: "SENTINEL")
+    assert get_interpreter({"edtalk_realtime": {}}) == "SENTINEL"
+    monkeypatch.undo()
+    # ② 真实链：legacy 指向不存在文件→忽略→记忆→仓库根（真机在位）兜底
+    r = get_interpreter({"edtalk_realtime": {"interpreter_path": str(tmp_path / "nope.exe")}})
+    assert r and os.path.isfile(r), f"legacy 失效应回退仓库根: {r}"
 
 
 # ---------- 2. 步骤编排：失败即停 ----------
