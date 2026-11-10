@@ -146,8 +146,12 @@ def edtalk_root() -> str:
 
 
 def resolve_character_dir(config: dict) -> str:
-    ed_cfg = (config or {}).get("edtalk_realtime", {}) or {}
-    return os.path.join(edtalk_root(), str(ed_cfg.get("character_dir", "wy")))
+    """编排素材的落位/消费目录=**tuber/{当前启用角色}**（2026-11-10 用户架构
+    改造）：character_dir 键升级为"当前启用角色"——画面设置选角色后编排
+    片段进对应角色包，全链单一数据源（消费 utils.digital_human_models 同源
+    函数，角色库根=仓库根 tuber/）。"""
+    from utils.digital_human_models import resolve_active_character_dir
+    return resolve_active_character_dir(config)
 
 
 def staging_dir(segment: str) -> str:

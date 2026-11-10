@@ -399,3 +399,6 @@ log*.txt
 
 # T5 解释器候选链记忆（运行时状态，不进 git）
 data/interpreter_memory.json
+
+# 角色库（tuber/）：每角色数据包（checkpoint 权重部署副本+推理帧 junction+编排片段），数据不入库
+tuber/

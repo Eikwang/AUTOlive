@@ -806,11 +806,10 @@ class TrainPipeline:
                 # 有训练产物（底模 ckpt 或口型产物）才部署；纯评估跑完无新 ckpt
                 self._deploy_ran = True
                 try:
-                    # 部署目标与服务启动/素材管理同源（默认 wy，存量自定义
-                    # 仍生效）——此前 fallback role_name 与服务两源不一致，
-                    # 产物落到无人加载的目录（2026-10-31 审查修复 F2）
-                    character_dir = resolve_character_dir_name(self.config_data)
-                    deploy_msg = self.apply_to_digital_human(self.role_name, character_dir, self.iter_count,
+                    # 部署=角色包创建（2026-11-10 tuber 角色库改造）：按角色名
+                    # 建 tuber/{role} 包（checkpoint+推理帧 junction），多角色
+                    # 并存——启用哪个角色由画面设置的 character_dir 决定。
+                    deploy_msg = self.apply_to_digital_human(self.role_name, iter_count=self.iter_count,
                                                              ckpt_rel=self._ckpt_rel)
                     deploy_ok = True
                     self._log(f"[部署] {deploy_msg}", 4)
@@ -1097,21 +1096,28 @@ class TrainPipeline:
         return msg
 
     @staticmethod
-    def apply_to_digital_human(role_name: str, character_dir: str, iter_count: int = 30000,
+    def apply_to_digital_human(role_name: str, character_dir: str = "",
+                               iter_count: int = 30000,
                                ckpt_rel: str | None = None) -> str:
         """把训练产物应用到实时推理（打通"训练→开播"最后一公里）。
 
+        2026-11-10 用户架构改造：部署目标=**tuber 角色库按角色名建包**——
+        训练角色名即包名（训练"小王" → `tuber/小王/`），每角色一个数据包
+        （checkpoint 权重部署副本+推理帧 junction+编排片段），多角色并存、
+        画面设置按角色切换。character_dir 参数保留兼容旧调用但不再消费
+        （部署目标由 role_name 决定）。
+
         映射（2026-09-24 迷你冒烟 strict 加载验证通过；2026-10-16 补数据联接）：
         - ckpt_models/<角色>/checkpoint/<iter:06d>.pt 的 ['gen'] state_dict
-          → <character_dir>/checkpoint/new.pt（realtime_serve Generator 权重）
-        - 口型微调产物 audio2lip ckpt → <character_dir>/checkpoint/audio2lip.pt
-          （get_model_paths 约定与 new.pt 并排于 checkpoint/ 下）
+          → tuber/<角色>/checkpoint/new.pt（realtime_serve Generator 权重）
+        - 口型微调产物 audio2lip ckpt → tuber/<角色>/checkpoint/audio2lip.pt
+          + ckpt_models/<角色>/audio2lip.pt（统一落位权威副本）
         - 推理数据子目录 orifra/count/metadata/facemark(+gaze_data)
           junction ← data/edtalk_train/<角色>/（缺了服务启动第 1 步即崩）
 
         Args:
-            role_name: 训练角色名
-            character_dir: realtime_serve 角色素材目录名（config.edtalk_realtime.character_dir）
+            role_name: 训练角色名（=角色包目录名）
+            character_dir: 已废弃（保留兼容旧调用签名；部署目标由 role_name 决定）
             iter_count: 底模微调 iter（定位产物文件名；ckpt_rel 未传时的旧假设）
             ckpt_rel: 底模产物相对 edtalk_dir 的路径（动态发现，优先于 iter_count 假设）
 
@@ -1120,8 +1126,10 @@ class TrainPipeline:
         """
         import torch
 
+        from utils.digital_human_models import tuber_root
+
         edtalk_dir = get_edtalk_dir()
-        char_root = os.path.join(edtalk_dir, character_dir)
+        char_root = os.path.join(tuber_root(), role_name)
         ckpt_dir = os.path.join(char_root, "checkpoint")
         os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -1136,19 +1144,24 @@ class TrainPipeline:
         new_pt_path = os.path.join(ckpt_dir, "new.pt")
         torch.save({"gen": cand["gen"]}, new_pt_path)
 
-        # 2) 口型权重：口型微调产物 → checkpoint/audio2lip.pt
-        #    （get_model_paths 约定：checkpoint/ 下 audio2lip.pt + new.pt 并排；
-        #    2026-10-16 实测曾错放角色包根 → "Audio2Lip model not found"）
-        #    统一落位（2026-11-09 用户设计）：ckpt_models/{role}/audio2lip.pt
-        #    =角色模型目录的权威口型权重（微调训练结果以角色名为单位保存）。
-        a2l_src = TrainPipeline._find_latest_a2l_ckpt(edtalk_dir, role_name)
+        # 2) 口型权重：统一落位优先（2026-11-09 用户设计：ckpt_models/{role}/
+        #    audio2lip.pt=权威副本——中间文件清理会删 logs/Audio2Lip 时间戳目录，
+        #    权威副本是部署链的唯一长期源）→ 数据包 checkpoint/audio2lip.pt
+        #    （get_model_paths 约定：checkpoint/ 下 audio2lip.pt + new.pt 并排）。
+        a2l_src = None
+        unified_first = os.path.join(edtalk_dir, "ckpt_models", role_name, "audio2lip.pt")
+        if os.path.isfile(unified_first):
+            a2l_src = unified_first
+        else:
+            a2l_src = TrainPipeline._find_latest_a2l_ckpt(edtalk_dir, role_name)
         if a2l_src:
             a2l_dst = os.path.join(ckpt_dir, "audio2lip.pt")
             shutil.copy2(a2l_src, a2l_dst)
             unified = os.path.join(edtalk_dir, "ckpt_models", role_name, "audio2lip.pt")
-            os.makedirs(os.path.dirname(unified), exist_ok=True)
-            shutil.copy2(a2l_src, unified)
-            a2l_msg = f"口型权重 {a2l_src} → {a2l_dst} + {unified}"
+            if os.path.abspath(a2l_src) != os.path.abspath(unified):
+                os.makedirs(os.path.dirname(unified), exist_ok=True)
+                shutil.copy2(a2l_src, unified)
+            a2l_msg = f"口型权重 {a2l_src} → {a2l_dst}"
         else:
             a2l_msg = "未找到口型微调产物（audio2lip.pt 保持不变）"
 
@@ -1158,6 +1171,6 @@ class TrainPipeline:
         data_msg = TrainPipeline._ensure_serve_data(char_root, role_name)
 
         return (
-            f"已应用：gen → {new_pt_path}；{a2l_msg}；{data_msg}。"
-            f"重启 realtime_serve 后生效（停止并重新『运行系统』）"
+            f"已部署到角色库 tuber/{role_name}（gen → {new_pt_path}；{a2l_msg}；{data_msg}）。"
+            f"在『画面设置-数字人角色』选择 {role_name} 并重启服务后生效"
         )

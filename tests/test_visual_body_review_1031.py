@@ -146,8 +146,9 @@ def test_startup_chain_frame_params_clamped():
 
 
 def test_startup_chain_character_dir_retired_key_registered():
-    """F4 守卫：character_dir 退役键登记（存量键一次性告知），启动参数保留
-    默认 wy 兜底（materials.resolve_character_dir 同源）。"""
+    """F4 守卫：character_dir 退役键登记（存量键一次性告知），启动参数指向
+    tuber 角色库（2026-11-10 架构改造：键值=当前启用角色，服务加载
+    tuber/{角色} 数据包）。"""
     src = _FRONTEND_MAIN.read_text(encoding="utf-8")
     assert '(("edtalk_realtime", "character_dir")' in src
-    assert '"--character-dir", str(ed_cfg.get("character_dir", "wy"))' in src
+    assert '"--character-dir", os.path.join(str(get_base_path()), "tuber",' in src

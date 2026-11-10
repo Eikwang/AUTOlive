@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""数字人模型统一管理守卫（2026-11-09 用户设计二轮）
+"""数字人模型统一管理守卫（2026-11-10 三轮：tuber 角色库架构）
 
-语义：以角色名为单位只管理微调训练后的模型（ckpt_models/{role}/）；
-中间文件（中间 iter ckpt/预览图/tfevents/口型时间戳目录）训练收尾自动清
-（cleanup_training_intermediates）；切换校验=服务消费面（部署数据包）；
-删除=角色全链（模型+部署数据包+训练工作区+日志残余+进度），current 保护。
+用户设计终态：tuber/ 角色库每角色一个子目录（checkpoint 部署副本+推理帧
+junction+编排片段）；character_dir 键=当前启用角色（画面设置选角色→编排
+片段与服务全链跟随）；ckpt_models 保留为训练产物权威库（收尾自动清中间
+文件）；删除=角色全链（角色包+权威库+工作区+日志残余+进度），current 保护。
 UI：train_streamer 只删不切（切换归画面设置 visual_body 角色下拉+服务自动重启）。
 """
 import os
@@ -25,16 +25,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _mk(tmp_path):
-    """假环境（两套大小写：数据包 wy / 训练产物 WY）：
-    - ckpt_models/WY/checkpoint/{000000,005000,019999}.pt（2 中间+1 最终）
-      + step_000.jpg/step_5000.jpg（预览图）+ log/tfevents（训练日志）
-    - logs/Audio2Lip/WY/20261016_0903/checkpoint/x.pt（口型微调时间戳目录）
-    - 部署数据包 edtalk/wy（checkpoint/new.pt+audio2lip.pt+junction×5）
+    """tuber 角色库假环境（两套大小写：角色包 wy / 训练产物 WY）：
+    - 权威库 edtalk/ckpt_models/WY/checkpoint/{000000,005000,019999}.pt
+      （2 中间+1 最终）+ step_*.jpg 预览图 + log/tfevents
+    - logs/Audio2Lip/WY/{ts}/checkpoint/x.pt（口型微调时间戳目录）
+    - 角色包 tuber/wy（checkpoint/new.pt+audio2lip.pt+junction×5）
     - 训练工作区 data/edtalk_train/WY（orifra/seg01 实体帧）
     """
     ed = tmp_path / "edtalk"
+    tb = tmp_path / "tuber"
     train = tmp_path / "data" / "edtalk_train"
-    # 训练结果（模型目录）——中间+最终
+    # 训练结果（权威库）——中间+最终
     ck = ed / "ckpt_models" / "WY" / "checkpoint"
     ck.mkdir(parents=True)
     (ck / "000000.pt").write_bytes(b"x" * (6 * 1024 * 1024))
@@ -48,8 +49,8 @@ def _mk(tmp_path):
     a2l_ts = ed / "logs" / "Audio2Lip" / "WY" / "20261016_0903" / "checkpoint"
     a2l_ts.mkdir(parents=True)
     (a2l_ts / "x.pt").write_bytes(b"a" * 1024)
-    # 部署数据包（checkpoint 权重+junction → 工作区）
-    pkg = ed / "wy"
+    # 角色包（checkpoint 权重+junction → 工作区）
+    pkg = tb / "wy"
     (pkg / "checkpoint").mkdir(parents=True)
     (pkg / "checkpoint" / "new.pt").write_bytes(b"gen")
     (pkg / "checkpoint" / "audio2lip.pt").write_bytes(b"a2l")
@@ -61,14 +62,14 @@ def _mk(tmp_path):
     for sub in ("orifra", "count", "metadata", "facemark", "gaze_data"):
         _winapi.CreateJunction(str(ws / sub), str(pkg / sub))
     config = {"edtalk_realtime": {"character_dir": "wy"}}
-    return ed, config
+    return ed, tb, config
 
 
 def test_list_model_view_union_and_current(tmp_path):
     """清单=模型视角：角色 union 归并（ckpt_models/数据包/工作区 casefold）、
     deployed/current/中间文件量化；不含素材帧大小。"""
-    ed, config = _mk(tmp_path)
-    data = list_digital_human_models(config, edtalk_root=str(ed))
+    ed, tb, config = _mk(tmp_path)
+    data = list_digital_human_models(config, tuber_root_arg=str(tb), edtalk_dir=str(ed))
     assert data["current"] == "wy"
     assert len(data["models"]) == 1, data["models"]
     m = data["models"][0]
@@ -85,7 +86,7 @@ def test_list_model_view_union_and_current(tmp_path):
 def test_cleanup_training_intermediates_keeps_final(tmp_path):
     """训练收尾清理：中间 iter/预览图/tfevents/口型时间戳目录全清，
     最终 iter 底模保留；idempotent（再跑零动作不炸）。"""
-    ed, config = _mk(tmp_path)
+    ed, tb, config = _mk(tmp_path)
     r = cleanup_training_intermediates("WY", edtalk_dir=str(ed))
     assert r["ok"] and r["freed_mb"] > 2, r
     ck = ed / "ckpt_models" / "WY" / "checkpoint"
@@ -100,26 +101,26 @@ def test_cleanup_training_intermediates_keeps_final(tmp_path):
 
 def test_validate_switch_requires_deployed_package(tmp_path):
     """切换校验=服务消费面（部署数据包）；未部署角色拒绝、current 空串。"""
-    ed, config = _mk(tmp_path)
-    assert validate_switch(config, "wy", edtalk_root=str(ed)) == ""
-    assert validate_switch(config, "WY", edtalk_root=str(ed)) == ""  # 大小写
-    assert "尚未部署" in validate_switch(config, "ghost", edtalk_root=str(ed))
+    ed, tb, config = _mk(tmp_path)
+    assert validate_switch(config, "wy", tuber_root_arg=str(tb)) == ""
+    assert validate_switch(config, "WY", tuber_root_arg=str(tb)) == ""  # 大小写
+    assert "尚未部署" in validate_switch(config, "ghost", tuber_root_arg=str(tb))
 
 
 def test_delete_full_chain_independent_junction_target(tmp_path):
-    """删除角色全链：模型目录+部署数据包（junction 先摘）+训练工作区
+    """删除角色全链：tuber 角色包（junction 先摘）+模型权威库+训练工作区
     （casefold wy↔WY）+口型残余+进度；current 保护拒绝。"""
-    ed, config = _mk(tmp_path)
+    ed, tb, config = _mk(tmp_path)
     # 保护：current（wy）拒绝
-    r0 = delete_digital_human_model(config, "wy", edtalk_root=str(ed))
+    r0 = delete_digital_human_model(config, "wy", tuber_root_arg=str(tb))
     assert r0["ok"] is False and "切换" in r0["error"]
-    assert (ed / "wy" / "checkpoint" / "new.pt").exists()
+    assert (tb / "wy" / "checkpoint" / "new.pt").exists()
     # 切走后可删
     config["edtalk_realtime"]["character_dir"] = "other"
-    r = delete_digital_human_model(config, "wy", edtalk_root=str(ed))
+    r = delete_digital_human_model(config, "wy", tuber_root_arg=str(tb), edtalk_dir=str(ed))
     assert r["ok"], r
-    assert not (ed / "wy").exists(), "部署数据包应整删"
-    assert not (ed / "ckpt_models" / "WY").exists(), "模型目录应删（casefold）"
+    assert not (tb / "wy").exists(), "角色包应整删（含编排片段）"
+    assert not (ed / "ckpt_models" / "WY").exists(), "权威库应删（casefold）"
     assert not (tmp_path / "data" / "edtalk_train" / "WY").exists(), "工作区应独立删"
     assert not (ed / "logs" / "Audio2Lip" / "WY").exists(), "口型残余应删"
     assert not (ed / "train_progress" / "WY.json").exists()

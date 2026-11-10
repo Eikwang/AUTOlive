@@ -17,6 +17,7 @@
 本页仅保留编排互锁状态源（F7 手动切段确认弹窗）。
 """
 import asyncio
+import os
 
 from nicegui import ui
 from typing import Any, Callable, Dict
@@ -168,16 +169,18 @@ def create_visual_body_tab(
                                  _update_combo_warning()),
         ).tooltip("开启后『运行系统』时自动拉起 realtime_serve；端口与解释器自动解析，无需配置")
 
-        # 数字人角色选择（2026-11-09 用户设计：以角色为单位切换微调模型；
-        # character_dir 内部量由本管理面受控接管——选择后服务运行中自动重启加载）
+        # 数字人角色选择（2026-11-10 tuber 角色库改造）：**只显示角色库
+        # （tuber/）中已有的角色子目录**——训练部署会自动建包入库；选择后
+        # 写 character_dir（=当前启用角色）并在服务运行中自动重启加载。
         def _role_options() -> dict:
-            from utils.digital_human_models import list_digital_human_models
+            from utils.digital_human_models import tuber_root
             cur = str(get_nested_value(config, "edtalk_realtime", "character_dir",
                                        default="wy") or "wy")
             opts = {cur: f"{cur}（当前）"}
-            for m in list_digital_human_models(config)["models"]:
-                mark = "" if m["deployed"] else "（未部署）"
-                opts.setdefault(m["role"], f"{m['role']}{mark}")
+            tb = tuber_root()
+            for d in (sorted(os.listdir(tb)) if os.path.isdir(tb) else []):
+                if os.path.isdir(os.path.join(tb, d)):
+                    opts.setdefault(d, d)
             return opts
 
         _role_switching = {"busy": False}
@@ -199,9 +202,10 @@ def create_visual_body_tab(
             online = service_status(config) is not None
             if not online:
                 ui.notify(position="top", type="positive",
-                          message=f"已选择角色 {role}（服务未运行，下次启动生效）")
+                          message=f"已选择角色 {role}——动作编排将使用 tuber/{role} "
+                                  "（服务未运行，下次启动生效）")
                 return
-            # 服务运行中：自动重启加载新角色（模型+推理帧都随角色切换）
+            # 服务运行中：自动重启加载新角色（模型+编排片段都随角色切换）
             from frontend.main import AutoliveApp
             app = AutoliveApp.APP_HOLDER.get("app")
             if app is None:
@@ -217,7 +221,8 @@ def create_visual_body_tab(
                     app._start_edtalk_realtime, config)
                 if ok:
                     ui.notify(position="top", type="positive",
-                              message=f"数字人服务已按角色 {role} 重启完成")
+                              message=f"数字人服务已按角色 {role} 重启完成——"
+                                      "动作编排已切换到该角色的素材")
                 else:
                     ui.notify(position="top", type="negative", timeout=10,
                               message=f"数字人服务重启失败：{reason}" +

@@ -95,7 +95,7 @@ def _run_full(monkeypatch, tmp_path, role="freshrole", with_ckpt=True,
     monkeypatch.setattr(TrainPipeline, "_cleanup_after_step",
                         lambda self, proc, stage: None)
 
-    def _fake_apply(role_name, character_dir, iter_count=30000, ckpt_rel=None):
+    def _fake_apply(role_name, character_dir="", iter_count=30000, ckpt_rel=None):
         applied.append((role_name, character_dir, iter_count, ckpt_rel))
         if apply_impl:
             return apply_impl()
@@ -171,13 +171,14 @@ def test_resolve_character_dir_name_legacy_custom_value_applies():
 
 
 def test_deploy_targets_service_character_dir(tmp_path, monkeypatch):
-    """部署调用收到的角色包目录名必须来自同源解析（默认 wy）。
+    """部署目标=训练角色名（2026-11-10 tuber 角色库改造）。
 
-    回归锁：原 fallback role_name——character_dir 键删除后产物部署到
-    edtalk/<角色名>/，服务却加载 wy，训练结果永不生效。
+    回归锁演进：原锁"部署与服务同源解析"（单包覆盖架构）；tuber 改造后
+    部署=按训练角色名建角色包（tuber/{role}），启用哪个角色由画面设置的
+    character_dir 决定——本锁断言部署目标=训练角色名（多角色并存基石）。
     """
     _, _, applied, _ = _run_full(monkeypatch, tmp_path, role="somerole")
-    assert applied[0][1] == "wy"
+    assert applied[0][0] == "somerole"
 
 
 # ---------- F4：推送分级（部署失败=报警；主动停止不发） ----------

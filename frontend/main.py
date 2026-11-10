@@ -581,6 +581,26 @@ class AutoliveApp:
             )
             return False, f"EDTalk 运行副本目录不存在：{edtalk_dir}", "请运行 scripts/copy_edtalk.py 一键复制脚本"
 
+        # 角色包权重预检（2026-11-10 用户实报：数据包 checkpoint 被删后服务
+        # exit=1 模糊报错）——拉起前确认 checkpoint/new.pt（Generator 权重）
+        # 与 audio2lip.pt（口型权重）在位，缺失给可行动指引（重新部署）。
+        # 2026-11-10 tuber 角色库改造：数据包=仓库根 tuber/{启用角色}。
+        character_name = str(ed_cfg.get("character_dir") or "wy")
+        pkg_ckpt = os.path.join(str(get_base_path()), "tuber", character_name, "checkpoint")
+        # 仅角色包目录已存在时查完整性（目录整体缺失=数据包未部署，保持原行为
+        # 由服务端报错；测试假环境同理跳过）
+        if os.path.isdir(pkg_ckpt):
+            missing = [f for f in ("new.pt", "audio2lip.pt")
+                       if not os.path.isfile(os.path.join(pkg_ckpt, f))]
+            if missing:
+                reason = (f"角色包 {character_name} 缺口型权重文件：{', '.join(missing)}"
+                          f"（{pkg_ckpt}）")
+                fix_hint = ("在『训练主播』页重新部署该角色（训练编排部署步会从"
+                            " ckpt_models 权威副本恢复角色包权重），或重新训练")
+                logger.error(f"{reason}。problem=角色包权重缺失；cause=数据包 checkpoint 不完整"
+                             f"（可能被手动清理/删除）；fix={fix_hint}")
+                return False, reason, fix_hint
+
         port = int(ed_cfg.get("port", 8000)) if ed_cfg.get("port") else 8000
         # host/API Token 已退役（2026-10-26）：控制面为纯本机回环（全系统消费方
         # 硬编码 127.0.0.1），省略 --host/--api-token 用服务端默认（回环+无鉴权）。
@@ -626,9 +646,11 @@ class AutoliveApp:
                       message=f"帧参数越界已自动修正：缓冲={buffer_frames}（1-300），"
                               f"预填充={preroll_frames}（须≤缓冲）；可在『画面设置』页调整")
         cmd = [interpreter, "-m", "realtime_serve.main"]
-        # character_dir 已退役为内部量（2026-10-31 画面设置批次）：UI 配置项移除，
-        # 默认 wy；存量自定义值仍生效（materials.resolve_character_dir 同源读取）
-        cmd += ["--character-dir", str(ed_cfg.get("character_dir", "wy"))]
+        # character_dir 语义升级（2026-11-10 tuber 角色库改造）：键值=当前启用
+        # 角色名，服务加载绝对路径 tuber/{角色}（每角色一个数据包，画面设置
+        # 切换=写此键+服务重启加载对应包）。
+        cmd += ["--character-dir", os.path.join(str(get_base_path()), "tuber",
+                                                str(ed_cfg.get("character_dir", "wy")))]
         cmd += ["--target-fps", str(_int_cfg("target_fps", 25))]
         cmd += ["--buffer-frames", str(buffer_frames)]
         cmd += ["--preroll-frames", str(preroll_frames)]

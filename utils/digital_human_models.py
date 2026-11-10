@@ -1,25 +1,27 @@
-# -*- coding: UTF-8 -*-
+# -*- coding: utf-8 -*-
 """
-数字人模型统一管理数据层（2026-11-09 用户设计二轮：以角色名为单位，
-只管理微调训练后的模型）。
+数字人模型统一管理数据层（2026-11-10 架构改造：tuber 角色库）。
 
-用户裁决语义：
-- "数字人模型"=训练主播流程的微调训练结果（底模 Generator + 口型
-  audio2lip），以角色名为单位保存于 `edtalk/ckpt_models/{role}/`——
-  **不含**预处理推理帧/素材（那是部署数据包与画面素材管理的领域）。
-- 训练收尾自动清中间文件（中间 iter ckpt/预览图 step_*.jpg/tfevents/
-  口型微调时间戳目录 logs/Audio2Lip/{role}）——最终模型落位后清理。
-- 画面设置选角色（config.edtalk_realtime.character_dir，2026-10-31 退役
-  为内部量，本管理面受控接管切换写入）→ 服务按新角色加载（重启生效）。
-- 删除角色=删该角色全部（模型目录+部署数据包+训练工作区+训练日志残余
-  +进度），当前启用角色保护拒绝。
+用户设计（三轮演进终态）：
+- **tuber 角色库**（仓库根 `tuber/`）：**每角色一个子目录**——checkpoint
+  权重部署副本（new.pt+audio2lip.pt）+ 推理帧 junction（orifra/count/
+  metadata/facemark/gaze_data → data/edtalk_train/{role}）+ **动作编排
+  片段**（orifra/{段} 等同套结构）。**数字人服务/动作编排/模型管理全链
+  按此目录消费**。
+- **config.edtalk_realtime.character_dir 语义升级**：从"固定目录名"升级为
+  "**当前启用角色**"——画面设置选角色=写此键，编排片段落位/服务启动/
+  管理清单全链跟随（训练 A/B/C 三个角色 = tuber 下三个子目录，选 A 则
+  编排片段进 tuber/A、服务加载 tuber/A）。
+- **部署目标=角色包创建**：训练角色名即包名（训练"小王" → `tuber/小王/`）。
+- **ckpt_models 保留为训练产物权威库**（管理区块显示/重部署恢复源）；
+  训练收尾自动清中间文件只清 ckpt_models/logs 侧。
 
-角色名两套大小写的历史现实：部署数据包名=config character_dir（"wy"）、
-训练产物目录名=role_name（"WY"）——关联与删除一律 casefold 兜底。
+历史演进：2026-11-09 一轮"数据包视角"（用户否决）→ 二轮"角色模型视角
++单包覆盖"→ 三轮（本版）"tuber 多角色库"。
 """
 import os
 import shutil
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from utils.my_log import logger
 
@@ -31,9 +33,34 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _edtalk_root(config, edtalk_root: str = None) -> str:
-    if edtalk_root:
-        return edtalk_root
+def _base_path() -> str:
+    try:
+        from frontend.config.paths import get_base_path
+        return str(get_base_path())
+    except Exception:
+        return _repo_root()
+
+
+def tuber_root(tuber_root: str = None) -> str:
+    """角色库根：仓库根 tuber/——每角色一个子目录（服务/编排/管理全链消费）。"""
+    if tuber_root:
+        return tuber_root
+    return os.path.join(_base_path(), "tuber")
+
+
+def _character_dir_name(config) -> str:
+    """当前启用角色（config.edtalk_realtime.character_dir，默认 wy）。"""
+    ed = (config or {}).get("edtalk_realtime", {}) or {}
+    return str(ed.get("character_dir") or "wy")
+
+
+def resolve_active_character_dir(config, tuber_root_arg: str = None) -> str:
+    """当前启用角色的数据包目录：tuber/{启用角色}。"""
+    return os.path.join(tuber_root(tuber_root_arg), _character_dir_name(config))
+
+
+def _edtalk_root() -> str:
+    """edtalk 副本根（ckpt_models/logs/train_progress 训练产物侧仍在此）。"""
     try:
         from frontend.config.paths import get_base_path
         return os.path.join(str(get_base_path()), "edtalk")
@@ -41,15 +68,9 @@ def _edtalk_root(config, edtalk_root: str = None) -> str:
         return os.path.join(_repo_root(), "edtalk")
 
 
-def _train_root(config, edtalk_root: str = None) -> str:
+def _train_root(edtalk_dir: str = None) -> str:
     """训练工作区根（data/edtalk_train——get_edtalk_dir 同源约定）。"""
-    return os.path.join(os.path.dirname(_edtalk_root(config, edtalk_root)),
-                        "data", "edtalk_train")
-
-
-def _character_dir_name(config) -> str:
-    ed = (config or {}).get("edtalk_realtime", {}) or {}
-    return str(ed.get("character_dir") or "wy")
+    return os.path.join(os.path.dirname(edtalk_dir or _edtalk_root()), "data", "edtalk_train")
 
 
 def _dir_size(root: str) -> int:
@@ -77,45 +98,41 @@ def _find_casefold(parent: str, name: str) -> str:
     return ""
 
 
-def _resolve_data_pkg(edtalk_dir: str, role: str) -> str:
-    """角色的部署数据包目录（edtalk/{casefold role}）。"""
-    return _find_casefold(edtalk_dir, role)
+def _resolve_data_pkg(role: str, tuber_root_arg: str = None) -> str:
+    """角色的部署数据包目录（tuber/{casefold role}）。"""
+    return _find_casefold(tuber_root(tuber_root_arg), str(role))
 
 
-def list_digital_human_models(config, edtalk_root: str = None) -> Dict[str, List[dict]]:
-    """角色模型清单（模型视角，以角色名为单位）。
+def list_digital_human_models(config, tuber_root_arg: str = None, edtalk_dir: str = None) -> Dict[str, List[dict]]:
+    """角色清单（tuber 角色库视角，以角色名为单位）。
 
-    角色来源=ckpt_models/{role}（训练结果）∪ 部署数据包（edtalk/ 下含
-    checkpoint/new.pt）∪ 训练工作区（data/edtalk_train/{role}）——casefold
-    归并。字段：
-    - role/model_gb：角色名/模型目录实体大小（ckpt_models/{role}）
-    - generator_ok：checkpoint/ 下存在 .pt（底模产物）
-    - audio2lip_ok：ckpt_models/{role}/audio2lip.pt（统一落位后）
-    - deployed：部署数据包存在且 checkpoint/new.pt 在（服务可加载）
-    - cleanup_pending：存在中间文件（非最终 iter ckpt/预览图/tfevents/
-      口型时间戳目录）——训练收尾清理未跑（历史训练遗留）
+    角色来源=tuber 库子目录（角色包）∪ ckpt_models/{role}（训练结果）∪
+    训练工作区——casefold 归并。字段：
+    - role/model_gb：角色名/权威库实体大小（ckpt_models/{role}）
+    - generator_ok/audio2lip_ok：权威库双权重在位
+    - deployed：tuber/{role}/checkpoint/new.pt 在（服务可加载）
+    - cleanup_pending/intermediate_count：中间文件量化
+    - workspace_exists：训练工作区在
     - current：config.edtalk_realtime.character_dir 指向（画面设置消费）
     """
-    edtalk_dir = _edtalk_root(config, edtalk_root)
-    train_root = _train_root(config, edtalk_root)
+    tb_root = tuber_root(tuber_root_arg)
+    edtalk_dir = edtalk_dir or _edtalk_root()
+    ck_root = os.path.join(edtalk_dir, "ckpt_models")
+    train_root = _train_root(edtalk_dir)
     current_name = _character_dir_name(config)
 
-    roles: Dict[str, str] = {}  # casefold -> 显示名（ckpt_models 优先）
-    ck_root = os.path.join(edtalk_dir, "ckpt_models")
+    roles: Dict[str, str] = {}  # casefold -> 显示名（tuber 库优先）
+    if os.path.isdir(tb_root):
+        for d in os.listdir(tb_root):
+            if os.path.isdir(os.path.join(tb_root, d)):
+                roles.setdefault(d.casefold(), d)
     if os.path.isdir(ck_root):
         for d in os.listdir(ck_root):
             if os.path.isdir(os.path.join(ck_root, d)):
                 roles.setdefault(d.casefold(), d)
-    if os.path.isdir(edtalk_dir):
-        for d in os.listdir(edtalk_dir):
-            pkg = os.path.join(edtalk_dir, d)
-            if os.path.isdir(pkg) and os.path.isfile(
-                    os.path.join(pkg, "checkpoint", "new.pt")):
-                roles.setdefault(d.casefold(), d)
-    if os.path.isdir(train_root):
-        for d in os.listdir(train_root):
-            if os.path.isdir(os.path.join(train_root, d)) and d != "train_progress":
-                roles.setdefault(d.casefold(), d)
+    for d in (os.listdir(train_root) if os.path.isdir(train_root) else []):
+        if os.path.isdir(os.path.join(train_root, d)):
+            roles.setdefault(d.casefold(), d)
 
     out: List[dict] = []
     for key in sorted(roles, key=str.casefold):
@@ -125,18 +142,17 @@ def list_digital_human_models(config, edtalk_root: str = None) -> Dict[str, List
         ck_dir = os.path.join(model_dir, "checkpoint") if model_dir else ""
         pts = sorted(f for f in (os.listdir(ck_dir) if os.path.isdir(ck_dir) else [])
                      if f.endswith(".pt"))
-        pkg = _resolve_data_pkg(edtalk_dir, name)
+        pkg = _resolve_data_pkg(name, tuber_root_arg)
         deployed = bool(pkg) and os.path.isfile(os.path.join(pkg, "checkpoint", "new.pt"))
-        # 中间文件盘点（cleanup_pending 量化）
         intermediates = 0
         if ck_dir and os.path.isdir(ck_dir):
-            intermediates += max(0, len(pts) - 1)  # 非最终 iter ckpt
+            intermediates += max(0, len(pts) - 1)
             intermediates += len([f for f in os.listdir(ck_dir)
                                   if f.startswith("step_") and f.endswith(".jpg")])
             intermediates += len(os.listdir(os.path.join(model_dir, "log"))
                                  ) if os.path.isdir(os.path.join(model_dir, "log")) else 0
         if os.path.isdir(os.path.join(edtalk_dir, "logs", "Audio2Lip", name)):
-            intermediates += 1  # 口型微调时间戳目录残余
+            intermediates += 1
         out.append({
             "role": name,
             "model_dir": model_dir,
@@ -153,19 +169,19 @@ def list_digital_human_models(config, edtalk_root: str = None) -> Dict[str, List
     return {"models": out, "current": current_name}
 
 
-def validate_switch(config, role: str, edtalk_root: str = None) -> str:
+def validate_switch(config, role: str, tuber_root_arg: str = None) -> str:
     """画面设置切换校验（空串=可切换；current 重复启用返回空串）。
 
-    服务消费面=部署数据包（推理帧 junction+checkpoint 权重），校验与其
-    构造需求对齐：orifra 有素材段+checkpoint/new.pt。
+    服务消费面=tuber/{role} 角色包（推理帧 junction+checkpoint 权重），
+    校验与其构造需求对齐：orifra 有素材段+checkpoint/new.pt。
     """
     current_name = _character_dir_name(config)
     if str(role).casefold() == current_name.casefold():
         return ""
-    pkg = _resolve_data_pkg(_edtalk_root(config, edtalk_root), str(role))
+    pkg = _resolve_data_pkg(str(role), tuber_root_arg)
     orifra = os.path.join(pkg, "orifra") if pkg else ""
     if not orifra or not os.path.isdir(orifra):
-        return (f"角色 {role} 尚未部署推理数据（缺数据包 orifra）——"
+        return (f"角色 {role} 尚未部署推理数据（角色库缺 {role} 包或其 orifra）——"
                 "请先完成该角色的训练部署，或在『画面设置』选择其它角色")
     try:
         segments = [d for d in os.listdir(orifra)
@@ -191,11 +207,7 @@ def cleanup_training_intermediates(role: str, edtalk_dir: str = None) -> dict:
     不抛异常。casefold 兜底（数据包 wy ↔ 训练目录 WY）。
     """
     if edtalk_dir is None:
-        try:
-            from frontend.config.paths import get_base_path
-            edtalk_dir = os.path.join(str(get_base_path()), "edtalk")
-        except Exception:
-            edtalk_dir = os.path.join(_repo_root(), "edtalk")
+        edtalk_dir = _edtalk_root()
     freed = {"mb": 0.0}
     removed: List[str] = []
 
@@ -239,16 +251,16 @@ def cleanup_training_intermediates(role: str, edtalk_dir: str = None) -> dict:
             "summary": summary}
 
 
-def delete_digital_human_model(config, role: str, edtalk_root: str = None) -> dict:
-    """删除一个角色（全链：模型目录+部署数据包+训练工作区+训练日志残余+进度）。
+def delete_digital_human_model(config, role: str, tuber_root_arg: str = None,
+                               edtalk_dir: str = None) -> dict:
+    """删除一个角色（全链：tuber 角色包+模型权威库+训练工作区+训练日志残余+进度）。
 
-    junction 处置：先 os.rmdir 摘除数据包内 junction（只删链接不删目标），
-    再独立 rmtree 数据包与训练工作区目标。保护：current 启用中拒绝。
+    junction 处置：先 os.rmdir 摘除角色包内 junction（只删链接不删目标），
+    再独立 rmtree 角色包与训练工作区目标。保护：current 启用中拒绝。
     返回结构化结果，不抛异常。
     """
-    edtalk_dir = _edtalk_root(config, edtalk_root)
-    train_root = _train_root(config, edtalk_root)
     role = str(role)
+    edtalk_dir = edtalk_dir or _edtalk_root()
     current_name = _character_dir_name(config)
     if role.casefold() == current_name.casefold():
         return {"ok": False, "error": "该角色为当前启用（画面设置-数字人角色）——"
@@ -270,8 +282,8 @@ def delete_digital_human_model(config, role: str, edtalk_root: str = None) -> di
         except OSError as e:
             errors.append(f"{label}: {e}")
 
-    pkg = _resolve_data_pkg(edtalk_dir, role)
-    # ① 部署数据包：先摘 junction（只删链接），再整删
+    pkg = _resolve_data_pkg(role, tuber_root_arg)
+    # ① 角色包：先摘 junction（只删链接），再整删（编排片段随之清除）
     if pkg:
         for sub in _JUNCTION_SUBDIRS:
             p = os.path.join(pkg, sub)
@@ -280,25 +292,24 @@ def delete_digital_human_model(config, role: str, edtalk_root: str = None) -> di
                     os.rmdir(p)
             except OSError as e:
                 errors.append(f"junction {sub}: {e}")
-        _rmtree(pkg, "部署数据包")
-    # ② 模型目录（微调训练结果）
+        _rmtree(pkg, "角色包")
+    # ② 模型权威库（微调训练结果）
     _rmtree(_find_casefold(os.path.join(edtalk_dir, "ckpt_models"), role), "模型目录")
     # ③ 训练工作区（预处理帧/原始素材——GB 级大头）
-    _rmtree(_find_casefold(train_root, role), "训练工作区")
+    _rmtree(_find_casefold(_train_root(edtalk_dir), role), "训练工作区")
     # ④ 口型微调日志残余
     _rmtree(_find_casefold(os.path.join(edtalk_dir, "logs", "Audio2Lip"), role),
             "口型微调产物")
     # ⑤ 训练进度
     progress = _find_casefold(os.path.join(edtalk_dir, "train_progress"), role)
     _rmtree(progress, "训练进度")
-    for pid_name in (f"{role}.json",):
-        p = os.path.join(edtalk_dir, "train_progress", pid_name)
-        if os.path.isfile(p):
-            try:
-                os.remove(p)
-                deleted.append(p)
-            except OSError as e:
-                errors.append(f"训练进度: {e}")
+    p = os.path.join(edtalk_dir, "train_progress", f"{role}.json")
+    if os.path.isfile(p):
+        try:
+            os.remove(p)
+            deleted.append(p)
+        except OSError as e:
+            errors.append(f"训练进度: {e}")
 
     ok = not errors
     logger.info(f"[digital-human-models] 删除角色 {role}: 删 {len(deleted)} 项"
