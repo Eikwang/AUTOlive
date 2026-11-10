@@ -18,6 +18,7 @@ CoverQueue 依赖 config.get(*keys) 变长键（Config 对象形态）——webu
 AutoliveApp.config（init_config 同形态，零适配）；my_handle 可选（webui 轻量
 进程无播放链，on_done=None=完成仅落盘，插播依赖点歌主链）。
 """
+import asyncio
 import logging
 import os
 import threading
@@ -141,8 +142,11 @@ def register_cover_routes(app, config, get_my_handle=None):
         """删除翻唱成品（debug-only；T7 用户诉求按钮现已进程内直调）。
 
         删除 covers/ 下同名三件（成品+分轨 vocal/inst）；song_source 原曲不删。
-        文件名白名单校验（防路径穿越）。code→HTTP 映射单点在本端点。"""
-        r = delete_cover_artifact(config, (req or {}).get("file"))
+        文件名白名单校验（防路径穿越）。code→HTTP 映射单点在本端点。
+        2026-11-11 断联根修：文件删除同步体移 to_thread（大文件删除秒级，
+        原 async handler 内联执行阻塞 webui 事件循环 → WS 判死页面重载）。"""
+        r = await asyncio.to_thread(
+            delete_cover_artifact, config, (req or {}).get("file"))
         if r.ok:
             return {"success": True, "deleted": r.deleted}
         raise HTTPException(status_code=r.code, detail=r.detail)
@@ -151,7 +155,8 @@ def register_cover_routes(app, config, get_my_handle=None):
     async def cover_enqueue(req: dict):
         song = str((req or {}).get("song") or "")
         try:
-            return enqueue_cover_manual(config, get_my_handle, song)
+            return await asyncio.to_thread(
+                enqueue_cover_manual, config, get_my_handle, song)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except HTTPException:

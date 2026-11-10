@@ -11,6 +11,7 @@
 写者矩阵：character_dir 下段目录的唯一写者=本模块（删除）与预处理产出（添加）；
 EDTalk 服务只做内存注册/卸载（/segment/add、/segment/remove），不碰盘。
 """
+import asyncio
 import json
 import os
 import re
@@ -864,11 +865,66 @@ def delete_material(config: dict, segment: str) -> dict:
 # HTTP 路由（挂载 main 进程 FastAPI；POST 回环校验沿 orchestration.api）
 # ----------------------------------------------------------------------
 
+def _reprocess_material(cfg: dict, payload: dict) -> dict:
+    """按口型重处理同步体（2026-11-11 断联根修抽出：原内联于 async handler，
+    service_status 同步 HTTP + 磁盘扫描在事件循环上执行——移入工作线程）。
+
+    前置校验 → 非当前段保护 → 暂存区源视频定位 → remove 旧注册 → 入队重处理。
+    MaterialError 由 handler 映射 422。
+    """
+    seg = str(payload.get("segment", "")).strip()
+    lip = bool(payload.get("lip_flag", True))
+    meta = get_material_meta(seg)
+    char_dir = resolve_character_dir(cfg)
+    if not _piece_complete(char_dir, seg):
+        raise MaterialError(
+            f"problem=素材不存在或不完整；cause={seg} 四件套缺失；"
+            "fix=刷新素材列表")
+    # 非当前播放段保护（R-eng4②/T0b：add 对已缓存段不重载，
+    # remove 拒当前渲染段——重处理必须不在播）
+    st = service_status(cfg)
+    if st and st.get("current_segment") == seg:
+        raise MaterialError(
+            f"problem=素材 '{seg}' 正在渲染中，拒绝重处理；"
+            "cause=当前播放段重载会撕裂渲染缓存；"
+            "fix=先切换到其他段（编排切走或 /segment/switch）再重处理")
+    # 原视频需在暂存区（original_videos）；缺失=无法重处理
+    stage_ov = os.path.join(staging_dir(seg), "original_videos")
+    src = None
+    if os.path.isdir(stage_ov):
+        for fn in os.listdir(stage_ov):
+            if fn.lower().endswith(_VIDEO_EXTS):
+                src = os.path.join(stage_ov, fn)
+                break
+    if not src:
+        raise MaterialError(
+            f"problem=素材 '{seg}' 缺原始视频（暂存区无 original_videos）；"
+            "cause=重处理需源视频；fix=删除后重新上传")
+    # 移除旧注册（非当前段安全）→ 重跑预处理 → 重注册
+    if st:
+        import requests as rq
+        rq.post(f"{_edtalk_api(cfg)}/segment/remove", json={"segment": seg},
+                headers=_auth_headers(cfg), timeout=10)
+    return publish_material(cfg, src, seg, device="cuda",
+                            material_type=meta.get("type", "main"),
+                            lip_flag=lip,
+                            background=meta.get("background"))
+
+
 def register_material_routes(app, config) -> None:
     """把 /edtalk_materials/* 素材管理路由挂到 main 进程 FastAPI 应用。
 
     config 参数为 Config 实例（dict 形态，支持 .get；沿 danmaku/orchestration
     路由注册惯例传 WebServer.config）。
+
+    2026-11-11 断联根修（用户实报：数字人下级页卡死重载循环）：本模块路由
+    挂 webui 进程（NiceGUI/FastAPI 单事件循环，socket.io ping_interval=4s/
+    ping_timeout=2s）——本进程实测 service_status（同步 /status 请求）服务
+    离线时恒定吃满 2.0s timeout、list_materials 全链 2.05s、delete 含 GB 级
+    rmtree——原 async handler 在事件循环上同步执行，编排页 8s 轮询每次冻结
+    循环 ≥2s 击穿 ping_timeout → WS 判死 → 浏览器重连整页重载。所有含阻塞
+    体（同步 HTTP/磁盘扫描/删除）的 handler 一律 asyncio.to_thread 移入
+    工作线程；守卫 tests/features/test_webui_routes_off_event_loop.py。
     """
     from fastapi import Depends, HTTPException
     from utils.orchestration.api import _require_loopback
@@ -880,7 +936,7 @@ def register_material_routes(app, config) -> None:
     async def materials_list():
         """素材清单（管理页刷新/轮询；只读不校验来源——观察者可看）。"""
         try:
-            return list_materials(_cfg())
+            return await asyncio.to_thread(list_materials, _cfg())
         except Exception as e:
             raise HTTPException(status_code=500, detail={
                 "problem": "素材清单读取失败", "cause": str(e),
@@ -905,7 +961,8 @@ def register_material_routes(app, config) -> None:
                 "cause": "需提交 {video_path, segment}",
                 "fix": "按素材管理页提交结构重试"})
         try:
-            task = publish_material(
+            task = await asyncio.to_thread(
+                publish_material,
                 _cfg(), str(payload.get("video_path", "")),
                 str(payload.get("segment", "")),
                 device=str(payload.get("device", "cuda")),
@@ -930,8 +987,8 @@ def register_material_routes(app, config) -> None:
                 "fix": "按素材管理页改判/背景表单结构重试"})
         try:
             seg = str(payload.pop("segment")).strip()
-            return {"ok": True, "segment": seg,
-                    "meta": set_material_meta(seg, **payload)}
+            meta = await asyncio.to_thread(set_material_meta, seg, **payload)
+            return {"ok": True, "segment": seg, "meta": meta}
         except MaterialError as e:
             raise HTTPException(status_code=422, detail={"message": str(e)})
 
@@ -942,50 +999,14 @@ def register_material_routes(app, config) -> None:
 
         重跑对应预处理链（完整人脸链/桩）+/segment/add 热更新（add 幂等重载，
         T0b 实证）。当前渲染段拒绝（remove 同源保护；R-eng4② 前置保护）。
+        同步体抽至 _reprocess_material，经 to_thread 执行（断联根修）。
         """
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail={
                 "problem": "请求体不是对象", "cause": "需提交 {segment, lip_flag}",
                 "fix": "按素材行重处理动作结构重试"})
-        cfg = _cfg()
-        seg = str(payload.get("segment", "")).strip()
-        lip = bool(payload.get("lip_flag", True))
         try:
-            meta = get_material_meta(seg)
-            char_dir = resolve_character_dir(cfg)
-            if not _piece_complete(char_dir, seg):
-                raise MaterialError(
-                    f"problem=素材不存在或不完整；cause={seg} 四件套缺失；"
-                    "fix=刷新素材列表")
-            # 非当前播放段保护（R-eng4②/T0b：add 对已缓存段不重载，
-            # remove 拒当前渲染段——重处理必须不在播）
-            st = service_status(cfg)
-            if st and st.get("current_segment") == seg:
-                raise MaterialError(
-                    f"problem=素材 '{seg}' 正在渲染中，拒绝重处理；"
-                    "cause=当前播放段重载会撕裂渲染缓存；"
-                    "fix=先切换到其他段（编排切走或 /segment/switch）再重处理")
-            # 原视频需在暂存区（original_videos）；缺失=无法重处理
-            stage_ov = os.path.join(staging_dir(seg), "original_videos")
-            src = None
-            if os.path.isdir(stage_ov):
-                for fn in os.listdir(stage_ov):
-                    if fn.lower().endswith(_VIDEO_EXTS):
-                        src = os.path.join(stage_ov, fn)
-                        break
-            if not src:
-                raise MaterialError(
-                    f"problem=素材 '{seg}' 缺原始视频（暂存区无 original_videos）；"
-                    "cause=重处理需源视频；fix=删除后重新上传")
-            # 移除旧注册（非当前段安全）→ 重跑预处理 → 重注册
-            if st:
-                import requests as rq
-                rq.post(f"{_edtalk_api(cfg)}/segment/remove", json={"segment": seg},
-                        headers=_auth_headers(cfg), timeout=10)
-            task = publish_material(cfg, src, seg, device="cuda",
-                                    material_type=meta.get("type", "main"),
-                                    lip_flag=lip,
-                                    background=meta.get("background"))
+            task = await asyncio.to_thread(_reprocess_material, _cfg(), payload)
             return {"accepted": True, "task": task}
         except MaterialError as e:
             raise HTTPException(status_code=422, detail={"message": str(e)})
@@ -999,6 +1020,7 @@ def register_material_routes(app, config) -> None:
                 "problem": "请求体不是对象", "cause": "需提交 {segment}",
                 "fix": "按素材管理页提交结构重试"})
         try:
-            return delete_material(_cfg(), str(payload.get("segment", "")))
+            return await asyncio.to_thread(
+                delete_material, _cfg(), str(payload.get("segment", "")))
         except MaterialError as e:
             raise HTTPException(status_code=422, detail={"message": str(e)})

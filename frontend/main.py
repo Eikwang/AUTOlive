@@ -85,6 +85,33 @@ from frontend.styles.themes import init_theme_manager, get_theme_manager
 from utils.my_log import logger
 from utils.autolive_paths import ensure_config_backup
 
+import asyncio
+
+
+def _forward_to_main(config: dict, path: str, *, method: str = "GET",
+                     payload=None, timeout: int = 60):
+    """转发 HTTP 请求到主系统 API（同步阻塞体——仅供 asyncio.to_thread 调用）。
+
+    2026-11-11 断联根修（用户实报：数字人下级页卡死重载循环）：/send /llm
+    /get_sys_info 原在 async def handler 内同步 urlopen(timeout=60)——主 API
+    无响应时冻结 webui 事件循环可达 60s，NiceGUI socket.io ping_timeout=2.0s
+    （nicegui.py:138-139）必判死 → WS 断联 → 浏览器重连整页重载。urlopen
+    收编本模块级同步函数，handler 一律 to_thread 移入工作线程；
+    守卫 tests/features/test_webui_routes_off_event_loop.py。"""
+    import json as _json
+    import urllib.request
+    main_api_ip = "127.0.0.1" if config.get("api_ip") == "0.0.0.0" else config.get("api_ip", "127.0.0.1")
+    main_api_port = config.get("api_port", 8000)
+    url = f'http://{main_api_ip}:{main_api_port}{path}'
+    if method == "GET":
+        req = urllib.request.Request(url, method='GET')
+    else:
+        req = urllib.request.Request(
+            url, data=_json.dumps(payload if payload is not None else {}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return _json.loads(response.read().decode('utf-8'))
+
 # D-15（基础功能 2026-10-22 节 #9）：退役配置键面清单（键路径→说明）。
 # 首启扫描存量命中→notify+log 一次性告知，防旧配置静默失效无感知；
 # 迁移/清理职责归 settings._ensure_defaults 各迁移点（此处只做可见面，
@@ -1521,21 +1548,11 @@ class AutoliveApp:
                 data_json = await request.json()
                 logger.info(f'WEBUI API send接口收到数据：{data_json}')
 
-                import json
-                import urllib.request
-                config_data = self.config._config
-                main_api_ip = "127.0.0.1" if config_data.get("api_ip") == "0.0.0.0" else config_data.get("api_ip", "127.0.0.1")
-                main_api_port = config_data.get("api_port", 8000)
-                url = f'http://{main_api_ip}:{main_api_port}/send'
-
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(data_json).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'}
-                )
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    resp_data = json.loads(response.read().decode('utf-8'))
-                    return resp_data
+                # 2026-11-11 断联根修：urlopen(60s) 移 to_thread——原内联同步
+                # 执行，主 API 无响应时冻结事件循环可达 60s（WS 判死页面重载）
+                return await asyncio.to_thread(
+                    _forward_to_main, self.config._config, '/send',
+                    method='POST', payload=data_json)
             except Exception as e:
                 logger.error(f"send处理失败: {e}")
                 return {"code": -1, "message": f"发送数据失败！{e}"}
@@ -1580,21 +1597,10 @@ class AutoliveApp:
                 data_json = await request.json()
                 logger.info(f'WEBUI API llm接口 收到数据：{data_json}')
 
-                import json
-                import urllib.request
-                config_data = self.config._config
-                main_api_ip = "127.0.0.1" if config_data.get("api_ip") == "0.0.0.0" else config_data.get("api_ip", "127.0.0.1")
-                main_api_port = config_data.get("api_port", 8000)
-                url = f'http://{main_api_ip}:{main_api_port}/llm'
-
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(data_json).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'}
-                )
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    resp_data = json.loads(response.read().decode('utf-8'))
-                    return resp_data
+                # 2026-11-11 断联根修：urlopen(60s) 移 to_thread（同 /send）
+                return await asyncio.to_thread(
+                    _forward_to_main, self.config._config, '/llm',
+                    method='POST', payload=data_json)
             except Exception as e:
                 logger.error(f"llm处理失败: {e}")
                 return {"code": -1, "message": f"失败！{e}"}
@@ -1603,17 +1609,10 @@ class AutoliveApp:
         async def api_get_sys_info():
             """获取系统信息"""
             try:
-                import json
-                import urllib.request
-                config_data = self.config._config
-                main_api_ip = "127.0.0.1" if config_data.get("api_ip") == "0.0.0.0" else config_data.get("api_ip", "127.0.0.1")
-                main_api_port = config_data.get("api_port", 8000)
-                url = f'http://{main_api_ip}:{main_api_port}/get_sys_info'
-
-                req = urllib.request.Request(url, method='GET')
-                with urllib.request.urlopen(req, timeout=60) as response:
-                    resp_data = json.loads(response.read().decode('utf-8'))
-                    return resp_data
+                # 2026-11-11 断联根修：urlopen(60s) 移 to_thread（同 /send）
+                return await asyncio.to_thread(
+                    _forward_to_main, self.config._config, '/get_sys_info',
+                    method='GET')
             except Exception as e:
                 logger.error(f"get_sys_info处理失败: {e}")
                 return {"code": -1, "message": f"get_sys_info处理失败！{e}"}
