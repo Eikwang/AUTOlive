@@ -33,8 +33,13 @@ _SONG_SEG_END_MARGIN = 1.15
 # 答谢连续跳过上限（2026-11-10 R3/F4/D14）：song 序列内连续跳过（到期优先
 # pop(i)）计数达此值 → 下一到期段放行队首条目一条（答谢时效保障——人声落后
 # 时间轴时每段皆 due，无上限=答谢饿死至歌尾；放行人声延后有界 ≈ 一条答谢
-# TTS 2-5s，e13 失步声明方向内）。
+# TTS 2-5s，e13 失步声明方向内）。R4 起为兜底（预算预检在前端控量）。
 _OVERDUE_SKIP_LIMIT = 2
+
+# 间奏插播硬性条件（2026-11-10 R4，用户指定）：间奏窗口剩余<此值或窗口本身
+# <此值 → 不再起插播音频（避免说一半）。用户口径：「进入间奏开始计时，不足
+# 3 秒时无需消费音频，或间奏空间本身就不足 3 秒，也无需消费音频」。
+_INTERLUDE_MIN_CONSUME_S = 3.0
 
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
@@ -185,16 +190,25 @@ class PlaybackMixin:
         return remaining if remaining > 0 else 0.0
 
     def _pop_next_entry_locked(self):
-        """出队选择（2026-11-10 R3 到期优先，须在 voice_tmp_path_queue_lock
-        持有内调用——Eng F5③锁纪律：扫描+pop 单次锁完成、锁内无 IO）。
+        """出队选择（2026-11-10 R4 窗口预算模型——用户实测反馈重构，须在
+        voice_tmp_path_queue_lock 持有内调用）。
 
-        ① 到期优先扫描：队列中第一个「song 切片段 ∧ seq>0 ∧ 锚存在 ∧ due 已
-        到」（due=t0+start_s−预补偿，与 last_end 播完保底取大=完整复用
-        _song_gate_wait_s 判定式/F8 义务）。找到且其前有插播条目（i>0）→
-        pop(i)（song 段优先，答谢延后留队不丢）；跳过区间含 999 条目 → 豁免
-        （999 优先级最高+让位机制与延后交互未定义，从简不延后——正常消费队
-        首）；连续跳过计数 ≥_OVERDUE_SKIP_LIMIT → 放行队首一条（答谢时效）。
-        ② 无到期段：复用 _song_gate_wait_s 判队首窗口（未到期→返回等待秒）。
+        用户设计预期（2026-11-10 实测反馈）：伴奏响=唱歌时间；其它消费音频
+        只能在间奏期间消费；间奏剩余不足 3s（或间奏本身不足 3s）不再起音频
+        （避免说一半）；间奏结束立刻切回人声（无论插播条目是否播完）；人声
+        分段全部对齐伴奏播完；人声播完而伴奏未完=垃圾时间（伴奏继续+自由
+        消费，新点歌可停止当前伴奏起新唱歌时间）。
+
+        ① 垃圾时间（anchor["wrapping"]）：伴奏进程死（is_alive poll，fail-soft）
+        → 清锚回 IDLE；否则**全直通 pop(0)**（自由消费，无窗口约束）。
+        ② 唱歌时间（锚存在）：a) 到期 song 段（due≤now，含 last_end 保底）
+        → pop(i) 跳过其前插播条目（延后留队不丢；跳过区间含 999 豁免）=
+        间奏结束立刻切回人声；b) 队首=插播条目 → **窗口预检**——间奏窗口
+        =[last_end, 下一 song 段 due]，剩余=窗口结束−now：剩余<3s 或窗口
+        总长<3s 不起音频；插播音频时长（pydub 读 voice_path，fail-soft 放行）
+        >剩余 → 不起（预算语义=消费完剩 2s 不够下一条则不消费）；通过 → pop。
+        c) 队首=song 段未到期 → 窗口门等待（复用 _song_gate_wait_s）。
+        ③ 无锚 → 全直通（fail-open）。
 
         Returns: (data_json|None, gate_wait_s)
           data_json 非 None=已出队待消费；gate_wait_s>0=队首 song 段窗口未到
@@ -204,9 +218,33 @@ class PlaybackMixin:
             return None, 0.0
         anchor = getattr(self, "_song_anchor", None)
         if anchor and anchor.get("t0") is not None:
+            # ① 垃圾时间（末段受理后，人声播完伴奏未完）：伴奏播完感知=
+            # 子进程 is_alive poll（降级线程无 proc 引用→保守保持 wrapping
+            # 直到新歌重建锚）。队列出现 song 切片段=新点歌序列 → 退出
+            # 垃圾时间走正常机制（seq0 消费重建锚+新伴奏起新唱歌时间）。
+            if anchor.get("wrapping"):
+                _has_new_song = any(
+                    isinstance(e, dict) and e.get("type") == "song"
+                    and e.get("song_segment") for e in queue)
+                proc = getattr(self, "_backing_proc", None)
+                backing_alive = True
+                if proc is not None:
+                    try:
+                        backing_alive = proc.is_alive()
+                    except Exception:
+                        pass
+                if not _has_new_song and not backing_alive:
+                    # 伴奏播完且无新歌=垃圾时间结束 → 清锚回 IDLE
+                    self._song_anchor = None
+                    return queue.pop(0), 0.0
+                if not _has_new_song:
+                    return queue.pop(0), 0.0  # 垃圾时间自由消费
+                anchor["wrapping"] = False  # 新歌到来：回到唱歌时间机制
+                logger.info("[song] 垃圾时间结束（新点歌触发），进入新唱歌时间")
             now = time.monotonic()
             last_end = anchor.get("last_end") or 0.0
             skip_count = int(anchor.get("skip_count") or 0)
+            # ②a 到期 song 段：间奏结束立刻切回人声（延后插播条目）
             for i, entry in enumerate(queue):
                 if not isinstance(entry, dict) or entry.get("type") != "song":
                     continue
@@ -218,26 +256,64 @@ class PlaybackMixin:
                     due = last_end  # 播完保底地板（F8：防插播后下段抢跑）
                 if now < due:
                     continue
-                # 到期 song 段=索引 i。跳过区间 [0, i) 的 999 豁免检查
                 if any(self._is_999_entry(e) for e in queue[:i]):
-                    anchor["skip_count"] = 0
+                    return queue.pop(0), 0.0  # 999 豁免（最高优先级不延后）
+                anchor["skip_count"] = 0 if i == 0 else min(
+                    skip_count + 1, _OVERDUE_SKIP_LIMIT)
+                return queue.pop(i), 0.0
+            # ②b 队首=插播条目 → 窗口预检（预算语义+3s 硬性条件）
+            head = queue[0]
+            if not (isinstance(head, dict) and head.get("type") == "song"):
+                window_end = self._next_song_due_locked(anchor)
+                if window_end is None:
+                    # 无后续 song 段（末段已消费完的收尾间隙）→ 自由消费
                     return queue.pop(0), 0.0
-                if i == 0:
-                    # song 段已在队首（无跳过发生）→ 限流复位重新武装
-                    anchor["skip_count"] = 0
-                    return queue.pop(0), 0.0
-                if skip_count < _OVERDUE_SKIP_LIMIT:
-                    # 到期优先：跳过其前插播条目（延后留队不丢），计数+1
-                    anchor["skip_count"] = skip_count + 1
-                    return queue.pop(i), 0.0
-                # 上限已达：放行队首一条（答谢时效），预算消耗后复位重新武装
-                anchor["skip_count"] = 0
+                remaining = window_end - now
+                window_total = window_end - (last_end if last_end > 0 else now)
+                if remaining < _INTERLUDE_MIN_CONSUME_S \
+                        or window_total < _INTERLUDE_MIN_CONSUME_S:
+                    # 硬性条件：剩余<3s 或窗口本身<3s → 不起音频（避免说
+                    # 一半）——等到期推人声
+                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD
+                if self._entry_duration_s(head) > remaining:
+                    # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
+                    # 不足 3s 时已由上面拦住）
+                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD
                 return queue.pop(0), 0.0
-        # 无到期段：窗口门判定（队首 song 切片段未到期→等待）
+        # ②c 无锚（fail-open）或队首=song 段：窗口门判定
         gate_wait = self._song_gate_wait_s(queue[0])
         if gate_wait > 0:
             return None, gate_wait
         return queue.pop(0), 0.0
+
+    def _next_song_due_locked(self, anchor):
+        """队列中下一个 song 切片段的窗口结束时刻（due=t0+start−预补偿，含
+        last_end 保底）；无 → None（自由消费）。须锁内调用。"""
+        t0 = anchor.get("t0")
+        last_end = anchor.get("last_end") or 0.0
+        for entry in self.voice_tmp_path_queue:
+            if not isinstance(entry, dict) or entry.get("type") != "song":
+                continue
+            seg = entry.get("song_segment") or {}
+            if not seg or int(seg.get("seq", 0)) == 0:
+                continue
+            due = t0 + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+            return max(due, last_end)
+        return None
+
+    def _entry_duration_s(self, entry):
+        """插播条目音频时长（pydub 读 voice_path，fail-soft：读取失败→0=
+        放行不阻塞——时长不可知时退化为不预检）。锁内调用豁免说明：本地小
+        音频 pydub 加载 <100ms（非重 IO/网络），持锁窗口可容忍；时长透传
+        优化列 TODOS。"""
+        try:
+            from pydub import AudioSegment
+            path = entry.get("voice_path") or ""
+            if not path or not os.path.isfile(path):
+                return 0.0
+            return len(AudioSegment.from_file(path)) / 1000.0
+        except Exception:
+            return 0.0
 
     def _start_backing_player(self, backing_path: str, volume: float):
         """伴奏播放启动编排（2026-11-10 R2，须在主进程调用）。
@@ -632,7 +708,10 @@ class PlaybackMixin:
         # 序列锚更新（2026-11-09 失步根修）：受理时刻=段起播锚（帧锁定出声
         # preroll ~0.3s）；last_end=受理+段时长×margin（播完保底——服务端
         # 渐进推理慢于实时时窗口门取 max(due, last_end)，宁可人声延后不
-        # flush 自截断）；末段受理完成清锚（序列收尾）。
+        # flush 自截断）。R4 垃圾时间（2026-11-10 用户预期）：末段受理后
+        # **不清锚**——置 wrapping=True（人声播完而伴奏未完=垃圾时间：伴奏
+        # 继续+自由消费音频，不属于唱歌时间）；退出=伴奏进程播完感知（出队
+        # poll is_alive）或新点歌 seq0 重建锚（新歌停止当前伴奏起新唱歌时间）。
         if data_json.get("type") == "song" and _seg_meta:
             _pushed_at = time.monotonic()
             _anchor = getattr(self, "_song_anchor", None)
@@ -646,7 +725,7 @@ class PlaybackMixin:
                         _anchor.get("last_end") or 0.0,
                         _pushed_at + _seg_dur * _SONG_SEG_END_MARGIN)
                 if int(_seg_meta.get("seq", 0)) == int(_seg_meta.get("total", 0)) - 1:
-                    self._song_anchor = None
+                    _anchor["wrapping"] = True  # 垃圾时间（R4：替代清锚）
         # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
         # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
         # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待

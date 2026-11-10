@@ -225,7 +225,9 @@ def test_consume_last_segment_clears_anchor(tmp_path):
                               "start_s": 90.0}}
     pb._song_anchor = {"t0": time.monotonic() - 100.0, "last_end": 0.0}
     asyncio.run(pb._consume_edtalk_entry(entry, wav))
-    assert getattr(pb, "_song_anchor", None) is None
+    # R4 垃圾时间：末段受理置 wrapping（人声播完伴奏未完=自由消费），不再清锚
+    anchor = getattr(pb, "_song_anchor", None)
+    assert anchor is not None and anchor.get("wrapping") is True
 
 
 def test_consume_mid_segment_updates_playthrough_floor(tmp_path):
@@ -319,22 +321,78 @@ def test_overdue_song_segment_jumps_ahead_of_thanks():
     assert pb._song_anchor["skip_count"] == 1
 
 
-def test_overdue_skip_limit_releases_head_thanks():
-    """连续跳过达 _OVERDUE_SKIP_LIMIT → 放行队首一条（答谢时效）+计数复位
-    （预算消耗后重新武装——F4/D14）。"""
+def test_interlude_budget_blocks_thanks_near_window_end():
+    """窗口预算预检（R4/D14 退役跳过上限）：间奏剩余<3s 不起答谢（等到期推
+    人声）——用户硬性条件「不足 3 秒时无需消费音频，避免说一半」。"""
     import time as _t
     pb = _gate_pb()
+    # 窗口：last_end=now，下一 song 段 due=now+4s（剩余 4s≥3s 但答谢 10s 超窗）
     pb.voice_tmp_path_queue = [
-        {"type": "comment", "voice_path": "a", "content": "thanks"},
+        {"type": "comment", "voice_path": "nonexistent.wav", "content": "thanks"},
         {"type": "song", "voice_path": "s1", "content": "s",
          "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
     ]
-    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0,
-                       "skip_count": 2}  # 已达上限
+    pb._song_anchor = {"t0": _t.monotonic() - 8.0, "last_end": 0.0}
+    # due=t0+10−0.3=now+1.7；last_end=now+2 → 窗口结束=max=now+2 → 剩余
+    # 2s<3s → 硬性条件拦截（不起答谢，等到期推人声）
+    pb._song_anchor["last_end"] = _t.monotonic() + 2.0
     with pb.voice_tmp_path_queue_lock:
         data, gw = pb._pop_next_entry_locked()
-    assert gw == 0 and data["type"] == "comment"  # 放行队首答谢
-    assert pb._song_anchor["skip_count"] == 0  # 复位重新武装
+    assert data is None  # 剩余 2s<3s → 不起答谢（返回等待）
+    assert gw > 0
+
+
+def test_interlude_budget_blocks_overlong_entry():
+    """预算语义：答谢音频时长>剩余窗口 → 不起下一条（消费完剩 2s 不够下一条
+    则无需消费——时长预检 pydub 读 voice_path，文件缺失=fail-soft 放行）。"""
+    import time as _t
+    from pydub import AudioSegment
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "comment", "voice_path": "long_thanks.wav", "content": "t"},
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
+    ]
+    now = _t.monotonic()
+    # t0=now−1.7（歌曲开始于过去）；seg01 start=10 → due=now+8；last_end=
+    # now+8（间奏此刻开始）→ 窗口剩余 8s≥3s；答谢 10s>8s → 拦截
+    pb._song_anchor = {"t0": now - 1.7, "last_end": now + 8.0}
+    _orig = AudioSegment.from_file
+    AudioSegment.from_file = classmethod(
+        lambda cls, path, **k: AudioSegment.silent(duration=10000))
+    try:
+        with pb.voice_tmp_path_queue_lock:
+            data, gw = pb._pop_next_entry_locked()
+    finally:
+        AudioSegment.from_file = _orig
+    assert data is None and gw > 0  # 超长答谢被拦截
+
+
+def test_overdue_wrapping_free_consume_and_new_song_exit():
+    """垃圾时间（R4）：末段受理后 wrapping=True → 非新歌全直通；队列出现
+    新 song 切片段 → 退出垃圾时间走正常机制（新点歌起新唱歌时间）。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "comment", "voice_path": "a", "content": "free1"},
+        {"type": "comment", "voice_path": "b", "content": "free2"},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0,
+                       "wrapping": True}
+    # 无伴奏 proc（getattr 默认 None→保守 alive=True）+无新歌 → 直通
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data["content"] == "free1" and gw == 0
+    # 新歌 seq0 出现 → 穿透（wrapping 关闭）
+    pb.voice_tmp_path_queue.insert(0, {"type": "song", "voice_path": "s0",
+                                       "content": "new",
+                                       "song_segment": {"seq": 0, "total": 2,
+                                                        "seg_dir": "",
+                                                        "start_s": 0.0}})
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data["content"] == "new"  # 新歌段直通（seq0=重建锚路径）
+    assert pb._song_anchor.get("wrapping") is False
 
 
 def test_overdue_resets_on_no_skip_consumption():
@@ -376,7 +434,7 @@ def test_overdue_999_in_skip_zone_exempts():
         data, gw = pb._pop_next_entry_locked()
     assert data["type"] == "reread_top_priority"  # 999 被正常消费（未延后）
     assert pb.voice_tmp_path_queue[0]["type"] == "song"  # song 段留队
-    assert pb._song_anchor["skip_count"] == 0
+    assert pb._song_anchor.get("skip_count", 0) == 0
 
 
 def test_overdue_no_anchor_or_not_due_fail_open():
