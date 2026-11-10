@@ -726,6 +726,12 @@ class PlaybackMixin:
                         _pushed_at + _seg_dur * _SONG_SEG_END_MARGIN)
                 if int(_seg_meta.get("seq", 0)) == int(_seg_meta.get("total", 0)) - 1:
                     _anchor["wrapping"] = True  # 垃圾时间（R4：替代清锚）
+            # 段推送诊断（2026-11-10 R4b 实测排障）：每段受理即打点——
+            # seq/段在歌曲时间轴位置/时长，服务端无受理时对齐主进程侧
+            logger.info(
+                f"[song] 段推送受理 seq={_seg_meta.get('seq')}/"
+                f"{_seg_meta.get('total')} start_s={_seg_meta.get('start_s')} "
+                f"时长={float(getattr(self.edtalk_client, 'last_duration_s', 0.0) or 0.0):.1f}s")
         # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
         # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
         # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
