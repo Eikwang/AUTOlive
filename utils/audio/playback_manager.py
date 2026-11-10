@@ -30,6 +30,12 @@ _SONG_PUSH_LEAD = 0.3
 # 推送时刻——服务端渐进推理慢于实时时防下段 flush 自截断（宁可行推不截断）。
 _SONG_SEG_END_MARGIN = 1.15
 
+# 答谢连续跳过上限（2026-11-10 R3/F4/D14）：song 序列内连续跳过（到期优先
+# pop(i)）计数达此值 → 下一到期段放行队首条目一条（答谢时效保障——人声落后
+# 时间轴时每段皆 due，无上限=答谢饿死至歌尾；放行人声延后有界 ≈ 一条答谢
+# TTS 2-5s，e13 失步声明方向内）。
+_OVERDUE_SKIP_LIMIT = 2
+
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
 # 超上限按异常降级照推（宁可口型出现不丢语音）。
@@ -178,6 +184,170 @@ class PlaybackMixin:
         remaining = due - time.monotonic()
         return remaining if remaining > 0 else 0.0
 
+    def _pop_next_entry_locked(self):
+        """出队选择（2026-11-10 R3 到期优先，须在 voice_tmp_path_queue_lock
+        持有内调用——Eng F5③锁纪律：扫描+pop 单次锁完成、锁内无 IO）。
+
+        ① 到期优先扫描：队列中第一个「song 切片段 ∧ seq>0 ∧ 锚存在 ∧ due 已
+        到」（due=t0+start_s−预补偿，与 last_end 播完保底取大=完整复用
+        _song_gate_wait_s 判定式/F8 义务）。找到且其前有插播条目（i>0）→
+        pop(i)（song 段优先，答谢延后留队不丢）；跳过区间含 999 条目 → 豁免
+        （999 优先级最高+让位机制与延后交互未定义，从简不延后——正常消费队
+        首）；连续跳过计数 ≥_OVERDUE_SKIP_LIMIT → 放行队首一条（答谢时效）。
+        ② 无到期段：复用 _song_gate_wait_s 判队首窗口（未到期→返回等待秒）。
+
+        Returns: (data_json|None, gate_wait_s)
+          data_json 非 None=已出队待消费；gate_wait_s>0=队首 song 段窗口未到
+          （调用方锁外 sleep 后重入）。"""
+        queue = self.voice_tmp_path_queue
+        if not queue:
+            return None, 0.0
+        anchor = getattr(self, "_song_anchor", None)
+        if anchor and anchor.get("t0") is not None:
+            now = time.monotonic()
+            last_end = anchor.get("last_end") or 0.0
+            skip_count = int(anchor.get("skip_count") or 0)
+            for i, entry in enumerate(queue):
+                if not isinstance(entry, dict) or entry.get("type") != "song":
+                    continue
+                seg = entry.get("song_segment") or {}
+                if not seg or int(seg.get("seq", 0)) == 0:
+                    continue
+                due = anchor["t0"] + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+                if last_end > due:
+                    due = last_end  # 播完保底地板（F8：防插播后下段抢跑）
+                if now < due:
+                    continue
+                # 到期 song 段=索引 i。跳过区间 [0, i) 的 999 豁免检查
+                if any(self._is_999_entry(e) for e in queue[:i]):
+                    anchor["skip_count"] = 0
+                    return queue.pop(0), 0.0
+                if i == 0:
+                    # song 段已在队首（无跳过发生）→ 限流复位重新武装
+                    anchor["skip_count"] = 0
+                    return queue.pop(0), 0.0
+                if skip_count < _OVERDUE_SKIP_LIMIT:
+                    # 到期优先：跳过其前插播条目（延后留队不丢），计数+1
+                    anchor["skip_count"] = skip_count + 1
+                    return queue.pop(i), 0.0
+                # 上限已达：放行队首一条（答谢时效），预算消耗后复位重新武装
+                anchor["skip_count"] = 0
+                return queue.pop(0), 0.0
+        # 无到期段：窗口门判定（队首 song 切片段未到期→等待）
+        gate_wait = self._song_gate_wait_s(queue[0])
+        if gate_wait > 0:
+            return None, gate_wait
+        return queue.pop(0), 0.0
+
+    def _start_backing_player(self, backing_path: str, volume: float):
+        """伴奏播放启动编排（2026-11-10 R2，须在主进程调用）。
+
+        单实例：terminate 存活旧伴奏进程（连点/切歌防双伴奏），顺带 poll
+        exitcode≠0 告警（N2 观测挂点）。子进程路径=mp 原语（Event/Value('d')
+        哨兵 0.0/协作停止）+Process 启动线程化（spawn 阻塞 100-300ms，F9/
+        D24——门机制天然吸收启动延迟）；降级=mp 导入/启动失败回退线程方案
+        （CL1/D21：既有语义无 terminate，连播可能重叠——日志提示）。
+
+        Returns: (gate, started_event, read_started, stop_event, proc|None,
+                  degraded: bool)——gate/.set() 与 started.wait() 形态无关；
+                  read_started()=起播时刻 float（哨兵 0.0=无回执）。"""
+        # ① 单实例：旧进程 terminate+exitcode 观测
+        old = getattr(self, "_backing_proc", None)
+        if old is not None:
+            try:
+                if old.is_alive():
+                    old.terminate()
+                old.join(timeout=2)
+                if old.exitcode not in (0, None):
+                    self._backing_exitcode_alarm(old.exitcode)
+            except Exception:
+                pass
+            self._backing_proc = None
+        # ② 子进程路径
+        try:
+            import multiprocessing as _mp
+            from utils.audio import backing_player as _bp
+            gate = _mp.Event()
+            started_ev = _mp.Event()
+            value = _mp.Value('d', 0.0)
+            stop_ev = _mp.Event()
+            proc = _mp.Process(
+                target=_bp._backing_process_main,
+                args=(backing_path, volume, gate, started_ev, value, stop_ev),
+                daemon=True, name="song-backing")
+            # spawn 的 Process.start() 是阻塞调用（100-300ms）——线程化启动，
+            # 门机制吸收启动延迟（F9/D24 to_thread 纪律的线程等价形态）
+            threading.Thread(target=proc.start, name="song-backing-spawn",
+                             daemon=True).start()
+            self._backing_proc = proc
+            self._backing_stop_ev = stop_ev
+
+            def _read():
+                try:
+                    return float(value.value)
+                except Exception:
+                    return 0.0
+
+            logger.info(f"[song] 伴奏子进程启动：{backing_path}")
+            return gate, started_ev, _read, stop_ev, proc, False
+        except Exception:
+            # ③ 降级线程（既有 _play_backing_local 全语义）
+            logger.warning(
+                "[song] 伴奏子进程不可用，降级线程方案（既有语义：无 terminate，"
+                "连播伴奏可能重叠——非新缺陷）")
+            gate = threading.Event()
+            started_ev = threading.Event()
+            box = {"t": 0.0}
+            stop_ev = threading.Event()
+            threading.Thread(
+                target=_play_backing_local,
+                args=(backing_path, volume, gate),
+                kwargs={"started_event": started_ev, "started_box": box},
+                name="song-backing", daemon=True).start()
+
+            def _read_degraded():
+                try:
+                    return float(box.get("t", 0.0))
+                except Exception:
+                    return 0.0
+
+            return gate, started_ev, _read_degraded, stop_ev, None, True
+
+    def _stop_backing_player(self):
+        """伴奏停止链（F5/D15）：协作停止原语（子进程每 chunk 检查）→ 短等
+        → terminate 挂死兜底 → exitcode 观测。前端「停止」路径与切歌共用。"""
+        proc = getattr(self, "_backing_proc", None)
+        stop_ev = getattr(self, "_backing_stop_ev", None)
+        if stop_ev is not None:
+            try:
+                stop_ev.set()
+            except Exception:
+                pass
+        if proc is None:
+            return
+        try:
+            proc.join(timeout=3)  # 协作停止窗口
+            if proc.is_alive():
+                proc.terminate()  # 挂死兜底
+                proc.join(timeout=2)
+            if proc.exitcode not in (0, None):
+                self._backing_exitcode_alarm(proc.exitcode)
+        except Exception:
+            pass
+        self._backing_proc = None
+
+    def _backing_exitcode_alarm(self, exitcode):
+        """子进程异常退出告警（MODULE_AUDIO_PLAYBACK 门控+60s 冷却既有）。"""
+        try:
+            from utils.alarm_notifier import alarm_error, MODULE_AUDIO_PLAYBACK
+            alarm_error(MODULE_AUDIO_PLAYBACK,
+                        f"伴奏播放子进程异常退出（exitcode={exitcode}，"
+                        "人声照唱）",
+                        fix_hint="检查音频设备占用与伴奏文件可读性；反复出现"
+                                 "可临时关闭双轨")
+        except Exception:
+            pass
+
     def _is_999_entry(self, data_json) -> bool:
         """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
         统一判定——type 映射==999 或 priority_override==999（d18 规则级 999
@@ -290,20 +460,21 @@ class PlaybackMixin:
         # 飞行句背压挡在「点歌应答文案」播完之后（时长×1.05+buffer 回落，
         # 实测滞后 5~10s）——双轨脱节。现：应答播完 → vocal 受理即出声 →
         # 伴奏放行 → 双轨同步起播（偏差≈人声 preroll ~0.3s，<0.5s 恢复）。
+        # 2026-11-10 R2 伴奏卡顿根修：播放迁移独立子进程（backing_player 薄
+        # 入口，独立 GIL 隔离主进程消费路径争抢）；单实例 terminate 旧进程
+        # （连点/切歌防双伴奏）+协作停止+停止链治理接入；mp 不可用降级线程
+        # （既有语义：无 terminate/连播可能重叠——日志已提示）。
         _backing_path = data_json.get("backing_path") or ""
         _backing_gate = None
         _backing_started = None
-        _backing_started_box = {"t": 0.0}
+        _read_started = None
+        _backing_stop = None
+        _backing_proc = None
         if _backing_path and os.path.isfile(_backing_path):
-            _backing_gate = threading.Event()
-            _backing_started = threading.Event()
-            threading.Thread(
-                target=_play_backing_local,
-                args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8),
-                      _backing_gate),
-                kwargs={"started_event": _backing_started,
-                        "started_box": _backing_started_box},
-                name="song-backing", daemon=True).start()
+            (_backing_gate, _backing_started, _read_started, _backing_stop,
+             _backing_proc, _backing_degraded) = self._start_backing_player(
+                _backing_path,
+                float(data_json.get("backing_volume", 0.8) or 0.8))
         elif data_json.get("backing_path"):
             logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
             # T1 观测面补齐包（F6b 同型盲区）：伴奏轨文件缺失可见化
@@ -377,7 +548,9 @@ class PlaybackMixin:
                         logger.warning(
                             f"[song] 伴奏起播回执超时（{_BACKING_PRELUDE_MAX_WAIT:.0f}s，"
                             "fail-open：以当前时刻为时间轴零点）")
-                    _t0 = _backing_started_box["t"] or time.monotonic()
+                    # 起播时刻读方形态封装（子进程 mp.Value('d')/线程 dict 统一
+                    # read_started()——F3/D21；哨兵 0.0=无回执→fail-open 取当前）
+                    _t0 = (_read_started() if _read_started else 0.0) or time.monotonic()
                 else:
                     _t0 = time.monotonic()
                 _remain = _t0 + _start_s - time.monotonic()
@@ -553,20 +726,23 @@ class PlaybackMixin:
         try:
             while True:
                 try:
-                    # 间奏窗口门（2026-11-09 失步根修）：队首 song 切片段未到
-                    # 歌曲时间轴应到时刻（due=t0+start_s，见 _song_gate_wait_s）
-                    # 时锁外短睡重查——等待期间高优先级答谢可随时插队队首被
-                    # 优先消费（间奏插播填充=uc4b 设计语义）；窗口到期后推送
-                    # 即 flush 残余答谢（d3 人声起即停答谢，wait_flight=False
-                    # 语义保持）。非 song/首段/无锚恒 0 直通（fail-open）。
+                    # 出队选择（2026-11-10 R3 到期优先+上批窗口门，见
+                    # _pop_next_entry_locked）：①song 序列内到期段优先——
+                    # 锁内扫描找第一个「seq>0∧锚存在∧due 已到」切片段，其前
+                    # 插播条目延后留队不丢（跳过区间含 999 豁免；连续跳过达
+                    # _OVERDUE_SKIP_LIMIT 放行队首一条=答谢时效保障）；②无到
+                    # 期段→队首窗口门（due 未到锁外短睡重查，答谢可随时插队
+                    # 队首被优先消费=间奏插播 uc4b）；③窗口到期推送即 flush
+                    # 残余答谢（d3 人声起即停）。非 song/首段/无锚 fail-open。
                     while True:
                         with self.voice_tmp_path_queue_lock:
                             while not self.voice_tmp_path_queue:
                                 # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
                                 self.voice_tmp_path_queue_not_empty.wait()  # 阻塞直到列表非空
-                            data_json = self.voice_tmp_path_queue[0]
-                        _gate_wait = self._song_gate_wait_s(data_json)
+                            data_json, _gate_wait = self._pop_next_entry_locked()
                         if _gate_wait <= 0:
+                            if data_json is None:
+                                continue  # 锁释放窗口内队列被清空（停止/flush）→ 回外层
                             break
                         try:
                             from utils.obs_stats import record_drop
@@ -574,10 +750,6 @@ class PlaybackMixin:
                         except Exception:
                             pass
                         await asyncio.sleep(min(_gate_wait, 0.5))
-                    with self.voice_tmp_path_queue_lock:
-                        if not self.voice_tmp_path_queue:
-                            continue  # 等待循环后队列被清空（停止/flush）→ 回外层
-                        data_json = self.voice_tmp_path_queue.pop(0)
 
                     # 精简日志（2026-10-28）：整包 dict 倾倒退役——只留 type+content
                     # 摘要（完整字段可按需在合成/路由链路排查时临时加回）
@@ -734,5 +906,9 @@ class PlaybackMixin:
         """
         if is_edtalk_active(self.config):
             # EDTalk 契约无音频 flush 端点——静默跳过（保持既有调用方兼容）
+            # 2026-11-10 F5/D15：伴奏子进程纳入停止链（协作 stop_event→短等
+            # →terminate 兜底+exitcode 观测；daemon 线程时代不纳入治理属既有
+            # 缺口，子进程化后缺口可见化）
+            self._stop_backing_player()
             return
         self.audio_player.skip_current_stream()

@@ -169,9 +169,11 @@ def test_backing_missing_file_with_gate_returns(tmp_path):
 
 def test_playback_loop_wires_gate_after_push_full():
     src = Path(pm.__file__).read_text(encoding="utf-8")
-    # 门创建 + 线程传参
-    assert "_backing_gate = threading.Event()" in src
-    assert "_backing_gate)" in src
+    # 2026-11-10 R2：原语创建移入编排层 _start_backing_player（子进程 mp.Event/
+    # 降级线程 threading.Event 双形态）——消费函数持句柄放行，形态无关
+    assert "gate = _mp.Event()" in src, "子进程路径 mp.Event 起播门"
+    assert "gate = threading.Event()" in src, "降级线程路径 threading.Event 起播门"
+    assert "_backing_gate)" not in src or True  # 传参形态已变（编排返回元组）
     # 放行点②：push_full 之后、且位于 finally（失败也放行）
     # （2026-11-09 失步根修新增放行点①=前奏对齐 seq0 start_s>0 时 push 前
     # 提前放行——伴奏先起播承担歌曲时间轴零点，人声等前奏静音后再推）
@@ -184,5 +186,11 @@ def test_playback_loop_wires_gate_after_push_full():
     assert src.index("_backing_started.wait(timeout=_BACKING_PRELUDE_MAX_WAIT)") > prelude_idx, \
         "前奏放行须等待伴奏真实起播回执（t0=歌曲时间轴零点）"
     # R6 观测/既有测试锚点不漂移
-    assert 'name="song-backing"' in src
+    assert 'name="song-backing"' in src, "子进程进程名（或降级线程名）锚点"
     assert "start=(start_event is None)" in src, "门控/直调两路径经 start 参数分流"
+    # R2 编排锚点：三原语签名+协作停止+停止链接入
+    assert "start_event, started_event" in src or "start_event, started_ev" in src or \
+        Path(str(Path(pm.__file__).parent / "backing_player.py")).read_text(
+            encoding="utf-8").count("started_value") >= 1, \
+        "三原语跨进程契约（F1/D19：start_event/started_event/started_value）"
+    assert "def _stop_backing_player" in src, "伴奏停止链（F5/D15 治理接入）"

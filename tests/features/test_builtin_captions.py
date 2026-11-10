@@ -238,6 +238,7 @@ def test_stop_current_audio_dispatch():
                 return True
             return None
     mixin.config = Cfg()
+    mixin._stop_backing_player = lambda: None  # 2026-11-10 R2：伴奏停止链接入 stub
     PlaybackMixin.stop_current_audio(mixin)
     assert calls == ["skip"], "EDTalk 激活时不追加调用"
 

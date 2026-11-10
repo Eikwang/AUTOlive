@@ -29,9 +29,27 @@ def test_d15_round_trip(tmp_path):
     silences = [{"start_s": 1.0, "end_s": 2.5}, {"start_s": 10.0, "end_s": 13.0}]
     assert vs.write_silences_file(sp, silences) is True
     doc = json.loads(open(sp, encoding="utf-8").read())
-    assert doc["version"] == 1 and doc["threshold_db"] == -40.0
-    assert doc["min_silence_s"] == 3.0
+    # 2026-11-10 参数修正：-20dB/0.3s（用户指定 300ms 静音标准）
+    assert doc["version"] == 1 and doc["threshold_db"] == -20.0
+    assert doc["min_silence_s"] == 0.3
     assert vs.load_silences(sp) == silences  # 往返一致（已排序）
+
+
+def test_d15_param_mismatch_invalidates(tmp_path):
+    """失效重算（2026-11-10）：文件参数与当前 DEFAULT 不一致（含字段缺失）→
+    load_silences 返回 None（三种 None 统一走惰性解析链路重算）。"""
+    sp = str(tmp_path / "old.silences.json")
+    # 旧参数文件（-40/3.0）→ 参数不一致 → None（触发重算）
+    vs.write_silences_file(sp, [{"start_s": 1.0, "end_s": 2.0}],
+                           threshold_db=-40.0, min_silence_s=3.0)
+    assert vs.load_silences(sp) is None
+    # 字段缺失 = 不一致 → None（防把缺失当匹配）
+    import json as _json
+    doc = _json.loads(open(sp, encoding="utf-8").read())
+    doc.pop("threshold_db")
+    with open(sp, "w", encoding="utf-8") as f:
+        _json.dump(doc, f)
+    assert vs.load_silences(sp) is None
 
 
 def test_d15_sidecar_naming():

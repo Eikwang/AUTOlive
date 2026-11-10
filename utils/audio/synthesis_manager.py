@@ -116,6 +116,29 @@ class SynthesisMixin:
             return 45.0
         return v if v > 0 else 0.0
 
+    def _min_interlude_s(self):
+        """间奏窗口最短读侧（2026-11-10 失步根修 R1）：检测静音段（-20dB/0.3s
+        用户标准）中 ≥ 此值才作间奏（切段+插播窗口）；0.3-1.0s 停顿留在人声段
+        内自然播（0.3s 窗口插不了任何音频——答谢 TTS 最短 ~2s；全按 0.3s 切段
+        产生 50-100 碎段）。
+
+        config 键 choose_song.min_interlude_s 兜底可调（缺省 1.0，未落盘）；
+        钳制 [vocal_silences.DEFAULT_MIN_SILENCE_S(0.3), 10.0]——0.0 会退化成
+        每 0.3s 停顿全切（碎段爆炸）、过大使插播永久关闭（Eng F7/D26）。"""
+        from utils.audio.vocal_silences import DEFAULT_MIN_SILENCE_S
+        try:
+            v = float(self.config.get("choose_song", "min_interlude_s"))
+        except (TypeError, ValueError):
+            v = 1.0
+        if not (v > 0):  # 0/负值/None=回缺省
+            v = 1.0
+        clamped = min(max(v, DEFAULT_MIN_SILENCE_S), 10.0)
+        if clamped != v:
+            logger.info(
+                f"[song] min_interlude_s 钳制：{v} → {clamped}"
+                f"（合法区间 [{DEFAULT_MIN_SILENCE_S}, 10.0]s）")
+        return clamped
+
     def _purge_stale_song_segments(self, base_dir):
         """陈旧切片目录清扫（泄漏兜底：跳过/打断导致末段清理未触达时，下次
         切片前按目录 mtime 清扫超时目录）。"""
@@ -215,9 +238,22 @@ class SynthesisMixin:
         陈旧清扫复用 _split_audio_segments 既有机制；条目附 gap_after_s
         （该段之后的间奏秒数——T7 插播窗口对齐与 X1 观测消费）。
 
+        2026-11-10 R1：入口按 _min_interlude_s 过滤（检测标准 -20dB/0.3s 照
+        用户指定；窗口粒度解耦——<min_interlude_s 的静音段不触发切片/不产生
+        插播窗口，留在人声段内自然播放；gap_after 按过滤后区间计算=一致）。
+
         Returns: list[dict]（恒非空：silences 空=整曲单段；导出失败=[]）。"""
         try:
             from pydub import AudioSegment
+            _interlude_min = self._min_interlude_s()
+            _kept = [g for g in (silences or [])
+                     if float(g["end_s"]) - float(g["start_s"]) >= _interlude_min]
+            if len(_kept) != len(silences or []):
+                logger.info(
+                    f"[song] 间奏窗口过滤（min_interlude_s={_interlude_min}s）："
+                    f"{len(silences or [])} 段检测静音 → {len(_kept)} 段间奏"
+                    "（短停顿留人声段内自然播）")
+            silences = _kept
             seg = AudioSegment.from_file(voice_path)
             total_s = len(seg) / 1000.0
             # 人声段=silences 互补区间（钳制到音频实际时长内）

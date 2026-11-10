@@ -1,22 +1,31 @@
-"""人声静音段数据文件（.silences.json）单一契约（2026-11-05 编排优化批次 T5）。
+"""人声静音段数据文件（.silences.json）单一契约（2026-11-05 编排优化批次 T5；
+2026-11-10 实测反馈批次参数修正）。
 
 裁决条款：
-- d15：schema={version:1, threshold_db:-40, min_silence_s:3,
+- d15：schema={version:1, threshold_db:-20, min_silence_s:0.3,
   silences:[{start_s,end_s}]}（时间单位秒，浮点）；存放=翻唱成品旁同名
   .silences.json（covers/{safe}__{profile_id}.silences.json）；解析器/切片器/
-  单测共同契约。-40dB 阈值实施时对真实 vocal 分轨 RMS 实测校准（C3 义务：
-  生成端参数化，本模块全部函数带阈值参数）。
+  单测共同契约。原 d15 字面值 -40dB/3s 经实播反馈修正为 **-20dB/300ms**
+  （用户指定：连续 300ms 低于 -20dB 即视为静音——100ms 窗口=3 连续静窗口）。
+  插播窗口粒度与检测标准解耦：≥min_interlude_s（消费端，默认 1.0s）的静音段
+  才作间奏（切段+插播窗口），0.3-1.0s 停顿留在人声段内自然播放。
 - F-H：解析显式校验 math.isfinite / 0≤start<end / 区间排序去重（Python json
   默认接受 NaN/Infinity 字面量；NaN 参与比较恒 False 静默错乱——违规一律
   按 e12 回退处置，不抛错阻塞点歌链）。
 - e12：损坏/半写/畸形文件→返回 None（调用方回退 45s 固定切片+观测桶），
   任何异常不外抛。
+- 失效重算（2026-11-10）：文件内 threshold_db/min_silence_s 与当前 DEFAULT
+  不一致（含字段缺失——parse_silences_document 已要求字段存在）→
+  load_silences 返回 None——与「文件缺失」「文件损坏」三种 None 统一走消费
+  端惰性解析链路（本播固定切片回退+后台重算写回含新参数字段，下次点播语义
+  切片生效）。零迁移成本。
 - d20/F-C：存量翻唱首次点播惰性解析（后台）由消费端调度；本模块提供
   compute_silences（RMS 扫描）与 write_silences_file（原子写）供生成端
-  （cover_worker）与惰性解析共用。
+  （cover_worker）与惰性解析共用。生成端以无参方式调用本模块函数→
+  常量变更即生成端自动跟随（cover_worker.py 无显式参数）。
 
-静音判定口径：RMS dBFS < threshold_db 连续 ≥ min_silence_s 的时段
-（窗口 100ms 步进；数字静音 dBFS=-inf 同判）。
+静音判定口径：RMS dBFS < threshold_db(-20) 连续 ≥ min_silence_s(0.3s) 的时段
+（窗口 100ms 步进=3 连续静窗口；数字静音 dBFS=-inf 同判）。
 """
 
 import json
@@ -26,9 +35,9 @@ import os
 from utils.my_log import logger
 
 SCHEMA_VERSION = 1
-DEFAULT_THRESHOLD_DB = -40.0
-DEFAULT_MIN_SILENCE_S = 3.0
-_WINDOW_MS = 100  # RMS 扫描窗口（100ms 步进——间奏检测精度需求远低于此）
+DEFAULT_THRESHOLD_DB = -20.0
+DEFAULT_MIN_SILENCE_S = 0.3
+_WINDOW_MS = 100  # RMS 扫描窗口（100ms 步进=300ms 最短静音 3 连续窗口）
 
 
 def silences_path_for(full_mix_path: str) -> str:
@@ -87,7 +96,12 @@ def parse_silences_document(doc):
 
 def load_silences(path: str):
     """e12 fail-soft 读取：文件缺失/损坏/半写/畸形 → None（不抛错）。
-    合法返回 [{start_s,end_s}]（空列表=合法「无间奏」语义）。"""
+    合法返回 [{start_s,end_s}]（空列表=合法「无间奏」语义）。
+
+    2026-11-10 失效重算：文件内 threshold_db/min_silence_s 与当前 DEFAULT
+    不一致（含字段缺失）→ None——旧参数文件自动失效，统一走消费端惰性
+    解析链路重算（本播固定切片回退+后台写回新参数）。日志区分两种 None
+    成因（参数不一致 vs 畸形），便于观测检出率。"""
     try:
         with open(path, "r", encoding="utf-8") as f:
             doc = json.load(f)
@@ -99,6 +113,20 @@ def load_silences(path: str):
             f"[silences] 数据文件畸形已忽略：{path}；problem=配置告警；"
             "cause=schema 校验未过（版本/值域/区间）；fix=删除该文件由惰性解析重建"
             "（或重翻歌曲生成）；本次点歌回退固定切片")
+        return None
+    try:
+        if float(doc.get("threshold_db")) != DEFAULT_THRESHOLD_DB \
+                or float(doc.get("min_silence_s")) != DEFAULT_MIN_SILENCE_S:
+            # 参数不一致（含字段缺失→float(None) TypeError 下方 except 兜底）→
+            # 失效重算（三种 None 统一处置）
+            logger.info(
+                f"[silences] 数据文件参数不一致已失效（trigger=重算）：{path}"
+                f"（文件 threshold={doc.get('threshold_db')}/min_s={doc.get('min_silence_s')}"
+                f"，当前 DEFAULT={DEFAULT_THRESHOLD_DB}/{DEFAULT_MIN_SILENCE_S}）"
+                "——本次点歌固定切片回退，后台按新标准重算写回")
+            return None
+    except (TypeError, ValueError):
+        return None  # 字段缺失/非数值=不一致（parse 已拒畸形，此处兜底）
     return parsed
 
 

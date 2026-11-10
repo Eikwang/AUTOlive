@@ -79,12 +79,16 @@ def test_song_segment_carries_start_s(tmp_path, fake_pydub, monkeypatch):
 
 def _gate_pb():
     from utils.audio.playback_manager import PlaybackMixin
+    import threading as _th
 
     class _Impl(PlaybackMixin):
         pass
 
     pb = _Impl()
     pb.config = _FakeConfig(seg=45)
+    # R3 出队选择守卫需要队列锁/条件变量（QueueMixin.__init__ 产物，stub 手动补）
+    pb.voice_tmp_path_queue_lock = _th.RLock()
+    pb.voice_tmp_path_queue_not_empty = _th.Condition(pb.voice_tmp_path_queue_lock)
     return pb
 
 
@@ -162,27 +166,25 @@ def _consume_pb(tmp_path, duration=2.0):
 
 def test_consume_seq0_prelude_backing_gate_first(monkeypatch, tmp_path):
     """前奏对齐时序（seq0 start_s>0）：伴奏门提前放行→真实起播回执为 t0→
-    人声等待前奏后推送；锚建立+push wait_flight=False 保持（d3 flush 答谢）。"""
-    import threading as _th
+    人声等待前奏后推送；锚建立+push wait_flight=False 保持（d3 flush 答谢）。
+    2026-11-10 R2：monkeypatch 编排层 _start_backing_player（原语形态由编排
+    决定——主进程侧行为契约=门放行/回执读取/锚建立）。"""
     import utils.audio.playback_manager as pm
 
     backing_calls = []
-    box = {"t": 0.0}
-    started = _th.Event()
+    gate_ev = type("G", (), {"set": staticmethod(lambda: None),
+                             "is_set": staticmethod(lambda: True)})()
+    started_ev = type("S", (), {"set": staticmethod(lambda: None),
+                                "wait": staticmethod(lambda timeout=None: True),
+                                "is_set": staticmethod(lambda: True)})()
 
-    def fake_backing(path, vol, start_event=None, started_event=None,
-                     started_box=None):
-        backing_calls.append({"gate_wait": start_event is not None})
-        if started_box is not None:
-            started_box["t"] = time.monotonic()  # 伴奏真实起播时刻
-        if started_event is not None:
-            started_event.set()
-        if start_event is not None:
-            start_event.wait(timeout=5)  # 模拟线程侧门等待
-        backing_calls.append({"gate_released": bool(
-            start_event is None or start_event.is_set())})
+    def fake_start(self, path, vol):
+        backing_calls.append({"path": path, "vol": vol})
+        import time as _t
+        return (gate_ev, started_ev, lambda: _t.monotonic(),
+                type("X", (), {"set": staticmethod(lambda: None)})(), None, True)
 
-    monkeypatch.setattr(pm, "_play_backing_local", fake_backing)
+    monkeypatch.setattr(pm.PlaybackMixin, "_start_backing_player", fake_start)
     pb, wav = _consume_pb(tmp_path)
     entry = {"type": "song", "voice_path": wav, "content": "s",
              "backing_path": str(tmp_path / "inst.wav"),
@@ -191,9 +193,9 @@ def test_consume_seq0_prelude_backing_gate_first(monkeypatch, tmp_path):
                               "start_s": 0.2}}
     (tmp_path / "inst.wav").write_bytes(b"fake")
     asyncio.run(pb._consume_edtalk_entry(entry, wav))
-    assert len(backing_calls) == 2  # 伴奏线程被启动并回执
+    assert len(backing_calls) == 1  # 编排层被调用（音量/路径透传）
     assert pb.edtalk_client.calls[0]["wait_flight"] is False  # d3 语义保持
-    # 锚：t0=伴奏起播回执（前奏对齐零点）；push 后 last_end=受理+时长×margin
+    # 锚：t0=起播回执（前奏对齐零点）；push 后 last_end=受理+时长×margin
     #（seq0 非末段，锚存活）
     assert pb._song_anchor is not None
     assert pb._song_anchor["t0"] is not None
@@ -283,3 +285,144 @@ def test_behavior_interlude_wait_before_push(tmp_path):
     waited = pushed_at[0] - t_start
     assert waited >= 1.0 - _SONG_PUSH_LEAD - 0.15  # 间奏等待生效（≈0.55s+）
     assert waited <= 2.0  # 无悬挂
+
+
+# ------------------------------------------------- R3 到期优先（2026-11-10）
+
+def _pop_pb(entries, anchor):
+    """构造带队列与锚的 pb（_pop_next_entry_locked 单元）。"""
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = list(entries)
+    pb._song_anchor = dict(anchor)
+    if anchor.get("t0") is not None:
+        pb._song_anchor["t0"] = anchor["t0"] - 100.0 if anchor.get("overdue") \
+            else anchor["t0"]
+    return pb
+
+
+def test_overdue_song_segment_jumps_ahead_of_thanks():
+    """到期优先：due 已到的 song 段跳过其前答谢 pop(i)（答谢留队不丢，
+    skip_count+1）——人声不饿死（R3 主链）。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "comment", "voice_path": "a", "content": "thanks1"},
+        {"type": "comment", "voice_path": "b", "content": "thanks2"},
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert gw == 0 and data["type"] == "song"  # song 段被跳前消费
+    assert pb.voice_tmp_path_queue[0]["content"] == "thanks1"  # 答谢留队原序
+    assert pb._song_anchor["skip_count"] == 1
+
+
+def test_overdue_skip_limit_releases_head_thanks():
+    """连续跳过达 _OVERDUE_SKIP_LIMIT → 放行队首一条（答谢时效）+计数复位
+    （预算消耗后重新武装——F4/D14）。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "comment", "voice_path": "a", "content": "thanks"},
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0,
+                       "skip_count": 2}  # 已达上限
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert gw == 0 and data["type"] == "comment"  # 放行队首答谢
+    assert pb._song_anchor["skip_count"] == 0  # 复位重新武装
+
+
+def test_overdue_resets_on_no_skip_consumption():
+    """song 段已在队首（i==0 无跳过）→ 正常消费+限流复位。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0,
+                       "skip_count": 2}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data["type"] == "song" and pb._song_anchor["skip_count"] == 0
+
+
+def test_overdue_999_in_skip_zone_exempts():
+    """999 豁免：到期段的跳过区间含 999 条目 → 放弃本次到期优先（正常消费
+    队首=999 优先级最高+让位机制与延后交互未定义从简豁免，F5/D23）。"""
+    import time as _t
+    pb = _gate_pb()
+    class _C:
+        @staticmethod
+        def get(*keys):
+            if len(keys) == 1:
+                return {"comment": 20, "reread_top_priority": 999}.get(keys[0])
+            if keys == ("filter", "priority_mapping"):
+                return {"comment": 20, "reread_top_priority": 999}
+            return None
+    pb.config = _C()
+    pb.voice_tmp_path_queue = [
+        {"type": "reread_top_priority", "voice_path": "r", "content": "999"},
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data["type"] == "reread_top_priority"  # 999 被正常消费（未延后）
+    assert pb.voice_tmp_path_queue[0]["type"] == "song"  # song 段留队
+    assert pb._song_anchor["skip_count"] == 0
+
+
+def test_overdue_no_anchor_or_not_due_fail_open():
+    """无锚/due 未到 → fail-open 直通（无锚 pop(0)；未到期→窗口门等待秒）。"""
+    import time as _t
+    pb = _gate_pb()
+    entry = _seg_entry(seq=1, start_s=100.0)
+    pb.voice_tmp_path_queue = [{"type": "comment", "voice_path": "a",
+                                "content": "x"}, entry]
+    # 无锚：直通 pop(0)（答谢优先）
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert gw == 0 and data["type"] == "comment"
+    # 有锚但 due 未到：队首 song 段窗口等待
+    pb.voice_tmp_path_queue = [entry]
+    pb._song_anchor = {"t0": _t.monotonic() + 5.0, "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data is None and gw > 4.0  # 等待≈5-lead
+
+
+# ------------------------------------------------- R1 过滤+钳制（2026-11-10）
+
+def test_min_interlude_filter_and_config_clamp(tmp_path, fake_pydub):
+    """间奏窗口过滤（消费端）：0.5s 静音不切/1.5s 切（min_interlude_s=1.0）；
+    config 键钳制 [0.3, 10]（0→回缺省、60→钳 10——F7/D26）。"""
+    from pydub import AudioSegment
+    fake_pydub["seg"] = AudioSegment.silent(duration=5000)  # 5s 音频承载区间
+    vocal = tmp_path / "d__p1_vocal.wav"
+    vocal.write_bytes(b"fake")
+    (tmp_path / "d__p1.wav").write_bytes(b"fake-mix")
+    sp = tmp_path / "d__p1.silences.json"
+    vs.write_silences_file(str(sp), [
+        {"start_s": 1.0, "end_s": 1.5},    # 0.5s——短停顿（不切）
+        {"start_s": 2.0, "end_s": 3.5},    # 1.5s——间奏（切）
+    ])
+    fx = _SynFixture(seg=45)
+    segs, _ = fx._semantic_or_fixed_slices(
+        str(vocal), {"full_path": str(tmp_path / "d__p1.wav")})
+    # 过滤后仅 1.5s 段为间奏 → 人声段 2 段（[0,2.0]+[3.5,3.0?]——3.5>3s 总长钳尾）
+    assert len(segs) == 2
+    assert segs[1]["start_s"] == 3.5
+    # 钳制：0→回缺省 1.0；60→钳 10
+    fx.config._data[("choose_song", "min_interlude_s")] = 0
+    assert fx._min_interlude_s() == 1.0
+    fx.config._data[("choose_song", "min_interlude_s")] = 60
+    assert fx._min_interlude_s() == 10.0
+    fx.config._data[("choose_song", "min_interlude_s")] = 0.5
+    assert fx._min_interlude_s() == 0.5
