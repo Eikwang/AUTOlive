@@ -117,27 +117,44 @@ class SynthesisMixin:
         return v if v > 0 else 0.0
 
     def _min_interlude_s(self):
-        """间奏窗口最短读侧（2026-11-10 失步根修 R1）：检测静音段（-20dB/0.3s
-        用户标准）中 ≥ 此值才作间奏（切段+插播窗口）；0.3-1.0s 停顿留在人声段
-        内自然播（0.3s 窗口插不了任何音频——答谢 TTS 最短 ~2s；全按 0.3s 切段
-        产生 50-100 碎段）。
+        """间奏窗口最短读侧（2026-11-10 失步根修 R1）：检测静音段中 ≥ 此值才
+        作间奏（切段+插播窗口）；短停顿留在人声段内自然播。
 
         config 键 choose_song.min_interlude_s 兜底可调（缺省 1.0，未落盘）；
-        钳制 [vocal_silences.DEFAULT_MIN_SILENCE_S(0.3), 10.0]——0.0 会退化成
-        每 0.3s 停顿全切（碎段爆炸）、过大使插播永久关闭（Eng F7/D26）。"""
-        from utils.audio.vocal_silences import DEFAULT_MIN_SILENCE_S
+        钳制 [0.5, 10.0]。R4c 检测参数回滚 -40/3.0 后检测静音段恒 ≥3s——本
+        过滤退化为无操作（机制保留：未来检测粒度细化时兼容）。"""
         try:
             v = float(self.config.get("choose_song", "min_interlude_s"))
         except (TypeError, ValueError):
             v = 1.0
         if not (v > 0):  # 0/负值/None=回缺省
             v = 1.0
-        clamped = min(max(v, DEFAULT_MIN_SILENCE_S), 10.0)
+        clamped = min(max(v, 0.5), 10.0)
         if clamped != v:
             logger.info(
-                f"[song] min_interlude_s 钳制：{v} → {clamped}"
-                f"（合法区间 [{DEFAULT_MIN_SILENCE_S}, 10.0]s）")
+                f"[song] min_interlude_s 钳制：{v} → {clamped}（合法区间 [0.5, 10.0]s）")
         return clamped
+
+    def _silence_detect_params(self):
+        """静音检测参数读侧（R4c ground truth 校准回滚后开放调参）：
+        Returns: (threshold_db, min_silence_s)——config 键
+        choose_song.silence_threshold_db/silence_min_silence_s，缺省走
+        vocal_silences.DEFAULT（-40/3.0，用户校准验证输出=标准答案）。"""
+        from utils.audio.vocal_silences import (
+            DEFAULT_MIN_SILENCE_S, DEFAULT_THRESHOLD_DB)
+        try:
+            th = float(self.config.get("choose_song", "silence_threshold_db"))
+        except (TypeError, ValueError):
+            th = DEFAULT_THRESHOLD_DB
+        try:
+            ms = float(self.config.get("choose_song", "silence_min_silence_s"))
+        except (TypeError, ValueError):
+            ms = DEFAULT_MIN_SILENCE_S
+        if not (-100.0 <= th <= 0.0):
+            th = DEFAULT_THRESHOLD_DB
+        if not (0.1 <= ms <= 30.0):
+            ms = DEFAULT_MIN_SILENCE_S
+        return th, ms
 
     def _purge_stale_song_segments(self, base_dir):
         """陈旧切片目录清扫（泄漏兜底：跳过/打断导致末段清理未触达时，下次
@@ -347,10 +364,17 @@ class SynthesisMixin:
 
         def _work():
             try:
-                silences = _vs_compute(vocal)
-                if _vs_write(sp, silences):
+                # 检测参数读 config 键（R4c ground truth 校准回滚后开放调参：
+                # choose_song.silence_threshold_db/silence_min_silence_s，缺省
+                # 不落盘走 vocal_silences DEFAULT -40/3.0）
+                _th_db, _min_s = self._silence_detect_params()
+                silences = _vs_compute(vocal, threshold_db=_th_db,
+                                       min_silence_s=_min_s)
+                if _vs_write(sp, silences, threshold_db=_th_db,
+                             min_silence_s=_min_s):
                     logger.info(f"[silences] 惰性解析完成：{sp}"
-                                f"（{len(silences)} 段间奏，下次点播语义切片生效）")
+                                f"（{len(silences)} 段间奏，th={_th_db}/min_s={_min_s}，"
+                                "下次点播语义切片生效）")
             except Exception:
                 try:
                     from utils.obs_stats import record_drop

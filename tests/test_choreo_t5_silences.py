@@ -29,9 +29,9 @@ def test_d15_round_trip(tmp_path):
     silences = [{"start_s": 1.0, "end_s": 2.5}, {"start_s": 10.0, "end_s": 13.0}]
     assert vs.write_silences_file(sp, silences) is True
     doc = json.loads(open(sp, encoding="utf-8").read())
-    # 2026-11-10 参数修正：-20dB/0.3s（用户指定 300ms 静音标准）
-    assert doc["version"] == 1 and doc["threshold_db"] == -20.0
-    assert doc["min_silence_s"] == 0.3
+    # R4c ground truth 校准回滚：-40dB/3s（0.3 产生 31 个换气碎段误判）
+    assert doc["version"] == 1 and doc["threshold_db"] == -40.0
+    assert doc["min_silence_s"] == 3.0
     assert vs.load_silences(sp) == silences  # 往返一致（已排序）
 
 
@@ -41,7 +41,7 @@ def test_d15_param_mismatch_invalidates(tmp_path):
     sp = str(tmp_path / "old.silences.json")
     # 旧参数文件（-40/3.0）→ 参数不一致 → None（触发重算）
     vs.write_silences_file(sp, [{"start_s": 1.0, "end_s": 2.0}],
-                           threshold_db=-40.0, min_silence_s=3.0)
+                           threshold_db=-20.0, min_silence_s=0.3)
     assert vs.load_silences(sp) is None
     # 字段缺失 = 不一致 → None（防把缺失当匹配）
     import json as _json
@@ -209,8 +209,8 @@ def lazy_env(tmp_path, monkeypatch):
     vocal.write_bytes(b"fake-vocal")
     calls = {"compute": 0}
     monkeypatch.setattr(sm, "_vs_compute",
-                        lambda p: (calls.__setitem__("compute", calls["compute"] + 1),
-                                   [{"start_s": 1.0, "end_s": 2.0}])[1])
+                        lambda p, **kw: (calls.__setitem__("compute", calls["compute"] + 1),
+                                         [{"start_s": 1.0, "end_s": 2.0}])[1])
     return {"full": str(full), "vocal": str(vocal), "calls": calls}
 
 
@@ -332,3 +332,33 @@ def test_uc4b_dual_track_backing_on_first_slice_only(tmp_path, fake_pydub, monke
     assert fx.captured[0].get("backing_path") == str(backing)  # 伴奏仅首片承载（uc4b）
     assert "backing_path" not in fx.captured[1]
     assert fx.captured[0]["gap_after_s"] == 1.0
+
+
+def test_manual_flag_skips_recompute(tmp_path):
+    """manual 豁免（R4c）：文件加 "manual": true =用户人工精修——参数不一致
+    也直接采用（跳过失效重算，人工值全责不被覆盖——用户校准路径）。"""
+    import json as _json
+    sp = str(tmp_path / "m.silences.json")
+    vs.write_silences_file(sp, [{"start_s": 0.0, "end_s": 31.0},
+                                {"start_s": 105.0, "end_s": 131.1}],
+                           threshold_db=-40.0, min_silence_s=3.0)
+    doc = _json.loads(open(sp, encoding="utf-8").read())
+    doc["manual"] = True
+    doc["threshold_db"] = -55.0  # 用户自定义参数也全责保留
+    with open(sp, "w", encoding="utf-8") as f:
+        _json.dump(doc, f)
+    loaded = vs.load_silences(sp)
+    assert loaded == [{"start_s": 0.0, "end_s": 31.0},
+                      {"start_s": 105.0, "end_s": 131.1}]  # 被采用未失效
+
+
+def test_ground_truth_params_output(tmp_path, monkeypatch):
+    """ground truth 校准（R4c）：-40/3.0 下（monkeypatch 真实扫描不可用——
+    验证 DEFAULT 常量回滚+load 参数校验对齐）。"""
+    assert vs.DEFAULT_THRESHOLD_DB == -40.0
+    assert vs.DEFAULT_MIN_SILENCE_S == 3.0
+    # -20/0.3 旧参数文件在回滚后失效（触发重算）
+    sp = str(tmp_path / "old.silences.json")
+    vs.write_silences_file(sp, [{"start_s": 1.0, "end_s": 2.0}],
+                           threshold_db=-20.0, min_silence_s=0.3)
+    assert vs.load_silences(sp) is None
