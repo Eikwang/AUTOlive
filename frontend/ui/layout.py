@@ -705,13 +705,18 @@ class DrawerLayout:
         except Exception as e:
             logger.error(f"启停状态同步失败: {e}")
 
-    def _execute_start(self):
-        """启动系统（免确认；api 静默通道 + UI 单条结果 notify——F12）"""
+    async def _execute_start(self):
+        """启动系统（免确认；api 静默通道 + UI 单条结果 notify——F12）
+
+        断联根修 2026-11-11：启动编排（外围+主系统拉起，秒级）原同步在
+        on_click 内执行阻塞事件循环（socket.io ping_timeout 2.0s 判死面）——
+        经 to_thread 移工作线程；notify/pending UI 更新留在循环上。"""
         if not self._guard_app():
             return
         self._set_pending(True, "启动中…")
         try:
-            result = self.app.run_external_program(type="api") or {}
+            result = await asyncio.to_thread(
+                self.app.run_external_program, type="api") or {}
             if result.get("code") == 200:
                 ui.notify(position="top", type="positive", message="程序开始运行")
             else:
@@ -740,11 +745,13 @@ class DrawerLayout:
                     "background: var(--color-danger); color: var(--text-on-primary);")
         dialog.open()
 
-    def _do_stop(self, dialog):
+    async def _do_stop(self, dialog):
+        """停止（断联根修 2026-11-11：进程树收尸秒级，to_thread 移工作线程）"""
         dialog.close()
         self._set_pending(True, "停止中…")
         try:
-            result = self.app.stop_external_program(type="api") or {}
+            result = await asyncio.to_thread(
+                self.app.stop_external_program, type="api") or {}
             code = result.get("code")
             if code == 200:
                 ui.notify(position="top", type="positive", message="程序已停止")
@@ -777,11 +784,16 @@ class DrawerLayout:
         dialog.open()
 
     async def _do_restart(self, dialog):
-        """系统级重启（D-02：stop + 间隔 + run，控制台 webui 自身不重启）"""
+        """系统级重启（D-02：stop + 间隔 + run，控制台 webui 自身不重启）
+
+        断联根修 2026-11-11：stop/run 编排原在 async handler 内同步执行
+        （同样阻塞循环）——两段均经 to_thread 移工作线程；E4 的 1.5s 间隔
+        保持 await asyncio.sleep（循环友好）。"""
         dialog.close()
         self._set_pending(True, "重启中…")
         try:
-            stop_result = self.app.stop_external_program(type="api") or {}
+            stop_result = await asyncio.to_thread(
+                self.app.stop_external_program, type="api") or {}
             if stop_result.get("code") == -1:
                 ui.notify(position="top", type="negative",
                           message=stop_result.get("msg", "停止失败"))
@@ -789,7 +801,8 @@ class DrawerLayout:
             # E4：停止与拉起之间留 1.5s——声卡/串口/弹幕连接释放存在滞后，
             # 背靠背 stop+run 会让新进程抢不到设备（且失败被静默）。
             await asyncio.sleep(1.5)
-            run_result = self.app.run_external_program(type="api") or {}
+            run_result = await asyncio.to_thread(
+                self.app.run_external_program, type="api") or {}
             if run_result.get("code") == 200:
                 ui.notify(position="top", type="positive", message="已重启")
             else:

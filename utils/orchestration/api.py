@@ -17,6 +17,7 @@
 写者矩阵：choreography 节的唯一写者 = 本模块 _write_choreography_section
 （tmp+os.replace 原子改写，沿 danmaku_consumer._write_config_section 模式）。
 """
+import asyncio
 import ipaddress
 import json
 import os
@@ -77,6 +78,29 @@ def _choreographer():
     return get_choreographer()
 
 
+def _apply_rules_sync(ch, node: dict) -> dict:
+    """规则热应用+持久化同步体（2026-11-11 断联根修抽出：供 to_thread 调用）。
+
+    apply_config 内含 EDTalk 可达性探测（同步 HTTP）与规则重算；
+    _write_choreography_section 为 config.json 原子改写——原在 async handler
+    内同步执行，阻塞主进程 API 事件循环（webui 编排页「应用」按钮期间
+    /choreography/status 轮询全体变慢）。持久化条件（C5-1 语义）逐行保持。
+    """
+    result = ch.apply_config(node)
+    persisted = False
+    # 持久化条件（C5-1 语义，2026-11-04 实测校正）：applied（换装成功）或
+    # edtalk_unreachable（已保存、暂未生效）——后者曾漏写盘致配置期改动
+    # （默认画面池/单段段）静默丢失+前端假成功文案。409（序列执行中）与
+    # worker 启动失败（已回滚）不持久化——防写回未生效状态。
+    if result.get("applied") or result.get("reason") == "edtalk_unreachable":
+        persisted = _write_choreography_section(node)
+        if not persisted:
+            logger.error("[choreography] 运行时已应用但持久化失败（重启丢失）")
+    result["persisted"] = persisted
+    result["success"] = bool(result.get("applied"))
+    return result
+
+
 def is_loopback_host(host: str) -> bool:
     """回环判定（Eng F6/DX 裁决）：ipaddress.is_loopback 覆盖 127.0.0.0/8 与 ::1，
     非裸字符串比较（可击穿 host=="127.0.0.1" 的朴素实现的 127.0.0.2 亦放行）。"""
@@ -102,7 +126,15 @@ def _require_loopback(request: Request) -> None:
 
 
 def register_choreography_routes(app, config) -> None:
-    """把 /choreography/* 控制面路由挂到 main.py 进程 FastAPI 应用。"""
+    """把 /choreography/* 控制面路由挂到 main.py 进程 FastAPI 应用。
+
+    2026-11-11 遗留债收编（webui 断联根修同源类）：主进程 uvicorn 亦为单
+    事件循环——三 handler 内的阻塞体（get_state 状态锁、apply_config 的
+    EDTalk 同步探测+规则重算+config.json 原子改写、simulate_trigger 与
+    worker 互锁）原同步执行，编排页轮询/应用期间冻结主 API 循环。一律
+    asyncio.to_thread 移工作线程；守卫
+    tests/features/test_orchestration_syscmd_off_event_loop.py。
+    """
     from fastapi import Depends, HTTPException
 
     @app.get("/choreography/status")
@@ -116,7 +148,7 @@ def register_choreography_routes(app, config) -> None:
             raise HTTPException(status_code=503, detail={
                 "problem": "编排器未装配", "cause": "主进程启动失败或版本未含编排模块",
                 "fix": "查看主进程启动日志"})
-        state = ch.get_state()
+        state = await asyncio.to_thread(ch.get_state)
         # 配置面摘要（持久层读，与运行态区分）
         node = config.get("choreography") or {}
         state["configured_rules"] = len(node.get("rules") or [])
@@ -140,19 +172,7 @@ def register_choreography_routes(app, config) -> None:
             raise HTTPException(status_code=503, detail={
                 "problem": "编排器未装配", "cause": "主进程未运行编排模块",
                 "fix": "重启运行系统后重试"})
-        result = ch.apply_config(node)
-        persisted = False
-        # 持久化条件（C5-1 语义，2026-11-04 实测校正）：applied（换装成功）或
-        # edtalk_unreachable（已保存、暂未生效）——后者曾漏写盘致配置期改动
-        # （默认画面池/单段段）静默丢失+前端假成功文案。409（序列执行中）与
-        # worker 启动失败（已回滚）不持久化——防写回未生效状态。
-        if result.get("applied") or result.get("reason") == "edtalk_unreachable":
-            persisted = _write_choreography_section(node)
-            if not persisted:
-                logger.error("[choreography] 运行时已应用但持久化失败（重启丢失）")
-        result["persisted"] = persisted
-        result["success"] = bool(result.get("applied"))
-        return result
+        return await asyncio.to_thread(_apply_rules_sync, ch, node)
 
     @app.post("/choreography/trigger")
     async def choreography_trigger(request: Request, payload: dict = None,
@@ -194,4 +214,6 @@ def register_choreography_routes(app, config) -> None:
             raise HTTPException(status_code=503, detail={
                 "problem": "编排器未装配", "cause": "主进程未运行编排模块",
                 "fix": "重启运行系统后重试"})
-        return ch.simulate_trigger(payload)
+        # simulate_trigger 与 worker 共享 _lock——worker 持锁期间同步等待
+        # 会冻结主 API 循环（断联根修同源类），经 to_thread 移工作线程
+        return await asyncio.to_thread(ch.simulate_trigger, payload)

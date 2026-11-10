@@ -958,6 +958,35 @@ class AutoliveApp:
             logger.info("[stop] 无残留进程")
         return reaped
 
+    def _sys_cmd_dispatch(self, cmd_type: str, data_json: dict):
+        """/sys_cmd 四命令编排体（同步阻塞——仅供 asyncio.to_thread 调用）。
+
+        2026-11-11 遗留债收编（用户实报页面卡死重载根修同源）：run/stop 编排
+        含外围+主系统拉起/进程树收尸（start_programs/stop_programs 秒级）与
+        restart 的 os.execl（Windows exec* 实现=spawn 新进程+退出当前进程，
+        退出为进程级、线程内执行等价）——原在 async handler 内同步执行冻结
+        webui 事件循环。逐行搬运原四分支（type="api" 静默通道语义保持）；
+        restart 语义注记（E3 批次）原样保留。UI 通道（layout.py 按钮）经
+        to_thread 调用同一编排，见 _execute_start/_do_stop/_do_restart。
+        """
+        if cmd_type == 'run':
+            return self.run_external_program(type="api")
+        elif cmd_type == 'stop':
+            return self.stop_external_program(type="api")
+        elif cmd_type == 'restart':
+            # 语义注记（E3 批次 /sys_cmd 语义标注）：此处 restart = 重启 webui
+            # 控制台自身（os.execl，见 restart_application），与 WebUI 导航栏
+            # 「停止&重启」按钮的系统级重启（stop+run，控制台不重启）不同。
+            # 语义统一/废弃待后续裁决（TODOS「/sys_cmd 重启语义统一」条目）。
+            api_type = (data_json or {}).get('api_type', 'api')
+            return self.restart_application(type=api_type)
+        elif cmd_type == 'factory':
+            src_path = (data_json or {}).get('data', {}).get('src_path', 'config.json.bak')
+            dst_path = (data_json or {}).get('data', {}).get('dst_path', 'config.json')
+            return self.factory(src_path, dst_path, type="api")
+        else:
+            return {"code": -1, "message": f"未知命令类型: {cmd_type}"}
+
     def run_external_program(self, type="webui"):
         """运行外部程序（与原文件 webui-bak.py L357-382 一致）"""
         if self.running_flag:
@@ -978,13 +1007,17 @@ class AutoliveApp:
                 if prog and prog.get("eta_s"):
                     eta_txt = f"，预计剩余约 {prog['eta_s'] // 60} 分钟"
                 logger.warning("训练进行中，用户尝试启动主系统——已阻止（显存冲突防护）")
-                ui.notify(
-                    position="top", type="warning",
-                    message=f"训练进行中（{stage_txt}{eta_txt}），主系统启动已阻止。"
-                            f"请先停止训练或等其完成；可先用现有角色体验实时推理。",
-                    actions=[{"label": "前往训练页", "type": "route",
-                              "handler": lambda: ui.navigate.to("/train_streamer", new_tab=True)}],
-                )
+                # 通道分派（断联根修 2026-11-11：api 通道经 to_thread 在工作线程
+                # 执行——ui.notify 需 NiceGUI client 上下文，线程内必抛）；
+                # api 通道语义=logger 即可（原 HTTP 上下文此 notify 本就悬空）
+                if type == "webui":
+                    ui.notify(
+                        position="top", type="warning",
+                        message=f"训练进行中（{stage_txt}{eta_txt}），主系统启动已阻止。"
+                                f"请先停止训练或等其完成；可先用现有角色体验实时推理。",
+                        actions=[{"label": "前往训练页", "type": "route",
+                                  "handler": lambda: ui.navigate.to("/train_streamer", new_tab=True)}],
+                    )
                 return
         except ImportError:
             pass
@@ -1509,7 +1542,12 @@ class AutoliveApp:
 
         @app.post('/sys_cmd')
         async def api_sys_cmd(request: Request):
-            """系统命令（run/stop/restart/factory；T2：login.enable=true 时须登录会话）"""
+            """系统命令（run/stop/restart/factory；T2：login.enable=true 时须登录会话）
+
+            2026-11-11 遗留债收编：四命令编排体（进程树拉起/收尸秒级+os.execl）
+            抽至 _sys_cmd_dispatch，经 asyncio.to_thread 执行——原在事件循环
+            同步运行，启动/停止期间冻结 webui 循环（socket.io ping_timeout
+            2.0s 判死面）。auth+载荷解析留在循环上（轻）。"""
             try:
                 if not _http_auth_ok(request):
                     return {"code": 401, "message": "未登录或会话已失效（login.enable=true 后控制端点须携带登录会话 cookie 或 X-Auth-Token）"}
@@ -1518,24 +1556,8 @@ class AutoliveApp:
                 cmd_type = data_json.get('type', '')
                 logger.info(f"开始执行 {cmd_type}命令...")
 
-                if cmd_type == 'run':
-                    resp_json = self.run_external_program(type="api")
-                elif cmd_type == 'stop':
-                    resp_json = self.stop_external_program(type="api")
-                elif cmd_type == 'restart':
-                    # 语义注记（E3 批次 /sys_cmd 语义标注）：此处 restart = 重启 webui
-                    # 控制台自身（os.execl，见 restart_application），与 WebUI 导航栏
-                    # 「停止&重启」按钮的系统级重启（stop+run，控制台不重启）不同。
-                    # 语义统一/废弃待后续裁决（TODOS「/sys_cmd 重启语义统一」条目）。
-                    api_type = data_json.get('api_type', 'api')
-                    resp_json = self.restart_application(type=api_type)
-                elif cmd_type == 'factory':
-                    src_path = data_json.get('data', {}).get('src_path', 'config.json.bak')
-                    dst_path = data_json.get('data', {}).get('dst_path', 'config.json')
-                    resp_json = self.factory(src_path, dst_path, type="api")
-                else:
-                    resp_json = {"code": -1, "message": f"未知命令类型: {cmd_type}"}
-
+                resp_json = await asyncio.to_thread(
+                    self._sys_cmd_dispatch, cmd_type, data_json)
                 return resp_json
             except Exception as e:
                 logger.error(f"sys_cmd处理失败: {e}")
