@@ -331,3 +331,11 @@ untime\sox\`(main.py:12-14 的 sys.prefix/sox PATH 约定目录,Eng H-1);探测�
 1. **~~rust 备用时效复检点~~（已执行 2026-10-29：用户裁决 rust 线弃用，server.exe/src/Config.toml/kbindex 等盘上删除，去留问题随删除终结）**— 原：python 侧持续演化而 rust 停滞，备份半衰期约 6 个月。
 2. **流式门控按通道键迁移评估**（P3, S）— fastrag 流式开关当前保守复用 custom_llm.stream_reply（跨通道控制，无 fastrag 侧独立键，语义矩阵已注明怪癖）。若未来出现"开 custom_llm 流式但关 fastrag 流式"的真实需求，评估新增 fastrag.stream_reply 键+gate 读取迁移。依赖：本批 T3 落地+需求实证。
 3. **fastrag 构建按钮解释器分叉收编核验**（P3, S）— T4 将构建按钮 llm.py:159 切到 resolve_interpreter 消除与启动路径的解析分叉（Eng A1）；实施后核验构建链在解释器挪位场景下的行为与启动链一致。依赖：本批 T4。
+
+## Deferred from /autoplan 2026-11-10 — 点歌间奏插播三缺陷修复批次
+
+1. **d15 契约字面值修订**（P3, S）— vocal_silences.py docstring 与 d15 裁决条款字面记载 threshold_db:-40/min_silence_s:3，本批改为 -20/0.3 后属契约文档漂移；修订 docstring 与相关文档引用。依赖：本批实施落地。
+2. **音频链路进程隔离（类级决策债）**（P2, M）— 主进程单 GIL 承载合成/播放/消费全链的第 4 次实例级修补（音频页断联 to_thread/测试挂死 GPU 门/伴奏断续子进程化）；触发条件=下一次同类主进程阻塞事故即立项隔离批次；backing_player 薄入口为可复用第一步。依赖：实播反馈。
+3. **webui 静音参数面板**（P3, M）— threshold_db/min_silence_s/min_interlude_s 可视化调参（choose_song tab），本批以 config 键 choose_song.min_interlude_s 兜底可调。依赖：本批落地+用户调参需求。
+4. **插播伴奏 ducking**（P3, M）— 插播答谢时伴奏音量闪避（音量包络），提升插播听感。依赖：实播反馈。
+5. **切片导出 wav 直切/增量导出**（P3, S）— 段数 10-25 放大合成线程 mp3 export 阻塞窗口（1-3s），触发条件=实播观测点歌频繁致答谢延迟可感知（song_gap_wait 桶）。依赖：实播数据。
