@@ -192,6 +192,62 @@ def test_progress_corrupt_returns_none(tmp_path, monkeypatch):
 # ---------- 4. 评估门槛判定 ----------
 
 
+def test_cleanup_pids_verdict_not_total_baseline(tmp_path):
+    """显存清理判定=训练树 PID 归属（2026-11-09 用户实报根修）：
+    树 PID 已从 PDH 消失 → 放行（总量高于基线为外部进程不阻断）；
+    树 PID 仍占 → 失败态。WDDM 延迟释放/外部波动不再误判。"""
+    p = _make_pipeline(tmp_path)
+    p.VRAM_POLL_TIMEOUT_S = 2  # 残留路径走满轮询窗口——短化防测试拖时
+    logs = []
+    p.on_log = lambda line, stage=None: logs.append(line)
+    p._vram_baseline_gb = 0.6
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            import io
+            self.stdout = io.BytesIO(b"")
+            self.pid = 424242
+
+        def poll(self):
+            return None  # 模拟存活中触发清理
+
+    import utils.gpu_probe as gp
+    import utils.train_streamer.pipeline as mod
+
+    # ① 树 PID 已从 PDH 消失（外部进程占 5GB 也不阻断）
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    monkeypatch.setattr(gp, "pdh_memory_pids",
+                        lambda: [(999, 5 * 1024**3), (1000, 1024**3)])
+    p._cleanup_after_step(FakeProc(), 1)
+    monkeypatch.undo()
+    assert not p._cleanup_timed_out, "树 PID 清零必须放行（外部占用不阻断）"
+    assert any("显存已清零" in ln for ln in logs)
+
+    # ② 树 PID 仍占显存 → 失败态（真残留）
+    logs.clear()
+    monkeypatch2 = pytest.MonkeyPatch()
+    monkeypatch2.setattr(mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    monkeypatch2.setattr(gp, "pdh_memory_pids",
+                         lambda: [(424242, 1024**3), (999, 512 * 1024**2)])
+    p._cleanup_after_step(FakeProc(), 1)
+    monkeypatch2.undo()
+    assert p._cleanup_timed_out, "树 PID 残留必须失败态"
+    assert any("仍占显存" in ln for ln in logs)
+
+    # ③ PDH 不可用 → 回退总量判定（基线 0.6 + 容差，nvidia-smi 返回低值=放行）
+    logs.clear()
+    p._cleanup_timed_out = False  # ② 遗留态重置
+    monkeypatch3 = pytest.MonkeyPatch()
+    monkeypatch3.setattr(mod.subprocess, "Popen", lambda *a, **kw: FakeProc())
+    monkeypatch3.setattr(gp, "pdh_memory_pids", lambda: None)
+    monkeypatch3.setattr(mod.subprocess, "run",
+                         lambda *a, **kw: type("R", (), {"stdout": "100"})())
+    p._cleanup_after_step(FakeProc(), 1)
+    monkeypatch3.undo()
+    assert not p._cleanup_timed_out, "PDH 不可用回退总量判定应放行（100MB < 基线）"
+
+
 def test_judge_eval_pass():
     """实测字段（jsonl metrics 嵌套）全过门槛 → None（通过）。"""
     pipeline = TrainPipeline(

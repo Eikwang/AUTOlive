@@ -21,7 +21,7 @@ GPU 专用显存归属探针（2026-11-07 翻唱显存残留排查批次）
 """
 import subprocess
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 def _pdh_command() -> str:
@@ -66,14 +66,26 @@ def _proc_name(pid: int) -> str:
         return "?"
 
 
-def pdh_memory_lines(top_n: int = 12) -> Tuple[List[str], bool]:
-    """PDH 路：(报告行列表, 是否可用)。失败不抛——返回标注行。"""
+def pdh_memory_pids() -> Optional[List[Tuple[int, int]]]:
+    """PDH 路 raw rows：[(pid, 专用显存字节)] 字节降序。
+
+    Returns:
+        rows 列表（可能为空=可用且无占用）；**None=PDH 路不可用**
+        （区别于空列表，调用方可区分降级路径）。
+    """
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", _pdh_command()],
             capture_output=True, encoding="utf-8", errors="replace", timeout=40)
-        rows = _parse_pdh_output(r.stdout or "")
     except Exception:
+        return None
+    return _parse_pdh_output(r.stdout or "")
+
+
+def pdh_memory_lines(top_n: int = 12) -> Tuple[List[str], bool]:
+    """PDH 路：(报告行列表, 是否可用)。失败不抛——返回标注行。"""
+    rows = pdh_memory_pids()
+    if rows is None:
         return ["  （PDH 路不可用——GPU 计数器读取失败）"], False
     if not rows:
         return ["  （无 GPU 专用显存占用进程）"], True

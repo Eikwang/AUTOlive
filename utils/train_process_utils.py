@@ -82,12 +82,33 @@ def release_local_gpu() -> None:
         pass
 
 
+def _tree_pids(root_pid: int) -> set:
+    """进程树 PID 集（root+psutil children recursive；psutil 缺失仅 root）。"""
+    pids = {root_pid}
+    try:
+        import psutil
+        for c in psutil.Process(root_pid).children(recursive=True):
+            pids.add(c.pid)
+    except Exception:
+        pass
+    return pids
+
+
 def cleanup_after_step(proc: Optional[subprocess.Popen], used_before_gb: Optional[float],
                        prefix: str = "[train]"):
     """步间资源清理（2026-10-14 用户指令）：步骤子进程退出后——
     ①taskkill /T 终结整棵进程树（mp.spawn 孙进程/dataloader worker 孤儿必灭）；
-    ②轮询等待显存回落到本步启动前基线（+0.5GB 容差），60s 超时放行+警告。"""
+    ②显存清零确认——2026-11-09 用户实报根修：判定从"总量回落基线"改为
+    "**训练树 PID 归属**"（PDH 探针 gpu_probe.pdh_memory_pids，任务管理器
+    同源）。taskkill 后 WDDM 驱动层显存回收延迟（实测 >120s、无进程残留、
+    最终自行回落）与外部进程显存波动（安卓虚拟机/浏览器）都会污染总量判定，
+    误判"残留"阻断编排。现语义：训练树 PID 从 PDH 消失=清零放行（总量高为
+    外部占用，日志说明不阻断）；PDH 不可用回退总量判定（原行为）。"""
+    from utils.gpu_probe import pdh_memory_pids
+
+    tree_pids: set = set()
     if proc is not None and proc.poll() is None:
+        tree_pids = _tree_pids(proc.pid)
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -95,7 +116,39 @@ def cleanup_after_step(proc: Optional[subprocess.Popen], used_before_gb: Optiona
                 creationflags=_noflag())
         except Exception:
             logger.warning(f"{prefix} taskkill 清理异常", exc_info=True)
-    wait_vram_release(used_before_gb, prefix=prefix)
+
+    if not tree_pids:
+        # 无可归属树（proc 已退出/None）——保留总量回落确认（原行为）
+        wait_vram_release(used_before_gb, prefix=prefix)
+        return
+
+    def _tree_alive() -> Optional[bool]:
+        rows = pdh_memory_pids()
+        if rows is None:
+            return None
+        return bool(tree_pids & {p for p, _ in rows})
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        alive = _tree_alive()
+        if alive is None:
+            # PDH 不可用——回退总量判定（原行为）
+            wait_vram_release(used_before_gb, prefix=prefix, timeout=max(
+                5, int(deadline - time.time())))
+            return
+        if not alive:
+            total_now = vram_used_gb()
+            if used_before_gb is not None and total_now is not None \
+                    and total_now > used_before_gb + 0.5:
+                logger.info(
+                    f"{prefix} 训练树 {len(tree_pids)} PID 显存已清零（总量 "
+                    f"{total_now:.1f}GB 高于基线 {used_before_gb:.1f}GB 为外部进程占用，不阻断）")
+            return
+        time.sleep(5)
+    logger.warning(
+        f"{prefix} 训练树 PID {sorted(tree_pids)} 显存 120s 未清零（真残留）"
+        "——检查进程是否存活；总量基线信息：当前 "
+        f"{vram_used_gb()}GB / 基线 {used_before_gb}GB")
 
 
 def gpu_gate(config, log_sink: List[str], prefix: str = "[train]") -> bool:

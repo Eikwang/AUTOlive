@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 import traceback
+from typing import Optional
 
 from utils.my_log import logger
 from utils import alarm_notifier
@@ -520,36 +521,71 @@ class TrainPipeline:
     VRAM_POLL_TIMEOUT_S = 120
 
     def _cleanup_after_step(self, proc: subprocess.Popen | None, stage: int) -> None:
-        """阶段完成后清理子进程树并等待显存回落。
+        """阶段完成后清理子进程树并确认训练树显存清零。
 
         范式移植自 train_voice_pipeline（义务块）：taskkill /F /T 杀子进程树
-        + nvidia-smi 显存回落基线轮询。超时/降级路径（DX F-5/Eng F-E14）：
-        轮询 120s 超时→"清理失败"态三段式提示+强制解除出口标志；
-        nvidia-smi 不可用→仅 taskkill+日志，不阻塞。"""
+        + 显存确认轮询。2026-11-09 用户实报根修：判定从"总量回落基线"改为
+        "**训练树 PID 归属**"（PDH 探针，任务管理器同源）——taskkill 后
+        WDDM 驱动层显存回收延迟（实测 >120s，PDH 复查无进程残留、显存最终
+        自行回落）与外部进程显存波动（安卓虚拟机/浏览器）都会污染总量判定，
+        误判"残留"阻断编排。现语义：训练树 PID 从 PDH 消失=清零放行（总量
+        高为外部占用，日志说明不阻断）；PDH 不可用回退总量判定（原行为）。
+        超时/降级路径（DX F-5/Eng F-E14）：轮询超时→"清理失败"态三段式提示
+        +强制解除出口标志；nvidia-smi/PDH 不可用→仅 taskkill+日志，不阻塞。"""
+        from utils.gpu_probe import pdh_memory_pids
+
+        tree_pids: set = set()
         if proc is not None and proc.poll() is None:
+            # taskkill 前收集树 PID（psutil children——杀完即查不到）
+            try:
+                import psutil
+                tree_pids.add(proc.pid)
+                for c in psutil.Process(proc.pid).children(recursive=True):
+                    tree_pids.add(c.pid)
+            except Exception:
+                tree_pids.add(proc.pid)
             try:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                                capture_output=True, timeout=15)
-                self._log(f"[清理] 子进程树 {proc.pid} 已终止", stage)
+                self._log(f"[清理] 子进程树 {proc.pid} 已终止（{len(tree_pids)} PID）", stage)
             except Exception as e:
                 self._log(f"[清理] taskkill 失败（继续轮询）：{e}", stage)
-        # 显存基线=训练开始前采样值（Eng F-E14）
-        baseline_gb = self._vram_baseline_gb
+
+        def _tree_alive() -> Optional[bool]:
+            """训练树 PID 是否仍占显存：True=残留 / False=清零 / None=PDH 不可用。"""
+            rows = pdh_memory_pids()
+            if rows is None:
+                return None
+            return bool(tree_pids & {p for p, _ in rows})
+
         t0 = time.time()
+        alive_last: Optional[bool] = None
         while time.time() - t0 < self.VRAM_POLL_TIMEOUT_S:
-            used = self._query_vram_gb()
-            if used is None:
-                # nvidia-smi 不可用（Eng F-E14 降级路径）
-                self._log("[清理] nvidia-smi 不可用，跳过显存轮询（仅进程清理）", stage)
+            alive_last = _tree_alive()
+            if alive_last is None:
+                # PDH 不可用——回退总量基线判定（原行为，Eng F-E14 降级路径）
+                used = self._query_vram_gb()
+                if used is None:
+                    self._log("[清理] 显存探测均不可用，跳过轮询（仅进程清理）", stage)
+                    return
+                baseline_gb = self._vram_baseline_gb
+                if baseline_gb is None or used <= baseline_gb + 0.5:
+                    self._log(f"[清理] 显存已回落基线（{used:.1f}GB）", stage)
+                    return
+                time.sleep(3)
+                continue
+            if not alive_last:
+                # 训练树 PID 已从显存清单消失=清零——总量高为外部进程，不阻断
+                self._log(f"[清理] 训练树 {len(tree_pids)} PID 显存已清零"
+                          f"（{time.time()-t0:.0f}s）", stage)
                 return
-            if baseline_gb is None or used <= baseline_gb + 0.5:
-                self._log(f"[清理] 显存已回落基线（{used:.1f}GB）", stage)
-                return
-            time.sleep(3)
+            time.sleep(5)
         # 超时（DX F-5：清理失败态+强制解除出口，不死锁用户）
+        hint = (f"训练树 PID {sorted(tree_pids)} 仍占显存"
+                if alive_last else "训练树状态未知（PDH 轮询异常）")
         self._log(
-            f"[清理][失败] problem=显存 {self._query_vram_gb() or '?'}GB 超过 {self.VRAM_POLL_TIMEOUT_S}s 未回落基线；"
-            f"cause=可能有残留进程占用显存（nvidia-smi 查看）；"
+            f"[清理][失败] problem={hint}，超过 {self.VRAM_POLL_TIMEOUT_S}s 未清零；"
+            f"cause=子进程树未被终结或驱动未回收其显存；"
             f"fix=手动 taskkill 残留 python 进程，或点击『强制解除并继续』（警告：显存可能未释放，"
             f"启动主系统可能失败）", stage)
         self._cleanup_timed_out = True
