@@ -484,3 +484,42 @@ def test_min_interlude_filter_and_config_clamp(tmp_path, fake_pydub):
     assert fx._min_interlude_s() == 10.0
     fx.config._data[("choose_song", "min_interlude_s")] = 0.5
     assert fx._min_interlude_s() == 0.5
+
+
+# ------------------------------------------------- 映射字符串值防御（实测修复）
+
+def test_priority_mapping_string_values_no_typeerror():
+    """映射表字符串值防御（2026-11-10 实测：用户 config song="80" 等 10 个
+    字符串值 → data_priority_insert int>=str TypeError 中断点歌入队整链）。
+    get_priority_level 经 audio_priority 单一源数值化：数值字符串→int，
+    混合映射（int+str）排序比较正常，非数值→None 落队尾。"""
+    from utils.audio.queue_manager import QueueMixin
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+    # 用户实测形态：song="80"（str）+comment=50（int）混合
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "comment": 50, "bad_type": "not_a_number"}
+        if keys == ("filter", "message_queue_max_len"):
+            return 50
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.message_queue = [
+        {"type": "comment", "voice_path": "c", "content": "c1"},  # int 50
+    ]
+    import threading as _th
+    pb.message_queue_lock = _th.RLock()
+    pb.message_queue_not_empty = _th.Condition(pb.message_queue_lock)
+    pb._cancelled_choreo = set()
+    # song（str "80"→80>50）入队：修复前 int>=str TypeError；修复后正常插队首
+    pb.data_priority_insert("等待合成消息", {
+        "type": "song", "voice_path": "s", "content": "s1"})
+    assert pb.message_queue[0]["type"] == "song"  # 80>50 插到 comment 前
+    # 非数值映射 → None 落队尾（不炸）
+    pb.data_priority_insert("等待合成消息", {
+        "type": "bad_type", "voice_path": "b", "content": "b1"})
+    assert pb.message_queue[-1]["type"] == "bad_type"

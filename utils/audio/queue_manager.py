@@ -428,10 +428,15 @@ class QueueMixin:
         priority_mapping = self.config.get("filter", "priority_mapping")
         
         def get_priority_level(data_json):
-            """根据 data_json 的 'type' 键返回优先级，未定义的 type 或缺失 'type' 键将返回 None"""
-            # 检查 data_json 是否包含 'type' 键且该键的值在 priority_mapping 中
+            """根据 data_json 的 'type' 键返回优先级，未定义的 type 或缺失 'type'
+            键将返回 None。2026-11-10 实测修复：映射表值可能为字符串（前端/
+            手动编辑 config 写入 "80"）——490 行 int>=str 比较直接 TypeError
+            中断入队（点歌整链失败）。经 audio_priority 单一源数值化：数值
+            字符串→int；非数值映射→None（队尾语义），与 item_priority 侧
+            int() 对称。"""
             audio_type = data_json.get("type")
-            return priority_mapping.get(audio_type, None)
+            from utils.audio.audio_priority import entry_priority
+            return entry_priority({"type": audio_type}, priority_mapping)
 
         def _entry_priority(item):
             """条目有效权重（O7，2026-10-28 消费批次；T2/e2 收敛）：条目自带
