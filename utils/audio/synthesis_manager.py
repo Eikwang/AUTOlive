@@ -169,7 +169,12 @@ class SynthesisMixin:
                 piece = seg[i * seg_ms:(i + 1) * seg_ms]
                 p = os.path.join(seg_dir, f"seg_{i:02d}.mp3")
                 piece.export(p, format="mp3")
-                out.append({"voice_path": p, "seq": i, "total": count, "seg_dir": seg_dir})
+                # start_s（2026-11-09 失步根修）：固定切片按等长推进——消费侧
+                # 段间窗口门（含播完保底）同样生效，消除固定切片段间
+                # push 互踩截断（原语义=背靠背连推）。
+                out.append({"voice_path": p, "seq": i, "total": count,
+                            "seg_dir": seg_dir,
+                            "start_s": round(i * seg_seconds, 3)})
             logger.info(f"[song] 点歌切片：{count} 段 × {seg_seconds:g}s"
                         f"（回复音频可按优先级插播）：{voice_path}")
             return out
@@ -242,8 +247,13 @@ class SynthesisMixin:
                 gap_after = 0.0
                 if i < total - 1:
                     gap_after = round(runs[i + 1][0] - e, 3)
+                # start_s（2026-11-09 失步根修）：段在歌曲时间轴的绝对起点——
+                # 消费侧窗口门（_song_gate_wait_s）据此对齐伴奏时钟（人声段
+                # 应在其歌曲位置起播，间奏时长不再被跳过）。首段 s>0=vocal
+                # 前奏静音（伴奏先起），同样由消费侧前奏等待对齐。
                 out.append({"voice_path": p, "seq": i, "total": total,
-                            "seg_dir": seg_dir, "gap_after_s": gap_after})
+                            "seg_dir": seg_dir, "start_s": round(s, 3),
+                            "gap_after_s": gap_after})
             logger.info(
                 f"[song] 语义切片（d1/d15）：{total} 个人声段"
                 f"（间奏 {len(silences)} 段）：{voice_path}")
@@ -360,6 +370,8 @@ class SynthesisMixin:
                             "song_segment": {
                                 "seq": s["seq"], "total": s["total"],
                                 "seg_dir": s["seg_dir"],
+                                # 歌曲时间轴起点（2026-11-09 失步根修：窗口门对齐锚）
+                                "start_s": s.get("start_s", 0.0),
                             },
                         }
                         # uc4b 双轨逐片：伴奏仅首片承载（后继片重启伴奏=已判死语义）

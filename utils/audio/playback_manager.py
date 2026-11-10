@@ -5,6 +5,7 @@
 import asyncio
 import shutil
 import threading
+import time
 import traceback
 import os
 from ..my_log import logger
@@ -15,6 +16,19 @@ from utils.web_captions import get_captions_manager
 # （_CHOREO_MUTE_MAX_WAIT=300s）+ push_full 受理开销；超时照常起播（宁可有
 # 伴奏不悬挂线程，与既有「人声照唱」降级语义对称）。
 _BACKING_START_MAX_WAIT = 360.0
+
+# 伴奏真实起播回执等待上限（2026-11-09 前奏对齐）：前奏静音场景伴奏线程
+# 准备阶段（加载/增益/导出/开流）的等待上限；超时 fail-open 以当前时刻为
+# 歌曲时间轴零点（宁可贵一点的对齐偏差不悬挂播放循环）。
+_BACKING_PRELUDE_MAX_WAIT = 10.0
+
+# 间奏窗口门推送预补偿（2026-11-09 失步根修）：due 提前量=pop→push HTTP
+# 受理开销≈0.3s，使「受理+preroll 出声」落在歌曲时间轴应到时刻附近。
+_SONG_PUSH_LEAD = 0.3
+
+# 段播完保底裕量（2026-11-09 失步根修）：受理时刻+段时长×此系数=最早下段
+# 推送时刻——服务端渐进推理慢于实时时防下段 flush 自截断（宁可行推不截断）。
+_SONG_SEG_END_MARGIN = 1.15
 
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
@@ -44,7 +58,8 @@ def routes_to_edtalk(data_json, config) -> bool:
     return is_edtalk_active(config)
 
 
-def _play_backing_local(backing_path: str, volume: float, start_event=None):
+def _play_backing_local(backing_path: str, volume: float, start_event=None,
+                        started_event=None, started_box=None):
     """R6 双轨伴奏外放（/autoplan 2026-10-23 批次，EDTalk 激活场景）：点歌伴奏轨
     独立 pyaudio 流本地播放（人声从数字人端出、伴奏本地出——双设备分工），随播完
     自退。失败仅告警不抛（R6 降级语义=人声照唱，伴奏缺失不黑场；F-S5 可观测）。
@@ -54,7 +69,11 @@ def _play_backing_local(backing_path: str, volume: float, start_event=None):
     飞行等待；②门放行后 start_stream 起播（playback_manager 在 push_full(vocal)
     受理返回后置位）。原实现线程启动即写流：伴奏立刻响，而人声被 EDTalk 单飞行句
     背压（_wait_flight_complete）挡在点歌应答播完之后（实测滞后 5~10s）——R6
-    <0.5s 同步义务被击穿。start_event=None 保持旧语义（open 即起播，兼容直调）。"""
+    <0.5s 同步义务被击穿。start_event=None 保持旧语义（open 即起播，兼容直调）。
+
+    2026-11-09 前奏对齐：started_event/started_box 非 None 时，start_stream 后
+    回执真实起播时刻（started_box["t"]=monotonic）——前奏静音场景人声首段以此
+    为歌曲时间轴零点（t0）等待前奏后再推，对齐伴奏时钟。"""
     tmp_path = None
     pa = stream = wf = None
     try:
@@ -81,6 +100,12 @@ def _play_backing_local(backing_path: str, volume: float, start_event=None):
                 logger.warning(
                     f"[song] 伴奏起播门超时（{_BACKING_START_MAX_WAIT:.0f}s），照常起播：{backing_path}")
             stream.start_stream()
+        if started_event is not None:
+            # 真实起播回执（2026-11-09 前奏对齐）：start_stream 后立即回执，
+            # 人声侧以该时刻为歌曲时间轴零点计算前奏/间奏窗口
+            if started_box is not None:
+                started_box["t"] = time.monotonic()
+            started_event.set()
         chunk = 1024 * wf.getnchannels() * wf.getsampwidth()
         data = wf.readframes(1024)
         while data:
@@ -126,6 +151,32 @@ class PlaybackMixin:
         if seg_dir and os.path.isdir(seg_dir):
             shutil.rmtree(seg_dir, ignore_errors=True)
             logger.info(f"[song] 切片目录已清理：{seg_dir}")
+
+    def _song_gate_wait_s(self, data_json) -> float:
+        """间奏窗口门（2026-11-09 失步根修）：队首 song 切片段未到「歌曲时间轴
+        应到时刻」时返回剩余等待秒（>0=消费循环锁外短睡重查）；其余恒 0。
+
+        due = t0 + start_s（该段在歌曲时间轴的起点；t0=首段建立的歌曲时间轴
+        零点≈伴奏起播时刻）− 推送预补偿（_SONG_PUSH_LEAD），再与上一段播完
+        保底（last_end=受理+段时长×margin）取大——服务端渐进推理慢于实时时
+        宁可人声延后（e13 失步声明方向）也不 flush 截断上一段。
+
+        fail-open：非 song/首段（受理即零点，前奏等待在消费函数内）/无锚
+        （异常态）恒 0 不阻塞——窗口门只在正常 song 序列中段生效。"""
+        if not isinstance(data_json, dict) or data_json.get("type") != "song":
+            return 0.0
+        seg = data_json.get("song_segment") or {}
+        if not seg or int(seg.get("seq", 0)) == 0:
+            return 0.0
+        anchor = getattr(self, "_song_anchor", None)
+        if not anchor or anchor.get("t0") is None:
+            return 0.0
+        due = anchor["t0"] + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+        last_end = anchor.get("last_end") or 0.0
+        if last_end > due:
+            due = last_end
+        remaining = due - time.monotonic()
+        return remaining if remaining > 0 else 0.0
 
     def _is_999_entry(self, data_json) -> bool:
         """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
@@ -241,12 +292,17 @@ class PlaybackMixin:
         # 伴奏放行 → 双轨同步起播（偏差≈人声 preroll ~0.3s，<0.5s 恢复）。
         _backing_path = data_json.get("backing_path") or ""
         _backing_gate = None
+        _backing_started = None
+        _backing_started_box = {"t": 0.0}
         if _backing_path and os.path.isfile(_backing_path):
             _backing_gate = threading.Event()
+            _backing_started = threading.Event()
             threading.Thread(
                 target=_play_backing_local,
                 args=(_backing_path, float(data_json.get("backing_volume", 0.8) or 0.8),
                       _backing_gate),
+                kwargs={"started_event": _backing_started,
+                        "started_box": _backing_started_box},
                 name="song-backing", daemon=True).start()
         elif data_json.get("backing_path"):
             logger.warning(f"[song] 伴奏轨缺失，人声照唱：{_backing_path}")
@@ -304,6 +360,38 @@ class PlaybackMixin:
                 logger.warning(
                     f"[EDTalk] 纯画面窗口等待超 {_CHOREO_MUTE_MAX_WAIT}s，降级照推"
                     f"（problem=窗口未按时结束；cause=编排看门狗异常；fix=检查编排状态）")
+        # 前奏对齐+序列锚（2026-11-09 失步根修）：song 切片首段推送前——
+        # start_s>0（vocal 前奏静音=伴奏先起）时伴奏门提前放行（伴奏起播即
+        # 歌曲时间轴零点 t0），人声等待前奏静音段后再推（修复「人声开场即
+        # 超前伴奏」）；start_s=0 保持门随 push 受理放行（原语义），t0=受理
+        # 时刻回填。锚 _song_anchor 供段间奏窗口门（_song_gate_wait_s）计算
+        # 后续段应到时刻；无伴奏轨时 t0 取当前时刻（时间轴语义仍供插播窗口）。
+        _seg_meta = data_json.get("song_segment") or {}
+        if data_json.get("type") == "song" and _seg_meta \
+                and int(_seg_meta.get("seq", 0)) == 0:
+            _start_s = float(_seg_meta.get("start_s") or 0.0)
+            if _start_s > 0:
+                if _backing_gate is not None:
+                    _backing_gate.set()  # 伴奏先起播（前奏期间伴奏响、人声静默）
+                    if not _backing_started.wait(timeout=_BACKING_PRELUDE_MAX_WAIT):
+                        logger.warning(
+                            f"[song] 伴奏起播回执超时（{_BACKING_PRELUDE_MAX_WAIT:.0f}s，"
+                            "fail-open：以当前时刻为时间轴零点）")
+                    _t0 = _backing_started_box["t"] or time.monotonic()
+                else:
+                    _t0 = time.monotonic()
+                _remain = _t0 + _start_s - time.monotonic()
+                if _remain > 0:
+                    logger.info(f"[song] 前奏等待 {_remain:.1f}s（人声对齐伴奏时间轴）")
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("song_gap_wait", round(_remain, 1))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_remain)
+                self._song_anchor = {"t0": _t0, "last_end": 0.0}
+            else:
+                self._song_anchor = {"t0": None, "last_end": 0.0}
         # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
         # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
         # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
@@ -368,6 +456,24 @@ class PlaybackMixin:
                 # 伴奏线程悬挂至超时）。push_full 内部全捕获不抛，finally
                 # 兜底 CancelledError 等 BaseException 穿透场景。
                 _backing_gate.set()
+        # 序列锚更新（2026-11-09 失步根修）：受理时刻=段起播锚（帧锁定出声
+        # preroll ~0.3s）；last_end=受理+段时长×margin（播完保底——服务端
+        # 渐进推理慢于实时时窗口门取 max(due, last_end)，宁可人声延后不
+        # flush 自截断）；末段受理完成清锚（序列收尾）。
+        if data_json.get("type") == "song" and _seg_meta:
+            _pushed_at = time.monotonic()
+            _anchor = getattr(self, "_song_anchor", None)
+            if _anchor is not None:
+                if _anchor.get("t0") is None:
+                    _anchor["t0"] = _pushed_at  # start_s=0 首段：受理即零点
+                _seg_dur = float(getattr(self.edtalk_client,
+                                         "last_duration_s", 0.0) or 0.0)
+                if _seg_dur > 0:
+                    _anchor["last_end"] = max(
+                        _anchor.get("last_end") or 0.0,
+                        _pushed_at + _seg_dur * _SONG_SEG_END_MARGIN)
+                if int(_seg_meta.get("seq", 0)) == int(_seg_meta.get("total", 0)) - 1:
+                    self._song_anchor = None
         # 字幕时序对齐（2026-10-28 修复）：推送点=push_full 返回后
         # ——此刻音频已被数字人受理、即将出声（preroll 缓冲 ~0.3s）。
         # 原推送点在 push_full 之前，未计入其内部的上一句飞行等待
@@ -447,11 +553,30 @@ class PlaybackMixin:
         try:
             while True:
                 try:
-                    # 获取线程锁，避免同时操作
+                    # 间奏窗口门（2026-11-09 失步根修）：队首 song 切片段未到
+                    # 歌曲时间轴应到时刻（due=t0+start_s，见 _song_gate_wait_s）
+                    # 时锁外短睡重查——等待期间高优先级答谢可随时插队队首被
+                    # 优先消费（间奏插播填充=uc4b 设计语义）；窗口到期后推送
+                    # 即 flush 残余答谢（d3 人声起即停答谢，wait_flight=False
+                    # 语义保持）。非 song/首段/无锚恒 0 直通（fail-open）。
+                    while True:
+                        with self.voice_tmp_path_queue_lock:
+                            while not self.voice_tmp_path_queue:
+                                # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
+                                self.voice_tmp_path_queue_not_empty.wait()  # 阻塞直到列表非空
+                            data_json = self.voice_tmp_path_queue[0]
+                        _gate_wait = self._song_gate_wait_s(data_json)
+                        if _gate_wait <= 0:
+                            break
+                        try:
+                            from utils.obs_stats import record_drop
+                            record_drop("song_gap_wait", round(_gate_wait, 1))
+                        except Exception:
+                            pass
+                        await asyncio.sleep(min(_gate_wait, 0.5))
                     with self.voice_tmp_path_queue_lock:
-                        while not self.voice_tmp_path_queue:
-                            # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
-                            self.voice_tmp_path_queue_not_empty.wait()  # 阻塞直到列表非空
+                        if not self.voice_tmp_path_queue:
+                            continue  # 等待循环后队列被清空（停止/flush）→ 回外层
                         data_json = self.voice_tmp_path_queue.pop(0)
 
                     # 精简日志（2026-10-28）：整包 dict 倾倒退役——只留 type+content

@@ -172,11 +172,17 @@ def test_playback_loop_wires_gate_after_push_full():
     # 门创建 + 线程传参
     assert "_backing_gate = threading.Event()" in src
     assert "_backing_gate)" in src
-    # 放行点：push_full 之后、且位于 finally（失败也放行）
-    push_idx = src.index("await self.edtalk_client.push_full")
+    # 放行点②：push_full 之后、且位于 finally（失败也放行）
+    # （2026-11-09 失步根修新增放行点①=前奏对齐 seq0 start_s>0 时 push 前
+    # 提前放行——伴奏先起播承担歌曲时间轴零点，人声等前奏静音后再推）
+    push_idx = src.index("wait_flight=_wait_flight")  # 唯一锚：消费循环 push（999 重推=wait_flight=True 字面量）
     set_idx = src.index("_backing_gate.set()", push_idx)
     finally_idx = src.rindex("finally:", push_idx, set_idx)
     assert finally_idx > push_idx, "放行必须在 push_full 之后的 finally 块内"
+    prelude_idx = src.index("伴奏先起播（前奏期间伴奏响、人声静默）")
+    assert prelude_idx < push_idx, "前奏提前放行点必须在 push_full 之前"
+    assert src.index("_backing_started.wait(timeout=_BACKING_PRELUDE_MAX_WAIT)") > prelude_idx, \
+        "前奏放行须等待伴奏真实起播回执（t0=歌曲时间轴零点）"
     # R6 观测/既有测试锚点不漂移
     assert 'name="song-backing"' in src
     assert "start=(start_event is None)" in src, "门控/直调两路径经 start 参数分流"
