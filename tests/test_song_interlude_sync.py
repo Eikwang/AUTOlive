@@ -718,48 +718,6 @@ def test_anchor_backfill_defense_missing_seq0(tmp_path):
 
 # ------------------------------------------------- R5 借位本地外放
 
-def test_interlude_local_playback_dispatch(tmp_path, monkeypatch):
-    """借位条目本地外放（R5 用户模型）：_play_interlude_local 走 mp 子进程
-    （不推数字人——人声流不中断）；文件缺失 fail-soft 跳过。"""
-    import asyncio
-    import types
-    import utils.audio.playback_manager as pm
-
-    created = []
-
-    class _FakeProc:
-        def __init__(self, target, args, daemon, name):
-            created.append({"path": args[0], "vol": args[1],
-                            "gate": args[2], "name": name})
-            self.exitcode = 0
-
-        def start(self):
-            pass
-
-        def join(self):
-            pass
-
-        def is_alive(self):
-            return False
-
-    import multiprocessing as _mp
-    monkeypatch.setattr(_mp, "Process", _FakeProc)
-    pb = _gate_pb()
-    # 正常路径：子进程启动（音量 1.0、无门=立即播）
-    wav = tmp_path / "thanks.wav"
-    wav.write_bytes(b"fake")
-    asyncio.run(pm.PlaybackMixin._play_interlude_local(
-        pb, {"type": "comment", "voice_path": str(wav), "content": "t"}))
-    assert len(created) == 1 and created[0]["vol"] == 1.0
-    assert created[0]["gate"] is None  # 无门=立即播
-    # 文件缺失：fail-soft 跳过（不启动子进程）
-    n = len(created)
-    asyncio.run(pm.PlaybackMixin._play_interlude_local(
-        pb, {"type": "comment", "voice_path": str(tmp_path / "nope.wav"),
-             "content": "t"}))
-    assert len(created) == n  # 未启动
-
-
 def test_borrowed_flag_propagates():
     """borrowed 标志传播（R5）：窗口借位条目返回 True（消费路由据此走本地
     外放），到期歌段/普通条目返回 False（走既有路由）。"""
@@ -784,3 +742,52 @@ def test_borrowed_flag_propagates():
     with pb.voice_tmp_path_queue_lock:
         data, gw, borrowed = pb._pop_next_entry_locked()
     assert data["type"] == "song" and borrowed is False
+
+
+# ------------------------------------------------- R5b song 不插队+回滚外放
+
+def test_song_slice_no_queue_jump_answer_plays_first():
+    """song 切片段不插队（R5b 用户模型）：答谢先入队+歌段(80)后入队 →
+    歌段追加队尾不插到答谢前——点歌应答先于歌播（用户预期「答复音频消费后
+    开始播放伴奏和人声」）。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "comment": 50}
+        if keys == ("filter", "message_queue_max_len"):
+            return 50
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.message_queue = []
+    pb.message_queue_lock = _th.RLock()
+    pb.message_queue_not_empty = _th.Condition(pb.message_queue_lock)
+    pb._cancelled_choreo = set()
+    # 先入答谢（50）
+    pb.data_priority_insert("等待合成消息", {"type": "comment",
+                                             "voice_path": "a", "content": "answer"})
+    # 后入 5 段（80——R4c 前会插到答谢前）
+    for i in range(5):
+        pb.data_priority_insert("等待合成消息", {
+            "type": "song", "voice_path": f"s{i}", "content": "s",
+            "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                             "start_s": float(i)}})
+    types = [e.get("type") for e in pb.message_queue]
+    assert types[0] == "comment"  # 应答在队首（先播）
+    assert types[1:] == ["song"] * 5  # 歌段追加在后（seq 序）
+    assert [e["song_segment"]["seq"] for e in pb.message_queue[1:]] == [0, 1, 2, 3, 4]
+
+
+def test_borrowed_entries_route_via_edtalk_rollback():
+    """R5b 回滚验证：本地外放方法已退役（ AttributeError 证明），借位条目
+    走正常 routes_to_edtalk=推数字人口型（用户纠错：插播需要口型推理）。"""
+    from utils.audio.playback_manager import PlaybackMixin
+    assert not hasattr(PlaybackMixin, "_play_interlude_local"), \
+        "本地外放方法应已退役（插播走 EDTalk 口型推理）"

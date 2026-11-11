@@ -166,6 +166,16 @@ class PlaybackMixin:
             shutil.rmtree(seg_dir, ignore_errors=True)
             logger.info(f"[song] 切片目录已清理：{seg_dir}")
 
+    def _is_999_entry(self, data_json) -> bool:
+        """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
+        统一判定——type 映射==999 或 priority_override==999（d18 规则级 999
+        载体）均触发 999 机制（active 标记/让位/单实例）。"""
+        try:
+            from utils.audio.audio_priority import entry_is_999
+            return entry_is_999(data_json, self.config.get("filter", "priority_mapping") or {})
+        except Exception:
+            return False
+
     def _song_gate_wait_s(self, data_json) -> float:
         """间奏窗口门（2026-11-09 失步根修）：队首 song 切片段未到「歌曲时间轴
         应到时刻」时返回剩余等待秒（>0=消费循环锁外短睡重查）；其余恒 0。
@@ -449,55 +459,6 @@ class PlaybackMixin:
         except Exception:
             pass
 
-    async def _play_interlude_local(self, data_json):
-        """窗口借位插播的本地外放（R5 用户模型重构）：插播音频**不进数字人
-        推理**——人声整曲在数字人端连续播（静音段音频内容自然无声+口型
-        idle，人声流不中断）；插播本地出声（观众可闻、数字人闭嘴），时间轴
-        保持前进（与 999 模式「插播时时间轴暂停」的唯一区别）。
-
-        复用伴奏子进程形态（mp 隔离 GIL——TTS 合成期争抢防卡顿）；串行等待
-        播完（窗口内插播不并发，to_thread 不阻塞事件循环）。字幕/编排回执/
-        消费回执由调用方承担（本方法只管出声）。"""
-        path = data_json.get("voice_path") or ""
-        if not path or not os.path.isfile(path):
-            logger.warning(f"[song] 插播音频缺失，跳过本地外放：{path}")
-            return
-        proc = None
-        try:
-            import multiprocessing as _mp
-            from utils.audio import backing_player as _bp
-            proc = _mp.Process(
-                target=_bp._backing_process_main,
-                args=(path, 1.0, None, None, None, None),
-                daemon=True, name="song-interlude")
-            proc.start()
-            await asyncio.to_thread(proc.join)  # 串行等播完
-            if proc.exitcode not in (0, None):
-                logger.warning(
-                    f"[song] 插播本地外放异常退出（exitcode={proc.exitcode}）：{path}")
-            else:
-                logger.info(f"[song] 插播本地外放完成：{path}")
-        except Exception:
-            logger.warning("[song] 插播本地外放失败（fail-soft 跳过）："
-                           + traceback.format_exc())
-        finally:
-            if proc is not None:
-                try:
-                    if proc.is_alive():
-                        proc.terminate()
-                except Exception:
-                    pass
-
-    def _is_999_entry(self, data_json) -> bool:
-        """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
-        统一判定——type 映射==999 或 priority_override==999（d18 规则级 999
-        载体）均触发 999 机制（active 标记/让位/单实例）。"""
-        try:
-            from utils.audio.audio_priority import entry_is_999
-            return entry_is_999(data_json, self.config.get("filter", "priority_mapping") or {})
-        except Exception:
-            return False
-
     def _on_edtalk_yield(self) -> bool:
         """d19/uc2b（T7，2026-11-05 批次）：EDTalk 路径 999 让位编排——
 
@@ -582,6 +543,7 @@ class PlaybackMixin:
                 pass
             logger.error("[EDTalk] 999 剩余重推失败（尾段丢失）\n"
                          + traceback.format_exc())
+
 
     async def _consume_edtalk_entry(self, data_json, voice_tmp_path):
         """EDTalk 路由条目消费（T2-批 2026-11-06 自 only_play_audio 原样提取）：
@@ -946,21 +908,10 @@ class PlaybackMixin:
                     # （含变速）后仅推送 /audio/push_full。推送协程内阻塞等待完成
                     # 判定（背压），失败降级记录不阻塞直播主流程。
                     # v2.2 流程优化（flowchartTD |助播流程| 边）：助播条目绕过数字人。
-                    # R5（2026-11-11 用户模型重构）：窗口借位条目=本地外放——插播
-                    # 音频不进数字人推理（人声整曲在数字人端连续播，静音段自然
-                    # 无声+口型 idle，人声流不中断）；插播本地出声（观众可闻），
-                    # 时间轴保持前进（与 999 模式的唯一区别）。
-                    if _borrowed:
-                        try:
-                            await self._play_interlude_local(data_json)
-                        finally:
-                            self._notify_choreo_complete(data_json)
-                            self.report_consumed(
-                                data_json.get("type", ""),
-                                data_json.get("content", ""))
-                        if _was_999:
-                            self.active_reread_top_999 = False
-                        continue  # 借位消费完 → 下一条（窗口/到期重查）
+                    # R5b（2026-11-11 用户纠错）：借位条目**走正常 EDTalk 路由**
+                    # （推数字人、口型推理——数字人对插播音频做口型），此前
+                    # 「本地外放」理解错误已回滚。插播只发生在人声静音窗口
+                    # （预算预检+时间戳调度），人声有声段不被打断。
                     if routes_to_edtalk(data_json, self.config):
                         # T2-批（2026-11-06 协作机制流程审查，W2 根修）：999 active
                         # 标记 finally 化——分支内任何异常逃逸（含 CancelledError 穿透）

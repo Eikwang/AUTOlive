@@ -482,8 +482,16 @@ class QueueMixin:
                     return {"code": 1, "msg": f"编排已撤销消息，丢弃迟到条目（step_id={_sid_msg}）"}
 
                 # 如果新数据没有 'type' 键或其类型不在 priority_mapping 中，直接插入到末尾
+                # R5b（2026-11-11 用户模型）：song 切片段不插队——追加队尾
+                # （切片组=「背景流」：答谢/入场等其它类型按优先级正常插到歌
+                # 段之前，点歌应答先于歌播、间奏期新答谢正常插到歌段前被
+                # 口型推理消费；song 段自身 seq 有序=队尾追加天然保序）
                 if new_data_priority is None:
                     insert_position = len(self.message_queue)
+                elif (isinstance(data_json, dict) and data_json.get("type") == "song"
+                      and data_json.get("song_segment")):
+                    insert_position = len(self.message_queue)
+                    logger.debug(f"song 切片段追加队尾（不插队）position={insert_position}")
                 else:
                     insert_position = 0  # 默认插入到列表开头
                     # 从列表的最后一个元素开始，向前遍历列表，直到第一个元素
@@ -629,14 +637,24 @@ class QueueMixin:
                     inserted = True
                     insert_msg = {"code": 200, "msg": f"音频已插入到位置 {len(queue) - 1}"}
                 elif len(queue) < max_len:
-                    # 规则1：未满 → 权重序插入（从尾向头找第一个 ≥ 新权重的条目，插其后=接组尾）
-                    insert_position = 0
-                    for i in range(len(queue) - 1, -1, -1):
-                        p = _priority_of(queue[i])
-                        if p is not None and p >= int(new_data_priority):
-                            insert_position = i + 1
-                            break
-                    _insert_and_notify(insert_position, data_json)
+                    # R5b：song 切片段不插队——追加队尾（背景流语义，其它类型
+                    # 按优先级正常插到歌段前）
+                    if (isinstance(data_json, dict) and data_json.get("type") == "song"
+                            and data_json.get("song_segment")):
+                        insert_position = len(queue)
+                        _insert_and_notify(insert_position, data_json)
+                        logger.debug(f"song 切片段追加队尾（不插队）position={insert_position}")
+                        inserted = True
+                        insert_msg = {"code": 200, "msg": "song 切片段追加队尾（不插队）"}
+                    else:
+                        # 规则1：未满 → 权重序插入（从尾向头找第一个 ≥ 新权重的条目，插其后=接组尾）
+                        insert_position = 0
+                        for i in range(len(queue) - 1, -1, -1):
+                            p = _priority_of(queue[i])
+                            if p is not None and p >= int(new_data_priority):
+                                insert_position = i + 1
+                                break
+                        _insert_and_notify(insert_position, data_json)
                     logger.debug(f"insert_position={insert_position}")
                     inserted = True
                     insert_msg = {"code": 200, "msg": f"音频已插入到位置 {insert_position}"}
@@ -651,7 +669,8 @@ class QueueMixin:
                                       and data_json.get("type") == "song"
                                       and data_json.get("song_segment"))
                     if _is_song_slice:
-                        _insert_and_notify(len(queue), data_json)
+                        insert_position = len(queue)
+                        _insert_and_notify(insert_position, data_json)
                         inserted = True
                         insert_msg = {"code": 200, "msg": "song 切片段满载豁免（接组尾，序列保真）"}
                         logger.info(f"voice_tmp_path_queue 已满，song 切片段豁免接组尾（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
