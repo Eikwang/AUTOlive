@@ -366,10 +366,19 @@ class SynthesisMixin:
             try:
                 # 检测参数读 config 键（R4c ground truth 校准回滚后开放调参：
                 # choose_song.silence_threshold_db/silence_min_silence_s，缺省
-                # 不落盘走 vocal_silences DEFAULT -40/3.0）
+                # 不落盘走 vocal_silences DEFAULT -40/3.0）；R4e 小间隔合并键
+                # choose_song.silence_merge_gap_s（缺省 3.0）
                 _th_db, _min_s = self._silence_detect_params()
+                try:
+                    _merge_gap = float(self.config.get(
+                        "choose_song", "silence_merge_gap_s"))
+                except (TypeError, ValueError):
+                    _merge_gap = 3.0
+                if not (0 <= _merge_gap <= 30.0):
+                    _merge_gap = 3.0
                 silences = _vs_compute(vocal, threshold_db=_th_db,
-                                       min_silence_s=_min_s)
+                                       min_silence_s=_min_s,
+                                       merge_gap_s=_merge_gap)
                 if _vs_write(sp, silences, threshold_db=_th_db,
                              min_silence_s=_min_s):
                     logger.info(f"[silences] 惰性解析完成：{sp}"

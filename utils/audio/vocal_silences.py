@@ -197,8 +197,31 @@ def _spectrum_silent(audio, start_ms: int, end_ms: int, peak_energy: float) -> b
         return True  # 频谱验证不可用 → 保持 RMS 候选（不阻塞链路）
 
 
+def _merge_small_gaps(runs, merge_gap_s: float = 3.0):
+    """小间隔合并（R4e，用户指令）：相邻静音段之间的人声残留（未清理干净的
+    和声/混音）间隔 <merge_gap_s → 合并为一个静音段——间奏不再被和声残留
+    切碎（例：[150.0-164.6]+[166.7-215.4] 间隔 2.1s<3s → [150.0-215.4]），
+    插播窗口更完整容错更高。仅生成端（compute_silences）调用；manual 人工
+    精修文件不经此步骤（人工值全责）。"""
+    if not runs or merge_gap_s <= 0:
+        return runs
+    merged = [dict(runs[0])]
+    for seg in runs[1:]:
+        if seg["start_s"] - merged[-1]["end_s"] < merge_gap_s:
+            # 间隔不足 → 残留并入静音（前段延伸到后段终点）
+            merged[-1]["end_s"] = seg["end_s"]
+        else:
+            merged.append(dict(seg))
+    if len(merged) != len(runs):
+        logger.info(
+            f"[silences] 小间隔合并（<{merge_gap_s}s 的和声/混音残留并入静音）："
+            f"{len(runs)} 段 → {len(merged)} 段")
+    return merged
+
+
 def compute_silences(vocal_path: str, threshold_db=DEFAULT_THRESHOLD_DB,
-                     min_silence_s: float = DEFAULT_MIN_SILENCE_S):
+                     min_silence_s: float = DEFAULT_MIN_SILENCE_S,
+                     merge_gap_s: float = 3.0):
     """RMS 扫描 vocal 分轨 → [{start_s,end_s}]（生成端/惰性解析共用）。
 
     2026-11-10 R4d 识别逻辑优化（用户指令：结合频谱）：
@@ -261,7 +284,9 @@ def compute_silences(vocal_path: str, threshold_db=DEFAULT_THRESHOLD_DB,
             runs = verified
         except Exception:
             pass  # 验证失败保持 RMS 候选
-    return _normalize(runs)
+    # ④ 小间隔合并（R4e）：和声/混音残留（<merge_gap_s）并入静音——间奏
+    # 不被残留切碎，插播窗口更完整容错
+    return _normalize(_merge_small_gaps(_normalize(runs), merge_gap_s))
 
 
 def _peak_energy(audio) -> float:

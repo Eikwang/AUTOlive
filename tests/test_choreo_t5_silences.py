@@ -407,3 +407,28 @@ def test_compute_silences_adaptive_none_path(tmp_path, monkeypatch):
     AudioSegment.silent(duration=800).export(fake, format="wav")
     out = vs.compute_silences(str(fake), threshold_db=None, min_silence_s=3.0)
     assert out == []  # 极短音频无静音段
+
+
+def test_merge_small_gaps_harmony_residue():
+    """小间隔合并（R4e 用户指令）：和声/混音残留（<3s 的人声碎片）把间奏
+    切碎 → 相邻静音段间隔 <3s 合并（例：[150.0-164.6]+[166.7-215.4] 间隔
+    2.1s → [150.0-215.4]）；≥3s 间隔保留（真歌词段）；链式合并。"""
+    from utils.audio.vocal_silences import _merge_small_gaps
+    # 用户实测示例：2.1s 和声残留切碎间奏
+    runs = [{"start_s": 150.0, "end_s": 164.6},
+            {"start_s": 166.7, "end_s": 215.4}]
+    out = _merge_small_gaps(runs, 3.0)
+    assert out == [{"start_s": 150.0, "end_s": 215.4}]
+    # ≥3s 间隔=真歌词段 → 保留
+    runs2 = [{"start_s": 10.0, "end_s": 20.0},
+             {"start_s": 24.0, "end_s": 40.0}]  # 间隔 4s
+    assert _merge_small_gaps(runs2, 3.0) == runs2
+    # 链式合并（连续小间隔）
+    runs3 = [{"start_s": 0.0, "end_s": 10.0},
+             {"start_s": 11.5, "end_s": 20.0},
+             {"start_s": 21.0, "end_s": 30.0}]  # 1.5s+1.0s 间隔
+    out3 = _merge_small_gaps(runs3, 3.0)
+    assert out3 == [{"start_s": 0.0, "end_s": 30.0}]
+    # 空列表/零阈值安全
+    assert _merge_small_gaps([], 3.0) == []
+    assert _merge_small_gaps(runs, 0.0) == runs
