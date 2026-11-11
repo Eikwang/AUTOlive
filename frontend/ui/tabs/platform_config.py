@@ -149,7 +149,14 @@ def create_platform_config_tab(
     login_svc = get_login_service()
 
     async def _toast(msg: str, kind: str = "positive"):
-        ui.notify(position="top", type=kind, message=msg[:180])
+        # client 存活兜底（2026-11-11 修订）：页面刷新/重连/元素重建后 slot 已
+        # 删除，ui.notify 抛 RuntimeError——不得外溢杀死调用方任务（重登轮询）。
+        # 不做 is_deleted 预检：nicegui.client 是模块且无 get()（14:05 实测
+        # AttributeError 反致全部 toast 被吞），异常降级日志即达标。
+        try:
+            ui.notify(position="top", type=kind, message=msg[:180])
+        except Exception as e:  # noqa: BLE001
+            logger.info(f"[platform_config] 前端通知失败（页面已刷新/元素已删除）：{msg[:80]}（{e}）")
 
     async def _err_notify(result: Dict[str, Any]):
         msg = result.get("error", "操作失败")
@@ -610,8 +617,12 @@ def create_platform_config_tab(
                 "failed": "重登失败——可重新点『登录』重试",
                 "superseded": "该次重登已被更新的登录操作取代",
             }
-            await _toast(msgs.get(st, f"重登状态：{st}"),
-                         "positive" if st == "completed" else "warning")
+            msg = msgs.get(st, f"重登状态：{st}")
+            # 服务端失败详情直出（2026-11-11：playwright 浏览器缺失等根因对用户可见）
+            detail = str(r.get("error") or "").strip()
+            if detail and st != "completed":
+                msg = f"{msg}｜{detail[:120]}"
+            await _toast(msg, "positive" if st == "completed" else "warning")
             return
         await _toast("重登状态跟踪超时（5 分钟）——重登仍在进行或已中断，可重新点『登录』",
                      "warning")

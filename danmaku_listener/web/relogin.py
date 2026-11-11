@@ -378,7 +378,7 @@ async def _douyin_profile_login_and_export(rec: dict, bridge, room_id: str,
     except Exception as e:  # noqa: BLE001  编排层兜底（导出异常/意外失败）
         logger.warning(f"[relogin][douyin] profile login 异常: {type(e).__name__}: {str(e)[:100]}")
         rec["send_refresh"] = "refresh_failed"
-        rec["error"] = (f"抖音登录流程异常: {type(e).__name__}——重跑重登即可，"
+        rec["error"] = (f"抖音登录流程异常: {type(e).__name__}: {str(e)[:120]}——重跑重登即可，"
                         "旧态不劣化（docs/integration/autolive-merge-v0.7.0.md §4.4）")
         return
     if result.get("status") != "ok":
@@ -427,7 +427,7 @@ async def _huya_takeover_and_recover(rec: dict, bridge, room_id: str) -> None:
     except Exception as e:  # noqa: BLE001  LoginTakeoverError/超时/滑块未过
         logger.warning(f"[relogin][huya] takeover 失败: {type(e).__name__}: {str(e)[:100]}")
         rec["send_refresh"] = "refresh_failed"
-        rec["error"] = (f"虎牙发送登录未完成: {type(e).__name__}——监听不受影响，"
+        rec["error"] = (f"虎牙发送登录未完成: {type(e).__name__}: {str(e)[:120]}——监听不受影响，"
                         "稍后发送将懒弹登录窗自愈（docs/integration/autolive-merge-v0.7.0.md §4.4）")
     # takeover 触发后即直启恢复监听（匿名可听，不依赖发送侧结果——S3）
     await _recover_rooms(rec, bridge, "huya")

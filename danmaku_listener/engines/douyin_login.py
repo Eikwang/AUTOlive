@@ -123,6 +123,28 @@ async def _export_listen_cookies(context, export_path: str) -> str:
         return "failed"
 
 
+async def run_login_flow(
+    room_id: str = "",
+    cookie_path: str = DEFAULT_COOKIE_FILE,
+    headless: bool = False,
+    timeout: float = DEFAULT_TIMEOUT,
+    on_status: Optional[Callable[[str], Any]] = None,
+) -> Dict[str, Any]:
+    """配置期登录入口（DanmakuLoginService._run_flow 统一契约）——profile 化转发
+
+    v0.8.0（1d7438bb）profile 化重构删除了旧瞬态 run_login_flow，但登录服务仍按
+    统一契约调用（2026-11-11 实测 AttributeError 断链——配置期『登录』点了没反应，
+    服务日志 module has no attribute 'run_login_flow'）。恢复同签名入口转发
+    run_profile_login_flow（S2 单窗双喂：可见窗扫码进 persistent profile，登录
+    落地导出监听 cookie 至 cookie_path）；返回值对齐旧口径（status 键；
+    cookie 细节不再经此暴露，服务层以 check_login 终判）。
+    """
+    result = await run_profile_login_flow(
+        room_id=room_id, headless=headless, timeout=timeout, on_status=on_status,
+        export_cookie_path=cookie_path)
+    return {"status": str(result.get("status") or "timeout_or_closed"), "cookies": {}}
+
+
 async def run_profile_login_flow(
     room_id: str = "",
     profile_dir: str = PROFILE_DIR,
