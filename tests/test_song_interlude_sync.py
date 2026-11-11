@@ -693,11 +693,11 @@ def test_song_slice_exempt_from_voice_queue_evict():
         pb.data_priority_insert("待播放音频列表", seg(i))
     seqs = [e["song_segment"]["seq"] for e in pb.voice_tmp_path_queue]
     assert seqs == [0, 1, 2, 3, 4]  # 全部保留（seg_00 未被取代）
-    # 普通条目（30 最低）满载 → 规则 4 丢弃（A1 语义不回归）
+    # R4h 容量分账：普通容量 0/4 有空位 → entrance 正常入队（song 段不挤压）
     r = pb.data_priority_insert("待播放音频列表", {
         "type": "entrance", "voice_path": "e", "content": "e"})
-    assert r["code"] == 1  # 最低优满载丢弃
-    assert len(pb.voice_tmp_path_queue) == 5
+    assert r["code"] == 200
+    assert len(pb.voice_tmp_path_queue) == 6  # song 5+普通 1
 
 
 def test_anchor_backfill_defense_missing_seq0(tmp_path):
@@ -791,3 +791,83 @@ def test_borrowed_entries_route_via_edtalk_rollback():
     from utils.audio.playback_manager import PlaybackMixin
     assert not hasattr(PlaybackMixin, "_play_interlude_local"), \
         "本地外放方法应已退役（插播走 EDTalk 口型推理）"
+
+
+# ------------------------------------------------- R4h 容量分账
+
+def test_capacity_accounting_normal_audio_not_squeezed():
+    """容量分账（R4h song4.log 实测）：song 段 5 条占满 voice 队列（上限 4）
+    后，答谢/入场仍可入队（song 段不占普通音频容量）——此前 80 条插播音频
+    被 A1 规则 4 扔掉=前奏/间奏零消费。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "comment": 50, "gift": 70, "entrance": 30}
+        if keys == ("filter", "voice_tmp_path_queue_max_len"):
+            return 4
+        if keys == ("filter", "voice_tmp_path_queue_min_start_play"):
+            return 0
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.voice_tmp_path_queue = []
+    pb.voice_tmp_path_queue_lock = _th.RLock()
+    pb.voice_tmp_path_queue_not_empty = _th.Condition(pb.voice_tmp_path_queue_lock)
+    pb.voice_tmp_path_queue_not_empty_flag = True
+    pb._cancelled_choreo = set()
+    seg = lambda i: {"type": "song", "voice_path": f"seg_{i:02d}", "content": "s",
+                     "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                                      "start_s": float(i)}}
+    for i in range(5):  # 5 段歌（超 max_len=4——song 段豁免接组尾）
+        pb.data_priority_insert("待播放音频列表", seg(i))
+    # 容量分账核心断言：song 段占满后普通音频仍入队（不再被规则 4 扔）
+    for i, (ty, pri) in enumerate([("comment", 50), ("gift", 70),
+                                   ("entrance", 30), ("comment", 50)]):
+        pb.data_priority_insert("待播放音频列表", {
+            "type": ty, "voice_path": f"n{i}", "content": f"n{i}"})
+    normals = [e for e in pb.voice_tmp_path_queue
+               if not (e.get("type") == "song" and e.get("song_segment"))]
+    assert len(normals) == 4  # 四条普通音频全部入队（song4.log 实测全被扔）
+    assert len(pb.voice_tmp_path_queue) == 9  # song 5+普通 4（瞬时超限消费回落）
+
+
+def test_message_queue_capacity_accounting():
+    """message_queue 容量分账对齐：song 段不占普通音频容量（合成队列一致）。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "comment": 50}
+        if keys == ("filter", "message_queue_max_len"):
+            return 2
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.message_queue = []
+    pb.message_queue_lock = _th.RLock()
+    pb.message_queue_not_empty = _th.Condition(pb.message_queue_lock)
+    pb._cancelled_choreo = set()
+    seg = lambda i: {"type": "song", "voice_path": f"s{i}", "content": "s",
+                     "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                                      "start_s": float(i)}}
+    for i in range(5):
+        pb.data_priority_insert("等待合成消息", seg(i))
+    # song 段占满（5>2）后普通音频仍入队
+    pb.data_priority_insert("等待合成消息", {"type": "comment",
+                                             "voice_path": "a", "content": "a"})
+    normals = [e for e in pb.message_queue
+               if not (e.get("type") == "song" and e.get("song_segment"))]
+    assert len(normals) == 1

@@ -426,7 +426,16 @@ class QueueMixin:
         """
         # 定义 type 到优先级的映射，相同优先级的 type 映射到相同的值，值越大优先级越高
         priority_mapping = self.config.get("filter", "priority_mapping")
-        
+
+        def _normal_queue_len(q):
+            """容量分账（R4h，2026-11-11 song4.log 实测）：song 切片段=背景流
+            **不占用普通音频的队列容量**——满载判定只数普通条目（80 处实测
+            丢弃：song 段 5 条占满 4 容量后，答谢/入场全部被规则 4 扔掉=前奏/
+            间奏零消费）。song 段自身满载豁免（接组尾，消费回落）。"""
+            return sum(1 for e in q if not (isinstance(e, dict)
+                        and e.get("type") == "song"
+                        and e.get("song_segment")))
+
         def get_priority_level(data_json):
             """根据 data_json 的 'type' 键返回优先级，未定义的 type 或缺失 'type'
             键将返回 None。2026-11-10 实测修复：映射表值可能为字符串（前端/
@@ -517,7 +526,7 @@ class QueueMixin:
                                   and data_json.get("song_segment"))
 
                 # 数据队列数据量超长判断：队满且插入位次在末尾（低优/未识别类型）→ 丢弃
-                if (len(self.message_queue) >= max_len
+                if (_normal_queue_len(self.message_queue) >= max_len
                         and insert_position >= len(self.message_queue)
                         and not _is_song_slice):
                     # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
@@ -531,7 +540,7 @@ class QueueMixin:
 
                 # 队满且插队位次有效（新数据优先级高于队内既有条目）→ 插队并驱逐队尾
                 evicted = None
-                if len(self.message_queue) >= max_len and insert_position < len(self.message_queue):
+                if _normal_queue_len(self.message_queue) >= max_len and insert_position < len(self.message_queue):
                     evicted = self.message_queue.pop()
 
                 # 在计算出的位置插入新数据
@@ -625,7 +634,7 @@ class QueueMixin:
 
                 # 未识别类型：维持既有语义——插队尾，满则丢弃
                 if new_data_priority is None:
-                    if len(queue) >= max_len:
+                    if _normal_queue_len(queue) >= max_len:
                         logger.warning(f"voice_tmp_path_queue 已满，音频丢弃（未识别类型）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                         try:
                             from utils.obs_stats import record_drop
@@ -636,9 +645,10 @@ class QueueMixin:
                     _insert_and_notify(len(queue), data_json)
                     inserted = True
                     insert_msg = {"code": 200, "msg": f"音频已插入到位置 {len(queue) - 1}"}
-                elif len(queue) < max_len:
+                elif _normal_queue_len(queue) < max_len:
                     # R5b：song 切片段不插队——追加队尾（背景流语义，其它类型
-                    # 按优先级正常插到歌段前）
+                    # 按优先级正常插到歌段前）；容量分账（R4h）：普通音频容量
+                    # 不被 song 段挤压
                     if (isinstance(data_json, dict) and data_json.get("type") == "song"
                             and data_json.get("song_segment")):
                         insert_position = len(queue)
