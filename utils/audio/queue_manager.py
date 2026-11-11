@@ -642,56 +642,70 @@ class QueueMixin:
                     insert_msg = {"code": 200, "msg": f"音频已插入到位置 {insert_position}"}
                 else:
                     # 队满路径（规则2/3/4）——组定位与驱逐全部锁内
-                    same_idx_list = [i for i, item in enumerate(queue) if _priority_of(item) == int(new_data_priority)]
-                    if same_idx_list:
-                        # 规则2：取代同权重组组首（最老）条目，新条目接组尾（净长度不变，组内 FIFO）
-                        front_idx = same_idx_list[0]
-                        last_idx = same_idx_list[-1]
-                        self.voice_tmp_path_queue.pop(front_idx)
-                        self.voice_tmp_path_queue.insert(last_idx, data_json)  # pop 后组尾左移1，插回原组尾位
-                        if self.voice_tmp_path_queue_not_empty_flag:
-                            self.voice_tmp_path_queue_not_empty.notify()
-                        try:
-                            from utils.obs_stats import record_drop
-                            record_drop("audio_same_tier_evict")
-                        except Exception:
-                            pass
-                        logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                    # R4g（2026-11-11 song3.log 实测）：song 切片段豁免满载
+                    # 取代/驱逐——切片序列不可丢（实测 seg_00 被「同权取代组首」
+                    # 挤掉连锁：伴奏不启动（backing_path 仅在 seq0）+锚不建立
+                    # （窗口机制全瘫）+人声从歌曲中间开始唱）。满载仍插组尾
+                    # （队列超限消费后回落）；普通条目维持 A1 权威语义。
+                    _is_song_slice = (isinstance(data_json, dict)
+                                      and data_json.get("type") == "song"
+                                      and data_json.get("song_segment"))
+                    if _is_song_slice:
+                        _insert_and_notify(len(queue), data_json)
                         inserted = True
-                        insert_msg = {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
+                        insert_msg = {"code": 200, "msg": "song 切片段满载豁免（接组尾，序列保真）"}
+                        logger.info(f"voice_tmp_path_queue 已满，song 切片段豁免接组尾（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                     else:
-                        non_none_priorities = [p for p in (_priority_of(it) for it in queue) if p is not None]
-                        min_priority = min(non_none_priorities) if non_none_priorities else None
-                        if min_priority is not None and int(new_data_priority) > min_priority:
-                            # 规则3：插入后驱逐最低优组组首（最老）条目——主叙述 10old/10new 双存要求组首驱逐
-                            evict_idx = next(i for i, it in enumerate(queue) if _priority_of(it) == min_priority)
-                            insert_position = 0
-                            for i in range(len(queue) - 1, -1, -1):
-                                p = _priority_of(queue[i])
-                                if p is not None and p >= int(new_data_priority):
-                                    insert_position = i + 1
-                                    break
-                            self.voice_tmp_path_queue.pop(evict_idx)
-                            if insert_position > evict_idx:
-                                insert_position -= 1
-                            _insert_and_notify(insert_position, data_json)
+                        same_idx_list = [i for i, item in enumerate(queue) if _priority_of(item) == int(new_data_priority)]
+                        if same_idx_list:
+                            # 规则2：取代同权重组组首（最老）条目，新条目接组尾（净长度不变，组内 FIFO）
+                            front_idx = same_idx_list[0]
+                            last_idx = same_idx_list[-1]
+                            self.voice_tmp_path_queue.pop(front_idx)
+                            self.voice_tmp_path_queue.insert(last_idx, data_json)  # pop 后组尾左移1，插回原组尾位
+                            if self.voice_tmp_path_queue_not_empty_flag:
+                                self.voice_tmp_path_queue_not_empty.notify()
                             try:
                                 from utils.obs_stats import record_drop
                                 record_drop("audio_same_tier_evict")
                             except Exception:
                                 pass
-                            logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组最老条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
+                            logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                             inserted = True
-                            insert_msg = {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
+                            insert_msg = {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
                         else:
-                            # 规则4：满且新权重更低 → 舍弃
-                            logger.warning(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】{_split_group_note(data_json)}")
-                            try:
-                                from utils.obs_stats import record_drop
-                                record_drop("audio_rule4_dropped")
-                            except Exception:
-                                pass
-                            insert_msg = {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}
+                            non_none_priorities = [p for p in (_priority_of(it) for it in queue) if p is not None]
+                            min_priority = min(non_none_priorities) if non_none_priorities else None
+                            if min_priority is not None and int(new_data_priority) > min_priority:
+                                # 规则3：插入后驱逐最低优组组首（最老）条目——主叙述 10old/10new 双存要求组首驱逐
+                                evict_idx = next(i for i, it in enumerate(queue) if _priority_of(it) == min_priority)
+                                insert_position = 0
+                                for i in range(len(queue) - 1, -1, -1):
+                                    p = _priority_of(queue[i])
+                                    if p is not None and p >= int(new_data_priority):
+                                        insert_position = i + 1
+                                        break
+                                self.voice_tmp_path_queue.pop(evict_idx)
+                                if insert_position > evict_idx:
+                                    insert_position -= 1
+                                _insert_and_notify(insert_position, data_json)
+                                try:
+                                    from utils.obs_stats import record_drop
+                                    record_drop("audio_same_tier_evict")
+                                except Exception:
+                                    pass
+                                logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组最老条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
+                                inserted = True
+                                insert_msg = {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
+                            else:
+                                # 规则4：满且新权重更低 → 舍弃
+                                logger.warning(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                                try:
+                                    from utils.obs_stats import record_drop
+                                    record_drop("audio_rule4_dropped")
+                                except Exception:
+                                    pass
+                                insert_msg = {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}
 
             # 锁外收尾：D-22 待播舍弃通知与 999 让位钩子（均不得持锁调用——前者内部
             # 自取本锁，后者触达播放器 yield/EDTalk HTTP）。原实现 discard 在插入前

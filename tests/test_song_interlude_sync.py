@@ -655,3 +655,62 @@ def test_normal_entry_still_dropped_when_full():
                                                 "content": "t"})
     assert r["code"] == 1  # 低优+末尾位次 → 丢弃（既有语义）
     assert len(pb.message_queue) == 1
+
+
+# ------------------------------------------------- R4g voice 队列豁免+锚防御
+
+def test_song_slice_exempt_from_voice_queue_evict():
+    """song 切片段豁免 voice_tmp_path_queue 满载取代/驱逐（R4g 实测：5 段入
+    voice 队列第 5 段「同权取代组首」挤掉 seg_00 → 伴奏不启动+锚不建立+
+    人声从歌曲中间唱）——满载接组尾（序列保真），普通条目 A1 语义保持。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "entrance": 30}
+        if keys == ("filter", "voice_tmp_path_queue_max_len"):
+            return 4
+        if keys == ("filter", "voice_tmp_path_queue_min_start_play"):
+            return 0
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.voice_tmp_path_queue = []
+    pb.voice_tmp_path_queue_lock = _th.RLock()
+    pb.voice_tmp_path_queue_not_empty = _th.Condition(pb.voice_tmp_path_queue_lock)
+    pb.voice_tmp_path_queue_not_empty_flag = True
+    pb._cancelled_choreo = set()
+    seg = lambda i: {"type": "song", "voice_path": f"seg_{i:02d}", "content": "s",
+                     "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                                      "start_s": float(i)}}
+    for i in range(5):  # 5 段入队（超 max_len=4——复现 song3.log 场景）
+        pb.data_priority_insert("待播放音频列表", seg(i))
+    seqs = [e["song_segment"]["seq"] for e in pb.voice_tmp_path_queue]
+    assert seqs == [0, 1, 2, 3, 4]  # 全部保留（seg_00 未被取代）
+    # 普通条目（30 最低）满载 → 规则 4 丢弃（A1 语义不回归）
+    r = pb.data_priority_insert("待播放音频列表", {
+        "type": "entrance", "voice_path": "e", "content": "e"})
+    assert r["code"] == 1  # 最低优满载丢弃
+    assert len(pb.voice_tmp_path_queue) == 5
+
+
+def test_anchor_backfill_defense_missing_seq0(tmp_path):
+    """锚缺失防御（R4g）：seq0 被挤（异常态）→ 首个受理段 seq>0 反推
+    t0=受理−start_s——对齐骨架保住（伴奏丢失另行豁免）。"""
+    pb, wav = _consume_pb(tmp_path, duration=2.0)
+    entry = {"type": "song", "voice_path": wav, "content": "s",
+             "song_segment": {"seq": 1, "total": 5, "seg_dir": "",
+                              "start_s": 76.2}}
+    t_before = time.monotonic()
+    asyncio.run(pb._consume_edtalk_entry(entry, wav))
+    anchor = getattr(pb, "_song_anchor", None)
+    assert anchor is not None and anchor["t0"] is not None
+    # t0=受理−start_s≈受理前 76.2s（歌从 0 开始的时间轴语义保住）
+    assert 74.0 <= t_before - anchor["t0"] <= 78.0
+    assert anchor["last_end"] > 0

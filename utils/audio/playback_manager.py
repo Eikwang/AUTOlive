@@ -739,6 +739,16 @@ class PlaybackMixin:
         if data_json.get("type") == "song" and _seg_meta:
             _pushed_at = time.monotonic()
             _anchor = getattr(self, "_song_anchor", None)
+            if _anchor is None and int(_seg_meta.get("seq", 0)) > 0:
+                # R4g 防御（song3.log 实测）：seq0 被队列满载挤掉（异常态）→
+                # 锚从未建立 → 窗口机制全瘫+人声从段位置直唱。反推时间轴零点
+                # t0=受理−start_s 保住对齐骨架（伴奏已随 seq0 丢失，另行豁免）。
+                _start = float(_seg_meta.get("start_s") or 0.0)
+                self._song_anchor = {"t0": _pushed_at - _start, "last_end": 0.0}
+                _anchor = self._song_anchor
+                logger.warning(
+                    f"[song] 首段缺失防御：seq={_seg_meta.get('seq')} 受理时无锚，"
+                    f"反推时间轴零点 t0=受理−start_s（伴奏轨可能随 seq0 丢失）")
             if _anchor is not None:
                 if _anchor.get("t0") is None:
                     _anchor["t0"] = _pushed_at  # start_s=0 首段：受理即零点
