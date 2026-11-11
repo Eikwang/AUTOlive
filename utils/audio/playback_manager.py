@@ -26,13 +26,12 @@ _BACKING_PRELUDE_MAX_WAIT = 10.0
 # 受理开销≈0.3s，使「受理+preroll 出声」落在歌曲时间轴应到时刻附近。
 _SONG_PUSH_LEAD = 0.3
 
-# 段播完保底裕量（2026-11-10 R4c 实测校准 1.15→1.03）：受理时刻+段时长×此
-# 系数=最早下段推送时刻。EDTalk 帧锁定播完=受理+0.3s 出声延迟+段时长——
-# 1.03 提供约 0.7s 缓冲（23s 段）且段间停顿从 3.4s→0.4s（同步差异不再累积：
-# 用户实测「连续片段与伴奏不再同步，差异越来越大」的根因=1.15×L−L 的额外
-# 等待逐段累积）。服务端渐进推理慢于实时时仍兜底（宁可人声延后不 flush 自
-# 截断，e13 方向）。
-_SONG_SEG_END_MARGIN = 1.03
+# 段播完估计的出声延迟（2026-11-11 R4f 实测校准）：帧锁定出声=受理+preroll
+# （首块推理就绪 ~0.3s），播完=受理+preroll+段时长——last_end 用加法精确化
+# （此前乘法 margin 1.03/1.15 的残差逐段累积：45s 段 1.35s/段，实测相邻无
+# 间奏段「人声停顿 1.5s、与伴奏差异越来越大」的根因）。推理慢于实时的极端
+# 场景由 e13 失步声明兜底（宁可截断尾巴不破坏对齐）。
+_SONG_PREROLL_S = 0.3
 
 # 答谢连续跳过上限（2026-11-10 R3/F4/D14）：song 序列内连续跳过（到期优先
 # pop(i)）计数达此值 → 下一到期段放行队首条目一条（答谢时效保障——人声落后
@@ -287,6 +286,27 @@ class PlaybackMixin:
         # ②c 无锚（fail-open）或队首=song 段：窗口门判定
         gate_wait = self._song_gate_wait_s(queue[0])
         if gate_wait > 0:
+            # 借位消费（R4f，2026-11-11 实测根修）：窗口未到期时，队首歌段
+            # 之后的待播音频（入场/答谢等——低优先级被插队规则压在歌段后，
+            # 窗口门只看队首导致前奏/间奏零消费）先出队消费——**借位 pop(i)
+            # 不动歌段**（歌段留队等待期）。预算预检：借位条目时长已知时，
+            # 播完须留 ≥3s 余量（用户硬性条件「不足 3 秒避免说一半」）；时长
+            # 未知（fail-soft=0）放行。遇下一个歌段即止（其后条目属后续窗口）。
+            window_end = self._next_song_due_locked(anchor)
+            remaining = ((window_end - time.monotonic())
+                         if window_end is not None else 0.0)
+            for i, entry in enumerate(queue):
+                if i == 0:
+                    continue
+                if (isinstance(entry, dict) and entry.get("type") == "song"
+                        and entry.get("song_segment")):
+                    break  # 到下一歌段为止
+                if not isinstance(entry, dict):
+                    continue
+                dur = self._entry_duration_s(entry)
+                if dur > 0 and remaining - dur < _INTERLUDE_MIN_CONSUME_S:
+                    continue  # 超窗/不足 3s 余量 → 看下一条
+                return queue.pop(i), 0.0
             return None, gate_wait
         return queue.pop(0), 0.0
 
@@ -725,9 +745,11 @@ class PlaybackMixin:
                 _seg_dur = float(getattr(self.edtalk_client,
                                          "last_duration_s", 0.0) or 0.0)
                 if _seg_dur > 0:
+                    # R4f 加法化：受理+preroll+段时长=帧锁定播完的物理估计
+                    # （乘法 margin 的残差逐段累积已退役）
                     _anchor["last_end"] = max(
                         _anchor.get("last_end") or 0.0,
-                        _pushed_at + _seg_dur * _SONG_SEG_END_MARGIN)
+                        _pushed_at + _SONG_PREROLL_S + _seg_dur)
                 if int(_seg_meta.get("seq", 0)) == int(_seg_meta.get("total", 0)) - 1:
                     _anchor["wrapping"] = True  # 垃圾时间（R4：替代清锚）
             # 段推送诊断（2026-11-10 R4b 实测排障）：每段受理即打点——

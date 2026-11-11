@@ -500,8 +500,18 @@ class QueueMixin:
                 logger.debug(f"insert_position={insert_position}")
                 max_len = int(self.config.get("filter", "message_queue_max_len"))
 
+                # R4f（2026-11-11 实测）：song 切片段豁免满载丢弃——切片序列
+                # 不可丢（丢 1 段=歌不完整，实测 5 段切片第 5 段被满载丢弃后
+                # 「四段后停」）；满载仍插入（队列超限消费后回落）。普通条目
+                # 维持 drop-only 既有语义。
+                _is_song_slice = (isinstance(data_json, dict)
+                                  and data_json.get("type") == "song"
+                                  and data_json.get("song_segment"))
+
                 # 数据队列数据量超长判断：队满且插入位次在末尾（低优/未识别类型）→ 丢弃
-                if len(self.message_queue) >= max_len and insert_position >= len(self.message_queue):
+                if (len(self.message_queue) >= max_len
+                        and insert_position >= len(self.message_queue)
+                        and not _is_song_slice):
                     # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
                     logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
                     try:

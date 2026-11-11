@@ -212,9 +212,9 @@ def test_consume_seq0_no_prelude_t0_backfilled_after_push(tmp_path):
     anchor = pb._song_anchor
     assert anchor is not None
     assert anchor["t0"] is not None  # push 后回填
-    from utils.audio.playback_manager import _SONG_SEG_END_MARGIN
+    from utils.audio.playback_manager import _SONG_PREROLL_S
     assert anchor["last_end"] == pytest.approx(
-        anchor["t0"] + 2.0 * _SONG_SEG_END_MARGIN, abs=0.5)  # 时长 2s stub
+        anchor["t0"] + _SONG_PREROLL_S + 2.0, abs=0.5)  # R4f 加法：受理+preroll+段长
 
 
 def test_consume_last_segment_clears_anchor(tmp_path):
@@ -239,9 +239,9 @@ def test_consume_mid_segment_updates_playthrough_floor(tmp_path):
     t0 = time.monotonic() - 10.0
     pb._song_anchor = {"t0": t0, "last_end": 0.0}
     asyncio.run(pb._consume_edtalk_entry(entry, wav))
-    from utils.audio.playback_manager import _SONG_SEG_END_MARGIN
+    from utils.audio.playback_manager import _SONG_PREROLL_S
     assert pb._song_anchor["last_end"] == pytest.approx(
-        time.monotonic() + 4.0 * _SONG_SEG_END_MARGIN, abs=1.0)
+        time.monotonic() + _SONG_PREROLL_S + 4.0, abs=1.0)  # R4f 加法化
 
 
 def test_fixed_slice_entry_gate_zero_when_no_anchor(tmp_path):
@@ -555,3 +555,103 @@ def test_overlong_segment_bisected(tmp_path, fake_pydub):
     assert starts == [0.0, 4.0, 49.0, 78.3]
     # 段起点经 song_segment 透传（消费侧窗口门锚定字段）
     assert all(s["start_s"] == st for s, st in zip(segs, starts))
+
+
+# ------------------------------------------------- R4f 借位消费+满载豁免
+
+def test_borrow_consume_during_window():
+    """借位消费（R4f）：窗口未到期时队首歌段之后的待播音频先出队（不动歌
+    段）——前奏/间奏期间低优先级音频（被插队规则压在歌段后）不再零消费。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 60.0}},
+        {"type": "entrance", "voice_path": "nonexistent.wav", "content": "hi"},
+        {"type": "comment", "voice_path": "nonexistent.wav", "content": "thanks"},
+    ]
+    # 窗口：t0+60（未到期，剩 ~55s）
+    pb._song_anchor = {"t0": _t.monotonic(), "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    # 队首歌段未到期 → 借位消费其后的入场条目（时长未知 fail-open 放行）
+    assert gw == 0 and data["type"] == "entrance"
+    assert pb.voice_tmp_path_queue[0]["type"] == "song"  # 歌段留队未动
+
+
+def test_borrow_budget_skips_overlong():
+    """借位预算预检：条目时长已知且播完剩余 <3s → 跳过该条目看下一条；
+    全部超窗 → 返回窗口等待。"""
+    import time as _t
+    from pydub import AudioSegment
+    pb = _gate_pb()
+    long_wav = None
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 60.0}},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic() + 55.0, "last_end": _t.monotonic()}
+    # 窗口结束=last_end=now → remaining≈0<3s → 无可借位 → 等待
+    with pb.voice_tmp_path_queue_lock:
+        data, gw = pb._pop_next_entry_locked()
+    assert data is None and gw >= 0
+
+
+def test_song_slice_exempt_from_message_queue_full():
+    """song 切片段豁免 message_queue 满载丢弃（R4f 实测：5 段切片第 5 段被
+    丢弃=歌不完整）——满载仍插入，普通条目维持 drop-only 语义。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80"}
+        if keys == ("filter", "message_queue_max_len"):
+            return 2  # 小上限逼出满载
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.message_queue = []
+    pb.message_queue_lock = _th.RLock()
+    pb.message_queue_not_empty = _th.Condition(pb.message_queue_lock)
+    pb._cancelled_choreo = set()
+    seg = lambda i: {"type": "song", "voice_path": f"s{i}", "content": "s",
+                     "song_segment": {"seq": i, "total": 3, "seg_dir": "",
+                                      "start_s": float(i)}}
+    for i in range(4):  # 4 段入队（超 max_len=2）
+        pb.data_priority_insert("等待合成消息", seg(i))
+    song_count = sum(1 for e in pb.message_queue if e.get("type") == "song")
+    assert song_count == 4  # 切片段全部保留（无丢弃）
+
+
+def test_normal_entry_still_dropped_when_full():
+    """普通条目满载 drop-only 语义不回归（song 豁免不扩大）。"""
+    from utils.audio.queue_manager import QueueMixin
+    import threading as _th
+
+    class _Impl(QueueMixin):
+        pass
+
+    pb = _Impl()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80", "talk": 30}
+        if keys == ("filter", "message_queue_max_len"):
+            return 1
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.message_queue = [{"type": "song", "voice_path": "s", "content": "s"}]
+    pb.message_queue_lock = _th.RLock()
+    pb.message_queue_not_empty = _th.Condition(pb.message_queue_lock)
+    pb._cancelled_choreo = set()
+    r = pb.data_priority_insert("等待合成消息", {"type": "talk", "voice_path": "t",
+                                                "content": "t"})
+    assert r["code"] == 1  # 低优+末尾位次 → 丢弃（既有语义）
+    assert len(pb.message_queue) == 1
