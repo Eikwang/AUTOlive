@@ -871,3 +871,25 @@ def test_message_queue_capacity_accounting():
     normals = [e for e in pb.message_queue
                if not (e.get("type") == "song" and e.get("song_segment"))]
     assert len(normals) == 1
+
+
+def test_borrow_scan_crosses_song_segments():
+    """跨歌段借位（R5c，间奏窗口）：答谢(低优)压在多个歌段之后的队尾——
+    借位扫描跳过歌段全队列扫描取到（R4f 的「遇歌段即 break」使借位从未
+    工作过）。前奏窗口的借位在 seq0 消费内的前奏调度循环（另一路径）。"""
+    import time as _t
+    pb = _gate_pb()
+    # song 不插队后真实形态：间奏窗口中（seg0 已消费）答谢全部压在全部
+    # 歌段之后——seg1 due≈now+25.9（窗口中，gate_wait>0 → 借位扫描）
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": f"seg_{i:02d}", "content": "s",
+         "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                          "start_s": 31.2 + i * 45.0}} for i in range(1, 5)
+    ] + [{"type": "comment", "voice_path": "nonexistent.wav", "content": "thanks1"},
+         {"type": "comment", "voice_path": "nonexistent.wav", "content": "thanks2"}]
+    pb._song_anchor = {"t0": _t.monotonic() - 50.0, "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw, borrowed = pb._pop_next_entry_locked()
+    assert gw == 0 and borrowed is True  # 借位取到队尾答谢
+    assert data["content"] == "thanks1"  # FIFO 首条
+    assert len(pb.voice_tmp_path_queue) == 5  # 4 歌段留队+1 答谢已出

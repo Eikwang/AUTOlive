@@ -307,17 +307,16 @@ class PlaybackMixin:
             remaining = ((window_end - time.monotonic())
                          if window_end is not None else 0.0)
             for i, entry in enumerate(queue):
-                if i == 0:
-                    continue
                 if (isinstance(entry, dict) and entry.get("type") == "song"
                         and entry.get("song_segment")):
-                    break  # 到下一歌段为止
+                    continue  # 跳过歌段（R5c：答谢压队尾跨歌段——不 break，
+                    # 全队列扫描借位；歌段留队不动）
                 if not isinstance(entry, dict):
                     continue
                 dur = self._entry_duration_s(entry)
                 if dur > 0 and remaining - dur < _INTERLUDE_MIN_CONSUME_S:
                     continue  # 超窗/不足 3s 余量 → 看下一条
-                return queue.pop(i), 0.0, True  # R5: borrowed=True（本地外放）
+                return queue.pop(i), 0.0, True  # R5b：借位走 EDTalk 口型
             return None, gate_wait, False
         return queue.pop(0), 0.0, False
 
@@ -663,7 +662,33 @@ class PlaybackMixin:
                         record_drop("song_gap_wait", round(_remain, 1))
                     except Exception:
                         pass
-                    await asyncio.sleep(_remain)
+                    # 前奏窗口调度循环（R5c，2026-11-11 用户模型）：等待期间
+                    # **借位消费**队列其它音频（推数字人口型——静音期插播），
+                    # 歌段留队等窗口结束。此前 await sleep 整段阻塞=前奏 31s
+                    # 零消费（消费循环被 seq0 消费占用，出队侧借位跑不了）。
+                    while True:
+                        _remain = _t0 + _start_s - _SONG_PUSH_LEAD - time.monotonic()
+                        if _remain <= 0:
+                            break
+                        _interlude_entry = None
+                        with self.voice_tmp_path_queue_lock:
+                            for _e in self.voice_tmp_path_queue:
+                                if (isinstance(_e, dict)
+                                        and not (_e.get("type") == "song"
+                                                 and _e.get("song_segment"))):
+                                    _interlude_entry = self.voice_tmp_path_queue.pop(0)
+                                    break
+                        if _interlude_entry is not None:
+                            logger.info(
+                                f"[song] 前奏窗口插播（推数字人口型）："
+                                f"{_interlude_entry.get('content', '')[:30]}")
+                            # 字幕/编排回执/消费回执由 _consume_edtalk_entry
+                            # 内置承担（勿重复调用——T3 单一源守卫）
+                            await self._consume_edtalk_entry(
+                                _interlude_entry,
+                                _interlude_entry.get("voice_path", ""))
+                        else:
+                            await asyncio.sleep(min(_remain, 0.5))
                 self._song_anchor = {"t0": _t0, "last_end": 0.0}
             else:
                 self._song_anchor = {"t0": None, "last_end": 0.0}
