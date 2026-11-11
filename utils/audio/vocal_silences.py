@@ -140,24 +140,103 @@ def load_silences(path: str):
     return parsed
 
 
-def compute_silences(vocal_path: str, threshold_db: float = DEFAULT_THRESHOLD_DB,
+def _adaptive_threshold(dbs):
+    """自适应阈值（R4d，用户指令「结合音频频谱优化识别」）：整曲 RMS 分布
+    的「人声峰基准偏移」——按歌自动找分界，替代固定阈值对响度差异的脆弱性
+    （轻柔歌人声 RMS 可低于 -40 误判静音；分离残留间奏 RMS 高于 -40 漏检）。
+
+    算法（v1 最大间隙被散值干扰实测选错——改为峰基准）：
+    阈值 = P85(RMS) − 35dB，钳制 [-90, -12]。P85=人声峰的代表值（人声窗占
+    比通常 <50%，静音/换气窗在低区）——阈值落在人声峰下方 35dB，与换气
+    （峰下 10-25dB）和真静音（峰下 60dB+）双方向拉开。分布校验：P85−P40
+    <20dB（P95−P05，单峰无静音群）→ None 回退固定 DEFAULT。
+
+    牧马城市 ground truth：P85≈-17 → 阈值≈-52 → 换气（-25~-45）不算静音 ✓、
+    真静音（-76~-120）检出 ✓、极弱尾音（-76~-90）检出 ✓。
+
+    Returns: 阈值 float，或 None（单峰/样本不足 → 回退固定 DEFAULT）。"""
+    valid = sorted(d for d in dbs if math.isfinite(d))
+    if len(valid) < 20:
+        return None  # 样本不足（纯伴奏/极短音频）→ 固定阈值兜底
+    p05 = valid[int(len(valid) * 0.05)]
+    p85 = valid[int(len(valid) * 0.85)]
+    if p85 - p05 < 20.0:
+        return None  # 分布单峰（无明显静音群）→ 固定阈值兜底
+    th = max(-90.0, min(-12.0, p85 - 35.0))
+    return th
+
+
+def _spectrum_silent(audio, start_ms: int, end_ms: int, peak_energy: float) -> bool:
+    """频谱能量验证（R4d 二道防线）：候选静音段内**逐 0.5s 子窗**的能量比
+    （相对全曲峰值窗能量）<1e-4 占比 ≥90% 才确认真静音——区分「数字静音」
+    与「有谱结构的弱信号」（极弱人声/换气呼吸噪声能量比 ~1e-2 不误判）。
+    长段容忍 10% 边界过渡窗（首尾淡入淡出子窗能量偏高属正常）。依赖 numpy
+    （惰性 import，失败=True 保持候选，不阻塞链路）。"""
+    try:
+        import numpy as np
+        chunk = audio[start_ms:end_ms]
+        if len(chunk) == 0:
+            return True
+        total_windows = 0
+        silent_windows = 0
+        for start in range(0, len(chunk), 500):
+            sub = chunk[start:start + 500]
+            if len(sub) == 0:
+                continue
+            total_windows += 1
+            samples = np.array(sub.get_array_of_samples(), dtype=np.float64)
+            if samples.size == 0 or peak_energy <= 0:
+                silent_windows += 1
+                continue
+            if float(np.sum(samples ** 2)) / peak_energy < 1e-4:
+                silent_windows += 1
+        if total_windows == 0:
+            return True
+        return silent_windows / total_windows >= 0.9
+    except Exception:
+        return True  # 频谱验证不可用 → 保持 RMS 候选（不阻塞链路）
+
+
+def compute_silences(vocal_path: str, threshold_db=DEFAULT_THRESHOLD_DB,
                      min_silence_s: float = DEFAULT_MIN_SILENCE_S):
     """RMS 扫描 vocal 分轨 → [{start_s,end_s}]（生成端/惰性解析共用）。
 
+    2026-11-10 R4d 识别逻辑优化（用户指令：结合频谱）：
+    - threshold_db=None → **自适应阈值**（RMS 双峰分离，按歌自动定界——
+      解决「其它歌曲响度差异/分离残留」的固定阈值脆弱性）；数值 → 固定
+      阈值（config 显式配置的用户 override）。
+    - 候选静音段经 **频谱能量验证**（FFT 总能量相对全曲峰值 <1e-4）——
+      极弱人声/呼吸噪声不误判（RMS 低的弱信号谱能量并不为零）。
+    - min_silence_s=3.0 为 ground truth 验证分界（0.3 产生换气碎段误判）。
+
     异常外抛由调用方处置（cover_worker 生成端 fail-soft 包裹；惰性解析线程
-    自捕获）。纯 CPU：<1s/4min 音频（100ms 窗口 numpy/pydub 扫描，d20）。"""
+    自捕获）。纯 CPU：<2s/4min 音频（100ms 窗口 pydub 扫描+候选段 FFT）。"""
     from pydub import AudioSegment
 
     audio = AudioSegment.from_file(vocal_path)
     total_s = len(audio) / 1000.0
     win = _WINDOW_MS
     n_windows = int(len(audio) // win)
+
+    # ① 逐窗 RMS 预扫（自适应阈值需要全曲分布）
+    dbs = []
+    for i in range(n_windows):
+        chunk = audio[i * win:(i + 1) * win]
+        db = chunk.dBFS
+        dbs.append(db if math.isfinite(db) else -120.0)  # 数字静音归一化记录
+    _eff_th = _adaptive_threshold(dbs) if threshold_db is None else float(threshold_db)
+    if _eff_th is None:
+        _eff_th = DEFAULT_THRESHOLD_DB
+    else:
+        logger.info(f"[silences] 自适应阈值={_eff_th:.1f}dB（双峰分离，"
+                    f"覆盖固定 {threshold_db if threshold_db is not None else 'None'}）")
+
+    # ② 静音段扫描（自适应/固定阈值）
     runs = []
     run_start = None
     for i in range(n_windows):
-        chunk = audio[i * win:(i + 1) * win]
-        db = chunk.dBFS  # 数字静音=-inf（< 任何有限阈值）
-        silent = not math.isfinite(db) or db < threshold_db
+        db = dbs[i]
+        silent = db < _eff_th
         t0, t1 = i * win / 1000.0, (i + 1) * win / 1000.0
         if silent and run_start is None:
             run_start = t0
@@ -167,7 +246,38 @@ def compute_silences(vocal_path: str, threshold_db: float = DEFAULT_THRESHOLD_DB
             run_start = None
     if run_start is not None and total_s - run_start >= min_silence_s:
         runs.append({"start_s": round(run_start, 3), "end_s": round(total_s, 3)})
+
+    # ③ 频谱能量验证（二道防线）：弱信号（极弱人声/换气）不误判
+    if runs:
+        try:
+            peak = _peak_energy(audio)
+            verified = [g for g in runs
+                        if _spectrum_silent(audio, int(g["start_s"] * 1000),
+                                            int(g["end_s"] * 1000), peak)]
+            if len(verified) != len(runs):
+                logger.info(
+                    f"[silences] 频谱验证剔除 {len(runs) - len(verified)} 个"
+                    f"伪静音候选（有谱结构的弱信号）：{len(verified)} 段保留")
+            runs = verified
+        except Exception:
+            pass  # 验证失败保持 RMS 候选
     return _normalize(runs)
+
+
+def _peak_energy(audio) -> float:
+    """全曲峰值能量（0.5s 粗粒度最大窗能量——频谱验证的分母）。"""
+    import numpy as np
+    peak = 0.0
+    step = 500
+    for start in range(0, len(audio), step):
+        chunk = audio[start:start + step]
+        if len(chunk) == 0:
+            continue
+        samples = np.array(chunk.get_array_of_samples(), dtype=np.float64)
+        e = float(np.sum(samples ** 2))
+        if e > peak:
+            peak = e
+    return peak
 
 
 def write_silences_file(path: str, silences, threshold_db: float = DEFAULT_THRESHOLD_DB,

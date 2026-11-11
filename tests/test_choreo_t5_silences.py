@@ -362,3 +362,48 @@ def test_ground_truth_params_output(tmp_path, monkeypatch):
     vs.write_silences_file(sp, [{"start_s": 1.0, "end_s": 2.0}],
                            threshold_db=-20.0, min_silence_s=0.3)
     assert vs.load_silences(sp) is None
+
+
+def test_adaptive_threshold_peak_baseline():
+    """自适应阈值（R4d）：人声峰基准偏移 P85−35——三态分布（人声/换气/静音）
+    换气不误判、真静音检出；单峰回退 None；样本不足回退 None。"""
+    from utils.audio.vocal_silences import _adaptive_threshold
+    import random
+    random.seed(42)
+    # 三态分布（牧马城市实况）：人声 -15~-18（60%）、换气 -25~-45（20%）、
+    # 真静音 -76~-120（20%）
+    dbs = ([random.uniform(-18, -15) for _ in range(600)]
+           + [random.uniform(-45, -25) for _ in range(200)]
+           + [random.uniform(-120, -76) for _ in range(200)])
+    th = _adaptive_threshold(dbs)
+    assert th is not None and -60 <= th <= -45  # 峰-35 落在人声/换气之间
+    assert th < -40  # 换气（-25~-45）整体高于阈值 → 不误判
+    # 单峰（全人声）→ None 回退
+    assert _adaptive_threshold([random.uniform(-18, -15) for _ in range(300)]) is None
+    # 样本不足 → None
+    assert _adaptive_threshold([-16.0] * 10) is None
+
+
+def test_compute_silences_adaptive_none_path(tmp_path, monkeypatch):
+    """threshold_db=None 自适应路径：compute_silences 全链（假件 RMS 分布
+    难造——验证参数贯通+config 键读侧不回归）。"""
+    from utils.audio import vocal_silences as vs
+    # config 读侧：缺省不落盘 → None → 自适应；显式配置 → 固定
+    from utils.audio.synthesis_manager import SynthesisMixin
+
+    class _Syn(SynthesisMixin):
+        def __init__(self, data):
+            self.config = type("C", (), {"get": staticmethod(
+                lambda *k: data.get(k) if len(k) == 2 else None)})()
+
+    fx_none = _Syn({})
+    assert fx_none._silence_detect_params() == (-40.0, 3.0)  # DEFAULT 回滚值
+    fx_cfg = _Syn({("choose_song", "silence_threshold_db"): -55,
+                   ("choose_song", "silence_min_silence_s"): 2.0})
+    assert fx_cfg._silence_detect_params() == (-55.0, 2.0)
+    # compute_silences None 路径签名贯通（假件音频=极短 → 自适应样本不足回退）
+    from pydub import AudioSegment
+    fake = tmp_path / "tiny.wav"
+    AudioSegment.silent(duration=800).export(fake, format="wav")
+    out = vs.compute_silences(str(fake), threshold_db=None, min_silence_s=3.0)
+    assert out == []  # 极短音频无静音段
