@@ -315,7 +315,7 @@ def test_overdue_song_segment_jumps_ahead_of_thanks():
     ]
     pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0}
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert gw == 0 and data["type"] == "song"  # song 段被跳前消费
     assert pb.voice_tmp_path_queue[0]["content"] == "thanks1"  # 答谢留队原序
     assert pb._song_anchor["skip_count"] == 1
@@ -337,7 +337,7 @@ def test_interlude_budget_blocks_thanks_near_window_end():
     # 2s<3s → 硬性条件拦截（不起答谢，等到期推人声）
     pb._song_anchor["last_end"] = _t.monotonic() + 2.0
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data is None  # 剩余 2s<3s → 不起答谢（返回等待）
     assert gw > 0
 
@@ -362,7 +362,7 @@ def test_interlude_budget_blocks_overlong_entry():
         lambda cls, path, **k: AudioSegment.silent(duration=10000))
     try:
         with pb.voice_tmp_path_queue_lock:
-            data, gw = pb._pop_next_entry_locked()
+            data, gw, _borrowed = pb._pop_next_entry_locked()
     finally:
         AudioSegment.from_file = _orig
     assert data is None and gw > 0  # 超长答谢被拦截
@@ -381,7 +381,7 @@ def test_overdue_wrapping_free_consume_and_new_song_exit():
                        "wrapping": True}
     # 无伴奏 proc（getattr 默认 None→保守 alive=True）+无新歌 → 直通
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data["content"] == "free1" and gw == 0
     # 新歌 seq0 出现 → 穿透（wrapping 关闭）
     pb.voice_tmp_path_queue.insert(0, {"type": "song", "voice_path": "s0",
@@ -390,7 +390,7 @@ def test_overdue_wrapping_free_consume_and_new_song_exit():
                                                         "seg_dir": "",
                                                         "start_s": 0.0}})
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data["content"] == "new"  # 新歌段直通（seq0=重建锚路径）
     assert pb._song_anchor.get("wrapping") is False
 
@@ -406,7 +406,7 @@ def test_overdue_resets_on_no_skip_consumption():
     pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0,
                        "skip_count": 2}
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data["type"] == "song" and pb._song_anchor["skip_count"] == 0
 
 
@@ -431,7 +431,7 @@ def test_overdue_999_in_skip_zone_exempts():
     ]
     pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0}
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data["type"] == "reread_top_priority"  # 999 被正常消费（未延后）
     assert pb.voice_tmp_path_queue[0]["type"] == "song"  # song 段留队
     assert pb._song_anchor.get("skip_count", 0) == 0
@@ -446,13 +446,13 @@ def test_overdue_no_anchor_or_not_due_fail_open():
                                 "content": "x"}, entry]
     # 无锚：直通 pop(0)（答谢优先）
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert gw == 0 and data["type"] == "comment"
     # 有锚但 due 未到：队首 song 段窗口等待
     pb.voice_tmp_path_queue = [entry]
     pb._song_anchor = {"t0": _t.monotonic() + 5.0, "last_end": 0.0}
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data is None and gw > 4.0  # 等待≈5-lead
 
 
@@ -573,7 +573,7 @@ def test_borrow_consume_during_window():
     # 窗口：t0+60（未到期，剩 ~55s）
     pb._song_anchor = {"t0": _t.monotonic(), "last_end": 0.0}
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     # 队首歌段未到期 → 借位消费其后的入场条目（时长未知 fail-open 放行）
     assert gw == 0 and data["type"] == "entrance"
     assert pb.voice_tmp_path_queue[0]["type"] == "song"  # 歌段留队未动
@@ -593,7 +593,7 @@ def test_borrow_budget_skips_overlong():
     pb._song_anchor = {"t0": _t.monotonic() + 55.0, "last_end": _t.monotonic()}
     # 窗口结束=last_end=now → remaining≈0<3s → 无可借位 → 等待
     with pb.voice_tmp_path_queue_lock:
-        data, gw = pb._pop_next_entry_locked()
+        data, gw, _borrowed = pb._pop_next_entry_locked()
     assert data is None and gw >= 0
 
 
@@ -714,3 +714,73 @@ def test_anchor_backfill_defense_missing_seq0(tmp_path):
     # t0=受理−start_s≈受理前 76.2s（歌从 0 开始的时间轴语义保住）
     assert 74.0 <= t_before - anchor["t0"] <= 78.0
     assert anchor["last_end"] > 0
+
+
+# ------------------------------------------------- R5 借位本地外放
+
+def test_interlude_local_playback_dispatch(tmp_path, monkeypatch):
+    """借位条目本地外放（R5 用户模型）：_play_interlude_local 走 mp 子进程
+    （不推数字人——人声流不中断）；文件缺失 fail-soft 跳过。"""
+    import asyncio
+    import types
+    import utils.audio.playback_manager as pm
+
+    created = []
+
+    class _FakeProc:
+        def __init__(self, target, args, daemon, name):
+            created.append({"path": args[0], "vol": args[1],
+                            "gate": args[2], "name": name})
+            self.exitcode = 0
+
+        def start(self):
+            pass
+
+        def join(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+    import multiprocessing as _mp
+    monkeypatch.setattr(_mp, "Process", _FakeProc)
+    pb = _gate_pb()
+    # 正常路径：子进程启动（音量 1.0、无门=立即播）
+    wav = tmp_path / "thanks.wav"
+    wav.write_bytes(b"fake")
+    asyncio.run(pm.PlaybackMixin._play_interlude_local(
+        pb, {"type": "comment", "voice_path": str(wav), "content": "t"}))
+    assert len(created) == 1 and created[0]["vol"] == 1.0
+    assert created[0]["gate"] is None  # 无门=立即播
+    # 文件缺失：fail-soft 跳过（不启动子进程）
+    n = len(created)
+    asyncio.run(pm.PlaybackMixin._play_interlude_local(
+        pb, {"type": "comment", "voice_path": str(tmp_path / "nope.wav"),
+             "content": "t"}))
+    assert len(created) == n  # 未启动
+
+
+def test_borrowed_flag_propagates():
+    """borrowed 标志传播（R5）：窗口借位条目返回 True（消费路由据此走本地
+    外放），到期歌段/普通条目返回 False（走既有路由）。"""
+    import time as _t
+    pb = _gate_pb()
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": "s1", "content": "s",
+         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 60.0}},
+        {"type": "entrance", "voice_path": "nonexistent.wav", "content": "hi"},
+    ]
+    pb._song_anchor = {"t0": _t.monotonic(), "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw, borrowed = pb._pop_next_entry_locked()
+    assert borrowed is True  # 借位条目（本地外放路由）
+    # 到期歌段：borrowed=False（EDTalk 路由）
+    pb.voice_tmp_path_queue.insert(0, {"type": "song", "voice_path": "s2",
+                                       "content": "s",
+                                       "song_segment": {"seq": 2, "total": 3,
+                                                        "seg_dir": "",
+                                                        "start_s": 120.0}})
+    pb._song_anchor = {"t0": _t.monotonic() - 200.0, "last_end": 0.0}
+    with pb.voice_tmp_path_queue_lock:
+        data, gw, borrowed = pb._pop_next_entry_locked()
+    assert data["type"] == "song" and borrowed is False

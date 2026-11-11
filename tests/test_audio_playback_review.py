@@ -1227,10 +1227,11 @@ class TestT3ReceiptSingleSource:
         import inspect
         from utils.audio import playback_manager
         src = inspect.getsource(playback_manager)
-        # 模块内 report_consumed 调用点=2：EDTalk 主路径 + 999 重推条目（均为
-        # EDTalk 路）；本地（builtin 移交）分支必须为零（W3 双计根修）
+        # 模块内 report_consumed 调用点=3：EDTalk 主路径 + 999 重推条目 +
+        # R5 窗口借位本地外放完成（均为真实消费完成点；本地 builtin 移交分支
+        # 必须为零——W3 双计根修）
         count = src.count("self.report_consumed(")
-        assert count == 2, f"playback_manager report_consumed 调用点应恰 2（EDTalk 主路径+重推），实为 {count}"
+        assert count == 3, f"playback_manager report_consumed 调用点应恰 3（EDTalk 主路径+重推+R5 借位本地外放），实为 {count}"
         # 本地分支无观测回执（移交点仅编排实例匹配）
         local_src = src[src.index("本地整轨（用户优化）"):]
         assert "self.report_consumed(" not in local_src, "本地分支残留观测回执（双计复现）"

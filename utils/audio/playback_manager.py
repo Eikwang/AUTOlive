@@ -213,12 +213,13 @@ class PlaybackMixin:
         c) 队首=song 段未到期 → 窗口门等待（复用 _song_gate_wait_s）。
         ③ 无锚 → 全直通（fail-open）。
 
-        Returns: (data_json|None, gate_wait_s)
+        Returns: (data_json|None, gate_wait_s, borrowed)
           data_json 非 None=已出队待消费；gate_wait_s>0=队首 song 段窗口未到
-          （调用方锁外 sleep 后重入）。"""
+          （调用方锁外 sleep 后重入）；borrowed=True=窗口借位条目（R5：本地
+          外放消费，不推数字人——人声流不中断）。"""
         queue = self.voice_tmp_path_queue
         if not queue:
-            return None, 0.0
+            return None, 0.0, False
         anchor = getattr(self, "_song_anchor", None)
         if anchor and anchor.get("t0") is not None:
             # ① 垃圾时间（末段受理后，人声播完伴奏未完）：伴奏播完感知=
@@ -239,9 +240,9 @@ class PlaybackMixin:
                 if not _has_new_song and not backing_alive:
                     # 伴奏播完且无新歌=垃圾时间结束 → 清锚回 IDLE
                     self._song_anchor = None
-                    return queue.pop(0), 0.0
+                    return queue.pop(0), 0.0, False
                 if not _has_new_song:
-                    return queue.pop(0), 0.0  # 垃圾时间自由消费
+                    return queue.pop(0), 0.0, False  # 垃圾时间自由消费
                 anchor["wrapping"] = False  # 新歌到来：回到唱歌时间机制
                 logger.info("[song] 垃圾时间结束（新点歌触发），进入新唱歌时间")
             now = time.monotonic()
@@ -260,29 +261,29 @@ class PlaybackMixin:
                 if now < due:
                     continue
                 if any(self._is_999_entry(e) for e in queue[:i]):
-                    return queue.pop(0), 0.0  # 999 豁免（最高优先级不延后）
+                    return queue.pop(0), 0.0, False  # 999 豁免（最高优先级不延后）
                 anchor["skip_count"] = 0 if i == 0 else min(
                     skip_count + 1, _OVERDUE_SKIP_LIMIT)
-                return queue.pop(i), 0.0
+                return queue.pop(i), 0.0, False
             # ②b 队首=插播条目 → 窗口预检（预算语义+3s 硬性条件）
             head = queue[0]
             if not (isinstance(head, dict) and head.get("type") == "song"):
                 window_end = self._next_song_due_locked(anchor)
                 if window_end is None:
                     # 无后续 song 段（末段已消费完的收尾间隙）→ 自由消费
-                    return queue.pop(0), 0.0
+                    return queue.pop(0), 0.0, False
                 remaining = window_end - now
                 window_total = window_end - (last_end if last_end > 0 else now)
                 if remaining < _INTERLUDE_MIN_CONSUME_S \
                         or window_total < _INTERLUDE_MIN_CONSUME_S:
                     # 硬性条件：剩余<3s 或窗口本身<3s → 不起音频（避免说
                     # 一半）——等到期推人声
-                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD
+                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
                 if self._entry_duration_s(head) > remaining:
                     # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
                     # 不足 3s 时已由上面拦住）
-                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD
-                return queue.pop(0), 0.0
+                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                return queue.pop(0), 0.0, True
         # ②c 无锚（fail-open）或队首=song 段：窗口门判定
         gate_wait = self._song_gate_wait_s(queue[0])
         if gate_wait > 0:
@@ -306,9 +307,9 @@ class PlaybackMixin:
                 dur = self._entry_duration_s(entry)
                 if dur > 0 and remaining - dur < _INTERLUDE_MIN_CONSUME_S:
                     continue  # 超窗/不足 3s 余量 → 看下一条
-                return queue.pop(i), 0.0
-            return None, gate_wait
-        return queue.pop(0), 0.0
+                return queue.pop(i), 0.0, True  # R5: borrowed=True（本地外放）
+            return None, gate_wait, False
+        return queue.pop(0), 0.0, False
 
     def _next_song_due_locked(self, anchor):
         """队列中下一个 song 切片段的窗口结束时刻（due=t0+start−预补偿，含
@@ -447,6 +448,45 @@ class PlaybackMixin:
                                  "可临时关闭双轨")
         except Exception:
             pass
+
+    async def _play_interlude_local(self, data_json):
+        """窗口借位插播的本地外放（R5 用户模型重构）：插播音频**不进数字人
+        推理**——人声整曲在数字人端连续播（静音段音频内容自然无声+口型
+        idle，人声流不中断）；插播本地出声（观众可闻、数字人闭嘴），时间轴
+        保持前进（与 999 模式「插播时时间轴暂停」的唯一区别）。
+
+        复用伴奏子进程形态（mp 隔离 GIL——TTS 合成期争抢防卡顿）；串行等待
+        播完（窗口内插播不并发，to_thread 不阻塞事件循环）。字幕/编排回执/
+        消费回执由调用方承担（本方法只管出声）。"""
+        path = data_json.get("voice_path") or ""
+        if not path or not os.path.isfile(path):
+            logger.warning(f"[song] 插播音频缺失，跳过本地外放：{path}")
+            return
+        proc = None
+        try:
+            import multiprocessing as _mp
+            from utils.audio import backing_player as _bp
+            proc = _mp.Process(
+                target=_bp._backing_process_main,
+                args=(path, 1.0, None, None, None, None),
+                daemon=True, name="song-interlude")
+            proc.start()
+            await asyncio.to_thread(proc.join)  # 串行等播完
+            if proc.exitcode not in (0, None):
+                logger.warning(
+                    f"[song] 插播本地外放异常退出（exitcode={proc.exitcode}）：{path}")
+            else:
+                logger.info(f"[song] 插播本地外放完成：{path}")
+        except Exception:
+            logger.warning("[song] 插播本地外放失败（fail-soft 跳过）："
+                           + traceback.format_exc())
+        finally:
+            if proc is not None:
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                except Exception:
+                    pass
 
     def _is_999_entry(self, data_json) -> bool:
         """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
@@ -860,7 +900,8 @@ class PlaybackMixin:
                             while not self.voice_tmp_path_queue:
                                 # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
                                 self.voice_tmp_path_queue_not_empty.wait()  # 阻塞直到列表非空
-                            data_json, _gate_wait = self._pop_next_entry_locked()
+                            data_json, _gate_wait, _borrowed = (
+                                self._pop_next_entry_locked())
                         if _gate_wait <= 0:
                             if data_json is None:
                                 continue  # 锁释放窗口内队列被清空（停止/flush）→ 回外层
@@ -905,6 +946,21 @@ class PlaybackMixin:
                     # （含变速）后仅推送 /audio/push_full。推送协程内阻塞等待完成
                     # 判定（背压），失败降级记录不阻塞直播主流程。
                     # v2.2 流程优化（flowchartTD |助播流程| 边）：助播条目绕过数字人。
+                    # R5（2026-11-11 用户模型重构）：窗口借位条目=本地外放——插播
+                    # 音频不进数字人推理（人声整曲在数字人端连续播，静音段自然
+                    # 无声+口型 idle，人声流不中断）；插播本地出声（观众可闻），
+                    # 时间轴保持前进（与 999 模式的唯一区别）。
+                    if _borrowed:
+                        try:
+                            await self._play_interlude_local(data_json)
+                        finally:
+                            self._notify_choreo_complete(data_json)
+                            self.report_consumed(
+                                data_json.get("type", ""),
+                                data_json.get("content", ""))
+                        if _was_999:
+                            self.active_reread_top_999 = False
+                        continue  # 借位消费完 → 下一条（窗口/到期重查）
                     if routes_to_edtalk(data_json, self.config):
                         # T2-批（2026-11-06 协作机制流程审查，W2 根修）：999 active
                         # 标记 finally 化——分支内任何异常逃逸（含 CancelledError 穿透）
