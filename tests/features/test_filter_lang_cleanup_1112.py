@@ -18,7 +18,7 @@
 """
 from pathlib import Path
 
-from tests.features.test_filter_review_1030 import _FilterConfigStub, _src
+from tests.features.test_filter_review_1030 import _FilterConfigStub, _src, _word_file
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +95,22 @@ class TestLangCharWhitelist:
         （按用户规格，弹幕不做回复语言级字符过滤）。"""
         c = self._c()
         assert c.clean_danmaku_text("こんにちは안녕") == "こんにちは안녕"
+
+    def test_emoji_tag_bracket_families(self):
+        """表情标签括号三族形态（2026-11-12 实测根修：抖音弹幕标签实为
+        方头【呲牙】——原正则仅匹配半角，括号被白名单遗弃后"呲牙"漏出
+        被 TTS 念出）。"""
+        c = self._c()
+        assert c.clean_danmaku_text(
+            "@小小 那等我回去看，如果你有空的话我发给你【呲牙】【呲牙】【呲牙】"
+        ) == "小小 那等我回去看如果你有空的话我发给你"
+        assert c.clean_danmaku_text(
+            "@小小 那等我回去看，如果你有空的话我发给你［呲牙］［呲牙］"
+        ) == "小小 那等我回去看如果你有空的话我发给你"
+        assert c.clean_danmaku_text("主播太美了【爱心】！！！") == "主播太美了"
+        assert c.clean_danmaku_text("好[爱心]【色】［赞］") == "好"
+        # 用户名同链受益（共用 remove_emoji）
+        assert c.clean_username("小【爱心】仙女") == "小仙女"
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +199,75 @@ class TestWiring:
         src = _src("frontend/ui/tabs/filter_config.py")
         assert 'keys=("filter", "username_convert_digits_to_chinese")' in src
         assert 'keys=("filter", "emoji")' in src
+
+
+# ---------------------------------------------------------------------------
+# (b) 过滤总开关断链根修（2026-11-12 实测：filter.enable 键缺失整组失效）
+# ---------------------------------------------------------------------------
+
+
+class TestFilterMasterGate:
+    """UI-16 批次 R3 总开关迁二级菜单写 filter.filter_master_enable，消费侧
+    仍读旧键 filter.enable——生产 config 无 enable 键 → 门恒真放行，长度
+    截断/弹幕表情过滤/违禁词过滤整组静默失效（实测 log：'做咖啡好治愈呢
+    [比心]' 未过滤直达合成）。守卫用生产配置形态（无 enable 键）锁定归一。"""
+
+    # 用户生产 config 形态：enable 键缺失、总开关键 filter_master_enable
+    PROD_CFG = {"filter": {"emoji": True, "filter_master_enable": True}}
+
+    def _h(self, filter_cfg):
+        from utils.common import Common
+        from utils.handlers.comment_handler import CommentHandler
+
+        class _MH:
+            pass
+
+        mh = _MH()
+        mh.config = _FilterConfigStub({"filter": filter_cfg})
+        mh.common = Common()
+        return CommentHandler(mh)
+
+    def test_prod_shape_emoji_filter_works(self):
+        """生产形态（无 enable 键）：弹幕表情过滤必须生效（修复前整组失效）。"""
+        h = self._h({"emoji": True, "filter_master_enable": True})
+        assert h.comment_check_and_replace("做咖啡好治愈呢[比心]") == "做咖啡好治愈呢"
+
+    def test_master_enable_false_passthrough(self):
+        """现行总开关键显式 false：恒透传。"""
+        h = self._h({"emoji": True, "filter_master_enable": False})
+        assert h.comment_check_and_replace("做咖啡好治愈呢[比心]") == "做咖啡好治愈呢[比心]"
+
+    def test_legacy_enable_false_passthrough(self):
+        """旧键 enable 显式 false：恒透传（双键任一关即关）。"""
+        h = self._h({"emoji": True, "enable": False})
+        assert h.comment_check_and_replace("做咖啡好治愈呢[比心]") == "做咖啡好治愈呢[比心]"
+
+    def test_conflicting_keys_any_false_closes(self):
+        """双键冲突（一 true 一 false）：任一显式 false 即关闭（防呆）。"""
+        h = self._h({"emoji": True, "enable": True, "filter_master_enable": False})
+        assert h.comment_check_and_replace("做咖啡好治愈呢[比心]") == "做咖啡好治愈呢[比心]"
+        h = self._h({"emoji": True, "enable": False, "filter_master_enable": True})
+        assert h.comment_check_and_replace("做咖啡好治愈呢[比心]") == "做咖啡好治愈呢[比心]"
+
+    def test_badwords_gate_prod_shape(self, tmp_path):
+        """违禁词过滤同门（prohibitions_handle 同断链）：生产形态下命中丢弃。"""
+        h = self._h({"filter_master_enable": True,
+                     "badwords": {"enable": True, "discard": True,
+                                  "path": _word_file(tmp_path)}})
+        assert h.prohibitions_handle("包含违禁词的内容") is None
+
+    def test_badwords_gate_master_false(self, tmp_path):
+        """总开关 false：违禁词过滤同被关闭（原语义：关闭后全部过滤失效）。"""
+        h = self._h({"filter_master_enable": False,
+                     "badwords": {"enable": True, "discard": True,
+                                  "path": _word_file(tmp_path)}})
+        assert h.prohibitions_handle("包含违禁词的内容") == "包含违禁词的内容"
+
+    def test_wiring(self):
+        """接线守卫：两处消费门读 _filter_master_enabled，不再裸读 enable。"""
+        src = _src("utils/handlers/comment_handler.py")
+        assert src.count("self._filter_master_enabled(filter_config)") == 2
+        assert 'filter_config.get("enable")' not in src
 
 
 # ---------------------------------------------------------------------------

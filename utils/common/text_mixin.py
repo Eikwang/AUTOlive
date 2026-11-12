@@ -273,7 +273,14 @@ class TextMixin:
 
     # 弹幕表情过滤（filter.emoji，2026-10-30 过滤审查批次接线）：
     # 移除平台表情标签与 Unicode emoji，只保留文字
-    _EMOJI_TAG_PATTERN = re.compile(r'\[[^\[\]]{1,16}\]')
+    # 标签括号三族形态（2026-11-12 实测根修：抖音弹幕表情标签实为方头
+    # 括号【呲牙】——原正则仅匹配半角 [呲牙]，方头/全角形态的括号被
+    # 字符白名单遗弃后"呲牙"汉字漏出被 TTS 念出）
+    _EMOJI_TAG_PATTERN = re.compile(
+        r'[\[［【]'
+        r'[^\[［【\]］】]{1,16}'
+        r'[\]］】]'
+    )
     _EMOJI_CHAR_PATTERN = re.compile(
         "["
         "\U0001F300-\U0001FAFF"   # 杂项符号与象形文字/扩展（含表情、手势、物件）
@@ -289,8 +296,9 @@ class TextMixin:
     def remove_emoji(self, text=""):
         """移除弹幕中的表情，只保留文字。
 
-        两级处理：先移除平台表情标签（[爱心][色] 等成对方括号短标签），
-        再移除 Unicode emoji 字符序列（含 ZWJ 组合与变体选择符）。
+        两级处理：先移除平台表情标签（[爱心]/【呲牙】/［色］ 等成对方括号族
+        短标签——半角/全角/方头三族），再移除 Unicode emoji 字符序列
+        （含 ZWJ 组合与变体选择符）。
 
         Args:
             text (str): 原始弹幕文本
