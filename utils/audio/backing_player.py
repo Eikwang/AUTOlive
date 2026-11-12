@@ -26,6 +26,10 @@ spawn 契约（Eng FB1/F9）：
   后 set Event**（防主进程 Event wait 返回后读到竞态旧值）。哨兵 0.0=无
   回执（所有退出路径统一置哨兵+set，防主进程白等门超时——含 vol<=0/加载
   失败/异常）。
+- duck_value（主→子，2026-11-12 伴奏闪避批次；mp.Value('d') 或 dict["v"]，
+  1.0=原音量）：闪避系数——前奏/间奏窗口借位插播时主进程写 0.5，写流循环
+  **每 chunk 读取**并按系数缩放 PCM（audioop.mul，93ms 粒度即时生效）。
+  播报播完写回 1.0。None/读失败=1.0 原样（fail-soft，不缩放）。
 
 协作停止（Eng F4/D22）：stop_event 非 None 时写流循环每 chunk 检查 →
 正常 close 退出（设备句柄干净释放）；主进程 terminate 仅作挂死兜底
@@ -51,9 +55,37 @@ def _report_started(started_event, started_value, ts: float) -> None:
         pass  # 回执失败不改变播放行为（门超时兜底 fail-open）
 
 
+def _read_duck(duck_value) -> float:
+    """闪避系数读取（2026-11-12 伴奏闪避批次）：双形态（mp.Value 用 .value、
+    dict 用 ["v"]）+ clamp [0,1]（防撕裂/脏值直通缩放）+ fail-soft 1.0
+    （读失败=不缩放，播放连续性优先）。写流循环每 chunk 调用（≈93ms 一次）。"""
+    try:
+        if duck_value is None:
+            return 1.0
+        if isinstance(duck_value, dict):
+            v = duck_value.get("v", 1.0)
+        else:
+            v = duck_value.value
+        return max(0.0, min(1.0, float(v)))
+    except Exception:
+        return 1.0
+
+
+def _scale_chunk(data: bytes, width: int, factor: float) -> bytes:
+    """PCM chunk 按系数缩放（audioop.mul，C 实现）。audioop=标准库且 pydub
+    自身依赖（随 pydub 同生共死）——不扩大薄入口 import 面（spawn 冷启动契约）。
+    缩放失败原样返回（闪避降级=不压，不影响播放）。"""
+    try:
+        import audioop as _audioop
+        return _audioop.mul(data, width, factor)
+    except Exception:
+        return data
+
+
 def _backing_process_main(backing_path: str, volume: float,
                           start_event=None, started_event=None,
-                          started_value=None, stop_event=None) -> None:
+                          started_value=None, stop_event=None,
+                          duck_value=None) -> None:
     """伴奏播放子进程主函数（全部生命周期：加载→门等待→起播→写流→自退）。
 
     Args:
@@ -63,6 +95,8 @@ def _backing_process_main(backing_path: str, volume: float,
         started_event: 子→主起播回执事件
         started_value: 子→主起播时刻载体（mp.Value('d') 哨兵 0.0 / dict）
         stop_event: 主→子协作停止（每 chunk 检查；None=不可协作停止）
+        duck_value: 主→子闪避系数载体（2026-11-12 伴奏闪避批次；每 chunk
+            读取，1.0=原音量，<1=按系数缩放；None=既有行为不缩放）
     """
     tmp_path = None
     pa = stream = wf = None
@@ -97,12 +131,17 @@ def _backing_process_main(backing_path: str, volume: float,
         _report_started(started_event, started_value, _time.monotonic())
         started_reported = True
         # 写流循环：chunk 4096 帧（≈93ms@44.1k——调度点减少 4x）；协作停止
-        # 每 chunk 检查（F4/D22：正常 close 释放设备句柄）
+        # 每 chunk 检查（F4/D22：正常 close 释放设备句柄）；闪避系数每 chunk
+        # 读取（2026-11-12 伴奏闪避批次——93ms 粒度即时生效），factor<1 才
+        # 缩放（正常路径零复制零开销）
         chunk = 4096 * wf.getnchannels() * wf.getsampwidth()
         data = wf.readframes(4096)
         while data:
             if stop_event is not None and stop_event.is_set():
                 break
+            _factor = _read_duck(duck_value)
+            if _factor < 0.999:
+                data = _scale_chunk(data, wf.getsampwidth(), _factor)
             stream.write(data)
             data = wf.readframes(4096)
         print(f"[song] 伴奏外放完成：{backing_path}")
@@ -131,7 +170,7 @@ def _backing_process_main(backing_path: str, volume: float,
 
 def play_backing_in_process(backing_path: str, volume: float,
                             start_event, started_event, started_value,
-                            stop_event=None):
+                            stop_event=None, duck_value=None):
     """主进程侧便捷启动（mp.Process(target=本模块顶层函数)——target 可 pickle；
     返回未启动的 Process，调用方 start/terminate/引用管理）。独立函数便于
     测试桩替换。"""
@@ -139,5 +178,5 @@ def play_backing_in_process(backing_path: str, volume: float,
     return _mp.Process(
         target=_backing_process_main,
         args=(backing_path, float(volume or 0.8), start_event, started_event,
-              started_value, stop_event),
+              started_value, stop_event, duck_value),
         daemon=True, name="song-backing")

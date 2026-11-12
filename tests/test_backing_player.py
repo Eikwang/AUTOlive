@@ -220,3 +220,77 @@ def test_started_value_after_gate_release(fake_audio_env):
                                  "（pytest 内 mp+pyaudio 设备面见 Eng 守卫策略）")
 def test_real_spawn_lifecycle_volume_zero():
     pass
+
+
+# ---------------------------------------------------------------------------
+# 伴奏闪避（2026-11-12 伴奏闪避批次）：跨进程第四原语 duck_value——主进程写
+# 系数（借位插播=0.5），子进程写流循环每 chunk 读取并 audioop 缩放 PCM。
+# 契约：双形态（mp.Value(.value)/dict["v"]）；每 chunk 读取（93ms 粒度即时
+# 生效）；fail-soft（脏值/读失败=1.0 原样播）；None=既有行为不变（回归面）。
+# ---------------------------------------------------------------------------
+
+import audioop as _audioop
+
+
+def _raw_chunk() -> bytes:
+    """_FakeWave.readframes(4096) 的固定返回（子进程 chunk=4096 帧）。"""
+    return b"\x00\x01" * (4096 * 2)
+
+
+def test_duck_dict_form_scales_chunks(fake_audio_env):
+    """dict 形态 duck 系数：写出 chunk 全部按 ×0.5 缩放（AC-001/008）。"""
+    val, ev = _FakeValue(), _FakeEvent()
+    bp._backing_process_main("fake.wav", 0.8, None, ev, val, None, {"v": 0.5})
+    written = _FakeStream.last.written
+    assert written, "未写出任何 chunk"
+    expect = _audioop.mul(_raw_chunk(), 2, 0.5)
+    assert all(chunk == expect for chunk in written), "chunk 未按 0.5 缩放"
+
+
+def test_duck_value_form_per_chunk_restore(fake_audio_env, monkeypatch):
+    """mp.Value 形态 + 每 chunk 读取证明：首 chunk 写出后主进程置 1.0 →
+    后续 chunk 原样（恢复语义，AC-002；93ms 粒度即时生效）。"""
+    duck = _FakeValue()
+    duck.value = 0.5
+    val, ev = _FakeValue(), _FakeEvent()
+
+    orig_write = _FakeStream.write
+
+    def _write_then_restore(self, data):
+        r = orig_write(self, data)
+        duck.value = 1.0  # 模拟主进程播报播完 release_now
+        return r
+
+    monkeypatch.setattr(_FakeStream, "write", _write_then_restore)
+    bp._backing_process_main("fake.wav", 0.8, None, ev, val, None, duck)
+    written = _FakeStream.last.written
+    assert written[0] == _audioop.mul(_raw_chunk(), 2, 0.5), "首 chunk 未缩放"
+    assert all(chunk == _raw_chunk() for chunk in written[1:]), \
+        "恢复后 chunk 未回到原音量"
+
+
+def test_duck_none_keeps_legacy(fake_audio_env):
+    """duck_value=None：行为与既有完全一致（chunk 原样）——回归面。"""
+    val, ev = _FakeValue(), _FakeEvent()
+    bp._backing_process_main("fake.wav", 0.8, None, ev, val, None, None)
+    assert all(chunk == _raw_chunk() for chunk in _FakeStream.last.written)
+
+
+def test_duck_fail_soft_on_garbage(fake_audio_env):
+    """脏系数（类型错误）：fail-soft 按 1.0 原样播，不崩（播放连续性优先）。"""
+    val, ev = _FakeValue(), _FakeEvent()
+    bp._backing_process_main("fake.wav", 0.8, None, ev, val, None, {"v": "garbage"})
+    assert all(chunk == _raw_chunk() for chunk in _FakeStream.last.written)
+
+
+def test_duck_fail_soft_on_raising_value(fake_audio_env):
+    """读系数抛异常的原语：fail-soft 原样播，不崩。"""
+
+    class _BoomValue:
+        @property
+        def value(self):
+            raise RuntimeError("boom")
+
+    val, ev = _FakeValue(), _FakeEvent()
+    bp._backing_process_main("fake.wav", 0.8, None, ev, val, None, _BoomValue())
+    assert all(chunk == _raw_chunk() for chunk in _FakeStream.last.written)

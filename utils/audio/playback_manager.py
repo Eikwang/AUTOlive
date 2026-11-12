@@ -44,6 +44,13 @@ _OVERDUE_SKIP_LIMIT = 2
 # 3 秒时无需消费音频，或间奏空间本身就不足 3 秒，也无需消费音频」。
 _INTERLUDE_MIN_CONSUME_S = 3.0
 
+# 伴奏闪避（2026-11-12 伴奏闪避批次，用户需求）：前奏/间奏窗口借位消费其它
+# 音频（播报/答谢等非歌曲音频）时伴奏压低系数——保证播报可辨；歌曲人声不
+# 触发（严格 borrowed 口径）。固定 0.5（用户决定不加配置面）。恢复=播报
+# 播完≈受理+时长+余量（与 last_end=受理+preroll+段时长 同源估计口径）。
+_BACKING_DUCK_FACTOR = 0.5
+_BACKING_DUCK_RELEASE_MARGIN_S = 0.5
+
 # 编排纯画面窗口音频等待上限（防呆兜底）：正常窗口 ≤ 三步 duration_s 之和
 # （enter/main/exit，用户配置通常各 10-30s）；看门狗 F1 保证窗口必然推进，
 # 超上限按异常降级照推（宁可口型出现不丢语音）。
@@ -73,7 +80,7 @@ def routes_to_edtalk(data_json, config) -> bool:
 
 
 def _play_backing_local(backing_path: str, volume: float, start_event=None,
-                        started_event=None, started_box=None):
+                        started_event=None, started_box=None, duck_box=None):
     """R6 双轨伴奏外放（/autoplan 2026-10-23 批次，EDTalk 激活场景）：点歌伴奏轨
     独立 pyaudio 流本地播放（人声从数字人端出、伴奏本地出——双设备分工），随播完
     自退。失败仅告警不抛（R6 降级语义=人声照唱，伴奏缺失不黑场；F-S5 可观测）。
@@ -87,7 +94,11 @@ def _play_backing_local(backing_path: str, volume: float, start_event=None,
 
     2026-11-09 前奏对齐：started_event/started_box 非 None 时，start_stream 后
     回执真实起播时刻（started_box["t"]=monotonic）——前奏静音场景人声首段以此
-    为歌曲时间轴零点（t0）等待前奏后再推，对齐伴奏时钟。"""
+    为歌曲时间轴零点（t0）等待前奏后再推，对齐伴奏时钟。
+
+    2026-11-12 伴奏闪避批次：duck_box 非 None 时写流循环每 chunk 读取系数
+    （dict["v"]，1.0=原音量）并缩放——与子进程 duck_value 同型（降级线程
+    无 mp 原语，dict 载体；GIL 下主进程单写者安全）。"""
     tmp_path = None
     pa = stream = wf = None
     try:
@@ -122,7 +133,15 @@ def _play_backing_local(backing_path: str, volume: float, start_event=None,
             started_event.set()
         chunk = 1024 * wf.getnchannels() * wf.getsampwidth()
         data = wf.readframes(1024)
+        # 伴奏闪避（2026-11-12）：每 chunk 读系数缩放——与子进程同型（降级
+        # 线程 dict 载体）；读缩放原语延迟导入（backing_player 薄入口），
+        # factor<1 才缩放（正常路径零开销）
+        from utils.audio.backing_player import _read_duck as _duck_read, \
+            _scale_chunk as _duck_scale
         while data:
+            _factor = _duck_read(duck_box)
+            if _factor < 0.999:
+                data = _duck_scale(data, wf.getsampwidth(), _factor)
             stream.write(data)
             data = wf.readframes(1024)
         logger.info(f"[song] 伴奏外放完成：{backing_path}")
@@ -361,6 +380,9 @@ class PlaybackMixin:
         Returns: (gate, started_event, read_started, stop_event, proc|None,
                   degraded: bool)——gate/.set() 与 started.wait() 形态无关；
                   read_started()=起播时刻 float（哨兵 0.0=无回执）。"""
+        # ⓪ 闪避残留清理（2026-11-12 伴奏闪避批次）：取消未触发恢复定时器；
+        # 原语下方新建（新歌=全量起播，不残留上一首闪避态——AC-007）
+        self._backing_duck_cancel_restore()
         # ① 单实例：旧进程 terminate+exitcode 观测
         old = getattr(self, "_backing_proc", None)
         if old is not None:
@@ -381,9 +403,11 @@ class PlaybackMixin:
             started_ev = _mp.Event()
             value = _mp.Value('d', 0.0)
             stop_ev = _mp.Event()
+            duck_val = _mp.Value('d', 1.0)  # 闪避原语（1.0=原音量起播）
             proc = _mp.Process(
                 target=_bp._backing_process_main,
-                args=(backing_path, volume, gate, started_ev, value, stop_ev),
+                args=(backing_path, volume, gate, started_ev, value, stop_ev,
+                      duck_val),
                 daemon=True, name="song-backing")
             # spawn 的 Process.start() 是阻塞调用（100-300ms）——线程化启动，
             # 门机制吸收启动延迟（F9/D24 to_thread 纪律的线程等价形态）
@@ -391,6 +415,7 @@ class PlaybackMixin:
                              daemon=True).start()
             self._backing_proc = proc
             self._backing_stop_ev = stop_ev
+            self._backing_duck = duck_val
 
             def _read():
                 try:
@@ -409,11 +434,14 @@ class PlaybackMixin:
             started_ev = threading.Event()
             box = {"t": 0.0}
             stop_ev = threading.Event()
+            duck_box = {"v": 1.0}  # 降级线程闪避载体（dict 形态，同型语义）
             threading.Thread(
                 target=_play_backing_local,
                 args=(backing_path, volume, gate),
-                kwargs={"started_event": started_ev, "started_box": box},
+                kwargs={"started_event": started_ev, "started_box": box,
+                        "duck_box": duck_box},
                 name="song-backing", daemon=True).start()
+            self._backing_duck = duck_box
 
             def _read_degraded():
                 try:
@@ -425,7 +453,12 @@ class PlaybackMixin:
 
     def _stop_backing_player(self):
         """伴奏停止链（F5/D15）：协作停止原语（子进程每 chunk 检查）→ 短等
-        → terminate 挂死兜底 → exitcode 观测。前端「停止」路径与切歌共用。"""
+        → terminate 挂死兜底 → exitcode 观测。前端「停止」路径与切歌共用。
+        伴奏闪避清理（2026-11-12 伴奏闪避批次）：取消恢复定时器+原语置空——
+        此后 hold/release 全 no-op（AC-007：新歌经 _start_backing_player
+        重建原语=全量起播）。"""
+        self._backing_duck_cancel_restore()
+        self._backing_duck = None
         proc = getattr(self, "_backing_proc", None)
         stop_ev = getattr(self, "_backing_stop_ev", None)
         if stop_ev is not None:
@@ -457,6 +490,75 @@ class PlaybackMixin:
                                  "可临时关闭双轨")
         except Exception:
             pass
+
+    # -------------------- 伴奏闪避生命周期（2026-11-12 伴奏闪避批次）--------
+
+    def _set_backing_duck(self, factor: float):
+        """闪避底层写（双形态原语）：mp.Value('d')/.value 或 dict["v"]——与
+        回执 started_value 同型双形态（F3/D21 先例）。原语缺失（无伴奏轨/
+        整轨模式/停止清理后）no-op；写失败 fail-soft（闪避降级为不压，不
+        影响播放）。仅状态翻转时打日志（防 per-pop 噪音）。"""
+        duck = getattr(self, "_backing_duck", None)
+        if duck is None:
+            return
+        try:
+            factor = max(0.0, min(1.0, float(factor)))
+            if isinstance(duck, dict):
+                prev = float(duck.get("v", 1.0))
+                duck["v"] = factor
+            else:
+                prev = float(duck.value)
+                duck.value = factor
+            if prev != factor:
+                logger.info(f"[song] 伴奏闪避 {'ON' if factor < 1.0 else 'OFF'}"
+                            f"（×{factor:.2f}）")
+        except Exception:
+            logger.warning("[song] 伴奏闪避设置失败（fail-soft，不影响播放）\n"
+                           + traceback.format_exc())
+
+    def _backing_duck_cancel_restore(self):
+        """取消未触发的闪避恢复定时器（hold/立即恢复/停止路径共用）。句柄
+        置换竞态窗口=µs 级且触发方向恒为恢复（fail-safe），不设锁；无条件
+        归一化属性（未调度过也可安全读取 None）。"""
+        timer = getattr(self, "_backing_duck_restore_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        self._backing_duck_restore_timer = None
+
+    def _backing_duck_hold(self):
+        """闪避 ON：取消未触发恢复 + 压至 _BACKING_DUCK_FACTOR（借位条目起播
+        前）。连续借位=重复 hold——定时器被取消即全程保持压低（AC-003），
+        写 0.5 幂等。"""
+        self._backing_duck_cancel_restore()
+        self._set_backing_duck(_BACKING_DUCK_FACTOR)
+
+    def _backing_duck_release_later(self, entry):
+        """闪避恢复调度（播报播完≈受理+时长+余量）：push_full 返回=播报起播
+        （受理），EDTalk 帧锁定 1× 播放 → 受理+pydub 时长=播完物理估计（与
+        last_end=受理+preroll+段时长 同源口径）。时长未知（fail-soft=0，如
+        pydub 读失败）不定时——等下一次非借位 pop（人声段 release_now）或
+        停止路径恢复（宁可持续压低不提前放开盖住播报的降级语义）。"""
+        self._backing_duck_cancel_restore()
+        try:
+            dur = float(self._entry_duration_s(entry) or 0.0)
+        except Exception:
+            dur = 0.0
+        if dur <= 0:
+            return
+        timer = threading.Timer(
+            dur + _BACKING_DUCK_RELEASE_MARGIN_S, self._backing_duck_release_now)
+        timer.daemon = True
+        self._backing_duck_restore_timer = timer
+        timer.start()
+
+    def _backing_duck_release_now(self):
+        """闪避 OFF（幂等）：取消定时器 + 回全量。歌曲人声段出队/异常路径/
+        停止路径/定时器回调共用出口（AC-002/006/007）。"""
+        self._backing_duck_cancel_restore()
+        self._set_backing_duck(1.0)
 
     def _on_edtalk_yield(self) -> bool:
         """d19/uc2b（T7，2026-11-05 批次）：EDTalk 路径 999 让位编排——
@@ -686,11 +788,26 @@ class PlaybackMixin:
                             logger.info(
                                 f"[song] 前奏窗口插播（推数字人口型）："
                                 f"{_interlude_entry.get('content', '')[:30]}")
+                            # 伴奏闪避（2026-11-12 伴奏闪避批次）：前奏窗口借位
+                            # 与消费循环同口径——**受理（出声）**时压伴奏，受理+
+                            # 时长估计恢复；异常=未出声不压（AC-001/002/006）。
+                            # 压低不放出队点（song6.log 修正：飞行等待期不抢
+                            # 当前音频——前奏场景当条=点歌应答，同理）。
+                            _borrow_consumed = False
+                            try:
+                                await self._consume_edtalk_entry(
+                                    _interlude_entry,
+                                    _interlude_entry.get("voice_path", ""))
+                                _borrow_consumed = True
+                            finally:
+                                if _borrow_consumed:
+                                    self._backing_duck_hold()
+                                    self._backing_duck_release_later(
+                                        _interlude_entry)
+                                else:
+                                    self._backing_duck_release_now()
                             # 字幕/编排回执/消费回执由 _consume_edtalk_entry
                             # 内置承担（勿重复调用——T3 单一源守卫）
-                            await self._consume_edtalk_entry(
-                                _interlude_entry,
-                                _interlude_entry.get("voice_path", ""))
                         else:
                             await asyncio.sleep(min(_remain, 0.5))
                 self._song_anchor = {"t0": _t0, "last_end": 0.0}
@@ -909,6 +1026,15 @@ class PlaybackMixin:
                     logger.debug(f"待播放队列出队 type={data_json.get('type')} "
                                  f"content={str(data_json.get('content', ''))[:50]}")
 
+                    # 伴奏闪避挂点（2026-11-12 伴奏闪避批次；同日 song6.log
+                    # 实测修正：压低点=**受理（播报出声）**而非出队——②b 窗口
+                    # 预检可在人声未唱完时出队借位条目（push 飞行等待把实际
+                    # 出声推迟到真实间奏），出队即压低会把正在唱的人声伴奏压
+                    # 掉 60s+。非借位出队（人声段/自由消费）幂等恢复（AC-004
+                    # +残留清理）。压低点见分支 finally（受理后）。
+                    if not _borrowed:
+                        self._backing_duck_release_now()
+
                     voice_tmp_path = data_json["voice_path"]
 
                     # A7/T1（2026-10-22 审查批次）：999 单实例 active 标记——条目离开
@@ -947,11 +1073,24 @@ class PlaybackMixin:
                         # 都释放标记，防 999 单实例门卡死复读专线（原释放点仅在正常
                         # 完成路径，逃逸即悬挂）。分支体提取为 _consume_edtalk_entry
                         # 逐字保持，仅移除正常路径内的冗余释放点——finally 统一承担。
+                        _consumed_ok = False
                         try:
                             await self._consume_edtalk_entry(data_json, voice_tmp_path)
+                            _consumed_ok = True
                         finally:
                             if _was_999:
                                 self.active_reread_top_999 = False
+                            # 伴奏闪避（2026-11-12 伴奏闪避批次）：**受理=
+                            # 播报出声**（push_full 返回）→ 此刻压低，受理+
+                            # 时长估计定时恢复（AC-001/002）；异常=播报未出声
+                            # 不压不悬挂（AC-006）。压低不放出队点（song6.log
+                            # 修正：飞行等待期间人声在唱，出队即压=压人声伴奏）
+                            if _borrowed:
+                                if _consumed_ok:
+                                    self._backing_duck_hold()
+                                    self._backing_duck_release_later(data_json)
+                                else:
+                                    self._backing_duck_release_now()
                     else:
                         # 本地播放统一 builtin 进程内播放器（2026-10-30 审查批次）：
                         # 「音频播放器」选择配置退役移除——外部 AUDIO_PLAYER HTTP 客户端
@@ -1017,11 +1156,20 @@ class PlaybackMixin:
                         except Exception:
                             pass
                         self._notify_choreo_complete(data_json)
+                        # 伴奏闪避（2026-11-12 伴奏闪避批次）：builtin 移交≈
+                        # 助播借位出声点 → 压低+受理口径定时恢复（同 EDTalk
+                        # 面）；移交异常由外层 except 兜底（AC-006）
+                        if _borrowed:
+                            self._backing_duck_hold()
+                            self._backing_duck_release_later(data_json)
                         # ② 点歌切片末段清理：builtin play()=异步入队非播放完成判定，
                         # 末段清理依赖合成侧 _purge_stale_song_segments 清扫兜底。
 
                 except Exception as e:
                     logger.error(traceback.format_exc())
+                    # 伴奏闪避兜底（2026-11-12 伴奏闪避批次，AC-006）：受理点
+                    # 语义下异常=未压低，此处幂等清残留（定时器/状态归零）。
+                    self._backing_duck_release_now()
         except Exception as e:
             logger.error(traceback.format_exc())
 
