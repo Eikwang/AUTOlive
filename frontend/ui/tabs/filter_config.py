@@ -42,13 +42,13 @@ def create_filter_config_tab(
             _auto_save(ui.input(label='最大单词数', placeholder='最长阅读的英文单词数（空格分隔）', value=get_nested_value(config, "filter", "max_len")).style("width:100%;").tooltip('最长阅读的英文单词数（空格分隔），超限自动截断只保留设定值'), keys=("filter", "max_len"))
             _auto_save(ui.input(label='最大字符数', placeholder='最长阅读的字符数，双重过滤，避免溢出', value=get_nested_value(config, "filter", "max_char_len")).style("width:100%;").tooltip('最长阅读的字符数，超限自动截断只保留设定值，双重过滤避免溢出'), keys=("filter", "max_char_len"))
 
-        # 违禁词过滤组（四开关同一行并列——违禁词过滤/违禁语句丢弃/数字转中文/表情过滤；
-        # 关联参数在开关行下方）
+        # 违禁词过滤组（四开关同一行并列——违禁词过滤/违禁语句丢弃/用户名数字
+        # 转文字/弹幕表情过滤；关联参数在开关行下方）
         with ui.row().style("align-items:center; gap:16px; flex-wrap:wrap;"):
             _auto_save(ui.switch('违禁词过滤', value=get_nested_value(config, "filter", "badwords", "enable")).style(switch_internal_css), keys=("filter", "badwords", "enable"))
             _auto_save(ui.switch('违禁语句丢弃', value=get_nested_value(config, "filter", "badwords", "discard")).style(switch_internal_css), keys=("filter", "badwords", "discard"))
-            _auto_save(ui.switch('用户名中的数字转中文', value=get_nested_value(config, "filter", "username_convert_digits_to_chinese")).style(switch_internal_css).tooltip('用户名中的数字转中文'), keys=("filter", "username_convert_digits_to_chinese"))
-            _auto_save(ui.switch('弹幕表情过滤', value=get_nested_value(config, "filter", "emoji")).style(switch_internal_css).tooltip('过滤弹幕与用户名中的表情（[爱心]、emoji）及特殊字符，只保留文字'), keys=("filter", "emoji"))
+            _auto_save(ui.switch('用户名数字转文字', value=get_nested_value(config, "filter", "username_convert_digits_to_chinese")).style(switch_internal_css).tooltip('开启后先过滤用户名中的表情、特殊字符和非回复语言文字（保留集按「通用配置-回复语言」，中文恒保留；如回复语言=中文时仅保留中文字符），再将数字转为文字（如"爱国*122"→"爱国一二二"）；全部被过滤时以"观众"替代'), keys=("filter", "username_convert_digits_to_chinese"))
+            _auto_save(ui.switch('弹幕表情过滤', value=get_nested_value(config, "filter", "emoji")).style(switch_internal_css).tooltip('过滤弹幕中的表情（[爱心]、emoji）、特殊字符及非中英日韩文字，只保留可念文字'), keys=("filter", "emoji"))
         with ui.grid(columns=3):
             _auto_save(ui.input(label='违禁词路径', value=get_nested_value(config, "filter", "badwords", "path"), placeholder='本地违禁词数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁词数据路径（txt，UTF-8 编码；你如果不需要，可以清空文件内容）'), keys=("filter", "badwords", "path"))
             _auto_save(ui.input(label='违禁拼音路径', value=get_nested_value(config, "filter", "badwords", "bad_pinyin_path"), placeholder='本地违禁拼音数据路径（你如果不需要，可以清空文件内容）').style("width:100%;").tooltip('本地违禁拼音数据路径（txt，UTF-8 编码；同音变体检测，仅「违禁语句丢弃」开启时生效）'), keys=("filter", "badwords", "bad_pinyin_path"))

@@ -557,7 +557,7 @@ class TestT10VoiceTalkChain:
         """任务 16：四开关同行并列。"""
         src = _src("frontend/ui/tabs/filter_config.py")
         row_block = src[src.find("四开关同一行并列"):src.find("违禁词路径")]
-        for label in ("违禁词过滤", "违禁语句丢弃", "用户名中的数字转中文", "弹幕表情过滤"):
+        for label in ("违禁词过滤", "违禁语句丢弃", "用户名数字转文字", "弹幕表情过滤"):
             assert f"ui.switch('{label}'" in row_block
 
     def test_stage_button_text_white(self):

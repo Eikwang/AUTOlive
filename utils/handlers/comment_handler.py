@@ -100,9 +100,11 @@ class CommentHandler:
                 max_len, max_char_len = 30, 50
             content = self.my_handle.common.remove_extra_words(content, max_len, max_char_len)
 
-            # 弹幕表情过滤（开启后移除表情，只保留文字）
+            # 弹幕表情过滤（开启后清洁内容，2026-11-12 过滤优化批次）：表情
+            # （[爱心]/emoji）+特殊字符+非中英日韩文字全部遗弃（字符白名单制），
+            # 只保留可念文字
             if filter_config.get("emoji"):
-                content = self.my_handle.common.remove_emoji(content)
+                content = self.my_handle.common.clean_danmaku_text(content)
 
             return content
         except Exception as e:
@@ -312,6 +314,12 @@ class CommentHandler:
         rc_content = content
         if self.my_handle.config.get("read_comment", "read_username_enable"):
             uname = username
+            # 念播用户名兜底（2026-11-12 过滤优化批次）：纯表情/特殊字符用户名
+            # 链上清洁后为空已 or 原文兜底——原文念播仍出乱码，此处对传入
+            # username 再清洁（幂等），空则"观众"
+            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                uname = (self.my_handle.common.clean_username(
+                    uname, self.my_handle.config.get("need_lang")) or "观众")
             try:
                 _rc_max_len = int(self.my_handle.config.get("read_comment", "username_max_len"))
             except (TypeError, ValueError):
@@ -375,14 +383,17 @@ class CommentHandler:
             if username is None:
                 return
 
-            # 用户名表情/特殊字符过滤（filter.emoji 与弹幕内容同开关，
-            # 2026-10-31 过滤优化批次）：用户名含表情（[爱心]/emoji）或特殊
-            # 字符时，语音合成念用户名会产生大量错误语音；先清洁后（合成侧
-            # 恒有）数字转中文。纯表情用户名过滤后为空 → 保留原文兜底。
-            # 写库/念弹幕缓冲/聊天记录（ori_username 留原文）/LLM 输入统一
-            # 使用清理后用户名；黑名单/积分在上方已用原始 data 判定，不受影响。
-            if self.my_handle.config.get("filter", "emoji"):
-                username = self.my_handle.common.clean_username(username) or username
+            # 用户名清洁（「用户名数字转文字」filter.username_convert_digits_
+            # to_chinese 开关链第一步，2026-11-12 过滤优化批次职责重划：用户名
+            # 处理归本开关、弹幕内容归 filter.emoji）：先过滤表情/特殊字符/
+            # 回复语言外文字（保留集按 need_lang，中文恒保留），后（下方 LLM
+            # 块与合成侧）数字转文字。纯表情用户名清洁后为空 → 保留原文兜底
+            # （念播/合成侧再兜"观众"）。写库/念弹幕缓冲/聊天记录（ori_username
+            # 留原文）/LLM 输入统一使用清理后用户名；黑名单/积分在上方已用
+            # 原始 data 判定，不受影响。
+            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                username = (self.my_handle.common.clean_username(
+                    username, self.my_handle.config.get("need_lang")) or username)
 
             content = self.prohibitions_handle(content)
             if content is None:
@@ -511,10 +522,10 @@ class CommentHandler:
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 用户名数字转中文（filter.username_convert_digits_to_chinese）：
-                # 参数语义=「数字转换为中文再发送给 LLM」——仅重绑本局部变量供
-                # LLM 输入使用（写库/聊天记录/黑名单均不受影响；合成侧同名转换
-                # 幂等，播报不受影响）
+                # 用户名数字转文字（filter.username_convert_digits_to_chinese，
+                # 原"数字转中文"）：链第二步（上方清洁之后，2026-11-12 过滤优化
+                # 批次）——仅重绑本局部变量供 LLM 输入使用（写库/聊天记录/
+                # 黑名单均不受影响；合成侧同名转换幂等，播报不受影响）
                 if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
                     username = self.my_handle.common.convert_digits_to_chinese(username) or username
 

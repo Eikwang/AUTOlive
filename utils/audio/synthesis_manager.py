@@ -390,19 +390,18 @@ class SynthesisMixin:
             if self.config.get("audio_synthesis_type") == "none":
                 return
 
-            # 用户名表情/特殊字符过滤（filter.emoji 同开关，2026-10-31 过滤
-            # 优化批次）：合成念用户名前的最终关口——弹幕链已过滤，语音对话/
-            # 念弹幕回放/答谢等其余来源的 username 在此兜底；先清洁后数字转
-            # 中文（共同构成用户名合成前处理链）。清理为空保留原文兜底。
-            if self.config.get("filter", "emoji"):
-                if message.get("username"):
-                    message["username"] = (self.common.clean_username(message["username"])
-                                           or message["username"])
-
-            # 将用户名字符串中的数字转换成中文
+            # 用户名合成前处理链（「用户名数字转文字」filter.username_convert_
+            # digits_to_chinese 单开关驱动，2026-11-12 过滤优化批次职责重划：
+            # 用户名处理归本开关、弹幕内容归 filter.emoji）——合成念用户名前
+            # 的最终关口：弹幕链已过滤，语音对话/念弹幕回放/答谢等其余来源的
+            # username 在此兜底。先清洁（表情/特殊字符/回复语言外文字，保留集
+            # 按 need_lang）后数字转文字；清洁为空 → 默认"观众"（保底规则，
+            # 替代原"保留原文"——全表情/特殊字符用户名念播出乱码）。
             if self.config.get("filter", "username_convert_digits_to_chinese"):
-                if message["username"] is not None:
-                    message["username"] = self.common.convert_digits_to_chinese(message["username"])
+                if message.get("username"):
+                    _uname = (self.common.clean_username(
+                        message["username"], self.config.get("need_lang")) or "观众")
+                    message["username"] = self.common.convert_digits_to_chinese(_uname)
 
             # 判断是否是点歌模式
             if message['type'] == "song":

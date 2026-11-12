@@ -184,10 +184,12 @@ class TestUsernameDigitsToChinese:
 
 
 class TestUsernameClean:
-    """用户名表情/特殊字符过滤（2026-10-31 过滤优化批次）：filter.emoji
-    开关同时约束弹幕内容与用户名——用户名含表情/特殊字符时语音合成念用户名
-    产生大量错误语音；合成侧 audio_synthesis 为最终关口兜底（先清洁后数字
-    转中文，构成用户名合成前处理链）。"""
+    """用户名清洁（2026-11-12 过滤优化批次职责重划）：清洁链归
+    「用户名数字转文字」开关（filter.username_convert_digits_to_chinese）——
+    先过滤表情/特殊字符/回复语言外文字，后（合成侧与 LLM 输入）数字转文字；
+    弹幕内容归 filter.emoji（clean_danmaku_text）。合成侧 audio_synthesis 为
+    最终关口兜底（清洁→"观众"保底→数字转文字）。本类行为断言均为缺省
+    need_lang（"所有"→中英日韩全保留）口径。"""
 
     def test_clean_username_behavior(self):
         from utils.common import Common
@@ -206,18 +208,23 @@ class TestUsernameClean:
         assert c.clean_username("ABC abc 123") == "ABC abc 123"
 
     def test_comment_handle_wiring(self):
-        """弹幕链接线：username 违禁处理后读 filter.emoji 调 clean_username。"""
+        """弹幕链接线（2026-11-12 职责重划）：username 违禁处理后读
+        filter.username_convert_digits_to_chinese 调 clean_username（need_lang
+        透传）；filter.emoji 的 config.get 用户名消费点不再存在。"""
         src = _src("utils/handlers/comment_handler.py")
-        assert 'config.get("filter", "emoji")' in src
-        assert "clean_username(username) or username" in src
+        assert 'config.get("filter", "username_convert_digits_to_chinese")' in src
+        assert 'username, self.my_handle.config.get("need_lang")) or username)' in src
+        assert 'config.get("filter", "emoji")' not in src
 
     def test_synthesis_final_gate_order(self):
-        """合成侧最终关口接线：clean_username 先于 convert_digits_to_chinese
-        （语音对话/念弹幕回放/答谢等来源的 username 统一在此兜底）。"""
+        """合成侧最终关口接线（2026-11-12 单开关三步链）：清洁 → "观众"保底
+        → 数字转文字（语音对话/念弹幕回放/答谢等来源的 username 统一在此兜底）。"""
         src = _src("utils/audio/synthesis_manager.py")
-        assert 'clean_username(message["username"])' in src
-        assert src.index("clean_username(message") < src.index(
-            'convert_digits_to_chinese(message["username"])')
+        assert 'config.get("filter", "username_convert_digits_to_chinese")' in src
+        assert 'self.config.get("need_lang")) or "观众")' in src
+        assert src.index("clean_username(") < src.index(
+            "convert_digits_to_chinese(_uname)")
+        assert 'config.get("filter", "emoji")' not in src
 
 
 # ---------------------------------------------------------------------------

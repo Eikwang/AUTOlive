@@ -319,23 +319,118 @@ class TextMixin:
         "]+"
     )
 
-    def clean_username(self, text=""):
-        """清理用户名：表情（标签+emoji）+ 特殊字符两级过滤，只保留可念文字。
+    # ---------- 回复语言保留集与字符级白名单过滤（2026-11-12 过滤优化批次） ----------
+    # 「用户名数字转文字」/「弹幕表情过滤」两开关共用的底层原语：白名单外
+    # 一律遗弃——表情、特殊字符/标点、生僻语言（藏文/泰文等）、控制与零宽
+    # 字符在白名单制下一次清空；数字（0-9）与空格与语言无关恒保留。
 
-        语义（2026-10-31 过滤优化批次）：用户名与弹幕内容同受「弹幕表情过滤」
-        开关（filter.emoji）约束——用户名含表情/特殊字符时语音合成念用户名会
-        产生大量错误语音。处理顺序=先表情后噪音字符；全部被过滤时返回空串，
-        由调用方以 `or username` 兜底保留原文（用户名不可为空）。
+    # 回复语言（通用配置 need_lang）→ 用户名保留语言集：中文恒保留
+    # （粤字∈CJK 区段归中文；配置值域 none/zh/yue/en/jp/ko 与 UI 对齐）。
+    # 未知值宽松放行中英日韩（仅表情/特殊字符过滤生效，防配置异常清空用户名）。
+    _NEED_LANG_KEEP = {
+        "none": frozenset(("zh", "en", "ja", "ko")),   # 所有
+        "zh": frozenset(("zh",)),
+        "yue": frozenset(("zh",)),                      # 粤语→中文字符
+        "en": frozenset(("zh", "en")),
+        "jp": frozenset(("zh", "ja")),
+        "ko": frozenset(("zh", "ko")),
+    }
+
+    # 语言白名单字符区段：中文=CJK 统一表意/扩展A/兼容表意+重复号々〆〇；
+    # 日文=假名（平/片假名，长音符ー在内）；韩文=谚文音节+Jamo+兼容 Jamo。
+    _LANG_RANGE_ZH = ((0x4E00, 0x9FFF), (0x3400, 0x4DBF),
+                      (0xF900, 0xFAFF), (0x3005, 0x3007))
+    _LANG_RANGE_JA = ((0x3040, 0x30FF),)
+    _LANG_RANGE_KO = ((0xAC00, 0xD7AF), (0x1100, 0x11FF), (0x3130, 0x318F))
+
+    @staticmethod
+    def _in_ranges(code, ranges):
+        return any(s <= code <= e for s, e in ranges)
+
+    def reply_keep_languages(self, need_lang=None):
+        """回复语言（need_lang）→ 保留语言集（frozenset）。
+
+        Args:
+            need_lang (str): 通用配置「回复语言」（none/zh/yue/en/jp/ko）
+
+        Returns:
+            frozenset: 保留语言集（'zh'/'en'/'ja'/'ko' 子集）
+        """
+        return self._NEED_LANG_KEEP.get(str(need_lang or "none").strip().lower(),
+                                        self._NEED_LANG_KEEP["none"])
+
+    def _filter_lang_chars(self, text, langs):
+        """字符级语言白名单过滤：白名单外一律遗弃。
+
+        Args:
+            text (str): 原始文本
+            langs (frozenset): 保留语言集（'zh'/'en'/'ja'/'ko'）
+
+        Returns:
+            str: 过滤后文本（数字与空格保留，其余见白名单规则）
+        """
+        langs = langs or self._NEED_LANG_KEEP["none"]
+        out = []
+        for ch in str(text or ""):
+            code = ord(ch)
+            if ch == " " or "0" <= ch <= "9":
+                out.append(ch)
+            elif ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+                if "en" in langs:
+                    out.append(ch)
+            elif self._in_ranges(code, self._LANG_RANGE_ZH):
+                out.append(ch)          # 汉字恒保留（中文，含粤字）
+            elif self._in_ranges(code, self._LANG_RANGE_JA):
+                if "ja" in langs:
+                    out.append(ch)
+            elif self._in_ranges(code, self._LANG_RANGE_KO):
+                if "ko" in langs:
+                    out.append(ch)
+            # 白名单外：遗弃（表情/特殊字符/标点/生僻语言/控制字符）
+        # 中段遗弃后残留的连续空格收敛为单空格（如 ko 态下 "abc 안녕" 的
+        # abc 遗弃后 "小明  안녕" → "小明 안녕"）
+        return re.sub(r" {2,}", " ", "".join(out))
+
+    def clean_username(self, text="", need_lang="none"):
+        """清理用户名：表情（标签+emoji）+ 特殊字符 + 回复语言外文字三级过滤，
+        只保留可念文字（2026-11-12 过滤优化批次）。
+
+        语义：「用户名数字转文字」开关（filter.username_convert_digits_to_
+        chinese）链第一步——先过滤表情/特殊字符/非回复语言文字，后（合成侧
+        与 LLM 输入）数字转文字。语言保留集由通用配置「回复语言」（need_lang）
+        决定：所有→中英日韩；中文/粤语→仅中文；英文/日文/韩文→中文+所选
+        语言。全部被过滤时返回空串，由调用方兜底——写库/链内 or 原文（用户名
+        不可为空），念播/合成侧 or "观众"（保底规则）。
 
         Args:
             text (str): 原始用户名
+            need_lang (str): 通用配置「回复语言」（none/zh/yue/en/jp/ko）
 
         Returns:
             str: 清理后的用户名（首尾空白收敛）
         """
         text = self.remove_emoji(text)
         text = self._USERNAME_NOISE_PATTERN.sub('', text)
+        text = self._filter_lang_chars(text, self.reply_keep_languages(need_lang))
         return text.strip()
+
+    def clean_danmaku_text(self, text=""):
+        """弹幕内容清洁（「弹幕表情过滤」filter.emoji 链，2026-11-12 过滤优化
+        批次）：表情（平台标签+emoji）、特殊字符与一切非中英日韩文字遗弃，
+        只保留可念文字。
+
+        保留集恒中英日韩（语种级整条丢弃由 lang_filter_pass 按「回复语言」
+        负责，此处仅做字符级可念性清洗）；数字与空格保留。纯表情/符号弹幕
+        返回空串，由调用方按空内容处置。
+
+        Args:
+            text (str): 原始弹幕内容
+
+        Returns:
+            str: 清洁后的文本（首尾空白收敛）
+        """
+        text = self.remove_emoji(text)
+        return self._filter_lang_chars(text, self._NEED_LANG_KEEP["none"]).strip()
 
 
     # 读取违禁词/违禁拼音词表文件（E4 编码边界：check_sensitive_words 1/2/3 共用）
