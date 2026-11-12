@@ -61,6 +61,10 @@ class DanmakuLoginService:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # 会话有效性校验器（2026-11-12 方案二——存在性判定之外的过期感知；
+        # status() 非阻塞契约：网络校验在后台线程，绝不进入轮询链）
+        from danmaku_listener.engines.login_session_validator import LoginSessionValidator
+        self._validator = LoginSessionValidator()
 
     # ---------- 平台元数据单源（Eng F-ENG-12） ----------
 
@@ -179,6 +183,31 @@ class DanmakuLoginService:
     def login_supported(self, platform: str) -> bool:
         return self._meta(platform) is not None
 
+    # ---------- 会话有效性校验（2026-11-12 方案二——过期感知呈现层） ----------
+
+    def session_status(self, platform: str) -> Optional[str]:
+        """登录凭证存在前提下的会话有效性（None=未登录/无校验依据）
+
+        非阻塞：真实校验（bilibili nav API）在后台线程执行，结果经缓存
+        在后续轮询自然呈现；本方法只做内存+本地 IO，可安全进入渲染/签名链。
+        返回 "valid"|"expired"|"stale"|"unverified"|None。
+        """
+        if not self.check_login(platform):
+            return None
+        try:
+            return self._validator.status(platform, _cookie_dir())
+        except Exception:
+            logger.opt(exception=True).warning(f"[danmaku-login-svc] {platform} 会话校验异常")
+            return "unverified"
+
+    def validate_session_now(self, platform: str) -> Optional[str]:
+        """同步强制校验（onboarding 专用——调用方须在 to_thread 内；网络调用）"""
+        try:
+            return self._validator.validate_now(platform, _cookie_dir())
+        except Exception:
+            logger.opt(exception=True).warning(f"[danmaku-login-svc] {platform} 强制校验异常")
+            return "unverified"
+
     def request_login(self, platform: str) -> dict:
         """发起登录（串行队列入队；webui 轮询 _state 呈现进度）。"""
         if not self.login_supported(platform):
@@ -266,9 +295,11 @@ class DanmakuLoginService:
         meta = self._meta(platform)
         if meta is None:
             return
-        if self.check_login(platform):
-            self._set_state(platform, "success", "已有登录态，无需重复登录")
-            return
+        # 放行显式登录请求（2026-11-12 根修——原 269-271 行「已有登录态直接 return」
+        # 阻断删除）：登录态判定是凭证存在性检查，会话可能已过期（B站 10-08 存档
+        # nav API 实测 -101 实证）——用户点「登录/重新登录」= 明确重登意图，照弹窗。
+        # 弹窗流程仅在登录成功时覆写 cookie 文件（超时/关窗不写），旧态不劣化。
+        # 添加房间自动引导的免打扰阻断保留在 UI 层 _onboard_login（check+会话校验双判）。
         self._set_state(platform, "launching", "浏览器启动中")
         started = time.time()
         # 组件 run_login_flow：可见浏览器 → 扫码 → cookie 保存（阻塞至完成/超时/关闭）
@@ -276,6 +307,7 @@ class DanmakuLoginService:
         self._loop.run_until_complete(
             asyncio.wait_for(meta["flow"](), timeout=LOGIN_WAIT_TIMEOUT + 120))
         elapsed = time.time() - started
+        self._validator.invalidate(platform)  # 登录动作后清会话校验缓存——徽章按新凭证重新判定
         if self.check_login(platform):
             self._set_state(platform, "success", f"登录成功（{elapsed:.0f}s，浏览器已关闭）")
         elif elapsed >= LOGIN_WAIT_TIMEOUT - 5:
@@ -380,9 +412,13 @@ class DanmakuLoginService:
                         break
                     try:
                         if page.is_closed():
-                            # 关窗确认制：无判定名平台（pdd/wxsp）由用户关窗表示登录完成；
-                            # 有判定名平台关窗时最后已知 cookie 命中同样落盘（gate 同款恢复语义）
-                            if last_cookies:
+                            # 关窗确认制（2026-11-12 根修——补 hit 检查）：无判定名平台
+                            # （pdd/wxsp）由用户关窗表示登录完成；有判定名平台关窗时
+                            # 最后已知 cookie **命中判定名才落盘**（gate 同款恢复语义，
+                            # login_gate.py:166 前例）。原实现漏 hit 检查——匿名会话
+                            # （xhs web_session 游客态）也被记 logged_in（2026-11-12
+                            # 11:29 xhs 快照实证假成功）。
+                            if not names and last_cookies:
                                 import json as _json
                                 state = await context.storage_state() if not page.is_closed() else {
                                     "cookies": last_cookies, "origins": []}
@@ -391,11 +427,19 @@ class DanmakuLoginService:
                                                encoding="utf-8")
                                 tmp.replace(state_path)
                                 outcome = "logged_in"
+                            elif names and hit:
+                                import json as _json
+                                tmp = Path(state_path + ".tmp")
+                                tmp.write_text(_json.dumps(
+                                    {"cookies": last_cookies, "origins": []},
+                                    ensure_ascii=False), encoding="utf-8")
+                                tmp.replace(state_path)
+                                outcome = "logged_in"
                             else:
                                 outcome = "window_closed"
                             break
                     except Exception:  # noqa: BLE001  页面已关（cookies 也失效）
-                        if last_cookies:
+                        if (not names and last_cookies) or (names and hit):
                             import json as _json
                             Path(state_path).write_text(
                                 _json.dumps({"cookies": last_cookies, "origins": []},
@@ -411,7 +455,6 @@ class DanmakuLoginService:
                 except Exception:  # noqa: BLE001
                     pass
         return outcome
-        self._set_state(self._state["platform"], "saving", "登录态保存中")
 
 
 # 模块级单例（Eng F-ENG-8）

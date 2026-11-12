@@ -449,8 +449,10 @@ class ControlledPageEngine(BaseEngine):
                 logger.debug(f"[{self.platform}] room {room_id} frame parse error: {e}")
 
         def on_websocket(ws) -> None:
-            logger.debug(f"[{self.platform}] room {room_id} ws open: "
-                         f"{str(ws.url)[:80]}")
+            # INFO（2026-11-12 pdd 诊断升级：原 DEBUG 线上不可见——收不到直播
+            # 信息时 ws 开没开/开在哪是第一分层证据；WS 开启低频，INFO 无噪音）
+            logger.info(f"[{self.platform}] room {room_id} ws open: "
+                        f"{str(ws.url)[:100]}")
             ws.on("framereceived",
                   lambda p: asyncio.create_task(on_frame(p)))
 

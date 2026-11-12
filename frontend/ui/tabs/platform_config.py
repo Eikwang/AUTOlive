@@ -48,9 +48,14 @@ _ROOM_STATE_TEXT = {
     "stalled": ("收流停滞", "var(--color-negative, #c10015)"),
     "disabled": ("已停用", "var(--text-hint, #9e9e9e)"),
 }
-_LOGIN_BADGE = {  # J-3 三级视觉
+_LOGIN_BADGE = {  # J-3 三级视觉 + 会话有效性分级（2026-11-12 方案二判定升级）
     "none": ("未登录", "grey-6"),
     "confirmed": ("已登录", "positive"),
+    # 存在性判定之外的会话校验结果（login_session_validator）——expired 红色
+    # 呈现是本次根修的核心可见化：凭证在、会话死（B站 nav -101 实证形态）
+    "expired": ("登录态已过期", "negative"),
+    "stale": ("登录态可能过期", "warning"),
+    "unverified": ("已登录", "positive"),
 }
 
 
@@ -106,28 +111,67 @@ async def _api(config: Dict[str, Any], method: str, path: str, body: Dict[str, A
         return None
 
 
+def _normalize_room_spec(platform: str, spec: str) -> "tuple[str | None, str]":
+    """链接 → 规范房间号归一（2026-11-12——config.rooms 落库 REST 安全 id）。
+
+    背景（1688/pdd 2026-11-12 实测）：运行期 bridge.add_room 对链接有完整
+    归一化链（extract_from_link → engine.normalize_room_id，注册表 room_id
+    永不含 ``://``——base.py:90 斜杠打散 404 铁律），但配置期直写 config.rooms
+    是原文落库 → 前端轮询/启停用原始链接拼 REST 路径全部 404（1688 添加成功
+    监听失败实证）。本函数把落库路径对齐到同一语义：webui 与组件同进程，
+    直接复用组件解析器（六平台静态正则含 1688 feedId/jd liveId）+
+    平台专属提取器（pdd mall_id——用户 2026-11-12 实测形态）。
+
+    Returns:
+        (normalized, note)：normalized=None 表示未归一（原文/confirm 路径）；
+        note 非空 = 明确错误（链接属于其他平台/提取失败），调用方直接报错。
+    """
+    if "://" not in spec:
+        return None, ""
+    try:
+        from danmaku_listener.utils.platform_parser import extract_from_link
+        link_spec = extract_from_link(spec)
+        if link_spec is not None:
+            if link_spec.platform != platform:
+                return None, f"该链接是 {link_spec.platform} 的直播间——请切换平台后添加"
+            return link_spec.room_id, ""
+    except Exception:
+        pass
+    if platform == "pdd":
+        try:
+            from danmaku_listener.engines.protocol.pdd import extract_room_id
+            return extract_room_id(spec), ""
+        except ValueError as e:
+            return None, str(e)
+    return None, ""
+
+
 def _validate_room(platform: str, room_spec: str, rooms: list) -> Dict[str, Any]:
-    """写前校验（CEO F5 + DX 发现 6）：返回 {"ok": bool, "error": str, "confirm": str|None}。"""
+    """写前校验（CEO F5 + DX 发现 6）：返回 {"ok", "error", "confirm", "normalized"}。
+
+    2026-11-12：链接先归一再校验（200 长度检查移到归一后——长分享链接归一为
+    数字 id 必短）；归一结果经 "normalized" 字段回传，落库用归一 id。
+    """
     spec = (room_spec or "").strip()
     if not platform or platform not in _ALL_PLATFORMS:
         return {"ok": False, "error": "请选择有效平台"}
     if not spec:
         return {"ok": False, "error": "房间号或链接不能为空"}
-    if len(spec) > _ROOM_SPEC_MAX:
+    normalized, note = _normalize_room_spec(platform, spec)
+    if note:
+        return {"ok": False, "error": note}
+    effective = normalized or spec
+    if len(effective) > _ROOM_SPEC_MAX:
         return {"ok": False, "error": f"房间标识过长（>{_ROOM_SPEC_MAX} 字符）"}
     for r in rooms:
         if isinstance(r, dict) and r.get("platform") == platform and \
-                str(r.get("room_id")) == spec:
-            return {"ok": False, "error": f"该平台已存在相同房间：{spec}"}
+                str(r.get("room_id")) == effective:
+            return {"ok": False, "error": f"该平台已存在相同房间：{effective}"}
     confirm = None
-    if "://" in spec:
-        try:
-            from danmaku_listener.utils.platform_parser import extract_from_link
-            if extract_from_link(spec) is None:
-                confirm = "无法识别的链接格式，将按原文保存，运行时可能无法监听——确认添加？"
-        except Exception:
-            confirm = "链接解析不可用，将按原文保存——确认添加？"
-    return {"ok": True, "error": "", "confirm": confirm}
+    if "://" in spec and normalized is None:
+        confirm = ("无法识别的链接格式，将按原文保存——启停/轮询等操作会失败，"
+                   "建议改填房间号/数字 ID。确认添加？")
+    return {"ok": True, "error": "", "confirm": confirm, "normalized": normalized}
 
 
 def create_platform_config_tab(
@@ -469,8 +513,12 @@ def create_platform_config_tab(
                     await _toast(v["confirm"], "warning")
                     return
                 state["confirm_pending"] = None
+                # 链接归一落库（2026-11-12）：config.rooms 存 REST 安全 id
+                # （pdd mall_id/1688 feedId 等）——前端轮询/启停拼路径不再被
+                # 链接字符打散（bridge 运行期归一同语义，见 _normalize_room_spec）
+                room_id = v.get("normalized") or spec
                 rooms = _rooms()
-                rooms.append({"platform": platform, "room_id": spec,
+                rooms.append({"platform": platform, "room_id": room_id,
                               "enabled": True})  # DX 发现 1：添加即启用（active 字段已退役）
                 if not await _write_rooms(rooms):
                     await _err_notify({"error": "配置保存失败",
@@ -478,7 +526,9 @@ def create_platform_config_tab(
                     return
                 room_input.value = ""
                 _render_rooms()  # 即时渲染（不依赖 3s 轮询——用户问题"添加后不显示列表"）
-                await _toast(f"房间已保存：{_PLATFORM_LABELS[platform]} {spec}")
+                extracted = bool(v.get("normalized")) and v["normalized"] != spec
+                await _toast(f"房间已保存：{_PLATFORM_LABELS[platform]} {room_id}"
+                             + ("（已从链接提取房间号）" if extracted else ""))
                 # onboard_room 编排（CEO F2 单入口）：登录检测 → 自动弹窗
                 await _onboard_login(platform)
             ui.button("添加", icon="add", on_click=_add_room).props("unelevated color=primary")
@@ -628,20 +678,45 @@ def create_platform_config_tab(
                      "warning")
 
     async def _onboard_login(platform: str):
-        """添加→检测→自动弹窗→列表刷新（CEO F2 编排接缝；Eng F-ENG-13 三平台）。"""
+        """添加→检测→自动弹窗→列表刷新（CEO F2 编排接缝；Eng F-ENG-13 三平台）。
+
+        2026-11-12 方案二：check_login 命中后追加会话有效性校验（to_thread——
+        nav API 网络调用绝不进事件循环）——expired 照样弹窗引导重登；其余状态
+        维持免打扰（unverified/stale 等价升级前语义）。
+        """
         if platform not in _CONFIG_LOGIN_PLATFORMS:
             login_hint.text = "该平台在启动系统后首次监听时按引导登录"
             return
         if login_svc.check_login(platform):
-            login_hint.text = "登录态正常"
-            return
+            sess = await asyncio.to_thread(login_svc.validate_session_now, platform)
+            if sess != "expired":
+                login_hint.text = "登录态正常"
+                return
+            login_hint.text = "登录态已过期——正在打开重新登录窗口"
+            await _toast("登录态已过期（凭证存在但会话失效）——正在打开重新登录窗口",
+                         "warning")
         r = login_svc.request_login(platform)
         if r.get("success"):
             login_hint.text = "登录窗口已弹出——请完成扫码，登录后自动保存"
             await _toast("检测到未登录——登录窗口已弹出（完成后自动保存）", "info")
 
     async def _retry_login(platform: str):
-        await _onboard_login(platform)
+        """「登录/重新登录」按钮（用户显式意图——绕过 onboarding 免打扰阻断）。
+
+        2026-11-12 根修：原实现复用 _onboard_login → check_login 命中即 return
+        → 会话过期后按钮永远只提示「登录态正常」，登录窗口永不弹出（B站 10-08
+        存档 -101 实证死循环）。按钮点击=明确重登意图，直接 request_login
+        （服务层 _process 已放行显式请求；弹窗流程仅成功时覆写 cookie，旧态不劣化）。
+        """
+        r = login_svc.request_login(platform)
+        if r.get("success"):
+            login_hint.text = "登录窗口已弹出——请完成扫码，登录后自动保存"
+            await _toast("登录窗口已弹出（完成后自动保存；已有凭证会被新登录覆盖）",
+                         "info")
+        else:
+            err = str(r.get("error") or "登录请求失败")
+            login_hint.text = err
+            await _toast(err, "negative")
 
     # ---------- 房间列表（config 真相 + 运行态叠加；Eng F-ENG-6 join 规则） ----------
 
@@ -660,15 +735,18 @@ def create_platform_config_tab(
         return "saved_pending"
 
     # 渲染签名（F7：单一元组集中构造——新增渲染依赖必须入签名，否则界面静默停更）
-    # 依赖：房间集合/enabled/run_state(含 stalled 标记)/登录徽章/回执(kind+rid)/模式
+    # 依赖：房间集合/enabled/run_state(含 stalled 标记)/登录徽章/会话校验态/回执(kind+rid)/模式
     def _room_signature() -> str:
         items = []
         for r in _rooms():
             p, rid = str(r.get("platform")), str(r.get("room_id"))
             key = f"{p}:{rid}"
             logged = bool(login_svc.check_login(p)) if p in _CONFIG_LOGIN_PLATFORMS else True
+            # 会话校验态入签名（2026-11-12 方案二）——后台校验完成（unverified→
+            # expired）后徽章自动刷新；session_status 非阻塞（内存+本地 IO）
+            sess = login_svc.session_status(p) if (logged and p in _CONFIG_LOGIN_PLATFORMS) else None
             rec = state["receipts"].get(key) or {}
-            items.append((key, bool(r.get("enabled")), _room_run_state(r), logged,
+            items.append((key, bool(r.get("enabled")), _room_run_state(r), logged, sess,
                           str(rec.get("kind", "")), str(rec.get("rid", "")),
                           state["mode"]))
         return repr(items)
@@ -718,14 +796,27 @@ def create_platform_config_tab(
                             .style("font-size:var(--font-size-tiny,11px);color:var(--color-negative,#c10015)")
                     ui.element("div").classes("col")
                     # 登录徽章（平台级——Design S-1；J-3 三级灰/绿）
+                    # 2026-11-12 方案二：徽章呈现会话有效性（expired/stale 分级）；
+                    # 登录按钮**常渲染**（logged→「重新登录」）——原 `if not logged`
+                    # 独占渲染导致会话过期后无重登入口（B站 10-08 存档 -101 死循环根因）
                     if p in _CONFIG_LOGIN_PLATFORMS:
                         logged = login_svc.check_login(p)
-                        lb_text, lb_color = _LOGIN_BADGE["confirmed" if logged else "none"]
-                        ui.badge(lb_text).props(f"outline color={lb_color}").tooltip(
-                            "同平台共享登录态；运行期以引擎实际验证为准")
+                        sess = login_svc.session_status(p) if logged else None
                         if not logged:
-                            ui.button("登录", on_click=lambda pp=p: _retry_login(pp)) \
-                                .props("flat dense color=warning")
+                            lb_text, lb_color = _LOGIN_BADGE["none"]
+                        elif sess in ("expired", "stale"):
+                            lb_text, lb_color = _LOGIN_BADGE[sess]
+                        else:
+                            lb_text, lb_color = _LOGIN_BADGE["confirmed"]
+                        ui.badge(lb_text).props(f"outline color={lb_color}").tooltip(
+                            "同平台共享登录态；运行期以引擎实际验证为准"
+                            if sess != "stale" else
+                            "凭证文件较旧（无真校验器平台按文件时间启发）——会话可能已过期，建议重新登录")
+                        ui.button("重新登录" if logged else "登录",
+                                  on_click=lambda pp=p: _retry_login(pp)) \
+                            .props("flat dense color=warning").tooltip(
+                            "弹出浏览器重新扫码登录（已有凭证仅在登录成功后被覆盖）"
+                            if logged else "弹出登录窗口——完成后自动保存")
                     else:
                         ui.badge("运行期登录").props("outline color=info").tooltip(
                             "该平台（受控页面引擎）在启动系统后首次监听时按引导自动登录")

@@ -78,17 +78,38 @@ class NeedLoginVisible(Exception):
 #: _wait_login_visible 会把登录后新增 cookie 全部打日志，供校准收紧）
 LOGIN_COOKIE_CANDIDATES = ("pdd_user_id", "PassId", "PDDAccessToken", "pdd_uid")
 
+#: 拼多多直播间 URL 模板（2026-11-12 用户实测形态：mall_id 即直播间标识——
+#: https://mobile.yangkeduo.com/transac_virtual_card_pwd.html?page_from=601129&mall_id=378420135
+#: 「只需要替换 mall_id 即可进入直播间」；page_from 为实测可用形态原样保留）
+PDD_LIVE_URL_TEMPLATE = ("https://mobile.yangkeduo.com/transac_virtual_card_pwd.html"
+                         "?page_from=601129&mall_id={mall_id}")
+
 
 def extract_room_id(room_spec: str) -> str:
-    """房间参数归一：拼多多直播间链接原样直达 / 纯数字 show_id"""
+    """房间参数归一：mall_id 链接 / 纯数字 mall_id（2026-11-12 mall_id 接入）
+
+    用户实测：拼多多直播间经 mall_id 进入（PDD_LIVE_URL_TEMPLATE）——链接形态
+    提取 mall_id 数字作 room 标识（注册表/REST 路径安全——base.py:90 斜杠打散
+    404 铁律）。原「链接原样 spec[:80] 截断」形态废弃：截断链打不开页面、
+    标识不稳定，且整链入库致启停/删除/enabled 全部 404。
+    """
+    import re
+
     spec = room_spec.strip()
-    if "pinduoduo.com" in spec or "yangkeduo.com" in spec or "pdd" in spec:
-        return spec[:80]  # 链接形态直达（room 标识截断）
-    m = __import__("re").match(r"^(\d{5,25})$", spec)
+    if "pinduoduo.com" in spec or "yangkeduo.com" in spec:
+        m = re.search(r"mall_id=(\d+)", spec)
+        if m:
+            return m.group(1)
+        raise PDDParseError(
+            f"无法从拼多多链接提取 mall_id: {spec[:80]!r}——"
+            "请使用直播间 mall_id 链接"
+            "（.../transac_virtual_card_pwd.html?...mall_id=<数字>）或直接填 mall_id 数字")
+    m = re.match(r"^(\d{5,25})$", spec)
     if m:
         return m.group(1)
     raise PDDParseError(
-        f"无法解析拼多多直播间参数: {spec[:60]!r}——请使用直播间分享链接或 show_id 数字")
+        f"无法解析拼多多直播间参数: {spec[:60]!r}——"
+        "请使用直播间 mall_id 链接或直接填 mall_id 数字")
 
 
 # ---- protobuf mini reader（无 schema 动态解码，仅 varint/length-delim） ----
@@ -355,6 +376,9 @@ class PDDProtocolEngine(ControlledPageEngine):
         self._http_hook = http_hook  # 诊断钩子：页面 HTTP 响应 URL（弹幕通道定位）
         # 游客降级窗口计数（per-room：{start, notice, chat, ext, audience}）
         self._degrade: Dict[str, Dict[str, Any]] = {}
+        # 会话帧统计（2026-11-12 收流诊断：raw=WS 帧到达数 / decoded=解码出业务帧数
+        # ——「登录后收不到」分层证据：raw=0 页面没开 WS；raw>0 decoded=0 帧格式变更）
+        self._frame_stats: Dict[str, Dict[str, Any]] = {}
 
     def validate_room_id(self, room_id: str) -> None:
         try:
@@ -362,12 +386,28 @@ class PDDProtocolEngine(ControlledPageEngine):
         except PDDParseError as e:
             raise ValueError(str(e)) from e
 
+    async def normalize_room_id(self, room_id: str) -> str:
+        """链接/口令归一为 mall_id（bridge.add_room 链接形态入口，base.py:90）。
+
+        注册表 room_id 不得含 ``://``/``/``——REST 启停/删除/enabled 路径被
+        斜杠打散 404（美团 2026-10-05 同病先例、1688 2026-11-12 实测复现）。
+        """
+        try:
+            return extract_room_id(room_id)
+        except PDDParseError as e:
+            raise ValueError(str(e)) from e
+
     # ---- 房间任务主循环 ----
 
     async def _run_room(self, room_id: str) -> None:
         room_key = extract_room_id(room_id)
-        goto_url = (room_id.strip() if room_id.strip().startswith("http")
-                    else None)
+        raw = room_id.strip()
+        if raw.startswith("http"):
+            goto_url = raw  # 整链直达兼容（历史形态；add_room 归一后 room_id 为纯数字不会出现）
+        elif raw.isdigit():
+            goto_url = PDD_LIVE_URL_TEMPLATE.format(mall_id=raw)
+        else:
+            goto_url = None
         logger.info(f"[pdd] room {room_id} connecting (key={room_key})")
         backoff = 15.0
         headless = True
@@ -375,8 +415,9 @@ class PDDProtocolEngine(ControlledPageEngine):
             try:
                 if goto_url is None:
                     raise PDDParseError(
-                        "拼多多直播间需要页面链接——请使用直播间分享链接"
-                        "（网页直播间 URL 形态待实测，纯数字 show_id 无从打开）")
+                        "拼多多直播间参数无法打开页面——请使用直播间 mall_id 链接"
+                        "或直接填 mall_id 数字"
+                        "（.../transac_virtual_card_pwd.html?mall_id=<数字>）")
                 await self._run_session(room_id, room_key, goto_url, headless)
                 backoff = 15.0
             except asyncio.CancelledError:
@@ -506,6 +547,8 @@ class PDDProtocolEngine(ControlledPageEngine):
         deadline = time.monotonic() + 14400.0
         self._touch_frame(room_id)  # 静默计时起点
         self._degrade.pop(room_id, None)  # 降级窗口计数重开归零
+        self._frame_stats[room_id] = {"raw": 0, "decoded": 0, "logged_first": False}
+        last_stats_flush = time.monotonic()
 
         async with async_playwright() as pw:
             context = await self._launch(pw, headless=headless)
@@ -545,8 +588,19 @@ class PDDProtocolEngine(ControlledPageEngine):
 
                 self._set_status(self.status.__class__.RUNNING)
 
+                # 登录 cookie 实况（2026-11-12 诊断：候选集失配→登录循环的第一证据）
+                login_names = sorted((await self._login_cookie_values(context)).keys())
+                logger.info(f"[pdd] room {room_id} session start "
+                            f"(login cookies={login_names or '无候选命中'})")
+
                 while time.monotonic() < deadline and not self._stopped(room_id):
                     await asyncio.sleep(2)
+                    # 帧统计周期透出（30s——raw/decoded 分层：页面没开 WS vs 帧格式变更）
+                    if time.monotonic() - last_stats_flush >= 30.0:
+                        last_stats_flush = time.monotonic()
+                        fs = self._frame_stats.get(room_id) or {}
+                        logger.info(f"[pdd] room {room_id} frame stats: "
+                                    f"raw={fs.get('raw', 0)} decoded={fs.get('decoded', 0)}")
                     if self._frame_silent(room_id, SILENCE_TIMEOUT):
                         raise PDDParseError(
                             "pdd.session.silent: 120s 无业务帧"
@@ -581,7 +635,19 @@ class PDDProtocolEngine(ControlledPageEngine):
         raw = payload.get("payload") if isinstance(payload, dict) else payload
         if raw is None:
             return
+        # 收流诊断（2026-11-12）：首帧 hex 头落 INFO（帧格式变更即时可见）；
+        # raw/decoded 分层计数（raw=0 页面没开 WS / raw>0 decoded=0 格式不匹配）
+        st = self._frame_stats.setdefault(
+            room_id, {"raw": 0, "decoded": 0, "logged_first": False})
+        st["raw"] += 1
+        if not st["logged_first"]:
+            st["logged_first"] = True
+            head = (bytes(raw[:16]).hex()
+                    if isinstance(raw, (bytes, bytearray)) else str(raw)[:32])
+            logger.info(f"[pdd] room {room_id} first ws frame: "
+                        f"len={len(raw)} head={head}")
         for obj in decode_pdd_frame(raw):
+            st["decoded"] += 1
             self._touch_frame(room_id)
             self.mark_received(room_id, int(time.time()))
             # 降级窗口统计（游客会话：弹幕/点赞类帧为零，见 is_degraded_window）
