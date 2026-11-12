@@ -893,3 +893,42 @@ def test_borrow_scan_crosses_song_segments():
     assert gw == 0 and borrowed is True  # 借位取到队尾答谢
     assert data["content"] == "thanks1"  # FIFO 首条
     assert len(pb.voice_tmp_path_queue) == 5  # 4 歌段留队+1 答谢已出
+
+
+def test_prelude_borrow_pops_scanned_index_not_head():
+    """前奏借位按扫描索引弹（R5c 修正）：队列=[歌段×5, 答谢×N]（song 不
+    插队形态）——扫描找到队尾答谢后弹**该索引**，而非 pop(0) 误弹队首歌段
+    （song5.log 实测：5 段被当插播连推互相 flush，人声只剩最后静音段前
+    的碎片）。"""
+    import asyncio
+    import time as _t
+    import types
+    import utils.audio.playback_manager as pm
+
+    pb = _gate_pb()
+
+    def _cfg_get(*keys):
+        if keys == ("filter", "priority_mapping"):
+            return {"song": "80"}
+        return None
+
+    pb.config = type("C", (), {"get": staticmethod(_cfg_get)})()
+    pb.voice_tmp_path_queue = [
+        {"type": "song", "voice_path": f"seg_{i:02d}", "content": "s",
+         "song_segment": {"seq": i, "total": 5, "seg_dir": "",
+                          "start_s": 31.2 + i * 45.0}} for i in range(5)
+    ] + [{"type": "comment", "voice_path": "nonexistent.wav", "content": "thanks"}]
+    pb._song_anchor = {"t0": _t.monotonic(), "last_end": 0.0}
+
+    # 模拟前奏借位扫描（与 _consume_edtalk_entry 前奏循环同逻辑）
+    with pb.voice_tmp_path_queue_lock:
+        picked = None
+        for _i, _e in enumerate(pb.voice_tmp_path_queue):
+            if (isinstance(_e, dict)
+                    and not (_e.get("type") == "song"
+                             and _e.get("song_segment"))):
+                picked = pb.voice_tmp_path_queue.pop(_i)
+                break
+    assert picked["content"] == "thanks"  # 弹的是扫描命中的答谢
+    assert [e["song_segment"]["seq"] for e in pb.voice_tmp_path_queue] == [0, 1, 2, 3, 4]
+    assert all(e["voice_path"].startswith("seg_") for e in pb.voice_tmp_path_queue)

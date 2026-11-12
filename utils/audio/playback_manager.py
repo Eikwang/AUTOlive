@@ -672,11 +672,15 @@ class PlaybackMixin:
                             break
                         _interlude_entry = None
                         with self.voice_tmp_path_queue_lock:
-                            for _e in self.voice_tmp_path_queue:
+                            for _i, _e in enumerate(self.voice_tmp_path_queue):
                                 if (isinstance(_e, dict)
                                         and not (_e.get("type") == "song"
                                                  and _e.get("song_segment"))):
-                                    _interlude_entry = self.voice_tmp_path_queue.pop(0)
+                                    # 按遍历索引弹（R5c 修正：此前 pop(0) 与
+                                    # 扫描条件错位——找到队尾答谢却弹了队首
+                                    # 歌段，5 段被当插播连推互相 flush）
+                                    _interlude_entry = (
+                                        self.voice_tmp_path_queue.pop(_i))
                                     break
                         if _interlude_entry is not None:
                             logger.info(
