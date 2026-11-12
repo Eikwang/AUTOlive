@@ -3,12 +3,13 @@
 
 退役（整合计划"Tests to Retire"）：test_write_serve_toml / test_write_serve_toml_file_token
 ——serve TOML 生成随进程内化删除（Test Plan Artifact 2026-10-06 登记）。
-保留回归契约：聚合器/文本净化/优先级丢弃（迁移到 _BoundedDropQueue）/登录队列/事件环/QR 安全。
+保留回归契约：DANMU 逐条透传（2026-11-12 聚合退役守卫）/LIKE 聚合/文本净化/优先级丢弃（迁移到 _BoundedDropQueue）/登录队列/事件环/QR 安全。
 新增：GIFT 增量换算（含首见/LRU 淘汰）/有界队列满载丢弃/下播裁剪/事件去重窗口/活跃路由。
 """
 import json
 import os
 import sys
+import threading
 import unittest
 import unittest.mock as _mock
 from collections import OrderedDict
@@ -28,23 +29,57 @@ def _msg(mtype="DANMU", seq=1, room="23058", platform="bilibili", payload=None, 
     }
 
 
-class TestAggregator(unittest.TestCase):
-    def test_single_passthrough(self):
-        out = []
-        agg = dc._DanmuAggregator(out.append)
-        agg.add(_msg(payload={"type": "DANMU", "user_name": "u", "content": "hi"}))
-        agg.flush()
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["payload"]["content"], "hi")
+class TestDanmuPassthrough(unittest.TestCase):
+    """DANMU 逐条透传守卫（2026-11-12 弹幕合并退役）。
+
+    根因回归：原 _DanmuAggregator 5s 窗口内 ≥2 条弹幕合并成一条（user_name
+    '、'连接 + content '[名]内容；'拼接）进对话链——黑名单按合并串查失效、
+    一条违禁/外语殃及窗口内他人正常弹幕、LLM 无法分别回复、念弹幕念拼接串。
+    退役后限速职能归 comment 遗忘定时器（攒批但逐条独立处理）。
+    """
+
+    def test_worker_loop_dispatches_each_danmu_separately(self):
+        svc = dc.DanmakuListenerService.__new__(dc.DanmakuListenerService)
+        svc._queue = dc._BoundedDropQueue(100)
+        svc._stop_evt = threading.Event()
+        dispatched = []
+
+        def _dispatch_and_stop(mtype, msg):
+            dispatched.append((mtype, msg))
+            if len(dispatched) >= 3:
+                svc._stop_evt.set()       # 第 3 条派发后停循环（while 检查在每轮开头）
+        svc._dispatch = _dispatch_and_stop
+        for i in range(3):
+            svc._queue.put(("DANMU", _msg(payload={"type": "DANMU",
+                                                   "user_name": f"u{i}", "content": f"m{i}"})))
+        svc._worker_loop()
+        self.assertEqual(len(dispatched), 3)                     # 逐条派发，不合并
+        self.assertEqual([m["payload"]["user_name"] for _, m in dispatched],
+                         ["u0", "u1", "u2"])                     # 原样透传
+        for _, m in dispatched:
+            self.assertNotIn("aggregated", m["payload"])         # 无聚合标记
+            self.assertNotIn("；", m["payload"]["content"])      # 无拼接串
+
+
+class TestLikeAggregator(unittest.TestCase):
+    """LIKE 窗口聚合契约（原 TestAggregator 契约迁移：点赞合并语义保持）。"""
 
     def test_window_merge(self):
         out = []
-        agg = dc._DanmuAggregator(out.append)
-        for i in range(dc.DANMU_AGG_MAX):
-            agg.add(_msg(payload={"type": "DANMU", "user_name": f"u{i}", "content": f"m{i}"}))
+        agg = dc._LikeAggregator(out.append)
+        for i in range(dc.LIKE_AGG_MAX):
+            agg.add(_msg(mtype="LIKE", payload={"type": "LIKE", "user_name": f"u{i}"}))
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["payload"]["aggregated"], dc.DANMU_AGG_MAX)
-        self.assertIn("m0", out[0]["payload"]["content"])
+        self.assertEqual(out[0]["like_count"], dc.LIKE_AGG_MAX)
+        self.assertIn("u0", out[0]["like_user_summary"])
+
+    def test_single_passthrough(self):
+        out = []
+        agg = dc._LikeAggregator(out.append)
+        agg.add(_msg(mtype="LIKE", payload={"type": "LIKE", "user_name": "u"}))
+        agg.flush()
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["like_user_summary"], "u")
 
 
 class TestSanitize(unittest.TestCase):
@@ -206,8 +241,8 @@ class TestDispatchRouting(unittest.TestCase):
 
 class TestConsumerDefaults(unittest.TestCase):
     def test_thresholds_match_obligations(self):
-        self.assertEqual(dc.DANMU_AGG_WINDOW_S, 5.0)
-        self.assertEqual(dc.DANMU_AGG_MAX, 5)
+        self.assertEqual(dc.LIKE_AGG_WINDOW_S, 5.0)
+        self.assertEqual(dc.LIKE_AGG_MAX, 5)
         self.assertEqual(dc.CONTRACT_VERSION_MAJOR, 1)
         self.assertEqual(dc.QUEUE_MAX_DEFAULT, 500)          # DX 5.1 可覆盖默认
         self.assertEqual(dc.WEB_CONSOLE_PORT_DEFAULT, 8080)

@@ -47,8 +47,8 @@ from utils.my_log import logger
 QUEUE_MAX_DEFAULT = 500            # 业务队列上限（可覆盖：danmaku_listener.queue_maxsize）
 WEB_CONSOLE_PORT_DEFAULT = 8080    # web_console 调试通道端口（可覆盖）
 STALL_THRESHOLD_S_DEFAULT = 60     # 收流停滞判定阈值（可覆盖）
-DANMU_AGG_WINDOW_S = 5.0           # DANMU 聚合时间窗
-DANMU_AGG_MAX = 5                  # 聚合条数上限
+LIKE_AGG_WINDOW_S = 5.0            # LIKE 聚合时间窗（原 DANMU_AGG_*——DANMU 聚合退役后仅 LIKE 聚合使用）
+LIKE_AGG_MAX = 5                   # LIKE 聚合条数上限
 CONTRACT_VERSION_MAJOR = 1         # 兼容断言：1.x 接受，2.x 拒绝
 CONTROL_TIMEOUT_S = 30             # 控制面协程等待超时（登录门启动等合法耗时最长）
 REBUILD_GUARD_MAX = 3              # 守护重建失控防护（连续 3 次停止重建、置红）
@@ -467,26 +467,27 @@ class DanmakuListenerService:
         except Exception:
             return False
 
-    # ---------- 消费线程（队列 → 聚合 → _dispatch；用户裁定多房间全互动，
+    # ---------- 消费线程（队列 → 逐条透传 + LIKE 聚合；用户裁定多房间全互动，
     # ---------- active 活跃路由已退役） ----------
 
     def _worker_loop(self) -> None:
-        agg = _DanmuAggregator(on_flush=lambda m: self._dispatch("DANMU", m))
         like_agg = _LikeAggregator(on_flush=self._dispatch_like_agg)
         while not self._stop_evt.is_set():
             item = self._queue.get(timeout=0.5)
             if item is None:
-                agg.maybe_flush()
                 like_agg.maybe_flush()
                 continue
             mtype, msg = item
-            if mtype == "DANMU":
-                agg.add(msg)
-            elif mtype == "LIKE":
+            if mtype == "LIKE":
                 like_agg.add(msg)
             else:
+                # DANMU 等其余类型逐条透传（2026-11-12 弹幕合并退役）：原
+                # _DanmuAggregator 5s 窗口把 ≥2 条弹幕合并成一条（user_name
+                # '、'连接 + content '[名]内容；'拼接）进对话链——黑名单按合并
+                # 串查失效、一条违禁/外语殃及窗口内他人正常弹幕、LLM 无法分别
+                # 回复、念弹幕念拼接串。限速职能归 comment 遗忘定时器
+                # （comment_forget_duration，攒批但逐条独立处理，语义完好）。
                 self._dispatch(mtype, msg)
-        agg.flush()
         like_agg.flush()
 
     def _dispatch_like_agg(self, merged: dict) -> None:
@@ -1238,7 +1239,7 @@ def build_danmaku_listener_service(config) -> Optional[DanmakuListenerService]:
     return DanmakuListenerService(cfg_getter)
 
 
-# ---------- 聚合器（保留自上轮：B-1 窗口聚合 + LIKE 聚合） ----------
+# ---------- 聚合器（保留自上轮：LIKE 聚合；DANMU 窗口聚合已于 2026-11-12 退役） ----------
 
 class _LikeAggregator:
     """LIKE 窗口聚合（保留：用户需求"监听到谁点赞"）。"""
@@ -1251,12 +1252,12 @@ class _LikeAggregator:
     def add(self, msg: dict) -> None:
         payload = msg.get("payload") or {}
         self._buf.append(payload)
-        if (len(self._buf) >= DANMU_AGG_MAX
-                or time.time() - self._window_start >= DANMU_AGG_WINDOW_S):
+        if (len(self._buf) >= LIKE_AGG_MAX
+                or time.time() - self._window_start >= LIKE_AGG_WINDOW_S):
             self.flush()
 
     def maybe_flush(self) -> None:
-        if self._buf and time.time() - self._window_start >= DANMU_AGG_WINDOW_S:
+        if self._buf and time.time() - self._window_start >= LIKE_AGG_WINDOW_S:
             self.flush()
 
     def flush(self) -> None:
@@ -1278,47 +1279,9 @@ class _LikeAggregator:
         self._window_start = time.time()
 
 
-class _DanmuAggregator:
-    """DANMU 窗口聚合（保留：B-1 对话链限速）。"""
-
-    def __init__(self, on_flush: Callable[[dict], None]):
-        self._on_flush = on_flush
-        self._buf: list[dict] = []
-        self._window_start = 0.0
-
-    def add(self, msg: dict) -> None:
-        now = time.time()
-        if not self._buf:
-            self._window_start = now
-        self._buf.append(msg)
-        if len(self._buf) >= DANMU_AGG_MAX or now - self._window_start >= DANMU_AGG_WINDOW_S:
-            self.flush()
-
-    def maybe_flush(self) -> None:
-        if self._buf and time.time() - self._window_start >= DANMU_AGG_WINDOW_S:
-            self.flush()
-
-    def flush(self) -> None:
-        if not self._buf:
-            return
-        if len(self._buf) == 1:
-            merged = self._buf.pop()
-            self._on_flush(merged)
-            return
-        items = self._buf[:]
-        self._buf = []
-        names, contents = [], []
-        for m in items:
-            p = m.get("payload") or {}
-            names.append(str(p.get("user_name") or "匿名"))
-            contents.append(_sanitize_danmu_text(str(p.get("content") or "")))
-        merged = {
-            "envelope": dict(items[-1].get("envelope") or {}),
-            "payload": {
-                "type": "DANMU",
-                "user_name": "、".join(dict.fromkeys(names))[:120],
-                "content": "；".join(f"[{n}]{c}" for n, c in zip(names, contents))[:600],
-                "aggregated": len(items),
-            },
-        }
-        self._on_flush(merged)
+# _DanmuAggregator（DANMU 窗口聚合，B-1 对话链限速）已于 2026-11-12 退役：
+# 5s 窗口内 ≥2 条弹幕被合并成一条（user_name '、'连接 + content '[名]内容；'
+# 拼接）进对话链——黑名单按合并串查失效、一条违禁/外语殃及窗口内他人正常弹幕、
+# LLM 无法分别回复、念弹幕念拼接串；且其打下的 aggregated 标记在 _dispatch 即
+# 被丢弃，下游全程无感知。限速职能归 comment 遗忘定时器
+# （comment_forget_duration，攒批但逐条独立处理，语义完好）。
