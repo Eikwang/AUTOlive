@@ -286,27 +286,10 @@ class SynthesisMixin:
                 runs.append((cursor, total_s))
             if not runs:
                 return []
-            # 段长兜底（2026-11-10 实测反馈 R4b）：长换气碎静音（<min_interlude_s
-            # 被过滤并入段）会拼出超长段（实测 74.3s）——超设计口径（45s）形态，
-            # EDTalk push 链路异常（服务端无受理）。超 _SONG_SEG_MAX_S 的段按
-            # song_segment_seconds 二分：段长回归已验证形态，段内自然停顿保留。
-            _max_seg = max(self._song_segment_seconds() or 45.0, 30.0)
-            _bounded = []
-            for (s, e) in runs:
-                if e - s <= _max_seg:
-                    _bounded.append((s, e))
-                    continue
-                cur = s
-                while e - cur > _max_seg:
-                    _bounded.append((cur, cur + _max_seg))
-                    cur += _max_seg
-                if e > cur:
-                    _bounded.append((cur, e))
-            if len(_bounded) != len(runs):
-                logger.info(
-                    f"[song] 超长段二分兜底：{len(runs)} 段 → {len(_bounded)} 段"
-                    f"（单段上限 {_max_seg:.0f}s）")
-            runs = _bounded
+            # R6（2026-11-12 用户指令）：段长二分兜底退役——段边界完全以
+            # silences.json 坐标为准（超长段整段推：74.7s/106.6s 实测链路
+            # 正常，payload/超时均在限内；二分切点落句中+段间推送间隙=
+            # 「唱几句停一下」的根因）。
             self._purge_stale_song_segments(os.path.dirname(voice_path) or ".")
             seg_dir = os.path.join(
                 os.path.dirname(voice_path) or ".",

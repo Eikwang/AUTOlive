@@ -525,39 +525,28 @@ def test_priority_mapping_string_values_no_typeerror():
     assert pb.message_queue[-1]["type"] == "bad_type"
 
 
-def test_overlong_segment_bisected(tmp_path, fake_pydub):
-    """段长兜底（R4b）：换气碎静音并入产生超长段（实测 74.3s）→ 按
-    song_segment_seconds 二分（45s 上限形态回归，段内自然停顿保留）。"""
+def test_overlong_segment_kept_whole_by_silence_coords(tmp_path, fake_pydub):
+    """R6（用户指令「依照 silences.json 文件为坐标」）：段长二分兜底退役——
+    人声段=silences 互补区间整段保留（74.7s/106.6s 段不再被 45s 二分切在
+    句中），段间推送间隙只发生在真间奏处。"""
     from pydub import AudioSegment
     fake_pydub["seg"] = AudioSegment.silent(duration=80000)  # 80s 音频
     vocal = tmp_path / "e2__p1_vocal.wav"
     vocal.write_bytes(b"fake")
     (tmp_path / "e2__p1.wav").write_bytes(b"fake-mix")
     sp = tmp_path / "e2__p1.silences.json"
-    # 一个 74.3s「间奏」把人声切出 74.3s 超长段（前 3s+后 2.7s）
-    vs.write_silences_file(str(sp), [{"start_s": 3.0, "end_s": 77.3}])
+    # 两个 1s 静音段 → 人声段=[0-3]+[4-50]+[51-78.3]+[78.3-80]
+    vs.write_silences_file(str(sp), [{"start_s": 3.0, "end_s": 4.0},
+                                     {"start_s": 77.3, "end_s": 78.3}])
     fx = _SynFixture(seg=45)
     segs, _ = fx._semantic_or_fixed_slices(
         str(vocal), {"full_path": str(tmp_path / "e2__p1.wav")})
-    # 人声段=[0,3]+[77.3,80]——无超长段；构造超长段改用两个短间奏夹长人声：
-    vs.write_silences_file(str(sp), [{"start_s": 3.0, "end_s": 4.0},
-                                     {"start_s": 50.0, "end_s": 51.0}])
-    segs, _ = fx._semantic_or_fixed_slices(
-        str(vocal), {"full_path": str(tmp_path / "e2__p1.wav")})
-    # 人声段=[0,3]+[4,50]+[51,80]——中段 46s<60 不切；构造 74s 段：
-    vs.write_silences_file(str(sp), [{"start_s": 3.0, "end_s": 4.0},
-                                     {"start_s": 77.3, "end_s": 78.3}])
-    segs, _ = fx._semantic_or_fixed_slices(
-        str(vocal), {"full_path": str(tmp_path / "e2__p1.wav")})
-    # 中段 [4, 77.3]=73.3s>45s → 二分为 45+28.3（+首尾两段=4 段）
-    assert len(segs) == 4
-    starts = [s["start_s"] for s in segs]
-    assert starts == [0.0, 4.0, 49.0, 78.3]
-    # 段起点经 song_segment 透传（消费侧窗口门锚定字段）
-    assert all(s["start_s"] == st for s, st in zip(segs, starts))
-
-
-# ------------------------------------------------- R4f 借位消费+满载豁免
+    # 3 段（无二分）：[0-3]+[4-77.3]+[78.3-80]——其中 [4-77.3]=73.3s
+    # 超长段整段保留（不二分，切点完全按 silences 坐标）
+    assert len(segs) == 3
+    starts = [seg["start_s"] for seg in segs]
+    assert starts == [0.0, 4.0, 78.3]
+    assert segs[1]["voice_path"]  # 73.3s 超长段整段导出
 
 def test_borrow_consume_during_window():
     """借位消费（R4f）：窗口未到期时队首歌段之后的待播音频先出队（不动歌
