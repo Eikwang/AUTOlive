@@ -20,6 +20,26 @@ class CommentHandler:
     # 重算 = 秒级卡顿），按文件 mtime 惰性缓存，文件变更自动重载。
     _BADWORDS_CACHE: dict = {}
 
+    @staticmethod
+    def _filter_master_enabled(filter_config):
+        """过滤总开关归一（2026-11-12 实测断链根修）。
+
+        根因：UI-16 批次 R3 把总开关迁至二级菜单后写 filter.filter_master_
+        enable（enable_paths.py），而消费侧仍读旧键 filter.enable——生产
+        config.json 无 enable 键（=None）→ 本门恒真直接放行，长度截断/
+        弹幕表情过滤/违禁词过滤**整组静默失效**（实测 14:54 log：弹幕
+        "做咖啡好治愈呢[比心]" 未过滤直达合成念出"比心"）。旧守卫未抓到：
+        测试桩显式给了 enable=True。
+
+        归一规则：两键（旧 enable / 现 filter_master_enable）任一显式
+        false 即关闭（防呆）；缺失/None/true 均视为开启（语义矩阵：总开关
+        默认开启）。
+        """
+        for key in ("enable", "filter_master_enable"):
+            if filter_config.get(key) is False:
+                return False
+        return True
+
     def __init__(self, my_handle):
         """
         初始化弹幕处理器
@@ -88,8 +108,9 @@ class CommentHandler:
             # 获取配置
             filter_config = self.my_handle.config.get("filter") or {}
 
-            # 检查是否启用过滤
-            if not filter_config.get("enable"):
+            # 检查是否启用过滤（总开关归一：filter.enable 旧键 + 现行
+            # filter.filter_master_enable，任一显式 false 即关闭）
+            if not self._filter_master_enabled(filter_config):
                 return content
 
             # 长度截断（最大单词数/最大字符数，超限自动截断只保留设定值）
@@ -138,8 +159,8 @@ class CommentHandler:
             # 获取配置
             filter_config = self.my_handle.config.get("filter") or {}
 
-            # 检查是否启用过滤（总开关 + badwords 开关）
-            if not filter_config.get("enable"):
+            # 检查是否启用过滤（总开关 + badwords 开关；总开关归一同上）
+            if not self._filter_master_enabled(filter_config):
                 return content
             badwords = filter_config.get("badwords") or {}
             if not badwords.get("enable"):
