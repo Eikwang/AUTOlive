@@ -26,7 +26,6 @@ import time
 from typing import Callable, Dict, List, Optional
 
 from utils.autolive_paths import AutolivePaths
-from utils.gpu_policy import is_background_task_allowed
 from utils.my_log import logger
 
 # 待执行 / 执行中 / 成功 / 失败 / 跳过（D5 五态）
