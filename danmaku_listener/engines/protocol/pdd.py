@@ -497,6 +497,14 @@ class PDDProtocolEngine(ControlledPageEngine):
         async with async_playwright() as pw:
             context = await self._launch(pw, headless=False)
             try:
+                # 已登录快进（2026-11-13 用户实测困扰：profile 已持登录态时
+                # 登录窗仍空等 300s「cookie 变化」——先查存在性，命中直接返回）
+                if await self._has_login_cookie(context):
+                    logger.info(f"[pdd] room {room_id} login window skip "
+                                "(profile already logged in)")
+                    await self._emit_system_status(
+                        room_id, "拼多多已持登录态（profile）——无需重复登录")
+                    return
                 page = context.pages[0] if context.pages else await context.new_page()
                 try:
                     await page.goto(goto_url, timeout=30000,
@@ -526,6 +534,18 @@ class PDDProtocolEngine(ControlledPageEngine):
                     if logged:
                         break
                 if logged:
+                    # 登录态快照落盘（2026-11-13：前端登录徽章依据——
+                    # pdd_profile_login_state.json，登录服务 check_login 同源。
+                    # 此前引擎登录不落快照→前端恒显「未登录」与引擎「登录成功」
+                    # 广播矛盾，用户实测困惑点）
+                    try:
+                        from danmaku_listener.engines import login_state_store
+                        await login_state_store.snapshot_login_state(
+                            context, names=LOGIN_COOKIE_CANDIDATES,
+                            path=self._login_state_path(), label="pdd-login")
+                    except Exception as e:  # noqa: BLE001  快照失败不阻断登录闭环
+                        logger.warning(f"[pdd] room {room_id} login snapshot failed: "
+                                       f"{type(e).__name__}: {str(e)[:80]}")
                     await self._emit_system_status(
                         room_id, "拼多多登录成功——开始监听")
                     logger.info(f"[pdd] room {room_id} login ok")
@@ -547,7 +567,8 @@ class PDDProtocolEngine(ControlledPageEngine):
         deadline = time.monotonic() + 14400.0
         self._touch_frame(room_id)  # 静默计时起点
         self._degrade.pop(room_id, None)  # 降级窗口计数重开归零
-        self._frame_stats[room_id] = {"raw": 0, "decoded": 0, "logged_first": False}
+        self._frame_stats[room_id] = {"raw": 0, "decoded": 0, "logged_first": False,
+                                      "types": {}}
         last_stats_flush = time.monotonic()
 
         async with async_playwright() as pw:
@@ -599,8 +620,11 @@ class PDDProtocolEngine(ControlledPageEngine):
                     if time.monotonic() - last_stats_flush >= 30.0:
                         last_stats_flush = time.monotonic()
                         fs = self._frame_stats.get(room_id) or {}
+                        top_types = sorted((fs.get("types") or {}).items(),
+                                           key=lambda kv: -kv[1])[:6]
                         logger.info(f"[pdd] room {room_id} frame stats: "
-                                    f"raw={fs.get('raw', 0)} decoded={fs.get('decoded', 0)}")
+                                    f"raw={fs.get('raw', 0)} decoded={fs.get('decoded', 0)} "
+                                    f"types={top_types}")
                     if self._frame_silent(room_id, SILENCE_TIMEOUT):
                         raise PDDParseError(
                             "pdd.session.silent: 120s 无业务帧"
@@ -637,17 +661,23 @@ class PDDProtocolEngine(ControlledPageEngine):
             return
         # 收流诊断（2026-11-12）：首帧 hex 头落 INFO（帧格式变更即时可见）；
         # raw/decoded 分层计数（raw=0 页面没开 WS / raw>0 decoded=0 格式不匹配）
-        st = self._frame_stats.setdefault(
-            room_id, {"raw": 0, "decoded": 0, "logged_first": False})
-        st["raw"] += 1
-        if not st["logged_first"]:
-            st["logged_first"] = True
+        # 2026-11-13 根修：统计变量改名 fstat——原复用 `st` 与循环体内降级统计块
+        # （st = self._degrade.setdefault(...)）变量遮蔽，多对象帧第二轮迭代
+        # st["decoded"] 打在降级字典上 → KeyError('decoded') → 每帧仅第 1 个
+        # 对象被处理/发出、其余全丢（控制台 "frame parse error: 'decoded'" 实证）
+        fstat = self._frame_stats.setdefault(
+            room_id, {"raw": 0, "decoded": 0, "logged_first": False, "types": {}})
+        fstat["raw"] += 1
+        if not fstat["logged_first"]:
+            fstat["logged_first"] = True
             head = (bytes(raw[:16]).hex()
                     if isinstance(raw, (bytes, bytearray)) else str(raw)[:32])
             logger.info(f"[pdd] room {room_id} first ws frame: "
                         f"len={len(raw)} head={head}")
         for obj in decode_pdd_frame(raw):
-            st["decoded"] += 1
+            fstat["decoded"] += 1
+            m_type = str(obj.get("message_type") or "?")
+            fstat["types"][m_type] = fstat["types"].get(m_type, 0) + 1
             self._touch_frame(room_id)
             self.mark_received(room_id, int(time.time()))
             # 降级窗口统计（游客会话：弹幕/点赞类帧为零，见 is_degraded_window）
