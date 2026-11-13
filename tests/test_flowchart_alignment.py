@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """图-码对齐断言（/autoplan main-20261026-153911 T3，终门批准实施）。
 
-防三类回归（义务块：tests/test_flowchart_alignment.py，Eng SC-1/native F2/F3/F4）：
+防四类回归（义务块：tests/test_flowchart_alignment.py，Eng SC-1/native F2/F3/F4；
+2026-11-13 对齐批次 T4 增第四类）：
 1. 播放分流拓扑歧义（AudioList 双出边 / SystemPlay 双入边 = 双声误读，C1）；
 2. 图锚点失效（图内引用的代码符号已不存在 = 识别中枢式重构后图失去追踪力，spec R1 I-6）；
-3. 图头元数据丢失（autoplan restore 回滚曾静默丢掉图头纪律行，native Eng F2）。
+3. 图头元数据丢失（autoplan restore 回滚曾静默丢掉图头纪律行，native Eng F2）；
+4. 图-码语义漂移（批次落码未落图——聚合退役/黑名单前置类语义更新未同步图面，
+   TestGraphSemanticDrift）。
 
 口径（ceo 义务块统一约定）：符号名为主、行号为辅——本文件只按符号名/文本片段
 断言，禁止按行号断言（行号随重构过期）。
@@ -225,3 +228,48 @@ class TestGraphHeader:
 
     def test_discipline_line_present(self):
         assert "改链必改图" in _graph_text(), "图头纪律行（改链必改图）缺失——疑 restore 回滚，须随批次重落盘"
+
+
+class TestGraphSemanticDrift:
+    """v2.13 图-码语义漂移守卫（2026-11-13 对齐批次 T4，Eng E1）。
+
+    第四类回归断言面：批次落码未落图。断言形式=符号名/关键词（本文件口径
+    「符号名为主、行号为辅」），节点扫描限 mermaid 块（_mermaid_text），
+    不用整行精确匹配。
+    """
+
+    def test_d1_aggregation_retired(self):
+        """D1 弹幕窗口聚合退役（ca5408e1）：代码侧 _DanmuAggregator 类定义不复存在
+        （退役守卫形式，防复活）；图头 v2.13 行记录该语义。"""
+        src = (REPO / "utils" / "danmaku_consumer.py").read_text(encoding="utf-8")
+        assert "class _DanmuAggregator" not in src, (
+            "弹幕窗口聚合器复活——聚合退役守卫红（退役决策 ca5408e1，用户实播验收）"
+        )
+        mermaid = _mermaid_text()
+        assert "v2.13" in mermaid and "聚合退役" in mermaid, (
+            "图头 v2.13 行缺少聚合退役语义注记——批次落码未落图"
+        )
+
+    def test_d2_blacklist_precedes_dedup(self):
+        """D2 黑名单统一拦截先于限入/去重：代码镜像顺序断言（符号名定位
+        process_data 源切片内 blacklist_handle 调用先于 is_data_repeat_in_limited_time，
+        禁行号）+图面 Door/Filter 关键词断言（Door 行含黑名单、Filter 行不含）。"""
+        src = (REPO / "utils" / "handlers" / "timer_handler.py").read_text(encoding="utf-8")
+        block = src[src.index("def process_data"):src.index("def process_last_data")]
+        assert "blacklist_handle" in block and "is_data_repeat_in_limited_time" in block, (
+            "process_data 切片缺少黑名单/去重调用点——代码镜像断言前提失效，须重审本守卫"
+        )
+        assert block.index("blacklist_handle") < block.index("is_data_repeat_in_limited_time"), (
+            "黑名单拦截不再先于限入去重——黑名单前置顺序漂移（图面 Door 表述随之失效）"
+        )
+        door_lines = [ln for ln in _mermaid_text().splitlines()
+                      if "Door(" in ln]
+        assert door_lines and "黑名单" in door_lines[0], (
+            "Door 节点缺少黑名单前置表述（应含 黑名单拦截）——D2 图面漂移"
+        )
+        filter_lines = [ln for ln in _mermaid_text().splitlines()
+                        if "Filter[" in ln]
+        assert filter_lines, "图中找不到 Filter 节点"
+        assert "黑名单" not in filter_lines[0], (
+            "Filter 节点不应再承担黑名单表述（黑名单已前移 Door）——职责重划回退"
+        )
