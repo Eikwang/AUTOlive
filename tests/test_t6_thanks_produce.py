@@ -18,7 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from utils.handlers.event_handler import EventHandler
-from utils.common_original import Common
+from utils.common import Common  # 生产同源（2026-11-13 GSV 空段批：common_original 为
+# 8-29 遗留旧版，缺 TextMixin._filter_lang_chars——答谢用户名白名单步依赖它）
 
 
 def make_config(overrides=None):

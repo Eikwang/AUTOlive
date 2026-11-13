@@ -228,7 +228,6 @@ class GptSovitsInproc:
         # 双保险 #2：save_configs no-op（防 3 处无条件回写任何 yaml）
         TTS_Config.save_configs = lambda *a, **k: None
         self._patch_shadows()
-        self._patch_text_preprocessor()
         return TTS, TTS_Config
 
     def _patch_shadows(self):
@@ -275,39 +274,13 @@ class GptSovitsInproc:
         except Exception:
             logger.warning("[gsv-inproc] bert_path env 注入失败", exc_info=True)
 
-    def _patch_text_preprocessor(self):
-        """空语种分段防护（2026-10-29 实测修复：torch.cat(): expected a non-empty list of Tensors）。
-
-        上游 get_phones_and_bert 混合分支按 LangSegmenter 分段后逐段 clean_text_inf，
-        纯符号分段会归一化为空串（实测触发：弹幕带全角方括号前缀“［离线请留言］”，
-        ［］被 LangSegmenter 判为 ja 段，text_lang=zh 混合分支强制按 zh 清洗 →
-        norm_text="" word2ph=[] → get_bert_feature 中 torch.cat(空列表) 崩溃；
-        多参考与降级单参考两次尝试同点崩溃，与参考音频无关）。
-        防护：text 与 word2ph 同时为空时返回 (hidden_size, 0) 零特征——phones 侧
-        同为空段，bert 沿 dim=1 cat 聚合时等价于无操作，其余分段正常合成。
-        """
-        try:
-            import torch
-            from GPT_SoVITS.TTS_infer_pack.TextPreprocessor import TextPreprocessor
-            if getattr(TextPreprocessor, "_autolive_empty_seg_guard", False):
-                return
-            orig = TextPreprocessor.get_bert_feature
-
-            def _safe_get_bert_feature(tp, text, word2ph):
-                if len(text) == 0 and len(word2ph) == 0:
-                    try:
-                        hidden = int(tp.bert_model.config.hidden_size)
-                    except Exception:
-                        hidden = 1024
-                    return torch.zeros((hidden, 0), dtype=torch.float32,
-                                       device=tp.device)
-                return orig(tp, text, word2ph)
-
-            TextPreprocessor.get_bert_feature = _safe_get_bert_feature
-            TextPreprocessor._autolive_empty_seg_guard = True
-            logger.info("[gsv-inproc] TextPreprocessor 空语种分段防护已启用")
-        except Exception:
-            logger.warning("[gsv-inproc] TextPreprocessor 防护补丁失败", exc_info=True)
+    # _patch_text_preprocessor 退役（2026-11-13）：空语种分段防护原以运行时
+    # monkeypatch 实现，但 patch 目标模块（GPT_SoVITS.TTS_infer_pack.TextPreprocessor，
+    # repo 根前缀导入）与运行时实际类（TTS_infer_pack.TextPreprocessor，TTS.py:40
+    # 内层目录前缀导入）是同一磁盘文件的两个独立模块对象——补丁只命中幽灵类，
+    # 防护从未生效（生产崩穿实证：答谢文案用户名"冲冲冲冲冲･･"，U+FF65 空段
+    # torch.cat 空列表）。守卫已源码化进 fork（TextPreprocessor._autolive_empty_seg_guard，
+    # 对两条导入路径同时生效），运行时补丁按死代码处置删除，防误导阅读。
 
     def _build_tts(self, gpt_model: str = "", sovits_model: str = ""):
         """构建全新 TTS 实例（换模事务的"新对象"侧，不触碰旧实例）。"""

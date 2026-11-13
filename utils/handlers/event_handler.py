@@ -33,10 +33,25 @@ class EventHandler:
     # ---------------- 答谢生产端（T6 恢复：消费端 timer_handler.py:102-202 在位） ----------------
 
     def _thanks_username(self, raw_username: str) -> str:
-        """答谢用用户名清洗：星号合并 + 特殊字符剔除 + 截断（保留 backup 旧逻辑核心步）。"""
+        """答谢用用户名清洗：星号合并 + 特殊字符剔除 + 回复语言白名单 + 截断
+        （保留 backup 旧逻辑核心步；2026-11-13 补语言白名单过滤步）。
+
+        2026-11-13 GSV 空段崩批：原黑名单制清洗（显式字符清单）放行装饰符号
+        ——实证：用户名"冲冲冲冲冲･･"（U+FF65 半角片假名中点不在清单）随答谢
+        文案进 GSV 被分语器判独立 ja 段、清洗剥光成空段（torch.cat 空列表崩，
+        fork 源码守卫已兜底）。此处补一步与弹幕链同原语的语言白名单过滤
+        （_filter_lang_chars + reply_keep_languages，11-12 过滤优化批次原语，
+        保留集由通用配置 need_lang 决定）；白名单全剥为空时回退原清洗结果
+        （用户名不可为空，合成不崩由 fork 守卫保证，念播含符号可接受）。
+        """
         common = self.my_handle.common
         username = common.merge_consecutive_asterisks(str(raw_username))
         username = common.replace_special_characters(username, "！!@#￥$%^&*_-+/——=()（）【】}|{:;<>~`\\")
+        filtered = common._filter_lang_chars(
+            username,
+            common.reply_keep_languages(self.my_handle.config.get("need_lang")))
+        if filtered.strip():
+            username = filtered
         try:
             max_len = int(self.my_handle.config.get("thanks", "username_max_len"))
             if max_len > 0:
