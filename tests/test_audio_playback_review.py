@@ -277,37 +277,42 @@ class TestRereadTypePassthrough:
 
 
 # ---------------------------------------------------------------------------
-# A10：四句一切切分
+# v2：标点句切分（2026-11-17 段间让位优化批次，替代 A10 四句一切）
 # ---------------------------------------------------------------------------
 
-class TestFourSentenceSplit:
+class TestPunctuationSplit:
     def _split(self, text):
         from utils.common.text_mixin import TextMixin
         return TextMixin.split_sentences(object.__new__(TextMixin), text)
 
-    def test_four_sentence_cap(self):
-        text = "。" .join(["第一句内容呀", "第二句内容呀", "第三句内容呀", "第四句内容呀",
-                          "第五句内容呀", "第六句内容呀", "第七句内容呀", "第八句内容呀", "第九句"]) + "。"
+    def test_comma_level_split(self):
+        """逗号/句号/问号/叹号均为切点，一句/小句一段（标点保留段尾）；
+        末尾碎段（<4 中文字）回并入上一片段"""
+        segs = self._split("大家好呀，欢迎来到直播间。今天聊聊天气？太好了！")
+        assert segs == ["大家好呀，", "欢迎来到直播间。", "今天聊聊天气？太好了！"]
+
+    def test_short_fragment_merge_forward(self):
+        """碎段（<4 中文字且 <8 英文字符）向前并入下一分段（TTS 极短文本质量差）"""
+        segs = self._split("嗯，好的，今天我们聊聊天气吧。")
+        assert segs == ["嗯，好的，今天我们聊聊天气吧。"]
+        # 英文碎段 "Second," 并入下一段；7 字中文句达标独立成段
+        segs = self._split("Second, part! 好的没问题呀。")
+        assert segs == ["Second, part!", " 好的没问题呀。"]
+
+    def test_segment_roundtrip_lossless(self):
+        """切分无损：片段拼接还原原文，英文标点同语义"""
+        text = "第一句内容呀。Second, part! 第三句呢？没问题"
         segs = self._split(text)
+        assert "".join(segs) == text
         assert len(segs) == 3
-        for seg in segs:
-            assert sum(seg.count(c) for c in "。！？!?") <= 4
 
     def test_no_punct_long_runon_fallback(self):
-        """无句末标点长文（150 字逗号连排）→ 各片段 ≤60 字兜底"""
-        body = "这是一段没有句末标点的超长文本，" * 10
+        """无任何标点长文（150 字连排）→ 各片段 ≤61 字兜底"""
+        body = "这是一段没有任何标点的超长文本" * 10
         segs = self._split(body)
         assert len(segs) >= 2
         assert all(len(s) <= 61 for s in segs)  # 60 字窗口（含切点标点 ≤61）
-        assert "".join(segs).replace("\n", "") == body
-
-    def test_short_tail_balanced(self):
-        """末段过短（<10 字）从相邻段回拉一句（不破坏四句上限）"""
-        text = "第一句内容比较长一些。" * 1 + "第二句也比较长哦。" + "第三句依旧长。" + "第四句。" + "短句"
-        text = "第一句内容比较长一些。第二句也比较长哦。第三句依旧长。第四句。短句"
-        segs = self._split(text)
-        assert len(segs) == 2
-        assert len(segs[-1]) >= 10 - 4  # 回拉后末段不再极端短
+        assert "".join(segs) == body
 
     def test_empty_text(self):
         assert self._split("") == []

@@ -598,15 +598,25 @@ class TextMixin:
         return result2
 
 
-    # 文本切分算法（A10 四句一切，2026-10-22 审查批次，义务 R2-A10）
-    # 语义：「句」=以句末标点（。！？!?）结尾的单元；先按句末标点分句，
-    # 无标点长句（>60 字）按逗号优先切点硬切兜底，每 4 句合并为一片段
-    # （设计上限硬约束：每个文本片段最多包含四句）；段内短句自然并段
-    # （下限保护），末段过短时从相邻段回拉一句平衡（不破坏四句上限）。
-    _SENTENCE_SPLIT_RE = r'(?<=[。！？!?])'
+    # 文本切分算法（v2 标点句切分，2026-11-17 段间让位优化批次；替代 A10 四句一切）
+    # 语义：按句内四级标点（，。？！及英文 ,.?!)切分，一句/小句一段——段长
+    # 典型 ≤5s，段间让位边界密化（EDTalk 插队等待 ≤ 单段时长）；标点保留
+    # 段尾保证 TTS 语调自然。无任何标点的超长文本（>60 字）仍走逗号/分号/
+    # 顿号兜底切分。
+    _SENTENCE_SPLIT_RE = r'(?<=[。！？!?，,])'
     _LONG_RUNON_LEN = 60
-    _SENTENCES_PER_SEGMENT = 4
-    _MIN_SEGMENT_LEN = 10
+    # 碎段下限（2026-11-17 段间让位优化批次）：中文字符 <4 且 英文/数字字符
+    # <8 判为碎段——TTS 对极短文本合成质量差（口型/语调不佳），碎段并入
+    # 下一分段；标点不计入字数口径。
+    _MIN_CJK_CHARS = 4
+    _MIN_LATIN_CHARS = 8
+
+    @staticmethod
+    def _is_short_fragment(s):
+        """碎段判定：中文字符数与英文/数字字符数均低于下限（标点不计入）。"""
+        cjk = len(re.findall(r'[\u4e00-\u9fff]', s))
+        latin = len(re.findall(r'[A-Za-z0-9]', s))
+        return cjk < 4 and latin < 8
 
     def _split_long_runon(self, s):
         """无标点长句兜底（>60 字）：逗号/分号/顿号优先切点，无切点按 60 字硬切。"""
@@ -628,58 +638,47 @@ class TextMixin:
         return [p for p in pieces if p]
 
     def split_sentences(self, text):
-        """四句一切切分（A10，替代旧"短句合并+标点切分"算法）。
+        """标点句切分（v2，2026-11-17 段间让位优化批次，替代旧"四句一切"算法）。
+
+        按句内四级标点（，。？！/ ,.?!）切分，一句/小句一段：插播等待 ≤ 单段
+        时长（段间让位边界密化）；标点保留在段尾，TTS 语调自然。碎段（中文字
+        符 <4 且 英文/数字字符 <8）向前并入下一分段，避免极短片段 TTS 合成
+        质量差。无任何标点的超长文本（>60 字）按逗号/分号/顿号兜底切分。
 
         Args:
             text (str): 待切分文本
 
         Returns:
-            list[str]: 文本片段列表，每片段最多含 4 个句末标点单元
+            list[str]: 文本片段列表，每片段=一个标点界定的句/小句（碎段已并段，
+                ≥60 字兜底片段除外）
         """
         if not text:
             return []
 
-        # 1) 按句末标点分句
-        raw = [s for s in re.split(self._SENTENCE_SPLIT_RE, text) if s]
-
-        # 2) 构建有序单元：(文本, 是否句末标点句)；兜底片段独立成段标记
-        #    （实施轮修正：兜底切出的 ≤60 字片段若参与 4 句合并会被拼回长段，兜底失效）
+        # 1) 标点切分 + 无标点长句兜底
         units = []
-        for s in raw:
+        for s in re.split(self._SENTENCE_SPLIT_RE, text):
+            if not s:
+                continue
             s = s.replace('\n', '')
             if len(s) > self._LONG_RUNON_LEN:
-                for p in self._split_long_runon(s):
-                    units.append((p, False))
+                units.extend(self._split_long_runon(s))
             else:
-                units.append((s, True))
+                units.append(s)
 
-        # 3) 流式组装：句按 4 句一组封段；兜底片段即到即封（保持原文顺序）
+        # 2) 碎段向前合并：短片段累积并入下一片段，直至合并体达下限
         result = []
-        buf = []
-        for seg_text, is_sentence in units:
-            if not is_sentence:
-                if buf:
-                    result.append("".join(buf))
-                    buf = []
-                result.append(seg_text)
+        acc = ""
+        for s in units:
+            acc += s
+            if not self._is_short_fragment(acc):
+                result.append(acc)
+                acc = ""
+        if acc:
+            if result:
+                result[-1] += acc  # 末尾碎段向前无段可并，回并入上一片段
             else:
-                buf.append(seg_text)
-                if len(buf) >= self._SENTENCES_PER_SEGMENT:
-                    result.append("".join(buf))
-                    buf = []
-        if buf:
-
-            # 4) 末段过短（<10 字）从上一句组回拉一句（下限保护，不破坏四句上限）
-            if len(buf) < self._MIN_SEGMENT_LEN and result:
-                last = result[-1]
-                sent_count = sum(last.count(c) for c in "。！？!?")
-                if sent_count >= 2:
-                    parts = [p for p in re.split(self._SENTENCE_SPLIT_RE, last) if p]
-                    if len(parts) >= 2:
-                        moved = parts.pop()
-                        result[-1] = "".join(parts)
-                        buf.insert(0, moved)
-            result.append("".join(buf))
+                result.append(acc)
 
         return [s for s in result if s.strip()]
 
