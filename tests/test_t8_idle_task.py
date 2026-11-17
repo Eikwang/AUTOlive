@@ -28,7 +28,8 @@ def make_config(overrides=None):
             "idle_time_min": 1,
             "idle_time_max": 2,
             "min_msg_queue_len_to_trigger": 1,
-            "min_audio_queue_len_to_trigger": 1,
+            # 2026-11-17 闲时触发参数合并批次：min_audio_queue_len_to_trigger 退役
+            # 不再消费（后端音频队列分支改读 min_msg_queue_len_to_trigger）
             "copywriting": {"enable": True, "random": True, "copy": ["闲时文案A", "闲时文案B"]},
             "comment": {"enable": False, "random": True, "copy": ["你是谁"]},
             "local_audio": {"enable": False, "random": True, "path": ["data/闲时音频/x.wav"]},

@@ -2,8 +2,11 @@
 """D4 新功能 UI + D5 参数页重组 纯函数单测（2026-10-19 切片 3）
 
 覆盖：过滤总开关默认 True（get_nested_value 缺省约定）/ 优先级预设值函数与
-有序条目（缺省过滤+降序）/ 礼物点歌映射匹配逻辑（含预演同函数）/ 任务组
-结构校验与存量单任务迁移。UI 渲染部分不测（NiceGUI slot 上下文）。
+有序条目（缺省过滤+降序）/ 礼物点歌映射匹配逻辑（含预演同函数）。
+（2026-11-17 前端布局全面调整批次：定时任务 tab 重组为 config["schedule"]
+动态任务组管理，D4 schedule_groups 组接管 UI 退役——任务组结构校验
+validate_schedule_groups 与存量迁移 migrate_tasks_to_groups 纯函数及其
+用例随之删除；schedule_groups 消费守卫见 test_schedule_review_1031.py）
 """
 import os
 import sys
@@ -17,10 +20,6 @@ from frontend.ui.tabs.filter_queue import (
     iter_priority_entries,
 )
 from frontend.ui.tabs.choose_song import list_song_names, match_gift_to_song
-from frontend.ui.tabs.schedule import (
-    migrate_tasks_to_groups,
-    validate_schedule_groups,
-)
 
 
 # ---------- ① 过滤总开关默认 True（filter.filter_master_enable） ----------
@@ -165,63 +164,3 @@ def test_list_song_names_only_audio(tmp_path):
     (tmp_path / "封面.jpg").write_bytes(b"x")
     names = list_song_names(str(tmp_path))
     assert names == ["晴天", "海阔天空"]
-
-
-# ---------- ⑤ 任务组结构校验与存量迁移（D4：schedule_groups） ----------
-
-def _valid_group(**over):
-    g = {"name": "默认组", "min_interval": 60, "max_interval": 120,
-         "copywriting_list": ["你好", "欢迎观看"]}
-    g.update(over)
-    return g
-
-
-def test_group_validate_ok():
-    assert validate_schedule_groups([_valid_group()]) == []
-
-
-def test_group_validate_missing_name():
-    errs = validate_schedule_groups([_valid_group(name="  ")])
-    assert any("缺少组名" in e for e in errs)
-
-
-def test_group_validate_interval_order():
-    errs = validate_schedule_groups([_valid_group(min_interval=200, max_interval=100)])
-    assert any("最大循环周期应不小于最小值" in e for e in errs)
-
-
-def test_group_validate_empty_copy():
-    errs = validate_schedule_groups([_valid_group(copywriting_list=[])])
-    assert any("文案列表为空" in e for e in errs)
-
-
-def test_group_validate_not_a_list():
-    assert validate_schedule_groups({"name": "x"}) == ["schedule_groups 应为列表"]
-
-
-def test_migrate_tasks_to_groups():
-    """存量单任务映射：字段名迁移 time_min/time_max/copy → 组字段；首组「默认组」。"""
-    tasks = [
-        {"enable": True, "time_min": 600.0, "time_max": 900.0, "copy": ["报时{time}", "欢迎{user_num}"]},
-        {"enable": False, "time_min": 60, "time_max": 120, "copy": ["感谢观看"]},
-    ]
-    groups = migrate_tasks_to_groups(tasks)
-    assert len(groups) == 2
-    assert groups[0]["name"] == "默认组"
-    assert groups[0]["min_interval"] == 600.0
-    assert groups[0]["max_interval"] == 900.0
-    assert groups[0]["copywriting_list"] == ["报时{time}", "欢迎{user_num}"]
-    assert groups[1]["name"] == "默认组#2"
-
-
-def test_migrate_tasks_empty():
-    assert migrate_tasks_to_groups([]) == []
-    assert migrate_tasks_to_groups(None) == []
-
-
-def test_migrated_groups_pass_validation():
-    """迁移产物过结构校验（闭环）。"""
-    groups = migrate_tasks_to_groups([
-        {"enable": True, "time_min": 600.0, "time_max": 900.0, "copy": ["a"]},
-    ])
-    assert validate_schedule_groups(groups) == []

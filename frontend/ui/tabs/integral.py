@@ -34,13 +34,9 @@ def create_integral_tab(
     from frontend.utils.config_auto_save import create_auto_save
     _auto_save = create_auto_save(config, set_config_callback, tab_key="integral")
 
-    # 通用
-    with ui.card().style(card_css):
-        ui.label("通用")
-        with ui.grid(columns=3):
-            with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('启用', value=get_nested_value(config, "integral", "enable")).style(switch_internal_css), ("integral", "enable"))
-                ui.label('积分功能总开关，关闭后签到/礼物/入场/关注均不计分').style("opacity:.6;font-size:12px;")
+    # 通用（2026-11-17 一致性批次：页内"启用"开关移除——二级菜单侧边栏总开关
+    # （frontend/config/enable_paths.py "integral" → integral.enable）承接，
+    # 消除同键双开关漂移；本页仅保留子开关与参数）
 
     # 签到
     with ui.card().style(card_css):
@@ -50,7 +46,7 @@ def create_integral_tab(
                 _auto_save(ui.switch('启用', value=get_nested_value(config, "integral", "sign", "enable")).style(switch_internal_css), ("integral", "sign", "enable"))
                 _auto_save(ui.input(label='获得积分数', value=get_nested_value(config, "integral", "sign", "get_integral"), placeholder='签到成功可以获得的积分数，请填写正整数！').style("width:100%;"), ("integral", "sign", "get_integral"))
                 _auto_save(ui.textarea(label='命令', value=textarea_data_change(get_nested_value(config, "integral", "sign", "cmd") or []), placeholder='弹幕发送以下命令可以触发签到功能，换行分隔命令').style("width:100%;"), ("integral", "sign", "cmd"), split_lines=True)
-        ui.label('隐形限制：每 12 小时最多计分一次，窗口内重复签到不计分不回复（防刷分，无需配置）').style("opacity:.6;font-size:12px;")
+        ui.label('隐形限制：每 24 小时最多计分一次，窗口内重复签到不计分不回复（防刷分，无需配置）').style("opacity:.6;font-size:12px;")
         with ui.card().style(card_css):
             ui.label("文案")
             for index, integral_sign_copywriting in enumerate(get_nested_value(config, "integral", "sign", "copywriting") or []):

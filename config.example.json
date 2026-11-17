@@ -1155,7 +1155,7 @@
             "enabled": true
           },
           {
-            "name": "平台配置",
+            "name": "弹幕监听",
             "tab_key": "platform_config",
             "enabled": true
           },

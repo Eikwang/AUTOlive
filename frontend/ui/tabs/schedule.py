@@ -7,80 +7,36 @@
 - 设置项用最多 3 列网格排布，组件宽度跟随列宽（width:100%）
 - 开关+关联参数 为上下结构单元：开关在上，输入框在下
 
-D4 任务组管理（2026-10-19 切片 3）：
-- 新增任务组 UI（组列表+添加/删除+组内编辑：组名/最小最大循环周期/文案列表）
-- 键结构注记：任务书建议 config["schedule"]["groups"]，但 config.schedule 存量为
-  list（utils/task_scheduler.py:82 直接按 list 消费 task["enable"]/["time_min"]/
-  ["time_max"]/["copy"]），list 不可挂子键——故落**顶层新键 config["schedule_groups"]**，
-  结构 [{name, min_interval, max_interval, copywriting_list}]；存量 schedule list
-  原样保留兼容，utils 消费方接线归收尾批
-- 存量单任务迁移：映射为"默认组"（migrate_tasks_to_groups 纯函数，UI 一键生成）
+2026-11-17 前端布局全面调整批次（任务四：定时任务 tab 重组为动态任务组管理）：
+- 任务组=config["schedule"] 数组元素（{enable, time_min, time_max, copy[]}），
+  每组渲染为独立卡片：启用开关+最小/最大循环周期+文案列表+删除按钮
+- 动态数组不走 _auto_save 静态 keys 路径（下标随增删漂移会把修改写进错位组）——
+  组内控件直接改写本组 dict（config["schedule"] 内活引用），再整表落盘
+  set_config_callback("schedule", value=...)（同 serial.py 动态配置组口径）；
+  组内字段手动补注册全局搜索（原 _auto_save 附带能力）
+- 「添加新任务组」管理模块卡片固定渲染在所有任务组之后（页面最下方），新组
+  默认 {enable:True, time_min:1200, time_max:2400, copy:[""]}，样式与现有组
+  完全一致；删除按钮从数组 pop 该组并重建容器，删空后展示占位提示（空数组
+  边界：后端注册零任务，不报错）
+- D4 schedule_groups 组接管 UI 随本批退役：本页落盘时同步清空遗留接管键
+  schedule_groups（后端组非空即接管存量 schedule，不清空则本页配置被旧组
+  覆盖失效；旧组数据不再消费）
+- 类型写回保证：enable 布尔、time_min/time_max 整数（存量 float 一并归一）、
+  copy 字符串数组（textarea 按行 split 滤空行）
 """
-import re
+from typing import Dict, Any, Callable, List
 
 from nicegui import ui
-from typing import Dict, Any, Callable, List
-from frontend.ui.components.config_helper import get_nested_value
+
 from frontend.utils.common import textarea_data_change
 
-# 组内字段与存量单任务字段的映射（存量 time_min/time_max/copy → 组 min_interval/max_interval/copywriting_list）
-_TASK_GROUP_FIELDS = ("name", "min_interval", "max_interval", "copywriting_list")
-
-
-def validate_schedule_groups(groups: Any) -> List[str]:
-    """校验任务组结构（纯函数，供测试与保存前校验共用）。
-
-    Returns:
-        错误描述列表；空列表 = 结构合法
-    """
-    errs: List[str] = []
-    if not isinstance(groups, list):
-        return ["schedule_groups 应为列表"]
-    for i, g in enumerate(groups):
-        if not isinstance(g, dict):
-            errs.append(f"组#{i} 应为对象")
-            continue
-        name = str(g.get("name") or "").strip()
-        if not name:
-            errs.append(f"组#{i} 缺少组名")
-        try:
-            mn = float(g.get("min_interval", 0))
-            mx = float(g.get("max_interval", 0))
-        except (TypeError, ValueError):
-            errs.append(f"组#{i}({name}) 循环周期应为数字")
-        else:
-            if mn < 0 or mx < 0:
-                errs.append(f"组#{i}({name}) 循环周期不能为负")
-            elif mx < mn:
-                errs.append(f"组#{i}({name}) 最大循环周期应不小于最小值")
-        copy_list = g.get("copywriting_list")
-        if not isinstance(copy_list, list) or not any(str(c).strip() for c in copy_list):
-            errs.append(f"组#{i}({name}) 文案列表为空")
-    return errs
-
-
-def migrate_tasks_to_groups(tasks: Any) -> List[Dict[str, Any]]:
-    """存量单任务列表 → 任务组结构（纯函数）。
-
-    映射规则：每条任务=一个组（时间字段名迁移 time_min/time_max → min_interval/
-    max_interval，copy → copywriting_list）；首组命名「默认组」，其余「默认组#2」起。
-    """
-    groups: List[Dict[str, Any]] = []
-    for i, task in enumerate(tasks or []):
-        if not isinstance(task, dict):
-            continue
-        groups.append({
-            "name": "默认组" if i == 0 else f"默认组#{i + 1}",
-            "min_interval": task.get("time_min", 60),
-            "max_interval": task.get("time_max", 120),
-            "copywriting_list": [str(c) for c in (task.get("copy") or []) if str(c).strip()],
-        })
-    return groups
-
-
-def _copy_text_to_list(text: str) -> List[str]:
-    """文案 textarea 文本 → 列表（换行/空格分隔；与存量 placeholder 语义一致）"""
-    return [c for c in re.split(r"[\s]+", (text or "").strip()) if c]
+# 新增任务组默认模板（任务书指定默认值；字段结构与 config["schedule"] 存量项对齐）
+_NEW_TASK_TEMPLATE: Dict[str, Any] = {
+    "enable": True,
+    "time_min": 1200,
+    "time_max": 2400,
+    "copy": [""],
+}
 
 
 def create_schedule_tab(
@@ -91,139 +47,180 @@ def create_schedule_tab(
     """创建定时任务标签页"""
     card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
+    button_internal_color = theme_config.get("button_internal_color", "primary")
+    button_internal_css = theme_config.get("button_internal_css", "")
 
-    # 导入自动绑定函数
-    from frontend.utils.config_auto_save import create_auto_save
-    _auto_save = create_auto_save(config, set_config_callback, tab_key="schedule")
+    def _get_tasks() -> List[Dict[str, Any]]:
+        tasks = config.get("schedule")
+        return tasks if isinstance(tasks, list) else []
 
-    # ---------- 存量单任务（原样保留展示；迁移说明见下方任务组卡） ----------
-    # 2026-11-14 保存修复：存量单任务此前仅构造 UI 未做任何保存绑定（_auto_save
-    # 创建后从未使用），修改 enable/周期/文案只停留在 UI——重启即回滚，且开启
-    # 开关无法落盘（后端读到恒 false，定时任务无法开启）。现按下标键绑定自动保存
-    with ui.card().style(card_css):
-        ui.label('定时任务')
-        schedule_var = {}
-        schedule_config_card = ui.card()
-        for index, schedule in enumerate(config.get("schedule", [])):
-            with schedule_config_card.style(card_css):
-                with ui.grid(columns=3):
-                    with ui.column().style("width:100%;"):
-                        schedule_var[str(4 * index)] = _auto_save(
-                            ui.switch(text=f"启用任务#{index}", value=schedule.get("enable", False)).style(switch_internal_css),
-                            ("schedule", str(index), "enable"))
-                        schedule_var[str(4 * index + 1)] = _auto_save(
-                            ui.input(label=f"最小循环周期#{index}", value=schedule.get("time_min", 60), placeholder='定时任务循环的周期最小时长（秒）').style("width:100%;"),
-                            ("schedule", str(index), "time_min"))
-                        schedule_var[str(4 * index + 2)] = _auto_save(
-                            ui.input(label=f"最大循环周期#{index}", value=schedule.get("time_max", 120), placeholder='定时任务循环的周期最大时长（秒）').style("width:100%;"),
-                            ("schedule", str(index), "time_max"))
-                    schedule_var[str(4 * index + 3)] = _auto_save(
-                        ui.textarea(label=f"文案列表#{index}", value=textarea_data_change(schedule.get("copy", [])), placeholder='存放文案的列表，通过空格或换行分割').style("width:100%;"),
-                        ("schedule", str(index), "copy"), split_lines=True)
+    def _register_search(label: str, keys: tuple, placeholder: str = "") -> None:
+        """组内字段注册全局搜索（原 _auto_save 附带能力，动态组手动补注册）"""
+        try:
+            from frontend.utils.config_registry import get_config_registry
+            get_config_registry().register(
+                tab_key="schedule", label=label, placeholder=placeholder,
+                config_keys=keys)
+        except Exception:
+            pass
 
-    # ---------- 任务组管理（D4：schedule_groups 新键） ----------
+    def _persist_tasks():
+        """任务组整表落盘（各组 dict 即 config["schedule"] 内活引用，改动已就地生效）。
+
+        2026-11-17 批次：D4 遗留接管键 schedule_groups 非空时后端组语义会接管
+        存量 schedule（本页改动失效）——落盘前一并清空该键（内存就地改，随本次
+        保存落盘），任务组语义统一回归 config["schedule"]。
+        """
+        if config.get("schedule_groups"):
+            config["schedule_groups"] = []
+        set_config_callback("schedule", value=_get_tasks())
+
+    def _normalize_field(field: str, value: Any):
+        """字段类型归一（2026-11-17 批次：布尔开关/整数周期/字符串数组文案写回）。
+
+        Returns:
+            (True, 归一值)；数值非法时 (False, None)——调用方提示并跳过本次落盘
+        """
+        try:
+            if field in ("time_min", "time_max"):
+                return True, int(float(value))  # 整数写回（存量 float 一并归一）
+            if field == "enable":
+                return True, bool(value)
+            if field == "copy":
+                # textarea 文本 → 字符串数组（按行 split 滤空行，同 _auto_save split_lines 口径）
+                return True, [line for line in str(value or "").split("\n") if line.strip()]
+        except (TypeError, ValueError):
+            return False, None
+        return True, value
+
+    def _set_task_field(task: Dict[str, Any], field: str, value, label: str = ""):
+        """组内字段写入本组 dict 并整表落盘（活引用写法与组下标解耦——删除他组
+        导致的下标漂移不影响本组写入；2026-11-17 批次）"""
+        ok, normalized = _normalize_field(field, value)
+        if not ok:
+            ui.notify(position="top", type="warning",
+                      message=f"{label or field} 应为数字，本次修改未保存")
+            return
+        task[field] = normalized
+        _persist_tasks()
+
+    def _bind_blur(comp, task: Dict[str, Any], field: str, label: str = ""):
+        """blur 兜底（同 auto_bind 口径）：填完直接关页/断连时 change 未发、值
+        丢失——失焦把组件当前值再存一次（归一后值未变则跳过，避免重复落盘）"""
+        def _on_blur(_e):
+            try:
+                current = comp.value
+            except Exception:
+                return
+            if current is None:
+                return
+            ok, normalized = _normalize_field(field, current)
+            if not ok:
+                ui.notify(position="top", type="warning",
+                          message=f"{label or field} 应为数字，本次修改未保存")
+                return
+            if task.get(field) != normalized:
+                task[field] = normalized
+                _persist_tasks()
+        reg = getattr(comp, "on", None)
+        if callable(reg):
+            reg("blur", _on_blur)
+
+    def _delete_task(index: int):
+        """删除任务组（从数组 pop + 重建容器；删除最后一组留空数组边界）。"""
+        tasks = _get_tasks()
+        if not (0 <= index < len(tasks)):
+            ui.notify(position="top", type="warning", message=f"定时任务组 #{index + 1} 不存在")
+            return
+        tasks.pop(index)
+        _persist_tasks()
+        _render_tasks()
+        ui.notify(position="top", type="positive",
+                  message=f"已删除定时任务组 #{index + 1}" + ("（当前已无任务组）" if not tasks else ""))
+
+    def _add_task():
+        """添加新任务组：追加到现有任务组之后（数组尾部），默认模板与现有组样式一致。"""
+        if not isinstance(config.get("schedule"), list):
+            config["schedule"] = []
+        config["schedule"].append(dict(_NEW_TASK_TEMPLATE))
+        _persist_tasks()
+        _render_tasks()
+        ui.notify(position="top", type="positive",
+                  message=f"已新增定时任务组 #{len(config['schedule'])}")
+
+    def _render_tasks():
+        """重建任务组容器（新增/删除后整表重渲染，新组样式与现有组完全一致）。"""
+        tasks_box.clear()
+        tasks = _get_tasks()
+        with tasks_box:
+            if not tasks:
+                # 空数组边界：删除最后一组后展示占位提示（后端注册零任务，不报错）
+                ui.label('暂无定时任务组，点击下方「添加新任务组」创建').style('opacity:.7; padding:8px;')
+            for index, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    continue
+                with ui.card().style(card_css):
+                    # 组头：组标题 + 删除按钮（2026-11-17 批次新增）
+                    with ui.row().style('width:100%; align-items:center; justify-content:space-between;'):
+                        ui.label(f'定时任务组 #{index + 1}')
+                        ui.button('删除本组', on_click=lambda _e, i=index: _delete_task(i),
+                                  color=button_internal_color).style(button_internal_css)
+                    with ui.grid(columns=3):
+                        # 开关+关联参数 上下结构单元：启用开关在上，时间上下限在下
+                        with ui.column().style("width:100%;"):
+                            enable_sw = ui.switch(
+                                text=f"启用任务#{index + 1}",
+                                value=bool(task.get("enable", False))).style(switch_internal_css)
+                            enable_sw.on_value_change(
+                                lambda e, t=task, i=index:
+                                _set_task_field(t, "enable", e.value, label=f"启用任务#{i + 1}"))
+                            _register_search(f"启用任务#{index + 1}", ("schedule", str(index), "enable"))
+                            tmin_in = ui.input(
+                                label=f"最小循环周期（秒）#{index + 1}",
+                                value=task.get("time_min", 1200),
+                                placeholder='定时任务循环的周期最小时长（秒）').style("width:100%;")
+                            tmin_in.on_value_change(
+                                lambda e, t=task, i=index:
+                                _set_task_field(t, "time_min", e.value, label=f"最小循环周期#{i + 1}"))
+                            _bind_blur(tmin_in, task, "time_min", label=f"最小循环周期#{index + 1}")
+                            _register_search(f"最小循环周期#{index + 1}", ("schedule", str(index), "time_min"))
+                            tmax_in = ui.input(
+                                label=f"最大循环周期（秒）#{index + 1}",
+                                value=task.get("time_max", 2400),
+                                placeholder='定时任务循环的周期最大时长（秒）').style("width:100%;")
+                            tmax_in.on_value_change(
+                                lambda e, t=task, i=index:
+                                _set_task_field(t, "time_max", e.value, label=f"最大循环周期#{i + 1}"))
+                            _bind_blur(tmax_in, task, "time_max", label=f"最大循环周期#{index + 1}")
+                            _register_search(f"最大循环周期#{index + 1}", ("schedule", str(index), "time_max"))
+                        copy_ta = ui.textarea(
+                            label=f"文案列表#{index + 1}",
+                            value=textarea_data_change(task.get("copy", [])),
+                            placeholder='存放文案的列表，通过空格或换行分割').style("width:100%;")
+                        copy_ta.on_value_change(
+                            lambda e, t=task, i=index:
+                            _set_task_field(t, "copy", e.value, label=f"文案列表#{i + 1}"))
+                        _bind_blur(copy_ta, task, "copy", label=f"文案列表#{index + 1}")
+                        _register_search(f"文案列表#{index + 1}", ("schedule", str(index), "copy"))
+
+    # 页面说明（顶部提示条，主题 CSS 类，不硬编码颜色）
+    with ui.element('div').classes('p-2 hint-callout'):
+        ui.label('定时任务：每个任务组按组内最小~最大循环周期（秒）随机触发一次组内文案；'
+                 '启用开关控制该组是否参与调度。新增任务组追加到现有任务组下方，删除本组即时生效。')
+
+    # 旧版接管键提示（2026-11-17 批次：D4 schedule_groups 组接管 UI 退役）
+    if config.get("schedule_groups"):
+        with ui.element('div').classes('p-2 hint-callout'):
+            ui.label('检测到旧版任务组接管键 schedule_groups 非空（后端优先消费）。'
+                     '本页保存任意任务组后该键将自动清空，任务组统一回归本页管理。')
+
+    # 任务组容器（每组独立卡片；先建容器再渲染，「添加新任务组」管理卡片固定其后）
+    tasks_box = ui.column().style("width:100%; gap:8px;")
+    _render_tasks()
+
+    # 「添加新任务组」管理模块卡片——始终位于最下方（在所有任务组之后渲染，2026-11-17 批次）
     with ui.card().style(card_css):
         ui.label('任务组管理')
-        ui.label("任务组=组名+最小/最大循环周期（秒）+文案列表；组内按周期随机触发文案").style(
-            "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
-
-        group_rows = []  # [(name_in, min_in, max_in, copy_ta, wrap_element)]
-
-        def _sync_groups():
-            cfg = config if isinstance(config, dict) else None
-            if cfg is None:
-                return
-            groups = [{
-                "name": (name_in.value or "").strip(),
-                "min_interval": min_in.value,
-                "max_interval": max_in.value,
-                "copywriting_list": _copy_text_to_list(copy_ta.value),
-            } for name_in, min_in, max_in, copy_ta, _w in group_rows]
-            cfg["schedule_groups"] = groups
-            set_config_callback("schedule_groups", value=groups)
-
-        def _add_group_row(name="", min_iv="", max_iv="", copy_list=None):
-            wrap = ui.column().style("width:100%;border:1px solid var(--border-color, #e5e7eb);border-radius:8px;padding:8px;gap:4px")
-            with wrap:
-                with ui.row().style("width:100%;align-items:center;gap:8px"):
-                    name_in = ui.input(label='组名', value=name, placeholder='例如：默认组').style("width:100%;")
-                    del_btn = ui.button(icon='delete', on_click=lambda: _request_remove_group(wrap)).props('flat dense round')
-                with ui.grid(columns=2).style("width:100%;"):
-                    min_in = ui.input(label='最小循环周期（秒）', value=min_iv, placeholder='例如：60').style("width:100%;")
-                    max_in = ui.input(label='最大循环周期（秒）', value=max_iv, placeholder='例如：120').style("width:100%;")
-                copy_ta = ui.textarea(label='文案列表', value=textarea_data_change(list(copy_list or [])),
-                                      placeholder='存放文案的列表，通过空格或换行分割').style("width:100%;")
-            row = (name_in, min_in, max_in, copy_ta, wrap)
-            group_rows.append(row)
-            for comp in (name_in, min_in, max_in, copy_ta):
-                comp.on_value_change(lambda e: _sync_groups())
-            return row
-
-        def _rebuild_rows(groups):
-            for _n, _mi, _ma, _c, w in list(group_rows):
-                w.delete()
-            group_rows.clear()
-            with groups_container:
-                for g in groups:
-                    _add_group_row(g.get("name", ""), g.get("min_interval", ""), g.get("max_interval", ""),
-                                   g.get("copywriting_list") or [])
-
-        def _migrate_existing():
-            # 存量单任务 → 任务组（首组命名「默认组」）；写入即保存
-            groups = migrate_tasks_to_groups(config.get("schedule", []))
-            if isinstance(config, dict):
-                config["schedule_groups"] = groups
-            set_config_callback("schedule_groups", value=groups)
-            _rebuild_rows(groups)
-            ui.notify(position="top", type="positive",
-                      message=f"已从存量任务生成 {len(groups)} 个任务组（首组为「默认组」）；utils 消费方接线归收尾批")
-
-        # 删除组前确认（D4）
-        pending_wrap = {"el": None}
-        with ui.dialog() as group_confirm, ui.card().style("min-width: 320px;"):
-            ui.label("确认删除任务组").style(
-                "font-size: var(--font-size-card-title, 16px); font-weight: var(--font-weight-title, 600); color: var(--text-title); margin-bottom: 4px;")
-            ui.label("删除后该组的周期与文案配置一并移除").style("color: var(--text-body);")
-            with ui.row().style("justify-content: flex-end; width: 100%; gap: 8px; margin-top: 8px;"):
-                ui.button("取消", on_click=lambda: group_confirm.close()).props("flat no-caps")
-                ui.button("确认删除", on_click=lambda: _do_remove_group()).props(
-                    "unelevated no-caps").style(
-                    "background: var(--color-danger); color: var(--text-on-primary);")
-
-        def _request_remove_group(wrap):
-            pending_wrap["el"] = wrap
-            group_confirm.open()
-
-        def _do_remove_group():
-            wrap = pending_wrap.get("el")
-            group_confirm.close()
-            if wrap is None:
-                return
-            group_rows[:] = [r for r in group_rows if r[4] is not wrap]
-            wrap.delete()
-            _sync_groups()
-
-        groups_container = ui.column().style("width:100%;gap:8px")
-        existing_groups = list(get_nested_value(config, "schedule_groups", default=[]) or [])
-        if not existing_groups:
-            # 存量兼容：无 groups 键时显示迁移提示（存量任务继续生效，不受影响）
-            with groups_container:
-                with ui.element('div').classes('p-2 hint-callout'):
-                    ui.label(f"尚未配置任务组。检测到存量单任务 {len(config.get('schedule', []) or [])} 条——"
-                             "点击下方按钮将映射为任务组（首组命名「默认组」，存量任务继续生效不受影响）；"
-                             "也可直接「添加任务组」从零开始")
-            with ui.row():
-                ui.button('从存量任务生成任务组', on_click=lambda: _migrate_existing()).props('outline dense')
-                ui.button('添加任务组', on_click=lambda: _add_group_row()).props('outline dense')
-        else:
-            with groups_container:
-                for g in existing_groups:
-                    _add_group_row(g.get("name", ""), g.get("min_interval", ""), g.get("max_interval", ""),
-                                   g.get("copywriting_list") or [])
-            with ui.row():
-                ui.button('添加任务组', on_click=lambda: _add_group_row()).props('outline dense')
-
-        if existing_groups and validate_schedule_groups(existing_groups):
-            ui.label("⚠ 现有任务组结构存在告警（保存时会按界面值重建）："
-                     + "；".join(validate_schedule_groups(existing_groups))).style(
-                "font-size: var(--font-size-assist, 12px); color: var(--color-warning, #d97706);")
+        with ui.row():
+            ui.button('添加新任务组', on_click=lambda _e: _add_task(),
+                      color=button_internal_color).style(button_internal_css)

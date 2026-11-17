@@ -95,7 +95,8 @@ class TestFunctionGroupMapping:
         """测试基础功能分组"""
         # Given: 配置文件
         # When: 查找基础功能分组
-        # Then: 包含通用配置和平台配置（旧"页面配置"web 已退役）
+        # Then: 包含通用配置和弹幕监听（2026-11-17 前端布局全面调整批次：
+        #       二级菜单标签"平台配置"更名"弹幕监听"，tab_key 不变）
         with open("config.json", "r", encoding="utf-8") as f:
             config = json.load(f)
 
@@ -104,7 +105,7 @@ class TestFunctionGroupMapping:
         func_names = [f["name"] for f in basic_group["functions"]]
 
         assert "通用配置" in func_names
-        assert "平台配置" in func_names
+        assert "弹幕监听" in func_names
 
     def test_interaction_settings_group(self):
         """测试互动设置分组"""

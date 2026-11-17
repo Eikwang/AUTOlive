@@ -76,7 +76,9 @@ class TestEnableSwitchMigration:
 
     def test_enable_paths_importable(self):
         from frontend.config.enable_paths import ENABLE_PATHS
-        assert len(ENABLE_PATHS) == 15  # 2026-10-28 动态配置退役（-trends_config）；2026-10-26 动作编排总开关迁二级菜单（+choreography）
+        # 2026-10-28 动态配置退役（-trends_config）；2026-10-26 动作编排总开关迁二级菜单（+choreography）；
+        # 2026-11-17 前端布局全面调整批次：弹幕监听总开关迁二级菜单（+platform_config）15 → 16
+        assert len(ENABLE_PATHS) == 16
 
     def test_enable_paths_resolve(self):
         """E-B2 前置：全部路径可在出货 config.json 解析"""
@@ -96,7 +98,7 @@ class TestDriftGuard:
     断言语义钉死（Eng F1，禁用集合相等于 ENABLE_PATHS）：
     (a) ENABLE_PATHS ⊆ tab_mapping（单向——mapping 中无启用开关的 tab 按设计
         不入 ENABLE_PATHS，见 enable_paths.py:10 文档串）；
-    (b) len(ENABLE_PATHS) == 15；
+    (b) len(ENABLE_PATHS) == 16（2026-11-17 前端布局全面调整批次 +platform_config）；
     (c) function_groups ↔ tab_mapping 真双向（集合相等）。
 
     fixture=磁盘 config.json 全节（与 test_enable_paths_resolve 同源，
@@ -156,9 +158,12 @@ class TestDriftGuard:
         assert not missing, f'ENABLE_PATHS 条目不在 tab_mapping: {sorted(missing)}'
 
     def test_enable_paths_count(self):
-        """(b) ENABLE_PATHS 计数守卫（随模块增删更新本断言）"""
+        """(b) ENABLE_PATHS 计数守卫（随模块增删更新本断言）
+
+        2026-11-17 前端布局全面调整批次：+1（platform_config → danmaku_listener.enabled，
+        弹幕监听总开关迁二级菜单）15 → 16。"""
         from frontend.config.enable_paths import ENABLE_PATHS
-        assert len(ENABLE_PATHS) == 15
+        assert len(ENABLE_PATHS) == 16
 
     def test_function_groups_tabs_render(self):
         """渲染健康扫描：磁盘 config 全部 fg tab 渲染不落"暂无配置页面"占位。

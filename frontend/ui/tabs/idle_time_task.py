@@ -39,8 +39,17 @@ def create_idle_time_task_tab(
                     },
                     value=get_nested_value(config, "idle_time_task", "type")
                 ).style("width:100%;").tooltip('闲时任务执行的逻辑'), ("idle_time_task", "type"))
-            _auto_save(ui.input(label='待合成消息队列个数小于此值时触发', value=get_nested_value(config, "idle_time_task", "min_msg_queue_len_to_trigger"), placeholder='待合成消息队列个数小于此值时触发').style("width:100%;"), ("idle_time_task", "min_msg_queue_len_to_trigger"))
-            _auto_save(ui.input(label='待播放音频队列个数小于此值时触发', value=get_nested_value(config, "idle_time_task", "min_audio_queue_len_to_trigger"), placeholder='待播放音频队列个数小于此值时触发').style("width:100%;"), ("idle_time_task", "min_audio_queue_len_to_trigger"))
+            # 2026-11-17 前端布局全面调整批次（任务五：闲时触发参数合并）：
+            # 原「待合成消息队列个数小于此值时触发」更名「触发闲时最小队列长度」
+            # （config 键不变）；原「待播放音频队列个数小于此值时触发」
+            # （min_audio_queue_len_to_trigger）UI 移除——后端两处读取点统一读
+            # 本键（utils/task_scheduler.py），按机制类型约束对应队列
+            _auto_save(ui.input(label='触发闲时最小队列长度',
+                                value=get_nested_value(config, "idle_time_task", "min_msg_queue_len_to_trigger"),
+                                placeholder='触发闲时最小队列长度').style("width:100%;").tooltip(
+                '队列长度小于等于该值视为空闲：机制类型为「待合成消息队列更新闲时」时约束待合成消息队列，'
+                '为「待播放音频队列更新闲时」时约束待播放音频队列'),
+                ("idle_time_task", "min_msg_queue_len_to_trigger"))
             _auto_save(ui.input(label='最小闲时时间', value=get_nested_value(config, "idle_time_task", "idle_time_min"), placeholder='最小闲时间隔时间（秒）').style("width:100%;"), ("idle_time_task", "idle_time_min"))
             _auto_save(ui.input(label='最大闲时时间', value=get_nested_value(config, "idle_time_task", "idle_time_max"), placeholder='最大闲时间隔时间（秒）').style("width:100%;"), ("idle_time_task", "idle_time_max"))
         with ui.row().style("align-items:center;gap:8px;flex-wrap:wrap"):

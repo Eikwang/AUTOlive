@@ -244,41 +244,15 @@ def create_platform_config_tab(
             return "service_disabled"
         return "running"
 
-    # ---------- 页头：总开关 + 胶囊 + 登录进度 chip ----------
-
+    # ---------- 页头：标题 + 胶囊（登录进度 chip 已弃用） ----------
+    # 2026-11-17 前端布局全面调整批次：总开关「启用监听」迁至二级菜单侧边栏
+    # （frontend/config/enable_paths.py "platform_config" → danmaku_listener.enabled，
+    # 页内原开关与本 toggle 处理器移除，消除同键双开关——先例 integral/choreography）。
+    # 开关=配置意图（写盘经 layout.set_config 单键窄写，重启系统后生效）；
+    # 运行态由下方状态胶囊承担，语义详见 _disk_danmaku_section 注记。
     with ui.row().classes("w-full items-center justify-between q-py-sm"):
-        with ui.row().classes("items-center gap-2"):
-            ui.label("弹幕监听（DanmakuListener）").style(
-                "font-size:var(--font-size-page-title,16px);font-weight:600;color:var(--text-primary)")
-            # 开关=配置意图（初值读磁盘真相；注释见 _disk_danmaku_section）
-            head_switch = ui.switch(
-                "启用监听", value=bool(_disk_danmaku_section().get("enabled", False)))
-
-            async def _toggle_service(_e=None):
-                target = head_switch.value
-                # main 活着的两种形态都走运行面端点（假启动批次修复 2026-10-12）：
-                # service_disabled（服务未构建）走 toggle 可在线构建——此前只有
-                # running 走 API，service_disabled 落配置期直写，但 main.py 内存
-                # 不会热重载 config 文件，导致开关写盘后运行面永远不知道。
-                if state["mode"] in ("running", "service_disabled"):
-                    r = await _api(config, "POST", "/danmaku/service/toggle", {"enabled": target})
-                    if r is None or not isinstance(r, dict) or not r.get("success"):
-                        await _err_notify(r or {"error": "运行面切换失败"})
-                        head_switch.value = not target
-                        return
-                    await _toast("监听已开启" if target else "监听已关闭")
-                else:  # 配置期：直写 config（不尝试 API——消除误导提示与闪动）
-                    ok = set_config_callback("danmaku_listener", "enabled",
-                                             value=target, _notify=False)
-                    if ok is False:
-                        await _err_notify({"error": "配置保存失败",
-                                           "fix_hint": "开关状态未翻转"})
-                        head_switch.value = not target
-                        return
-                    await _toast("已开启——启动系统后将同时启动已启用房间的监听"
-                                 if target else "已关闭")
-            head_switch.on("update:model-value", _toggle_service)
-
+        ui.label("弹幕监听（DanmakuListener）").style(
+            "font-size:var(--font-size-page-title,16px);font-weight:600;color:var(--text-primary)")
         with ui.row().classes("items-center gap-2"):
             # 旧「登录：空闲」chip 已移除（2026-10-13 用户裁定弃用——登录进度由
             # 表单下方 login_progress 行内呈现，房间行登录徽章承载登录态）

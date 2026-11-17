@@ -67,7 +67,10 @@ def create_audio_play_tab(
     # ---------- 内置播放器卡（唯一本地播放后端，常驻） ----------
     with ui.card().style(card_css):
         ui.label('内置播放器')
-        with ui.grid(columns=3):
+        # 2026-11-17 前端布局全面调整批次：分块重排三行——第一行输出设备+缓冲
+        # 队列上限；第二行「播放后随机间隔」开关独占一行；第三行间隔上下限并列。
+        # 绑定键与默认值不变。
+        with ui.grid(columns=2):
             device_select = ui.select(
                 label='输出设备', options={'-1': '系统默认'}, value='-1',
             ).style("width:100%;").tooltip('枚举系统输出声卡；打开失败时自动回退系统默认设备并报错（R1）')
@@ -75,10 +78,14 @@ def create_audio_play_tab(
             # 播放器内部缓冲队列（audio_json_list），与互动设置页的合成产物队列
             # 上限（filter.voice_tmp_path_queue_max_len）是链路相邻的两层
             _auto_save(ui.input(label='播放缓冲队列上限（背压）', value=str(get_nested_value(config, "audio_player", "queue_max", default=50) or 50)).style("width:100%;").tooltip('播放器内部缓冲队列的容量上限，满载后新音频阻塞等待播放消费（背压，不丢弃台词）。合成产物队列上限另见互动设置-消息队列&音频队列'), ("audio_player", "queue_max"))
-            with ui.column().style("width:100%;"):
-                _auto_save(ui.switch('播放后随机间隔', value=get_nested_value(config, "audio_player", "random_audio_interval", "enable", default=False)).style(switch_internal_css).tooltip('每条播放完后在上下限之间随机休眠（秒）。默认关闭：下一条音频由播放完成回执驱动立即取用'), ("audio_player", "random_audio_interval", "enable"))
-                _auto_save(ui.input(label='随机间隔下限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "min", default=0.1)).style("width:100%;"), ("audio_player", "random_audio_interval", "min"))
-                _auto_save(ui.input(label='随机间隔上限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "max", default=3)).style("width:100%;"), ("audio_player", "random_audio_interval", "max"))
+
+        # 第二行：随机间隔开关（独占一行——原与间隔上下限同列纵排）
+        _auto_save(ui.switch('播放后随机间隔', value=get_nested_value(config, "audio_player", "random_audio_interval", "enable", default=False)).style(switch_internal_css).tooltip('每条播放完后在上下限之间随机休眠（秒）。默认关闭：下一条音频由播放完成回执驱动立即取用'), ("audio_player", "random_audio_interval", "enable"))
+
+        # 第三行：随机间隔上下限并列（2 列网格）
+        with ui.grid(columns=2):
+            _auto_save(ui.input(label='随机间隔下限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "min", default=0.1)).style("width:100%;"), ("audio_player", "random_audio_interval", "min"))
+            _auto_save(ui.input(label='随机间隔上限(秒)', value=get_nested_value(config, "audio_player", "random_audio_interval", "max", default=3)).style("width:100%;"), ("audio_player", "random_audio_interval", "max"))
 
         # D4：优先级映射只读折叠区（默认收起；dx7 逃生门注明）
         # A5/F-4（2026-10-22 审查批次）：数据源切换 filter.priority_mapping（权威单源），

@@ -12,6 +12,9 @@
    念出）；comment 模式 LLM 提示词语义保持原样
 5. 系统自源（origin=system-idle）排除：闲时自发弹幕不污染 {last_username}、
    不刷新闲时计时；轮询异常不杀线程
+6. 闲时触发参数合并（2026-11-17 前端布局全面调整批次）：音频队列阈值 UI 移除，
+   后端两处读取点统一读 min_msg_queue_len_to_trigger（「触发闲时最小队列长度」），
+   旧键 min_audio_queue_len_to_trigger 全库不再消费
 """
 
 import json
@@ -37,7 +40,9 @@ def make_config(idle_overrides=None):
             "idle_time_min": 1,
             "idle_time_max": 2,
             "min_msg_queue_len_to_trigger": 1,
-            "min_audio_queue_len_to_trigger": 1,
+            # 2026-11-17 闲时触发参数合并批次：min_audio_queue_len_to_trigger 退役
+            # 不再消费（后端音频队列分支改读 min_msg_queue_len_to_trigger），
+            # 测试桩配置不再提供该键
             "trigger_type": ["comment"],
             "copywriting": {"enable": True, "random": True, "copy": ["闲时文案A"]},
             "comment": {"enable": False, "random": True, "copy": ["你是谁"]},
@@ -282,3 +287,47 @@ class TestSystemSourceExclusion:
         th.process_data({"username": "观众C", "content": "嗨"}, "comment")
         assert "观众C" in my_global.last_username_list
         assert my_global.global_idle_time == 0
+
+
+# ---------- ⑥ 闲时触发参数合并（2026-11-17 前端布局全面调整批次） ----------
+
+class TestQueueThresholdMerge:
+    def test_ui_audio_threshold_removed_and_label_merged(self):
+        """UI 守卫：音频队列阈值输入移除，参数更名「触发闲时最小队列长度」（键不变）。"""
+        src = open("frontend/ui/tabs/idle_time_task.py", encoding="utf-8").read()
+        # 旧键路径零消费（退役说明注释可提及键名，故按键路径断言而非裸键名）
+        assert 'idle_time_task", "min_audio_queue_len_to_trigger' not in src
+        # 旧 label 不再作为控件文本（label=/placeholder= 绑定形态断言）
+        assert "label='待播放音频队列个数小于此值时触发'" not in src
+        assert "placeholder='待播放音频队列个数小于此值时触发'" not in src
+        assert "触发闲时最小队列长度" in src
+        assert "min_msg_queue_len_to_trigger" in src
+
+    def test_backend_unified_key_zero_old_consumption(self):
+        """后端守卫：两处读取点统一读 min_msg_queue_len_to_trigger，旧键路径零消费。"""
+        src = open("utils/task_scheduler.py", encoding="utf-8").read()
+        # 旧键路径零消费（退役说明注释可提及键名，故按键路径断言而非裸键名）
+        assert 'idle_time_task", "min_audio_queue_len_to_trigger' not in src
+        assert src.count('min_msg_queue_len_to_trigger")') >= 2  # 合成队列+音频队列两分支
+
+    def test_audio_mechanism_reads_unified_key(self, monkeypatch):
+        """行为守卫：音频队列分支按统一键判阈值——桩配置不含旧键，阈值取
+        min_msg_queue_len_to_trigger=5：队列 3 ≤ 5 应判空闲触发（若仍读旧键
+        则缺键兜底阈值 1，队列 3 > 1 永不触发）。"""
+        ts, mh = make_ts({"type": "待播放音频队列更新闲时",
+                          "idle_time_min": 1, "idle_time_max": 1,
+                          "min_msg_queue_len_to_trigger": 5})
+        mh.audio.voice_tmp_path_queue = ["a"] * 3
+        ts.do_task = MagicMock(return_value=(0, [], [], []))
+        TestQueueMechanismMinMax._run_idle_thread(self, monkeypatch, ts, rounds=2)
+        assert ts.do_task.call_count >= 1
+
+    def test_audio_mechanism_busy_no_trigger(self, monkeypatch):
+        """音频队列长度 > 统一阈值 → 空闲条件不满足，不触发（阈值语义对照）。"""
+        ts, mh = make_ts({"type": "待播放音频队列更新闲时",
+                          "idle_time_min": 1, "idle_time_max": 1,
+                          "min_msg_queue_len_to_trigger": 1})
+        mh.audio.voice_tmp_path_queue = ["a"] * 3
+        ts.do_task = MagicMock(return_value=(0, [], [], []))
+        TestQueueMechanismMinMax._run_idle_thread(self, monkeypatch, ts, rounds=6)
+        assert ts.do_task.call_count == 0

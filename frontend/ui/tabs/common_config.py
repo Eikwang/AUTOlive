@@ -8,6 +8,8 @@
 布局规范：
 - 设置项用 2 列网格排布，组件宽度跟随列宽（width:100%）
 - 开关+关联参数 为上下结构单元：开关在上，输入框在下
+- 2026-11-17 前端布局全面调整批次：整页重组为三个分块卡片（基础模型选择/
+  弹幕模板/回复模板），纵向排列、各卡独立 ui.card 且宽度一致（不跨卡共用网格）
 """
 import json
 from nicegui import ui
@@ -33,6 +35,7 @@ def create_common_config_tab(
     set_config_callback: Callable
 ):
     """创建通用配置标签页（精简版）"""
+    card_css = theme_config.get("card", "")
     switch_internal_css = theme_config.get("switch_internal", "")
 
     # 导入自动绑定函数
@@ -48,50 +51,53 @@ def create_common_config_tab(
     visual_body_options = {'edtalk_realtime': 'EDTalk 实时驱动'}
     audio_synthesis_type_options = {'gpt_sovits': 'GPT_SoVITS', 'edge_tts': 'edge-tts'}  # D-19：与合成测试处下拉保持一致
 
-    # 基础配置（2列网格）
-    with ui.grid(columns=2):
-        # 旧架构 platform 16 选 1 与 room_display_id 已退役（整合计划 P2-4）：
-        # 监听房间/活跃指定统一在"平台配置"页（DanmakuListener 进程内模块）
+    # ========== 2026-11-17 前端布局全面调整批次：重组为三个分块卡片 ==========
+    # 纵向排列、各卡独立 ui.card 且宽度一致（不跨卡共用网格）；绑定键与默认值
+    # 与旧版逐字一致，仅重排布局。
 
-        _auto_save(ui.select(
-            label='大语言模型',
-            options=chat_type_options,
-            value=get_nested_value(config, "chat_type")
-        ).style("width:100%;").tooltip('选用的LLM类型。相关的弹幕信息等会传递给此LLM进行推理，获取回答'), ("chat_type",))
+    # 分块一：基础模型选择（大语言模型/数字人/语音合成/回复语言 四个下拉，
+    # 原 2 列网格整体迁入独立卡片）。旧架构 platform 16 选 1 与 room_display_id
+    # 已退役（整合计划 P2-4）：监听房间/活跃指定统一在"弹幕监听"页（DanmakuListener 进程内模块）
+    with ui.card().style(card_css):
+        with ui.grid(columns=2):
+            _auto_save(ui.select(
+                label='大语言模型',
+                options=chat_type_options,
+                value=get_nested_value(config, "chat_type")
+            ).style("width:100%;").tooltip('选用的LLM类型。相关的弹幕信息等会传递给此LLM进行推理，获取回答'), ("chat_type",))
 
-        _auto_save(ui.select(
-            label='数字人',
-            options=visual_body_options,
-            value=get_nested_value(config, "visual_body")
-        ).style("width:100%;").tooltip('选用的数字人模型，用于直播形象。默认使用系统集成的 EDTalk 实时驱动模型'), ("visual_body",))
+            _auto_save(ui.select(
+                label='数字人',
+                options=visual_body_options,
+                value=get_nested_value(config, "visual_body")
+            ).style("width:100%;").tooltip('选用的数字人模型，用于直播形象。默认使用系统集成的 EDTalk 实时驱动模型'), ("visual_body",))
 
-        _auto_save(ui.select(
-            label='语音合成',
-            options=audio_synthesis_type_options,
-            value=get_nested_value(config, "audio_synthesis_type")
-        ).style("width:100%;").tooltip('选用的TTS类型，所有的文本内容最终都将通过此TTS进行语音合成'), ("audio_synthesis_type",))
+            _auto_save(ui.select(
+                label='语音合成',
+                options=audio_synthesis_type_options,
+                value=get_nested_value(config, "audio_synthesis_type")
+            ).style("width:100%;").tooltip('选用的TTS类型，所有的文本内容最终都将通过此TTS进行语音合成'), ("audio_synthesis_type",))
 
-        _auto_save(ui.select(
-            label='回复语言',
-            # 2026-10-22 批次（G3）：补韩文/粤语。内部值 'jp'→引擎 'ja' 映射见
-            # synthesis_manager.tts_handle（存量配置兼容，不改键值）
-            options={'none': '所有', 'zh': '中文', 'en': '英文', 'jp': '日文', 'ko': '韩文', 'yue': '粤语'},
-            value=get_nested_value(config, "need_lang")
-        ).style("width:100%;").tooltip('限制回复的语言，如：选中中文，则只会回复中文提问，其他语言将被跳过。同时关联GPT-SOVITS合成语种（所有→auto，中文→zh）'), ("need_lang",))
+            _auto_save(ui.select(
+                label='回复语言',
+                # 2026-10-22 批次（G3）：补韩文/粤语。内部值 'jp'→引擎 'ja' 映射见
+                # synthesis_manager.tts_handle（存量配置兼容，不改键值）
+                options={'none': '所有', 'zh': '中文', 'en': '英文', 'jp': '日文', 'ko': '韩文', 'yue': '粤语'},
+                value=get_nested_value(config, "need_lang")
+            ).style("width:100%;").tooltip('限制回复的语言，如：选中中文，则只会回复中文提问，其他语言将被跳过。同时关联GPT-SOVITS合成语种（所有→auto，中文→zh）'), ("need_lang",))
 
-    # 开关+参数组合（上下结构：开关在上，输入框在下，2列网格）
-    with ui.grid(columns=2):
-        # 弹幕模板组
-        with ui.column().style("width:100%;"):
-            _auto_save(ui.switch('启用弹幕模板', value=get_nested_value(config, "comment_template", "enable")).style(switch_internal_css).tooltip('开启后系统进行AI对话时，按模板设定的格式向LLM发送包含用户名的信息；关闭则只发送弹幕内容'), ("comment_template", "enable"))
-            _auto_save(ui.input(label='弹幕模板', value=get_nested_value(config, "comment_template", "copywriting"), placeholder='此配置会对弹幕内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量').style("width:100%;").tooltip('此配置会对弹幕内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("comment_template", "copywriting"))
+    # 分块二：弹幕模板（开关在上、模板输入在下——上下结构单元；原与回复模板
+    # 同卡双列并排，现拆为独立卡片）
+    with ui.card().style(card_css):
+        _auto_save(ui.switch('启用弹幕模板', value=get_nested_value(config, "comment_template", "enable")).style(switch_internal_css).tooltip('开启后系统进行AI对话时，按模板设定的格式向LLM发送包含用户名的信息；关闭则只发送弹幕内容'), ("comment_template", "enable"))
+        _auto_save(ui.input(label='弹幕模板', value=get_nested_value(config, "comment_template", "copywriting"), placeholder='此配置会对弹幕内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量').style("width:100%;").tooltip('此配置会对弹幕内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("comment_template", "copywriting"))
 
-        # 回复模板组
-        with ui.column().style("width:100%;"):
-            _auto_save(ui.switch('启用回复模板', value=get_nested_value(config, "reply_template", "enable")).style(switch_internal_css).tooltip('此配置会在LLM输出的答案中进行回复内容的重新构建'), ("reply_template", "enable"))
-            _auto_save(ui.input(label='回复用户名的最大长度', value=get_nested_value(config, "reply_template", "username_max_len"), placeholder='回复用户名的最大长度').style("width:100%;").tooltip('回复用户名的最大长度，超过时截断用户名'), ("reply_template", "username_max_len"))
-            _auto_save(ui.textarea(
-                label='回复模板',
-                placeholder='此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量',
-                value=textarea_data_change(get_nested_value(config, "reply_template", "copywriting"))
-            ).style("width:100%;").tooltip('此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("reply_template", "copywriting"), split_lines=True)
+    # 分块三：回复模板（开关 + 用户名长度上限 + 模板多行输入，上下结构）
+    with ui.card().style(card_css):
+        _auto_save(ui.switch('启用回复模板', value=get_nested_value(config, "reply_template", "enable")).style(switch_internal_css).tooltip('此配置会在LLM输出的答案中进行回复内容的重新构建'), ("reply_template", "enable"))
+        _auto_save(ui.input(label='回复用户名的最大长度', value=get_nested_value(config, "reply_template", "username_max_len"), placeholder='回复用户名的最大长度').style("width:100%;").tooltip('回复用户名的最大长度，超过时截断用户名'), ("reply_template", "username_max_len"))
+        _auto_save(ui.textarea(
+            label='回复模板',
+            placeholder='此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量',
+            value=textarea_data_change(get_nested_value(config, "reply_template", "copywriting"))
+        ).style("width:100%;").tooltip('此配置会对LLM回复内容进行修改，{}内为变量，会被替换为指定内容，请勿随意删除变量'), ("reply_template", "copywriting"), split_lines=True)

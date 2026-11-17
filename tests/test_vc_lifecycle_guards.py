@@ -432,7 +432,10 @@ def test_queue_labels_distinct_mechanism():
     queue = _read(os.path.join("frontend", "ui", "tabs", "filter_queue.py"))
     assert "播放缓冲队列上限（背压）" in play, "音频播放页 label 未标注"
     assert "audio_player" in play and "queue_max" in play
-    assert "待播音频队列容量（优先级丢弃）" in queue, "互动设置页 label 未标注"
+    # 2026-11-17 前端布局批次：四项改一行（columns=4），label 改队列环节短名
+    assert "ui.grid(columns=4)" in queue, "队列参数未一行排列"
+    assert "待播放队列长度" in queue, "互动设置页 label 未标注"
+    assert "待播音频队列容量（优先级丢弃）" not in queue, "旧 label 残留"
     assert "另见" in play and "另见" in queue, "缺跨页互引"
     assert "待播队列上限" not in play, "旧混淆 label 残留"
     assert "音频播放队列最大保留长度" not in queue, "旧混淆 label 残留"

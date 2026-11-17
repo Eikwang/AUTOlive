@@ -1803,6 +1803,13 @@ class DrawerLayout:
                     # 新值，单键变更须窄写直接落盘（内存已同步写入）。
                     from frontend.config.settings import get_config
                     get_config().narrow_write_choreography_enable(bool(value))
+                elif tuple(keys) == ("danmaku_listener", "enabled"):
+                    # danmaku_listener.enabled 窄写特判（2026-11-17 前端布局全面
+                    # 调整批次）：弹幕监听总开关迁二级菜单后经此落盘——main 可达时
+                    # Settings.save 全量 dump 对该节整节磁盘回读，直写新值会被吞
+                    # （假保存）。单键窄写直接落盘（内存已同步写入），先例同上。
+                    from frontend.config.settings import get_config
+                    get_config().narrow_write_danmaku_enabled(bool(value))
                 else:
                     self.save_config()
             except Exception as e:

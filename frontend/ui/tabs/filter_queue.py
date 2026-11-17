@@ -120,20 +120,20 @@ def create_filter_queue_tab(
 
     with ui.card().style(card_css):
         with ui.expansion('待合成音频的消息&待播放音频队列', icon="settings", value=True).classes('w-full'):
-            with ui.grid(columns=3):
+            with ui.grid(columns=4):
                 # X8（2026-11-06 批次）：文案标注队列环节与机制——本参数约束
                 # 合成产物队列（voice_tmp_path_queue），与音频播放页的播放缓冲
                 # 上限（audio_player.queue_max）是链路相邻的两层
-                _auto_save(ui.input(label='消息队列最大保留长度', placeholder='收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃', value=get_nested_value(config, "filter", "message_queue_max_len")).style("width:100%;").tooltip('收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃'), keys=("filter", "message_queue_max_len"))
-                _auto_save(ui.input(label='待播音频队列容量（优先级丢弃）', placeholder='合成完成的音频，会根据优先级存入待播音频队列，当新音频的优先级低于队列中所有的音频且超过此长度时，此音频将被丢弃', value=get_nested_value(config, "filter", "voice_tmp_path_queue_max_len")).style("width:100%;").tooltip('合成完成音频等待分发的队列容量，满载时低优先级音频被丢弃、高优先级插队驱逐队尾（不阻塞合成）。播放缓冲上限另见基础功能-音频播放'), keys=("filter", "voice_tmp_path_queue_max_len"))
+                _auto_save(ui.input(label='待处理队列长度', placeholder='收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃', value=get_nested_value(config, "filter", "message_queue_max_len")).style("width:100%;").tooltip('收到的消息，生成的文本内容，会根据优先级存入消息队列，当新消息的优先级低于队列中所有的消息且超过此长度时，此消息将被丢弃'), keys=("filter", "message_queue_max_len"))
+                _auto_save(ui.input(label='待播放队列长度', placeholder='合成完成的音频，会根据优先级存入待播音频队列，当新音频的优先级低于队列中所有的音频且超过此长度时，此音频将被丢弃', value=get_nested_value(config, "filter", "voice_tmp_path_queue_max_len")).style("width:100%;").tooltip('合成完成音频等待分发的队列容量，满载时低优先级音频被丢弃、高优先级插队驱逐队尾（不阻塞合成）。播放缓冲上限另见基础功能-音频播放'), keys=("filter", "voice_tmp_path_queue_max_len"))
                 _auto_save(ui.input(
-                    label='音频播放队列首次触发播放阈值',
+                    label='启动消费队列长度',
                     placeholder='正整数 例如：20，如果你不想开播前缓冲一定数量的音频，请配置0',
                     value=get_nested_value(config, "filter", "voice_tmp_path_queue_min_start_play")
                 ).style("width:100%;").tooltip('此功能用于缓存一定数量的音频后再开始播放。如果你不想开播前缓冲一定数量的音频，请配置0；如果你想提前准备一些音频，如因为TTS合成慢的原因，可以配置此值，让TTS提前合成你的其他任务触发的内容'), keys=("filter", "voice_tmp_path_queue_min_start_play"))
                 # 合成背压门（2026-11-16 消费回传背压批次）：消费回传驱动供需速率匹配
                 _auto_save(ui.input(
-                    label='合成背压门限（消费回传）',
+                    label='待播放队列压力',
                     placeholder='正整数 例如：2，配置0关闭合成背压门',
                     value=get_nested_value(config, "play_audio", "synth_gate_depth", default=2)
                 ).style("width:100%;").tooltip('待播放音频队列中普通音频达到此数量时，合成线程暂停取下一条消息（消费出队一条后继续），使合成速率贴合播放速率、避免队列持续积压高压。点歌切片、复读/编排等最高优先级（权重≥500）音频、待播放的弹幕回复不受此门限制。配置0=关闭背压门；调大可增加TTS抖动缓冲但队列积压更多；首次触发播放阈值大于此值时按阈值生效'), keys=("play_audio", "synth_gate_depth"))

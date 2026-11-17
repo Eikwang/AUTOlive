@@ -8,6 +8,8 @@
 - 开关+关联参数 为上下结构单元：开关在上，输入框在下
 - 歌曲翻唱模块（/autoplan 2026-10-14 C-3）：折叠分组承载（状态/参数/成品），
   队列状态经 main 侧 /cover/status 窄端点轮询（写者矩阵：webui 只读）
+- 数值参数（相似度/伴奏音量/翻唱音高）为 ui.number 数值输入框
+  （2026-11-17 前端布局批次：滑块退役，min/max/step/精度与绑定键不变）
 """
 import difflib
 import os
@@ -100,27 +102,35 @@ def create_choose_song_tab(
                 _auto_save(ui.input(label='引导文案（礼物点歌开启时）', value=get_nested_value(config, "choose_song", "guide_copy"), placeholder='开启礼物点歌后，匹配成功未打赏的回应，不播放\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "guide_copy"))
             with ui.column().style("width:100%;"):
                 _auto_save(ui.input(label='匹配成功文案', value=get_nested_value(config, "choose_song", "match_success_copy"), placeholder='点歌匹配成功后播报（关键词直点/礼物点歌共用）\n变量：{user} {content} {gift}').style("width:100%;"), keys=("choose_song", "match_success_copy"))
+        # 2026-11-17 前端布局批次（任务七①）：滑块改数值输入框（ui.number）——
+        # min/max/step/精度语义与绑定键、value 全部不变；on_change 内沿原滑块
+        # min/max 钳制 + 清空回落默认值（防 None 落盘毒化数字键，消费侧 or 默认同口径）
         with ui.grid(columns=2):
             with ui.column().style("width:100%;"):
                 similarity_val = float(get_nested_value(config, "choose_song", "similarity") or 0.5)
-                simlab = ui.label(f'匹配最低相似度: {similarity_val:.2f}').style("font-size:12px")
-                ui.slider(min=0.1, max=1.0, step=0.05, value=similarity_val,
-                          on_change=lambda e: (simlab.set_text(f'匹配最低相似度: {float(e.value):.2f}'),
-                                               set_config_callback("choose_song", "similarity", value=float(e.value)))
-                          ).props("label-always").style("width:100%")
+                ui.number(label='匹配最低相似度', placeholder='0.10–1.00，步进 0.05（默认 0.5）',
+                          min=0.1, max=1.0, step=0.05, precision=2, value=similarity_val,
+                          on_change=lambda e: set_config_callback(
+                              "choose_song", "similarity",
+                              value=float(max(0.1, min(1.0, e.value))) if e.value is not None else 0.5),
+                          ).style("width:100%;").tooltip('点歌/礼物映射匹配的最低相似度阈值（误命中多调高，漏命中多调低）')
             with ui.column().style("width:100%;"):
                 bv_val = float(get_nested_value(config, "choose_song", "backing_volume") or 0.8)
-                bvlab = ui.label(f'伴奏音量（数字人演唱时）: {bv_val:.0%}').style("font-size:12px")
-                ui.slider(min=0.0, max=1.0, step=0.05, value=bv_val,
-                          on_change=lambda e: (bvlab.set_text(f'伴奏音量（数字人演唱时）: {float(e.value):.0%}'),
-                                               set_config_callback("choose_song", "backing_volume", value=float(e.value)))
-                          ).props("label-always").style("width:100%")
+                ui.number(label='伴奏音量（数字人演唱时）', placeholder='0–1.00，步进 0.05；0=静音（默认 0.8）',
+                          min=0.0, max=1.0, step=0.05, precision=2, value=bv_val,
+                          on_change=lambda e: set_config_callback(
+                              "choose_song", "backing_volume",
+                              value=float(max(0.0, min(1.0, e.value))) if e.value is not None else 0.8),
+                          ).style("width:100%;")
         ui.label("伴奏音量：数字人演唱时伴奏从直播设备外放的音量（0=静音）；干声经数字人口型驱动，伴奏本地外放").style(
             "font-size: var(--font-size-assist, 12px); color: var(--text-hint, #9ca3af);")
 
     # ---------- 礼物点歌映射表+匹配预演（D4：choose_song.gift_song_map 新键） ----------
     with ui.card().style(card_css):
-        with ui.expansion("礼物点歌（礼物事件映射歌曲播放）", value=False).style("width:100%"):
+        # 2026-11-17 前端布局批次（任务七②）：礼物点歌模块 ui.expansion 可折叠，
+        # 对齐 filter_queue 同款 expansion+icon+classes 用法（展开内容不变；
+        # value=False 默认折叠维持现状）
+        with ui.expansion("礼物点歌（礼物事件映射歌曲播放）", icon="redeem", value=False).classes('w-full'):
             # 启用开关（2026-10-31 点歌审查批次：gift_song_enable——开启后礼物命中
             # 映射即点歌播放、关键词点歌仅回应引导文案；关闭后关键词直点歌、礼物仅答谢）
             with ui.row().style("width:100%;align-items:center;gap:12px"):
@@ -279,7 +289,10 @@ def create_choose_song_tab(
 
     # ---------- 歌曲翻唱（C-3：折叠分组防卡片墙，Design P4/P7） ----------
     with ui.card().style(card_css):
-        with ui.expansion("歌曲翻唱（点歌命中自动翻唱→成品自动插播）", value=False).style("width:100%"):
+        # 2026-11-17 前端布局批次（任务七②）：歌曲翻唱模块 ui.expansion 可折叠，
+        # 对齐 filter_queue 同款 expansion+icon+classes 用法（展开内容不变；
+        # value=False 默认折叠维持现状）
+        with ui.expansion("歌曲翻唱（点歌命中自动翻唱→成品自动插播）", icon="mic_external_on", value=False).classes('w-full'):
             # ① 队列状态卡（/cover/status 轮询；to_thread 解耦事件循环——nicegui3 教训）
             status_lab = ui.label("队列状态查询中…").style("font-size:12px;color:var(--text-secondary)")
 
@@ -466,12 +479,16 @@ def create_choose_song_tab(
                                      options=opts).style("width:100%;"),
                            keys=("choose_song", "cover_profile_id"))
                 with ui.column().style("width:100%"):
+                    # 2026-11-17 前端布局批次（任务七①）：滑块改数值输入框——
+                    # min/max/step/精度与绑定键、value 不变；钳制+清空回落 0
+                    # （消费侧 cover_worker int(pitch or 0) 同口径）
                     pitch_val = int(get_nested_value(config, "choose_song", "cover_pitch") or 0)
-                    plab = ui.label(f"翻唱音高（八度）: {pitch_val:+d}").style("font-size:12px")
-                    ui.slider(min=-12, max=12, step=1, value=pitch_val,
-                              on_change=lambda e: (plab.set_text(f"翻唱音高（八度）: {int(e.value):+d}"),
-                                                   set_config_callback("choose_song", "cover_pitch", value=int(e.value))),
-                              ).props("label-always").style("width:100%")
+                    ui.number(label='翻唱音高（八度）', placeholder='-12–+12，步进 1（男转女 +1）',
+                              min=-12, max=12, step=1, precision=0, value=pitch_val,
+                              on_change=lambda e: set_config_callback(
+                                  "choose_song", "cover_pitch",
+                                  value=int(max(-12, min(12, e.value))) if e.value is not None else 0),
+                              ).style("width:100%;")
             ui.label("音高单位=八度（男转女 +1）；AI 翻唱内部换算半音").style(
                 "font-size:11px;color:var(--text-secondary)")
 

@@ -12,6 +12,12 @@ tab_key → 该功能"启用"开关的业务 config 路径（tuple 逐级键）�
 from typing import Dict, Tuple
 
 ENABLE_PATHS: Dict[str, Tuple[str, ...]] = {
+    # 2026-11-17 前端布局全面调整批次：弹幕监听（原"平台配置"）总开关迁至二级菜单
+    # （页内"启用监听"开关移除；绑定键 danmaku_listener.enabled 不变）。写盘经
+    # layout.set_config 的单键窄写特判（main 可达时 Settings.save 整节磁盘回读会
+    # 吞 webui 全量 dump 的新值，先例 choreography.enable）；开关=配置意图，
+    # 运行态由页内状态胶囊承担，重启系统后生效
+    "platform_config": ("danmaku_listener", "enabled"),
     "audio_play": ("play_audio", "enable"),
     "web_captions_printer": ("web_captions_printer", "enable"),
     "svc": ("rvc_vc", "enabled"),

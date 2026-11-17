@@ -481,6 +481,10 @@ class TaskScheduler:
                         # idle_min~max 随机等待后才执行（2026-10-31 审查批次：
                         # 原实现每 5s 轮询阈值满足即触发——最小/最大闲时时间
                         # 参数对两队列机制零生效，队列持续空时 5s 一条刷屏）
+                        # 2026-11-17 闲时触发参数合并批次：阈值统一读
+                        # min_msg_queue_len_to_trigger（UI 名「触发闲时最小队列
+                        # 长度」）——两队列机制共用同一 config 键，按机制类型
+                        # 约束对应队列
                         try:
                             threshold = int(self.config.get("idle_time_task", "min_msg_queue_len_to_trigger") or 1)
                         except (TypeError, ValueError):
@@ -489,8 +493,12 @@ class TaskScheduler:
                         idle_now = queue_len <= threshold
                     elif "播放" in mechanism or "音频队列" in mechanism:
                         # 待播放音频队列闲时（同上：min/max 等待生效）
+                        # 2026-11-17 闲时触发参数合并批次：原 min_audio_queue_len_to_trigger
+                        # 退役不再读取（存量 config 保留该键仅作兼容，不消费）——
+                        # 两队列机制统一读 min_msg_queue_len_to_trigger（「触发闲时
+                        # 最小队列长度」），按机制类型约束待播放音频队列
                         try:
-                            threshold = int(self.config.get("idle_time_task", "min_audio_queue_len_to_trigger") or 1)
+                            threshold = int(self.config.get("idle_time_task", "min_msg_queue_len_to_trigger") or 1)
                         except (TypeError, ValueError):
                             threshold = 1
                         queue_len = len(getattr(self.my_handle.audio, "voice_tmp_path_queue", []) or [])

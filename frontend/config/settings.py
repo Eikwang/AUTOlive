@@ -163,6 +163,45 @@ class Settings:
                 pass
             raise
 
+    def narrow_write_danmaku_enabled(self, enable: bool) -> None:
+        """danmaku_listener.enabled 单键窄写（2026-11-17 前端布局全面调整批次）。
+
+        背景：弹幕监听总开关（原"平台配置"页内「启用监听」）迁至二级菜单后，
+        二级菜单开关经 set_config 落盘。写者矩阵（Eng F-ENG-2）：main.py 可达时
+        本进程 save() 全量 dump 会对 danmaku_listener 节做整节磁盘回读——webui
+        直写该节的新值会被吞（假保存）。故二级菜单开关的单键变更走此处：
+        读磁盘节 → 仅改 enabled → tmp+os.replace 原子写回。写法对齐
+        narrow_write_choreography_enable 先例；异常上抛（调用方 set_config
+        回滚内存+UI）。开关=配置意图（重启系统后生效），运行态由
+        /danmaku/status 轮询胶囊承担。"""
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            disk = json.load(f)
+        node = disk.get("danmaku_listener")
+        if not isinstance(node, dict):
+            node = {}
+        try:
+            from utils.my_log import logger
+            logger.info(f"[danmaku_listener] 写盘审计（二级菜单开关窄写）："
+                        f"enabled {node.get('enabled')}→{bool(enable)}（其余键保持磁盘值）")
+        except Exception:
+            pass
+        node["enabled"] = bool(enable)
+        disk["danmaku_listener"] = node
+        tmp_path = self.config_path.with_suffix(
+            self.config_path.suffix + f".tmp{os.getpid()}"
+        )
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(disk, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.config_path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def _main_reachable(self) -> bool:
         """main.py 控制面可达性探测（TCP 10ms；无 HTTP 依赖）。api_port 为 main.py FastAPI 端口。"""
         import socket
