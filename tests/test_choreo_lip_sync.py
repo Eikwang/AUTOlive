@@ -136,9 +136,12 @@ class TestPlaybackGuardWiring:
         assert "_CHOREO_MUTE_MAX_WAIT" in src  # 防呆上限常量在位
         # 等待循环消费 in_mute_window（窗口结束才放行推送）
         assert "while _choreo_guard.in_mute_window()" in src
-        # W2 finally 化守卫：999 active 标记在调用方 try/finally 释放
+        # W2 finally 化守卫（2026-11-15 批次：999 active 标记退役，改为 EDTalk
+        # 在飞条目登记 _edtalk_current_entry 的 finally 清理）
         caller = inspect.getsource(playback_manager.PlaybackMixin.only_play_audio)
-        assert "finally:" in caller and "active_reread_top_999 = False" in caller
+        assert "finally:" in caller
+        consumer = inspect.getsource(playback_manager.PlaybackMixin._consume_edtalk_entry)
+        assert "_edtalk_current_entry = None" in consumer  # finally 清理在飞登记
 
     def test_mute_wait_limit_defined(self):
         from utils.audio.playback_manager import _CHOREO_MUTE_MAX_WAIT

@@ -58,6 +58,16 @@ class EventHandler:
                 username = username[:max_len]
         except (TypeError, ValueError):
             pass
+        # 用户名数字转文字（2026-11-14 助播听感修复）：答谢文案在 _thanks_generate
+        # 把 username 变量替换进 content——合成侧关口只转 message["username"]
+        # （助播消息该键是助播名，转不到 content 内嵌的数字），"9527" 被念成
+        # "九千五百二十七"。与弹幕链同开关（filter.username_convert_digits_
+        # to_chinese）、幂等，主播/助播/编排答谢三路同修。
+        try:
+            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                username = common.convert_digits_to_chinese(username) or username
+        except Exception:
+            pass
         return username
 
     def _thanks_copy(self, type2: str) -> str:

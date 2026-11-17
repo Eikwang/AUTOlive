@@ -422,8 +422,8 @@ class ConversationManager:
         
         if stop_audio_play:
             # 2026-10-30 审查批次：stop_audio("pygame",...) 链随 pygame 播放分支
-            # 退役——本地播放统一 builtin，清队后打断当前流（EDTalk 激活时内部
-            # 静默跳过，契约无 flush 端点）
+            # 退役——本地播放统一 builtin，清队后打断当前流；EDTalk 激活时
+            # 2026-11-16 批次改为推送静音 flush（服务端替换语义）→ 数字人闭嘴
             self.my_handle.audio.stop_current_audio()
     
     def do_listen_and_comment(self, continuous: bool = False):

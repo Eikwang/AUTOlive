@@ -3,13 +3,14 @@
 音频播放审查批次测试（/autoplan main-20261022-143149 批准实施，2026-10-22）
 
 义务覆盖（review-record.md E1-E6/R1-R8）：
-- E1：队列溢出四规则（设计四示例+主叙述逐行复现）+ 999 单实例约束 + 有界不变量
+- E1：队列溢出四规则（设计四示例+主叙述逐行复现）+ 有界不变量
+  （2026-11-15 批次：999 单实例约束随 999 机制退役，约束格移除）
 - E1/A2：变速迁移（clamp / pitch 换算公式 / 合成侧随机源边界）
-- A6/R6(a)：reread type 透传（999 映射保持，签名不 TypeError）
+- A6/R6(a)：reread type 透传（最高权重映射保持 500，签名不 TypeError）
 - A10：四句一切切分（四句上限 / 无标点 60 字兜底 / 末段平衡）
 - A11：门控（idle 本地音频 enable / EDTalk 推送链豁免）
 - A12：svc 失败不入队
-- F-2/F-3/F-5：builtin 暂停-续播状态机（pause 保持/挂起让位/弃置留痕/回退折算）
+- F-2/F-3/F-5：builtin 暂停-续播状态机（pause 保持/让位挂起/弃置留痕/回退折算）
 - A5/F-4：优先级单源（settings 默认表无 priority_mapping + builtin provider 消费）
 """
 
@@ -152,48 +153,26 @@ class TestQueueFourRules:
             assert len(fx.voice_tmp_path_queue) <= 6
         assert len(fx.voice_tmp_path_queue) == 6
 
-    def test_999_single_instance_in_queue(self):
-        """999 单实例：队列中已有 999 时新 999 舍弃（优先于取代/插队规则）"""
+    def test_interrupt_requested_for_higher_priority_insert(self):
+        """d12 b 触发（2026-11-15 批次：999 退役）：新音频有效权重严格高于
+        在播条目且同声道 → 请求 builtin 让位"""
         fx = self._fixture(6)
-        self._build(fx, ["w999", "w200", "w150", "w150", "w80", "w20"])
-        result = fx.data_priority_insert("待播放音频列表", _item("w999", "second"))
-        assert result["code"] == 1
-        assert sum(1 for d in fx.voice_tmp_path_queue if d["type"] == "w999") == 1
-
-    def test_999_single_instance_active_flag(self):
-        """999 单实例：播放器持有（active 标记）时新 999 舍弃——即使队列为空"""
-        fx = self._fixture(6)
-        fx.active_reread_top_999 = True
-        result = fx.data_priority_insert("待播放音频列表", _item("w999", "while-playing"))
-        assert result["code"] == 1
-        assert fx.voice_tmp_path_queue == []
-
-    def test_999_active_cleared_allows_next(self):
-        """999 释放（active 清除、队列无 999）后新 999 正常入队"""
-        fx = self._fixture(6)
-        fx.active_reread_top_999 = False
-        result = fx.data_priority_insert("待播放音频列表", _item("w999", "fresh"))
-        assert result["code"] == 200
-        assert fx.voice_tmp_path_queue[0]["type"] == "w999"
-
-    def test_interrupt_requested_for_non999_insert(self):
-        """A7 情况1：非 999 新音频入队成功且 999 active → 请求 builtin 让位"""
-        fx = self._fixture(6)
-        fx.active_reread_top_999 = True
         called = []
         # T3/e3（2026-11-05）：让位入口泛化为 request_yield（触发裁决在
-        # _maybe_interrupt_999_for a/b 双规则；999 active=a 触发）
+        # _maybe_barge_in_for：barge-in 钩子① + d12 b 规则②）
         fx.audio_player = types.SimpleNamespace(
-            request_yield=lambda: called.append(1))
+            request_yield=lambda: called.append(1),
+            get_playing_weight=lambda: 10)
         fx.data_priority_insert("待播放音频列表", _item("w200", "interruptor"))
         assert called == [1]
 
-    def test_interrupt_ignored_when_active_false(self):
-        """无 999 在播时不触发让位"""
+    def test_interrupt_ignored_when_idle(self):
+        """无在播条目（playing weight None）时不触发让位"""
         fx = self._fixture(6)
         called = []
         fx.audio_player = types.SimpleNamespace(
-            request_999_interrupt=lambda: called.append(1))
+            request_yield=lambda: called.append(1),
+            get_playing_weight=lambda: None)
         fx.data_priority_insert("待播放音频列表", _item("w200", "normal"))
         assert called == []
 
@@ -232,7 +211,7 @@ class TestSpeedClampAndPitch:
 
 
 # ---------------------------------------------------------------------------
-# A6：reread type 透传（999 映射保持）
+# A6：reread type 透传（最高权重映射保持 500）
 # ---------------------------------------------------------------------------
 
 class _RereadConfig:
@@ -249,7 +228,8 @@ class _RereadConfig:
 
 
 class TestRereadTypePassthrough:
-    """A6：reread type 透传（999 映射保持）。2026-10-30 过滤审查批次：
+    """A6：reread type 透传（最高权重映射保持 500。2026-11-15 批次 999 特殊
+    机制退役）。2026-10-30 过滤审查批次：
     reread_handle 收口为手动直通——无 enable/词表门控，内容原文直通合成。"""
 
     def _handler(self, captured):
@@ -268,7 +248,7 @@ class TestRereadTypePassthrough:
         return CommentHandler(_MH())
 
     def test_reread_top_priority_type_preserved(self):
-        """R6(a)：reread_top_priority 原样透传（999 权重映射保持），不再 TypeError"""
+        """R6(a)：reread_top_priority 原样透传（最高权重映射保持 500），不再 TypeError"""
         captured = []
         h = self._handler(captured)
         ok = h.reread_handle({"username": "u", "content": "复读这段"}, type="reread_top_priority")
@@ -501,10 +481,9 @@ def _bare_player():
     p._error_seq = 0
     p._suspended_999 = None
     p._suspended_play = None
-    p._playing_is_999 = False
+    p._playing_weight = None
     p._current_output_rate = 0
     p._interrupt_999_event = threading.Event()
-    p._release_999_hook = None
     p._priority_provider = None
     p._completion_cb = None
     return p
@@ -527,17 +506,18 @@ class TestBuiltinPauseResume:
             stream._active = False
 
         threading.Thread(target=_hold_then_complete, daemon=True).start()
-        status_holder["status"] = p._wait_loop(is_999=False)
+        status_holder["status"] = p._wait_loop()
         assert status_holder["status"] == "completed"
         assert stream.stopped is False  # 未被 wait_loop 主动停流
 
-    def test_999_interrupt_suspends(self):
-        """A7 情况1：999 播放中让位事件 → 返回 suspended + 停流"""
+    def test_yield_interrupt_suspends(self):
+        """d12 泛化让位（2026-11-15 批次：999 退役）：在播条目让位事件 →
+        返回 suspended + 停流"""
         p = _bare_player()
         stream = _FakeStream()
         p.stream = stream
         p._interrupt_999_event.set()
-        status = p._wait_loop(is_999=True)
+        status = p._wait_loop()
         assert status == "suspended"
         assert stream.stopped is True
         assert p._interrupt_999_event.is_set() is False
@@ -546,7 +526,7 @@ class TestBuiltinPauseResume:
         p = _bare_player()
         p.stream = _FakeStream()
         p._skip_event.set()
-        assert p._wait_loop(is_999=False) == "skipped"
+        assert p._wait_loop() == "skipped"
 
     def test_resume_rewinds_one_second_output_rate(self):
         """F-5/E2：回退 1 秒 = 输出采样率帧数（speed≠1 用输出速率折算）"""
@@ -556,27 +536,21 @@ class TestBuiltinPauseResume:
         p._current_output_rate = 44100 * 2  # speed=2 的输出采样率
         p._suspended_999 = {"type": "reread_top_priority", "voice_path": "x.wav"}
         p._suspended_play = {"wf": wf, "tmp_audio_path": ""}
-        released = []
-        p._release_999_hook = lambda: released.append(1)
 
         # 让 wait_loop 立即完成：续播后保持流 inactive（start_stream 覆写为 no-op）
         p.stream._active = False
         p.stream.start_stream = lambda: None
         p._resume_suspended_999()
         assert wf.setpos_calls == [max(0, 100000 - 88200)]
-        assert released == [1]
         assert p._suspended_999 is None and p._suspended_play is None
 
     def test_discard_suspended_releases_and_cleans(self):
-        """F-3：skip/clear/stop_all 弃置挂起条目（释放钩子+现场清理，不静默）"""
+        """F-3：skip/clear/stop_all 弃置挂起条目（现场清理+日志留痕，不静默）"""
         p = _bare_player()
         wf = _FakeWf()
         p._suspended_999 = {"type": "reread_top_priority", "voice_path": "x.wav"}
         p._suspended_play = {"wf": wf, "tmp_audio_path": ""}
-        released = []
-        p._release_999_hook = lambda: released.append(1)
         p._discard_suspended("清空队列")
-        assert released == [1]
         assert p._suspended_999 is None
         assert wf.setpos_calls == []  # 未续播
 
@@ -587,7 +561,7 @@ class TestBuiltinPauseResume:
         stream = _FakeStream()
         p.stream = stream
         p._interrupt_999_event.set()
-        assert p._wait_loop(is_999=True) == "suspended"
+        assert p._wait_loop() == "suspended"
         assert p.pause_event.is_set() is True, "挂起必须同置 pause_event（get_status().paused → E-4 字幕挂起）"
 
         # 续播：回退→清 pause_event→start_stream
@@ -597,8 +571,6 @@ class TestBuiltinPauseResume:
         p._current_output_rate = 16000
         p.stream.start_stream = lambda: None  # 保持 inactive 供 wait_loop 立即完成
         p.stream._active = False
-        released = []
-        p._release_999_hook = lambda: released.append(1)
         p._resume_suspended_999()
         assert p.pause_event.is_set() is False, "续播必须解除 pause_event（字幕恢复）"
 
@@ -609,17 +581,18 @@ class TestBuiltinPauseResume:
         p2.resume_stream()
         assert p2.pause_event.is_set() is True, "挂起期手动续播不得解除 pause_event"
 
-    def test_request_interrupt_gated_on_playing_999(self):
-        """让位请求仅在 999 播放中且未挂起时生效"""
+    def test_request_yield_gated_on_playing(self):
+        """让位请求仅在播放中且未挂起时生效（2026-11-15 批次：999 退役，
+        判定面=_playing_weight）"""
         p = _bare_player()
-        p.request_999_interrupt()
-        assert p._interrupt_999_event.is_set() is False  # 非 999 播放中
-        p._playing_is_999 = True
-        p.request_999_interrupt()
+        p.request_yield()
+        assert p._interrupt_999_event.is_set() is False  # 空闲（无在播条目）
+        p._playing_weight = 500
+        p.request_yield()
         assert p._interrupt_999_event.is_set() is True
         p._interrupt_999_event.clear()
         p._suspended_999 = {"type": "reread_top_priority"}
-        p.request_999_interrupt()
+        p.request_yield()
         assert p._interrupt_999_event.is_set() is False  # 已挂起 → 忽略（情况c）
 
 
@@ -977,16 +950,18 @@ class TestPlaybackConsumptionHooks:
     2026-10-30 审查批次：本地播放统一 builtin——原 外部/pygame 路径随
     「音频播放器」配置退役删除，三路收敛为两路；builtin 真实完成点经
     audio_core 注册的完成回调二次回执（G1，互斥不双报由回调注册点保证）。
+    2026-11-15 批次：999 剩余重推随 999 机制退役，重推回执点移除——
+    playback_manager 内调用点=1（EDTalk 主路径）。
     """
 
     def test_source_wiring(self):
         import inspect
         from utils.audio import playback_manager
         src = inspect.getsource(playback_manager)
-        assert src.count("report_consumed(") >= 2, \
-            "EDTalk/builtin 两路均须调用 report_consumed（M3 断链补齐）"
+        assert src.count("report_consumed(") == 1, \
+            "playback_manager 调用点应恰 1（EDTalk 主路径；999 重推回执随退役移除）"
         assert "_notify_choreo_complete" in src
-        # 两路完成回传统一走 helper（既有 mute 守卫/song 直通另有 2 处合法调用点）
+        # 完成回传统一走 helper（既有 mute 守卫/song 直通另有 2 处合法调用点）
         assert src.count("get_choreographer()") <= 3
 
 
@@ -996,36 +971,14 @@ class TestPlaybackConsumptionHooks:
 
 class TestT1ConcurrentInsert:
     """音频队列 A1 四规则判定锁内化（对齐 message_queue 分支 M1/M2 模式）——
-    多生产者竞态关闭后的确定性守卫：999 单实例在任意交错下恰好 1 条、
-    满载并发驱逐净长度不变且权重序保持。"""
+    多生产者竞态关闭后的确定性守卫：满载并发驱逐净长度不变且权重序保持。
+    （2026-11-15 批次：999 单实例约束随 999 机制退役，并发格移除。）"""
 
     def _fixture(self, max_len, min_start_play=1):
         mapping = {t: int(t[1:]) for t in ("w999", "w500", "w200", "w150", "w100", "w80", "w50", "w30", "w20")}
         mapping["talk"] = 60
         cfg = _FakeConfig(priority_mapping=mapping, min_start_play=min_start_play, max_len=max_len)
         return _QueueFixture(config=cfg)
-
-    def test_concurrent_999_single_instance(self):
-        """双生产者并发 999 入队——单实例约束在任意交错下恰好放行 1 条（W1 竞态格）。
-        修复前：999 检查（锁外）与插入（锁内）分离，并发双检查双通过可产生 2 条。"""
-        host = self._fixture(max_len=100)
-        n = 8
-        barrier = threading.Barrier(n)
-        results = []
-
-        def producer(i):
-            barrier.wait()
-            results.append(host.data_priority_insert(
-                "待播放音频列表", _item("w999", f"p{i}")))
-
-        threads = [threading.Thread(target=producer, args=(i,)) for i in range(n)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
-        n999 = sum(1 for it in host.voice_tmp_path_queue if it.get("type") == "w999")
-        assert n999 == 1, f"999 单实例被并发突破：队列中 {n999} 条 999"
-        assert sum(1 for r in results if r.get("code") == 200) == 1
 
     def test_concurrent_full_queue_eviction_invariant(self):
         """满载并发混权重插入——净长度不变 + 定义权重条目降序不变量在任意交错下保持。
@@ -1055,37 +1008,40 @@ class TestT1ConcurrentInsert:
         assert defined == sorted(defined, reverse=True), "权重降序不变量被并发破坏"
 
     def test_discard_and_interrupt_fire_only_on_insert(self):
-        """锁外收尾语义：999 被单实例拒绝时不触发 D-22 舍弃通知与让位钩子；
-        成功插入时两者都触发（插入成功才触发的触发集合不变量）。"""
-        mapping = {t: int(t[1:]) for t in ("w999", "w50")}
+        """锁外收尾语义：插入被拒（规则4：满且新权重更低）时不触发 D-22 舍弃
+        通知与 barge-in/让位裁决；成功插入时触发（插入成功才触发的触发集合
+        不变量。2026-11-15 批次：999 单实例拒绝格退役，改规则4 拒绝）。"""
+        mapping = {"w200": 200, "w50": 50, "w10": 10}
         mapping["talk"] = 60
-        cfg = _FakeConfig(priority_mapping=mapping, min_start_play=1, max_len=100,
+        cfg = _FakeConfig(priority_mapping=mapping, min_start_play=1, max_len=3,
                           extra={("talk", "continuous_talk"): True})
         host = _QueueFixture(config=cfg)
         calls = {"discard": [], "interrupt": []}
         host._continuous_talk_discard_notify = lambda count: calls["discard"].append(count)
-        host._maybe_interrupt_999_for = lambda dj: calls["interrupt"].append(dj.get("type"))
+        host._maybe_priority_yield_for = lambda dj: calls["interrupt"].append(dj.get("type"))
 
-        # 1) 首条 999 成功插入 → interrupt 触发、discard 不触发（非 talk）
-        r1 = host.data_priority_insert("待播放音频列表", _item("w999", "first"))
+        # 1) w200 成功插入 → interrupt 触发、discard 不触发（非 talk）
+        r1 = host.data_priority_insert("待播放音频列表", _item("w200", "first"))
         assert r1["code"] == 200
-        assert calls["interrupt"] == ["w999"] and calls["discard"] == []
+        assert calls["interrupt"] == ["w200"] and calls["discard"] == []
 
-        # 2) 第二条 999 被单实例拒绝 → 两者都不触发
-        r2 = host.data_priority_insert("待播放音频列表", _item("w999", "second"))
-        assert r2["code"] == 1 and "999" in r2["msg"]
-        assert calls["interrupt"] == ["w999"] and calls["discard"] == []
+        # 2) 满载后更低权重被规则4 拒绝 → 两者都不触发
+        host.voice_tmp_path_queue.append(_item("w50", "seed-low1"))
+        host.voice_tmp_path_queue.append(_item("w50", "seed-low2"))
+        r2 = host.data_priority_insert("待播放音频列表", _item("w10", "lower"))
+        assert r2["code"] == 1
+        assert calls["interrupt"] == ["w200"] and calls["discard"] == []
 
         # 3) talk 条目成功插入且待播 ≥2 → discard 触发（连续对话语义保留）
-        host.voice_tmp_path_queue.append(_item("w50", "pending1"))
         r3 = host.data_priority_insert("待播放音频列表", {"type": "talk", "voice_path": "talk.wav"})
         assert r3["code"] == 200
         assert len(calls["discard"]) == 1 and calls["interrupt"][-1] == "talk"
 
 
 # ---------------------------------------------------------------------------
-# T2-批（2026-11-06 协作机制流程审查，W2 根修）：only_play_audio 999 active
-# 标记 finally 化——异常逃逸不再悬挂复读专线
+# T2-批（2026-11-06 协作机制流程审查，W2 根修；2026-11-15 批次改写）：
+# only_play_audio EDTalk 在飞条目登记（_edtalk_current_entry）finally 化——
+# 异常逃逸不再悬挂在飞登记（barge-in 钩子与闲时门按此判定「EDTalk 在飞」）
 # ---------------------------------------------------------------------------
 
 class _EdtalkConfig:
@@ -1093,7 +1049,7 @@ class _EdtalkConfig:
 
     def __init__(self, max_len=100):
         self._data = {
-            ("filter", "priority_mapping"): {"reread_top_priority": 999, "comment": 20},
+            ("filter", "priority_mapping"): {"reread_top_priority": 500, "comment": 20},
             ("filter", "voice_tmp_path_queue_max_len"): max_len,
             ("filter", "voice_tmp_path_queue_min_start_play"): 1,
             ("filter", "message_queue_max_len"): 100,
@@ -1147,11 +1103,10 @@ class _PlaybackHost(QueueMixin, PlaybackMixin):
         self.voice_tmp_path_queue_not_empty = threading.Condition(lock=self.voice_tmp_path_queue_lock)
         self.voice_tmp_path_queue_not_empty_flag = False
         self.config = config
-        self.active_reread_top_999 = False
         self.edtalk_client = _EdtalkClientStub()
 
 
-class TestT2NineRelease:
+class TestFlightEntryLifecycle:
     """驱动拓扑对齐生产：only_play_audio 在专用线程的自有事件循环中运行
     （其空队列等待=threading.Condition.wait 阻塞调用，与 scenario 同线程
     会冻结整个循环）；主线程以阻塞轮询断言，结束时依赖 daemon 线程退场。"""
@@ -1172,10 +1127,11 @@ class TestT2NineRelease:
         t.start()
         return t
 
-    def test_exception_escape_releases_999_flag(self):
-        """W2：EDTalk 分支异常逃逸（push 成功后字幕推送注入失败）→ 999 active
-        标记必须释放（finally）。修复前：释放点仅在正常完成路径，逃逸即悬挂，
-        后续 999 全部被单实例约束拒绝=复读专线死链。"""
+    def test_exception_escape_clears_flight_entry(self):
+        """W2（2026-11-15 批次改写）：EDTalk 分支异常逃逸（push 成功后字幕推送
+        注入失败）→ 在飞登记 _edtalk_current_entry 必须清理（finally）。修复前：
+        清理点仅在正常完成路径，逃逸即悬挂——barge-in 钩子与闲时门会把死引用
+        当作「EDTalk 在飞」误判。"""
         host = _PlaybackHost(_EdtalkConfig())
 
         async def _boom(_data):
@@ -1184,34 +1140,36 @@ class TestT2NineRelease:
 
         self._start_worker(host)
         # 先入队（worker 已起，condition notify 正常唤醒）
-        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "999"})
+        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "复读取词"})
         assert r["code"] == 200
         assert host.edtalk_client.push_fired.wait(5), "push_full 未被受理"
-        assert self._wait_until(lambda: host.active_reread_top_999 is False), \
-            "异常逃逸后 999 active 标记未释放（finally 缺失）"
-        # 逃逸后单实例约束已解除（可直接再入队 999）
-        r2 = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "y.wav", "content": "999-again"})
-        assert r2["code"] == 200, "999 标记悬挂导致单实例约束误拒（W2 复现）"
-        assert self._wait_until(lambda: host.active_reread_top_999 is False and host.edtalk_client.push_fired.is_set())
+        assert self._wait_until(lambda: getattr(host, "_edtalk_current_entry", None) is None), \
+            "异常逃逸后在飞登记未清理（finally 缺失）"
+        # 逃逸后可直接再入队同类型条目（闲时门/barge-in 判定面恢复正常）
+        r2 = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "y.wav", "content": "复读取词-again"})
+        assert r2["code"] == 200
+        assert self._wait_until(lambda: getattr(host, "_edtalk_current_entry", None) is None and host.edtalk_client.push_fired.is_set())
 
-    def test_normal_path_releases_after_complete(self):
-        """正常路径回归：push 时标记为 True（播放中持有）、完成后释放（原语义不变）。"""
+    def test_normal_path_clears_after_complete(self):
+        """正常路径回归：push 时在飞登记持有本条目、完成后清理（原语义不变）。"""
         host = _PlaybackHost(_EdtalkConfig())
-        flag_seen = {}
+        flight_seen = {}
 
         orig_push = host.edtalk_client.push_full
 
         async def push_full(pcm_path, content="", wait_flight=True):
-            flag_seen["during"] = host.active_reread_top_999
+            flight_seen["during"] = getattr(host, "_edtalk_current_entry", None)
             return await orig_push(pcm_path, content, wait_flight)
         host.edtalk_client.push_full = push_full
 
         self._start_worker(host)
-        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "999"})
+        r = host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "x.wav", "content": "复读取词"})
         assert r["code"] == 200
         assert host.edtalk_client.push_fired.wait(5)
-        assert self._wait_until(lambda: host.active_reread_top_999 is False)
-        assert flag_seen.get("during") is True, "push 受理时刻 999 active 标记应已置位"
+        assert self._wait_until(lambda: getattr(host, "_edtalk_current_entry", None) is None)
+        assert isinstance(flight_seen.get("during"), dict), \
+            "push 受理时刻在飞登记应已置位（barge-in 钩子/闲时门判定面）"
+        assert flight_seen["during"].get("voice_path") == "x.wav"
 
 
 # ---------------------------------------------------------------------------
@@ -1220,18 +1178,19 @@ class TestT2NineRelease:
 
 class TestT3ReceiptSingleSource:
     """本地（builtin）路径观测回执收敛至真实完成点单点——移交点不再双报。
-    源级断言钉死调用点面：playback_manager 仅 EDTalk 两路（主路径+999 重推）、
-    audio_core 完成回调一处。"""
+    源级断言钉死调用点面：playback_manager 仅 EDTalk 主路径一处、
+    audio_core 完成回调一处。（2026-11-15 批次：999 重推回执点随 999 机制退役。）"""
 
     def test_local_branch_has_no_observation_receipt(self):
         import inspect
         from utils.audio import playback_manager
         src = inspect.getsource(playback_manager)
-        # 模块内 report_consumed 调用点=2：EDTalk 主路径 + 999 重推条目（R5b
-        # 本地外放回滚后借位走 EDTalk 主路径，无独立回执点；本地 builtin 移交
-        # 分支必须为零——W3 双计根修）
+        # 模块内 report_consumed 调用点=1：EDTalk 主路径（R5b 本地外放回滚后
+        # 借位走 EDTalk 主路径，无独立回执点；本地 builtin 移交分支必须为零
+        # ——W3 双计根修。2026-11-15 批次：999 剩余重推随 999 机制退役，
+        # 原重推回执点移除）
         count = src.count("self.report_consumed(")
-        assert count == 2, f"playback_manager report_consumed 调用点应恰 2（EDTalk 主路径+重推），实为 {count}"
+        assert count == 1, f"playback_manager report_consumed 调用点应恰 1（EDTalk 主路径），实为 {count}"
         # 本地分支无观测回执（移交点仅编排实例匹配）
         local_src = src[src.index("本地整轨（用户优化）"):]
         assert "self.report_consumed(" not in local_src, "本地分支残留观测回执（双计复现）"
@@ -1275,7 +1234,7 @@ class TestT6CancelLateEnqueue:
         QueueMixin._cancelled_choreo_steps.clear()
 
     def _fixture(self, max_len=100):
-        mapping = {"comment": 20, "reread_top_priority": 999}
+        mapping = {"comment": 20, "reread_top_priority": 500}
         cfg = _FakeConfig(priority_mapping=mapping, min_start_play=1, max_len=max_len,
                           extra={("filter", "message_queue_max_len"): max_len})
         return _QueueFixture(config=cfg)

@@ -11,7 +11,7 @@ import threading
 import json
 import random
 import difflib
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 from .error_handler import handle_error, safe_execute
 import importlib
@@ -27,7 +27,7 @@ from .common import Common
 from .audio import Audio
 from .gpt_model.gpt import GPT_MODEL
 from .base import logger
-from .db import SQLiteDB, ensure_integral_unique_index, ensure_integral_entrance_ts_column
+from .db import SQLiteDB, ensure_integral_unique_index, ensure_integral_entrance_ts_column, ensure_integral_follow_ts_column
 from .my_translate import My_Translate
 
 # 导入 handler 模块
@@ -263,6 +263,7 @@ class My_handle(metaclass=SingletonMeta):
                 total_price INT NOT NULL,
                 last_ts DATETIME NOT NULL,
                 last_entrance_ts DATETIME,
+                last_follow_ts DATETIME,
                 UNIQUE(platform, username, uid)
             )
             '''
@@ -273,11 +274,63 @@ class My_handle(metaclass=SingletonMeta):
             # 唯一索引（UPSERT 计分写入依赖该索引，见 utils/db.ensure_integral_unique_index）
             ensure_integral_unique_index(self.db)
             # 2026-10-31 积分审查批次：存量库幂等补 last_entrance_ts 列
-            # （入场 12h 限频依赖，见 utils/db.ensure_integral_entrance_ts_column）
+            # （入场 24h 限频依赖，见 utils/db.ensure_integral_entrance_ts_column）
             ensure_integral_entrance_ts_column(self.db)
+            # 2026-11-16 积分限频批次：存量库幂等补 last_follow_ts 列
+            # （关注 24h 限频依赖，见 utils/db.ensure_integral_follow_ts_column）
+            ensure_integral_follow_ts_column(self.db)
+
+            # entrance 表保留期治理（2026-11-16 审查批次⑤B）：入场表只写不删
+            # 长期直播持续膨胀——启动时按保留天数裁剪一次 + 每 6h 周期裁剪
+            self._entrance_retention_start()
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f'数据库 {My_handle.config.get("database", "path")} 创建失败，请查看日志排查问题！！！')
+
+    # entrance 表保留期治理（2026-11-16 审查批次⑤B）
+    _ENTRANCE_RETENTION_INTERVAL_S = 6 * 3600   # 周期裁剪间隔：6 小时
+
+    def _entrance_retention_days(self):
+        """读取 database.entrance_retention_days 语义：
+        >0 —— 保留最近 N 天；0 —— 关闭清理（保留全量历史）；
+        缺省/非法值 —— 默认 30 天（存量用户 config 缺新键也生效）。"""
+        try:
+            days = int(My_handle.config.get("database", "entrance_retention_days"))
+        except (TypeError, ValueError):
+            days = 30
+        return days
+
+    def entrance_retention_cleanup(self):
+        """按保留天数裁剪 entrance 表（参数化 SQL；失败只记日志不中断）。
+
+        ts 由 event_handler.entrance_handle 以 datetime.now() 写入
+        （sqlite3 适配 ISO 字符串，字符串比较即时间比较语义正确）。"""
+        days = self._entrance_retention_days()
+        if days <= 0 or self.db is None:
+            return
+        try:
+            cutoff = datetime.now() - timedelta(days=days)
+            ok = self.db.execute('DELETE FROM entrance WHERE ts < ?', (cutoff,))
+            if ok:
+                logger.info(f"entrance 表保留期裁剪完成：保留最近 {days} 天（早于 {cutoff:%Y-%m-%d %H:%M:%S} 的记录已删除）")
+        except Exception:
+            logger.error(f"entrance 表保留期裁剪失败：{traceback.format_exc()}")
+
+    def _entrance_retention_start(self):
+        """启动时裁剪一次 + 每 6h 自重排 daemon Timer 周期裁剪。"""
+        if self._entrance_retention_days() <= 0:
+            logger.info("entrance 表保留期裁剪已关闭（database.entrance_retention_days=0）")
+            return
+        self.entrance_retention_cleanup()
+        t = threading.Timer(self._ENTRANCE_RETENTION_INTERVAL_S, self._entrance_retention_periodic)
+        t.daemon = True
+        t.start()
+
+    def _entrance_retention_periodic(self):
+        self.entrance_retention_cleanup()
+        t = threading.Timer(self._ENTRANCE_RETENTION_INTERVAL_S, self._entrance_retention_periodic)
+        t.daemon = True
+        t.start()
 
 
     # 重载config
@@ -303,6 +356,17 @@ class My_handle(metaclass=SingletonMeta):
     
     def audio_synthesis_handle(self, data_json):
         return self.audio_handler.audio_synthesis_handle(data_json)
+
+    def abandon_reply_link(self, link):
+        """生产端放弃念白↔回复配对（2026-11-16 弹幕↔回复配对批次）。定义于
+        QueueMixin（宿主=Audio 实例），此代理供 handlers 调用；Audio 未就绪/
+        异常时静默忽略（登记失败退消费门 15s 超时兜底语义）。"""
+        try:
+            audio = getattr(self, "audio", None)
+            if audio is not None:
+                audio.abandon_reply_link(link)
+        except Exception:
+            pass
     
     def get_audio_info(self):
         return self.audio_handler.get_audio_info()
@@ -465,7 +529,8 @@ class My_handle(metaclass=SingletonMeta):
     
     def reread_handle(self, data, type=None):
         # 2026-10-30 过滤审查批次：弹幕触发复读退役，收口手动直通（聊天页按钮/
-        # HTTP /send）；透传 type（reread_top_priority→999 权重映射保持）
+        # HTTP /send）；透传 type（reread_top_priority→最高权重映射保持，
+        # 2026-11-15 批次 999 特殊机制退役后映射 500）
         return self.comment_handler.reread_handle(data, type=type)
     
     def tuning_handle(self, data):

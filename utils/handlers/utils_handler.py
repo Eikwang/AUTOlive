@@ -239,8 +239,12 @@ class UtilsHandler:
         """
         限定时间内数据是否重复（去重接线：由 timer_handler.process_data 入口统一调用）
 
-        去重键=用户名+内容键：content 缺失时回退 gift_name（礼物按礼物名去重）、
-        再回退空串（关注等仅按用户名去重；房间信息由调用方预合成 content 值键）。
+        去重判定键（2026-11-16 混合键口径，用户裁决）：
+          comment → content-only（不同用户发的相同弹幕也算重复）
+          gift    → username + 礼物名（同用户短时间重复打赏同礼物；不同用户
+                    打同礼物不互斥）
+          其余    → username + 内容键（content 缺失回退 gift_name、再回退空串；
+                    关注等仅按用户名去重；房间信息由调用方预合成 content 值键）
 
         Args:
             data (dict): 数据
@@ -277,10 +281,15 @@ class UtilsHandler:
             current_time = time.time()
 
             # 检查是否重复（live_data 键缺失时补建——新类型 like/room_stats 等容错）
+            # 判定键按类型分流：comment 跨用户同文也算重复（content-only）；
+            # 其余类型须同用户且同内容（gift 即用户+礼物名）
             bucket = self.my_handle.live_data.setdefault(type, [])
             for item in bucket:
                 if current_time - item.get("time", 0) < deduplication_time:
-                    if item.get("username") == data.get("username") and item.get("content") == content:
+                    if type == "comment":
+                        if item.get("content") == content:
+                            return True
+                    elif item.get("username") == data.get("username") and item.get("content") == content:
                         return True
 
             # 添加到去重列表

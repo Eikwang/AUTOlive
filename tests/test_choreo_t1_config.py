@@ -141,13 +141,17 @@ def test_arbitration_enable_non_bool_falls_back(warn_spy):
 # ------------------------------------------------- d14/d21 example 同步
 
 def test_example_config_carries_new_keys():
-    """config.example.json：choreography 连续触发窗口键（d14 落 example）+
-    priority_mapping.dynamic_text=15（d21 音频面对齐编排面 d10）。"""
+    """config.example.json：choreography 连续触发窗口键（d14 落 example）。
+    priority_mapping.dynamic_text 已移除（2026-11-14 去重：编排音频条目经
+    答谢链 type=gift 等 + priority_override=500，类型映射无消费点——
+    死权重键会与"系统任务-动态文案"（trends_copywriting）在优先级页
+    重复展示同名"动态文案"）。"""
     example = json.loads(Path("config.example.json").read_text(encoding="utf-8"))
     ch = example.get("choreography") or {}
     assert ch.get("continuous_trigger_window_s") == 30
     pm = (example.get("filter") or {}).get("priority_mapping") or {}
-    assert pm.get("dynamic_text") == 15
+    assert "dynamic_text" not in pm
+    assert pm.get("trends_copywriting") is not None
 
 
 def test_full_node_round_trip():

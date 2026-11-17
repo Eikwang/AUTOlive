@@ -21,7 +21,7 @@ from ..base import logger
 # （迁移见 utils/db.ensure_integral_unique_index，索引缺失时本语句报错）。
 # 逐列累加语义：
 #   integral     累加（excluded.integral = 本次行为得分）
-#   view_num     累加——字段语义=计分入场次数（2026-10-31 积分审查批次起：12h 限频
+#   view_num     累加——字段语义=计分入场次数（2026-10-31 积分审查批次起：24h 限频
 #                窗口内的重复入场不计分不写库，view_num 即「总获得积分的进场次数」，
 #                与 {entrance_num} 变量语义一致），入场事件传 1、其余行为传 0
 #   sign_num     条件自增——签到事件传 1、其余行为传 0，即仅计分签到时 +1
@@ -33,9 +33,13 @@ from ..base import logger
 #   last_ts      每次行为覆盖
 #   last_entrance_ts 仅入场时覆盖（excluded.view_num > 0），非入场事件传 None
 #                （列可空）——入场限频判定以 view_num>0 为门卫
+#   last_follow_ts 仅关注时覆盖（excluded.last_follow_ts IS NOT NULL），非关注事件
+#                传 None（列可空）——关注限频判定直接看该列（NULL=迁移前存量/
+#                从未计分，fail-open 放行；2026-11-16 积分限频批次：关注补 24h
+#                滚动限频，与签到/入场同口径）
 INTEGRAL_UPSERT_SQL = '''
-INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, last_sign_ts, total_price, last_ts, last_entrance_ts)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, last_sign_ts, total_price, last_ts, last_entrance_ts, last_follow_ts)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(platform, username, uid) DO UPDATE SET
     integral = integral + excluded.integral,
     view_num = view_num + excluded.view_num,
@@ -43,18 +47,19 @@ ON CONFLICT(platform, username, uid) DO UPDATE SET
     last_sign_ts = CASE WHEN excluded.sign_num > 0 THEN excluded.last_sign_ts ELSE last_sign_ts END,
     total_price = total_price + excluded.total_price,
     last_ts = excluded.last_ts,
-    last_entrance_ts = CASE WHEN excluded.view_num > 0 THEN excluded.last_entrance_ts ELSE last_entrance_ts END
+    last_entrance_ts = CASE WHEN excluded.view_num > 0 THEN excluded.last_entrance_ts ELSE last_entrance_ts END,
+    last_follow_ts = CASE WHEN excluded.last_follow_ts IS NOT NULL THEN excluded.last_follow_ts ELSE last_follow_ts END
 '''
 
 # 积分写库重试退避（E3/CAP6）：失败按 0.1*2^k 秒退避，最多 3 次尝试；
 # WAL 与 busy_timeout 已在 utils/db.py 连接初始化处统一设置。
 INTEGRAL_DB_MAX_ATTEMPTS = 3
 
-# 签到/入场 12h 隐形限频（2026-10-31 积分审查批次，防频繁刷分）：距上次
-# 「计分」签到/入场不足 12 小时，本行为不计分、不写库、不回复（隐形=无配置
-# 项，静默拦截）。礼物/关注/查询不受限频。解析失败的库时间戳视为从未计分
-# （fail-open，脏数据不封死计分链）。
-INTEGRAL_COOLDOWN_HOURS = 12
+# 签到/入场/关注 24h 滚动限频（2026-10-31 积分审查批次引入，2026-11-16 批次
+# 12h→24h 并扩展到关注，防频繁刷分）：距上次「计分」签到/入场/关注不足 24 小时，
+# 本行为不计分、不写库、不回复（隐形=无配置项，静默拦截）。礼物/查询不受限频。
+# 解析失败的库时间戳视为从未计分（fail-open，脏数据不封死计分链）。
+INTEGRAL_COOLDOWN_HOURS = 24
 
 
 def parse_db_ts(value):
@@ -70,7 +75,7 @@ def parse_db_ts(value):
 
 
 def cooldown_active(last_ts, now):
-    """行为是否处于 12 小时限频窗口内。
+    """行为是否处于 24 小时限频窗口内。
 
     Args:
         last_ts: 库中上次计分时间（datetime 或 ISO 字符串；None/解析失败=从未计分）
@@ -839,7 +844,7 @@ class FeatureHandler:
         Returns:
             bool: 是否触发并处理。失败语义（CAP6）：写库失败 log 后返回 False，
                   不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）。
-                  2026-10-31 补充：签到处于 12h 限频窗口时返回 True——该弹幕已被
+                  2026-10-31 补充：签到处于限频窗口（2026-11-16 批次起为 24h）时返回 True——该弹幕已被
                   积分链消费（静默拦截不计分），不再落入 LLM/助播链
         """
         try:
@@ -874,6 +879,19 @@ class FeatureHandler:
         uid = str(data.get("uid", "") or "")
         return platform, username, uid
 
+    def _integral_display_name(self, username: str) -> str:
+        """积分回复展示名（2026-11-14 助播听感修复）：身份/写库口径保持原文
+        （库内跨事件匹配依赖原名），回复文案 {username} 变量数字转文字——
+        同弹幕链开关（filter.username_convert_digits_to_chinese）、幂等。
+        合成侧关口只转 message["username"]（助播消息该键是助播名），转不到
+        积分文案变量内嵌的数字。"""
+        try:
+            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                return self.my_handle.common.convert_digits_to_chinese(username) or username
+        except Exception:
+            pass
+        return username
+
     def _integral_warn_once(self, key, message):
         """积分配置缺键告警（每个键仅一次）。"""
         if key not in self._integral_warned_keys:
@@ -904,9 +922,10 @@ class FeatureHandler:
             return False
 
     def _integral_fetch_row(self, platform, username, uid):
-        """查询积分行，返回 (integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts)
-        或 None（无记录/查询失败）；后两列为 2026-10-31 12h 限频新增（调用方按索引取前四列不受影响）。"""
-        sql = ("SELECT integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts "
+        """查询积分行，返回 (integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts, last_follow_ts)
+        或 None（无记录/查询失败）；末三列为限频时间戳列（2026-10-31 入场/签到批
+        次 + 2026-11-16 关注批次新增，调用方按索引取前四列不受影响）。"""
+        sql = ("SELECT integral, view_num, sign_num, total_price, last_sign_ts, last_entrance_ts, last_follow_ts "
                "FROM integral WHERE platform = ? AND username = ? AND uid = ?")
         try:
             return self.my_handle.db.fetch_one(sql, (platform, username, uid))
@@ -1011,7 +1030,7 @@ class FeatureHandler:
 
         row = self._integral_fetch_row(platform, username, uid)
         now = datetime.now()
-        # 12h 隐形限频（防刷分）：门卫 sign_num>0——上次签到真实发生过才看
+        # 24h 滚动限频（防刷分）：门卫 sign_num>0——上次签到真实发生过才看
         # last_sign_ts（排除非签到事件 fresh INSERT 写入的 now 占位值）。
         # 窗口内静默拦截：不计分、不写库、不回复（view/sign 次数与积分同步
         # 不动，保持「总打卡次数=计分次数」口径）。返回 True=该弹幕已被积分
@@ -1032,7 +1051,7 @@ class FeatureHandler:
             self._integral_warn_once("integral.sign.get_integral", "积分配置缺少 integral.sign.get_integral，使用默认值 1")
         points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
 
-        args = (platform, username, uid, points, 0, 1, now, 0, now, None)
+        args = (platform, username, uid, points, 0, 1, now, 0, now, None, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             # CAP6：写库失败不中断直播主流程——返回 False（状态条告警标记），弹幕继续走常规链路
             logger.error(f"签到积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
@@ -1073,14 +1092,15 @@ class FeatureHandler:
 
         now = datetime.now()
         # 非签到事件 last_sign_ts 传 now 占位（UPSERT CASE 不消费；存量表该列
-        # NOT NULL，fresh INSERT 不可为 None）；last_entrance_ts 传 None（可空列）
-        args = (platform, username, uid, points, 0, 0, now, total_price, now, None)
+        # NOT NULL，fresh INSERT 不可为 None）；last_entrance_ts/last_follow_ts
+        # 传 None（可空列）
+        args = (platform, username, uid, points, 0, 0, now, total_price, now, None, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"礼物积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
         self._integral_tier_reply(blocks, "gift_price_interval", total_price, data, {
-            "username": username,
+            "username": self._integral_display_name(username),
             "gift_name": data.get("gift_name", "礼物"),
             "gift_num": data.get("gift_num", data.get("num", 1)),
             "unit_price": data.get("unit_price", 0),
@@ -1090,7 +1110,7 @@ class FeatureHandler:
         return True
 
     def _integral_entrance_handle(self, data):
-        """入场计分：view_num（计分入场次数，12h 限频窗口内不计）+1，积分按入场次数档位累加。"""
+        """入场计分：view_num（计分入场次数，24h 限频窗口内不计）+1，积分按入场次数档位累加。"""
         enable = self.my_handle.config.get("integral", "entrance", "enable")
         if enable is None:
             self._integral_warn_once("integral.entrance.enable", "积分配置缺少 integral.entrance.enable，按默认开启处理")
@@ -1104,7 +1124,7 @@ class FeatureHandler:
 
         row = self._integral_fetch_row(platform, username, uid)
         now = datetime.now()
-        # 12h 隐形限频（防刷分）：门卫 view_num>0——上次入场计分真实发生过才看
+        # 24h 滚动限频（防刷分）：门卫 view_num>0——上次入场计分真实发生过才看
         # last_entrance_ts（NULL=迁移前存量/从未计分，fail-open 放行）。
         # 窗口内静默拦截：不计分、不写库（view_num 即「总获得积分的进场次数」，
         # 与 {entrance_num} 变量口径一致）、不回复。
@@ -1124,13 +1144,13 @@ class FeatureHandler:
             self._integral_warn_once("integral.entrance.get_integral", "积分配置缺少 integral.entrance.get_integral，使用默认值 1")
         points = int(block["get_integral"]) if (block is not None and block.get("get_integral") is not None) else int(flat_points)
 
-        args = (platform, username, uid, points, 1, 0, now, 0, now, now)
+        args = (platform, username, uid, points, 1, 0, now, 0, now, now, None)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"入场积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
         self._integral_tier_reply(blocks, "entrance_num_interval", new_view_num, data, {
-            "username": username,
+            "username": self._integral_display_name(username),
             "get_integral": points,
             "entrance_num": new_view_num,
         })
@@ -1163,14 +1183,23 @@ class FeatureHandler:
             self._integral_warn_once("integral.follow.copywriting", "积分配置缺少 integral.follow.copywriting，使用默认关注文案")
 
         now = datetime.now()
-        # 关注无 12h 限频（任务书仅签到/入场限频）；列占位语义同礼物
-        args = (platform, username, uid, points, 0, 0, now, 0, now, None)
+        # 24h 滚动限频（2026-11-16 批次：关注与签到/入场同口径，防反复取关-关注刷分）：
+        # 直接看 last_follow_ts（NULL=迁移前存量/从未计分，fail-open 放行）。
+        # 窗口内静默拦截：不计分、不写库、不回复。
+        row = self._integral_fetch_row(platform, username, uid)
+        if row and cooldown_active(row[6], now):
+            logger.info(f"[积分] 用户 {username} 关注处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+            return True
+
+        # 列占位语义同礼物：last_sign_ts 传 now 占位（UPSERT CASE 不消费），
+        # last_entrance_ts/last_follow_ts 传 None（可空列，仅对应行为覆盖）
+        args = (platform, username, uid, points, 0, 0, now, 0, now, None, now)
         if not self._integral_db_write(INTEGRAL_UPSERT_SQL, args):
             logger.error(f"关注积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
         self._integral_format_and_reply(copy_list, data, {
-            "username": username,
+            "username": self._integral_display_name(username),
             "get_integral": points,
         })
         return True
@@ -1200,7 +1229,7 @@ class FeatureHandler:
         if not username:
             return False
 
-        variables = {"username": username}
+        variables = {"username": self._integral_display_name(username)}
         # 查询为只读链路（无写库定序问题）；先探活区分「库不可达」与「无记录」
         # （CAP6/DX：查询失败回复通用失败文案，不静默）
         if not self._integral_db_probe():

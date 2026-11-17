@@ -52,7 +52,9 @@ PRODUCER_TYPES = frozenset({
     "local_qa_audio", "local_qa_text",
     "assistant_anchor_text", "assistant_anchor_audio",
     "trends_copywriting",
-    "dynamic_text",  # 2026-11-05 编排优化批次 d21：动态文案独立类型（权重 15 与编排面 d10 对齐）
+    # dynamic_text 移除（2026-11-14 去重）：编排动态文案音频条目经答谢链
+    # （type=gift 等）+ priority_override=500，类型映射无消费点——原 d21
+    # 预留键与"系统任务-动态文案"（trends_copywriting）UI 重复展示
 })
 
 # 允许的无生产者预留键（语义矩阵登记，不判死键失败）
@@ -137,7 +139,7 @@ class TestQueueMechanismWiring:
         assert "entry_priority(item, priority_mapping)" in qm
         ap = _src("utils/audio/audio_priority.py")
         assert 'item.get("priority_override")' in ap
-        assert "def entry_is_999" in ap
+        assert "def entry_priority" in ap  # 单一源判定（2026-11-15 批次 999 退役）
         assert "def cancel_choreo_audio" in qm
         ch = _src("utils/orchestration/choreographer.py")
         assert '"priority_override": CHOREO_AUDIO_PRIORITY' in ch

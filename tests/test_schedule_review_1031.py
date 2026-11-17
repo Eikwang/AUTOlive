@@ -261,12 +261,14 @@ class TestGroupWiring:
         assert fake_thread_cls.return_value.start.called
 
     def test_start_condition_disabled_no_thread(self, monkeypatch):
-        """存量全关+无组+非 dy → 不启动。"""
+        """2026-11-14 语义变更：调度线程常驻启动——enable 门控移入调度循环
+        （签名比对动态重注册），运行中开启任务即时生效，启动时全关也启动。"""
         ts, mh = make_scheduler()
         fake_thread_cls = MagicMock()
         monkeypatch.setattr(task_mod.threading, "Thread", fake_thread_cls)
         ts.start_schedule_thread()
-        fake_thread_cls.assert_not_called()
+        fake_thread_cls.assert_called()
+        fake_thread_cls.return_value.start.assert_called()
 
 
 # ---------- ⑤ 调度线程健壮性 ----------

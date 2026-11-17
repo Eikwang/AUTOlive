@@ -15,6 +15,7 @@ from copy import deepcopy
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from .vocal_silences import silences_path_for as _silences_path_for
+from .queue_manager import QueueMixin
 from .vocal_silences import load_silences as _load_silences
 from .vocal_silences import compute_silences as _vs_compute
 from .vocal_silences import write_silences_file as _vs_write
@@ -53,11 +54,24 @@ class SynthesisMixin:
         while True:  # 无限循环，直到队列为空时退出
             try:
                 # 获取线程锁，避免同时操作
-                with self.message_queue_lock:
-                    while not self.message_queue:
-                        # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
-                        self.message_queue_not_empty.wait()  # 阻塞直到列表非空
-                    message = self.message_queue.pop(0)
+                # 出队（2026-11-16 消费回传背压批次：合成背压门——pop 前锁外
+                # 判定队首条目豁免与待播放队列深度，门控期等消费出队回执唤醒，
+                # 见 QueueMixin.synth_gate_wait_s；队首在等待窗口内可能变为
+                # 豁免条目——每轮重 peek 重判）
+                while True:
+                    with self.message_queue_lock:
+                        while not self.message_queue:
+                            # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
+                            self.message_queue_not_empty.wait()  # 阻塞直到列表非空
+                        message = self.message_queue[0]  # peek：门控判定用
+                    if self.synth_gate_wait_s(message) <= 0:
+                        with self.message_queue_lock:
+                            if not self.message_queue:
+                                continue  # 等待窗口内被清空（停止/flush）→ 重查
+                            message = self.message_queue.pop(0)
+                        break
+                    # 门控等待：消费出队回执提前唤醒；超时轮询兜底重查
+                    self.synth_gate_sleep(QueueMixin._SYNTH_GATE_POLL_S)
 
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处

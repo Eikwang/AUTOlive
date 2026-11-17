@@ -97,6 +97,9 @@ def create_schedule_tab(
     _auto_save = create_auto_save(config, set_config_callback, tab_key="schedule")
 
     # ---------- 存量单任务（原样保留展示；迁移说明见下方任务组卡） ----------
+    # 2026-11-14 保存修复：存量单任务此前仅构造 UI 未做任何保存绑定（_auto_save
+    # 创建后从未使用），修改 enable/周期/文案只停留在 UI——重启即回滚，且开启
+    # 开关无法落盘（后端读到恒 false，定时任务无法开启）。现按下标键绑定自动保存
     with ui.card().style(card_css):
         ui.label('定时任务')
         schedule_var = {}
@@ -105,10 +108,18 @@ def create_schedule_tab(
             with schedule_config_card.style(card_css):
                 with ui.grid(columns=3):
                     with ui.column().style("width:100%;"):
-                        schedule_var[str(4 * index)] = ui.switch(text=f"启用任务#{index}", value=schedule.get("enable", False)).style(switch_internal_css)
-                        schedule_var[str(4 * index + 1)] = ui.input(label=f"最小循环周期#{index}", value=schedule.get("time_min", 60), placeholder='定时任务循环的周期最小时长（秒）').style("width:100%;")
-                        schedule_var[str(4 * index + 2)] = ui.input(label=f"最大循环周期#{index}", value=schedule.get("time_max", 120), placeholder='定时任务循环的周期最大时长（秒）').style("width:100%;")
-                    schedule_var[str(4 * index + 3)] = ui.textarea(label=f"文案列表#{index}", value=textarea_data_change(schedule.get("copy", [])), placeholder='存放文案的列表，通过空格或换行分割').style("width:100%;")
+                        schedule_var[str(4 * index)] = _auto_save(
+                            ui.switch(text=f"启用任务#{index}", value=schedule.get("enable", False)).style(switch_internal_css),
+                            ("schedule", str(index), "enable"))
+                        schedule_var[str(4 * index + 1)] = _auto_save(
+                            ui.input(label=f"最小循环周期#{index}", value=schedule.get("time_min", 60), placeholder='定时任务循环的周期最小时长（秒）').style("width:100%;"),
+                            ("schedule", str(index), "time_min"))
+                        schedule_var[str(4 * index + 2)] = _auto_save(
+                            ui.input(label=f"最大循环周期#{index}", value=schedule.get("time_max", 120), placeholder='定时任务循环的周期最大时长（秒）').style("width:100%;"),
+                            ("schedule", str(index), "time_max"))
+                    schedule_var[str(4 * index + 3)] = _auto_save(
+                        ui.textarea(label=f"文案列表#{index}", value=textarea_data_change(schedule.get("copy", [])), placeholder='存放文案的列表，通过空格或换行分割').style("width:100%;"),
+                        ("schedule", str(index), "copy"), split_lines=True)
 
     # ---------- 任务组管理（D4：schedule_groups 新键） ----------
     with ui.card().style(card_css):

@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS integral (
     total_price INT NOT NULL,
     last_ts DATETIME NOT NULL,
     last_entrance_ts DATETIME,
+    last_follow_ts DATETIME,
     UNIQUE(platform, username, uid)
 )
 '''
@@ -136,8 +137,9 @@ def fast_retry_sleep(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_sign_cooldown(monkeypatch):
-    """关闭 12h 隐形限频（2026-10-31 批次引入）：本文件用例专注 UPSERT 语义，
-    连续签到/入场计分用例不受限频窗口拦截；限频语义由 test_integral_review_1031.py 专测。"""
+    """关闭 24h 滚动限频（2026-10-31 批次引入 12h，2026-11-16 批次 12h→24h 并扩展
+    到关注）：本文件用例专注 UPSERT 语义，连续签到/入场/关注计分用例不受限频窗口
+    拦截；限频语义由 test_integral_review_1031.py 专测。"""
     monkeypatch.setattr(feature_handler_module, "INTEGRAL_COOLDOWN_HOURS", 0)
 
 
@@ -258,8 +260,8 @@ class TestConcurrency:
         conn1 = sqlite3.connect(db_file, timeout=5)
         conn2 = sqlite3.connect(db_file, timeout=5)
         try:
-            args1 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:00", 0, "2026-01-01 00:00:00", None)
-            args2 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:01", 0, "2026-01-01 00:00:01", None)
+            args1 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:00", 0, "2026-01-01 00:00:00", None, None)
+            args2 = ("dy", "小明", "", 1, 0, 1, "2026-01-01 00:00:01", 0, "2026-01-01 00:00:01", None, None)
             conn1.execute(INTEGRAL_UPSERT_SQL, args1)
             conn1.commit()
             conn2.execute(INTEGRAL_UPSERT_SQL, args2)
@@ -364,7 +366,7 @@ class TestTiers:
         # 预置 sign_num=30（档 1 上限），下一次签到应落档 2（2 分）
         now = "2026-01-01 00:00:00"
         assert handler.my_handle.db.execute(INTEGRAL_UPSERT_SQL,
-                                            ("dy", "小明", "", 30, 0, 30, now, 0, now, None))
+                                            ("dy", "小明", "", 30, 0, 30, now, 0, now, None, None))
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
         row = handler.my_handle.db.fetch_one("SELECT integral, sign_num FROM integral")
         assert row[0] == 30 + 2

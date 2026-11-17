@@ -253,13 +253,14 @@ class TestIdleCopyVariables:
         assert content.endswith(("甲", "乙"))
 
     def test_comment_mode_content_untouched(self):
-        """comment 模式 LLM 提示词语义保持原样（无变量替换/brackets）。"""
+        """comment 模式文案原样发真实弹幕（无变量替换/brackets）；不再本地
+        process_data 模拟流通（2026-11-14 回环驱动——LLM 由自发声回环触发）。"""
         ts, mh = make_ts({"copywriting": {"enable": False},
                           "comment": {"enable": True, "random": True,
                                       "copy": ["请介绍{time}[甲|乙]"]}})
         ts.do_task(0, [], ["请介绍{time}[甲|乙]"], [])
         mh.send_live_danmu.assert_called_once_with("请介绍{time}[甲|乙]")
-        assert mh.process_data.call_args[0][0]["content"] == "请介绍{time}[甲|乙]"
+        mh.process_data.assert_not_called()
 
 
 # ---------- ⑤ 系统自源排除 ----------

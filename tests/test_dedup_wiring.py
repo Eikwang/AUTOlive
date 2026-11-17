@@ -161,14 +161,39 @@ class TestDedupWiring(unittest.TestCase):
         cfg = self._cfg()
         cfg["comment_forget_reserve_num"] = 3
         fh = _FakeHandle(cfg)
+        # 2026-11-16 混合键口径：comment 按 content-only 去重（跨用户也算重复），
+        # 故本窗口缓冲语义测试改用不同内容避免被去重裁剪
         fh.timer_handler.process_data({"username": "u1", "content": "666"}, "comment")  # 首条立即
-        fh.timer_handler.process_data({"username": "u2", "content": "666"}, "comment")  # 窗口内
-        fh.timer_handler.process_data({"username": "u3", "content": "666"}, "comment")  # 窗口内
+        fh.timer_handler.process_data({"username": "u2", "content": "667"}, "comment")  # 窗口内
+        fh.timer_handler.process_data({"username": "u3", "content": "668"}, "comment")  # 窗口内
         # 缓冲只保留最新 reserve_num-1=2 条
         self.assertEqual(len(fh.timers["comment"].last_data), 2)
         time.sleep(0.3)  # 等遗忘窗口到期补发
         # 首条立即 1 条 + 窗口末补发 2 条 = 全部处理
         self.assertEqual(len(fh.handled), 3)
+
+    def test_cross_user_same_comment_dropped(self):
+        """2026-11-16 混合键口径：comment 按 content-only 去重——不同用户发
+        相同弹幕，窗口内同样丢弃。"""
+        fh = _FakeHandle(self._cfg())
+        fh.timer_handler.process_data({"username": "u1", "content": "666"}, "comment")
+        fh.timer_handler.process_data({"username": "u2", "content": "666"}, "comment")
+        time.sleep(0.3)
+        self.assertEqual(len(fh.handled), 1)
+
+    def test_gift_cross_user_same_gift_kept(self):
+        """2026-11-16 混合键口径：gift 去重键=用户+礼物名——不同用户打同礼物
+        不互斥（均处理）。"""
+        cfg = self._cfg()
+        cfg["limited_time_deduplication"]["gift"] = 10
+        # gift 遗忘窗口默认 0.1s（缺键容错），拉长避免断言前窗口到期竞态；
+        # 保留数缺省 1（tail_keep=0 立即裁空），补齐镜像 comment 配置
+        cfg["gift_forget_duration"] = 10
+        cfg["gift_forget_reserve_num"] = 5
+        fh = _FakeHandle(cfg)
+        fh.timer_handler.process_data({"username": "u1", "gift_name": "火箭"}, "gift")
+        fh.timer_handler.process_data({"username": "u2", "gift_name": "火箭"}, "gift")
+        self.assertEqual(len(fh.timers["gift"].last_data), 1)
 
     def test_reserve_num_one_no_replay(self):
         """入场语义（保留数 1）：每个窗口期内仅处理首条，窗口末不补发。"""

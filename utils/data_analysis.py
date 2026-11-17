@@ -245,9 +245,10 @@ class Data_Analysis:
                 'dataset': [
                     {
                         # 列序与 CREATE TABLE integral 一致（含 2026-10-31 积分审查
-                        # 批次新增的 last_entrance_ts——缺列会导致 SELECT * 的 10 值
-                        # 与 dimensions 9 维错位，数据视图表头错乱）
-                        'dimensions': ['platform', 'username', 'uid', 'integral', 'view_num', 'sign_num', 'last_sign_ts', 'total_price', 'last_ts', 'last_entrance_ts'],
+                        # 批次新增的 last_entrance_ts 与 2026-11-16 批次新增的
+                        # last_follow_ts——缺列会导致 SELECT * 的 11 值与 dimensions
+                        # 维数错位，数据视图表头错乱）
+                        'dimensions': ['platform', 'username', 'uid', 'integral', 'view_num', 'sign_num', 'last_sign_ts', 'total_price', 'last_ts', 'last_entrance_ts', 'last_follow_ts'],
                         'source': list_list
                     },
                     {

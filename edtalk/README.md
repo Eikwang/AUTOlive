@@ -69,7 +69,7 @@ D:\AI\EDTalk\runtime312\python.exe train_fine_tune.py --datapath <角色> --exp_
 
 | 既有功能 | edtalk_realtime 激活时的行为 |
 |---|---|
-| 弹幕打断（stop_current_audio） | 只作用于本地 mixer/audio_player；EDTalk 端无 flush-audio 契约端点，打断**不会**停止其音频播放 |
+| 弹幕打断（stop_current_audio） | 2026-11-16 批次起：停播时追加推送 0.2s 静音（EDTalkClient.flush_silence，走 /audio/push_full 既有通道）触发服务端 flush 替换（d3 替换语义）→ 数字人闭嘴（此前语义：无 flush-audio 契约端点，打断不停止其音频播放） |
 | send_audio_play_info_to_callback | 推送模式下播放完成回调被跳过（本地不播放） |
 | 音频变速（audio_random_speed） | 变速照常，但推送的是**变速后文件**（EDTalk 收到的是最终音频） |
 | 本地字幕/洛曦联动 | 不受影响（在播放分支之前执行） |

@@ -19,6 +19,7 @@ import asyncio
 import base64
 import io
 import os
+import threading
 import time
 import traceback
 import wave
@@ -145,8 +146,6 @@ class EDTalkClient:
         # 推送锁：串行化推送（多消息来源防护）
         self._push_lock = asyncio.Lock()
 
-    # ---------- 内部工具 ----------
-
     def _auth_headers(self) -> dict:
         token = (self.config_data.get("api_token") or "").strip()
         return {"Authorization": f"Bearer {token}"} if token else {}
@@ -169,6 +168,8 @@ class EDTalkClient:
         取舍：宁可延迟不截断——启发式超时也强制放行（避免死锁），但记录告警。
         2026-10-29 优化批次：等待构成观测日志——区分「上一句真在播」（合理
         串行等待）与「buffer 永不回落导致轮询超时」（系统性白等，需查服务端）。
+        2026-11-16 段间让位批次：barge-in 打断即弃退役——飞行等待恢复完整
+        语义（当前段播完才放行），插播由队列权重排序在段间完成。
         """
         t0 = time.monotonic()
         min_flight = duration_s * FLIGHT_MARGIN
@@ -297,10 +298,51 @@ class EDTalkClient:
 
     # ---------- 控制面（直调 HTTP，实时生效） ----------
 
+    def flush_silence(self, duration_s: float = 0.2) -> dict:
+        """打断闭嘴（2026-11-16 聊天审查批次）：推送静音整句触发服务端 flush
+        替换（d3 替换语义——push 即截断上一句缓冲），数字人立即闭嘴。
+
+        背景：音频进入口型推理的方式=整句 push——服务端只要还有音频在消费
+        就持续推理口型；因此打断闭嘴的关键是让服务端缓冲被静音替换。
+        （/output/pause 只冻结消费与帧位，画面定格不等于闭嘴，不采用。）
+        同通道 /audio/push_full（EMBEDDING v0.4 唯一有效），同步直调绕过
+        单飞行句背压——打断必须立即生效；并发安全由服务端 _push_lock 串行
+        +flush 兜底。成功后同步客户端飞行启发式状态（last_duration_s/
+        _flight_until），下一句真实推送不被旧句飞行等待拖延。
+
+        Args:
+            duration_s: 静音时长（秒），默认 0.2s——足够 render_loop flush
+                并消费完静音闭嘴，又不占用明显服务时间
+
+        Returns:
+            dict: {"ok": bool, ...}（失败降级不抛异常，与 pause_output 同款）
+        """
+        try:
+            import requests
+            samples = max(1, int(TARGET_RATE * duration_s))
+            pcm = b"\x00\x00" * samples  # int16 单声道静音
+            resp = requests.post(
+                f"{self.api_ip_port}/audio/push_full",
+                json={"pcm_base64": base64.b64encode(pcm).decode("ascii")},
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                # 飞行启发式与服务端缓冲同步：服务端当前缓冲=本段静音
+                self.last_duration_s = float(duration_s)
+                self._flight_until = time.monotonic()
+                self.last_push_time = time.time()
+                logger.info(f"[EDTalk] 静音 flush 已推送（{duration_s:.1f}s，打断闭嘴）")
+                return {"ok": True}
+            return {"ok": False, "status": resp.status_code}
+        except Exception as e:
+            logger.warning(f"[EDTalk] 静音 flush 失败（降级忽略）：{e}")
+            return {"ok": False, "error": str(e)}
+
     def pause_output(self) -> dict:
         """F-A/uc2b（2026-11-05 批次 T6）：任意点暂停输出（消费冻结，精确帧位
-        续播）。失败降级 {"ok": False}——调用方按 d17 fallback 维持排序语义
-        （运行时降级=999 按队列序播放，不阻塞入队主链）。"""
+        续播）。失败降级 {"ok": False}（999 机制 2026-11-15 已退役，本方法保留
+        为服务端控制面通用端点——运行时降级=按队列序播放，不阻塞入队主链）。"""
         try:
             import requests
             resp = requests.post(
@@ -309,7 +351,14 @@ class EDTalkClient:
                 headers=self._auth_headers(),
                 timeout=5,
             )
-            return resp.json() if resp.status_code == 200 else {"ok": False, "status": resp.status_code}
+            if resp.status_code == 200:
+                # 2026-11-14 实测修复：服务端成功体为 {"paused": true}（无 ok 键，
+                # 契约见 test_choreo_t6_yield.py）——原样透传会让 _on_edtalk_yield
+                # 的 .get("ok", False) 把成功误判为失败 → 走 d17 降级分支且永不
+                # resume → 服务端输出永久冻结（画面停住、口型音频不消费）。
+                # 成功统一归一 ok=True，与失败 {"ok": False} 契约对称。
+                return {"ok": True, **(resp.json() or {})}
+            return {"ok": False, "status": resp.status_code}
         except Exception as e:
             logger.warning(f"EDTalk 暂停输出失败（降级维持排序）：{e}")
             return {"ok": False, "error": str(e)}
@@ -344,7 +393,10 @@ class EDTalkClient:
                 headers=self._auth_headers(),
                 timeout=5,
             )
-            return resp.json() if resp.status_code == 200 else {"ok": False, "status": resp.status_code}
+            if resp.status_code == 200:
+                # 同 pause_output 归一：服务端成功体 {"paused": false} 无 ok 键
+                return {"ok": True, **(resp.json() or {})}
+            return {"ok": False, "status": resp.status_code}
         except Exception as e:
             logger.error(f"EDTalk 恢复输出失败（输出将保持冻结）：{e}")
             return {"ok": False, "error": str(e)}

@@ -1,17 +1,19 @@
-"""T4 song 序列仲裁状态机守卫（2026-11-05 编排优化批次）。
+"""T4 song 序列仲裁状态机守卫（2026-11-05 编排优化批次；2026-11-16 动态文案
+插播&切回批次改写）。
 
 覆盖裁决条款：
-- d9：song hold 被高权重打断→歌曲链路不撤销（无 CancelAudio）+转入 seq 旁路
-  挂起态；打断者序列照常启动
-- e4：挂起态字段（rule_id/deadline/entered_at）；挂起期默认池不接管（恢复
-  不发 RestoreDefault，恢复序列=hold 步）
-- d2：打断者播完→歌曲未结束=回唱歌画面（恢复序列）；歌曲已结束=回默认池
-- F-B：挂起期 on_song_started 仍刷新挂起 deadline（自校正不断链）
-- d11：song hold 中 song 重触发=点歌队列追加承接（编排序列保持 hold 不重排）
-- e9：恢复=基础档画面（D-4 清零后 select_tier(rule,1)，非打断前档位）
-- d22：挂起硬上限超时=强制回默认+告警；总开关 off=回退现行抢占终止语义
+- rejected（2026-11-16 用户裁决口径；本批动作编排审查补齐 queue 模式）：song
+  在播 + 其它规则触发（如礼物，standard/queue 均同）=放弃该触发
+  （accepted=false / takeover=false / 不排队不挂起），保持点歌画面；
+  礼物答谢等音频语义走原生链不受影响（编排只管画面）
+- d11：song hold 中 song 重触发=点歌队列追加承接（编排序列保持 hold 不重排，
+  2026-11-16 批次保持不变——承接归音频侧歌曲队列）
+- d22：总开关 off=回退现行抢占终止语义（旧 exit 衔接保持）
+
+历史 d9/e4（song hold 挂起）/d2（双结束态恢复）/e9/F-B/d22 硬上限守卫随
+song hold 挂起路径退役迁移：挂起机制现仅服务 resident（kind=resident），
+守卫见 test_choreo_t10_resident_insert.py。
 """
-import threading
 from unittest.mock import patch
 
 from utils.orchestration.choreographer import ChoreoEngine
@@ -61,96 +63,103 @@ def _trigger_gift(eng, name="小心心"):
 
 
 def _accept_switch(eng, result):
-    """切换命令接受回填（seq 级 hold_for_song 标志在接受点置位 :729-736）。"""
+    """切换命令接受回填（seq 级 hold_for_song 标志在接受点置位）。"""
     sw = next(c for c in result["commands"] if type(c).__name__ == "SwitchSegment")
     return eng.on_switch_result(sw.step_id, True, NOW[0])
 
 
-def _suspend_song(eng, song_rid="song_a", remaining=200.0, match=""):
-    """构造 song hold 活跃态并完成一次高权重打断（进入挂起）。"""
+def _song_hold_active(eng, remaining=200.0, match=""):
+    """构造 song hold 活跃态（主线 hold + 歌曲锚 deadline）。"""
     r = _trigger_song(eng, match)
     assert r["reason"] == "accepted"
     _accept_switch(eng, r)
     eng.on_song_started("test_song", remaining, NOW[0])
     assert eng.seq.get("hold_for_song") is True
+
+
+# ------------------------------------------------- rejected 放弃语义（2026-11-16）
+
+def test_rejected_gift_abandoned_during_song_hold():
+    """song 在播 + 礼物规则触发=放弃该规则（不排队不挂起，保持点歌画面）。"""
+    NOW[0] = 1000.0
+    eng = _engine([_song_rule(), _gift_rule()])
+    _song_hold_active(eng, remaining=200.0)  # deadline=1200
+    before = dict(eng.seq)
     d = _trigger_gift(eng)
-    assert d["reason"] == "interrupted"
-    _accept_switch(eng, d)  # 打断者切换接受（deadline 建立前提，生产=EDTalk 回填）
-    return d
-
-
-# ------------------------------------------------- d9/e4 挂起进入
-
-def test_d9_interrupt_spares_song_chain_and_suspends():
-    NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    d = _suspend_song(eng)
-    cancels = [c for c in d["commands"] if type(c).__name__ == "CancelAudio"]
-    assert cancels == []  # 歌曲链路不撤销（d9）
-    assert eng.song_suspended == {"rule_id": "song_a", "deadline": 1200.0,
-                                  "entered_at": 1000.0, "kind": "song"}
-    assert eng.seq["rule_id"] == "g1"  # 打断者序列照常启动
-    assert eng.counters["song_a"] == 0  # D-4 清零（e9 前提）
+    assert d["reason"] == "rejected"          # 放弃（不排队不挂起）
+    assert d["accepted"] is False
+    assert d["takeover"] is False             # 礼物答谢音频语义走原生链（编排只管画面）
+    assert eng.seq["rule_id"] == "song_a"     # 点歌画面保持
+    assert eng.seq == before                  # 序列零扰动
+    assert eng.song_suspended is None         # 无挂起（原 d9 挂起路径退役）
+    assert eng.counters.get("g1", 0) == 0     # 不重入计数
+    assert eng.pending_queue == []            # 不排队（原 O3 排队路径让位于放弃）
     assert eng.state == "sequence"
-
-
-def test_e4_suspension_fields_and_no_restore_default():
-    NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    _suspend_song(eng)
-    # 挂起态字段完整（e4 契约三键）
-    assert set(eng.song_suspended.keys()) == {"rule_id", "deadline", "entered_at", "kind"}
-    assert eng.song_suspended["kind"] == "song"  # T8：kind 参数化（song/resident）
-    # 打断者完成 → 恢复（不发 RestoreDefault——默认池不接管，e4）
-    NOW[0] = 1006.0
-    cmds = eng.on_tick(NOW[0])
-    assert eng.seq["rule_id"] == "song_a"  # 已恢复
-    assert eng.state == "sequence"
-    assert eng.song_suspended is None
-    assert not [c for c in cmds if type(c).__name__ == "RestoreDefault"]
-    assert eng.seq["steps"][0]["hold_for_song"] is True
-    assert eng.seq["current_deadline"] == 1200.0  # deadline 续挂起锚
-
-
-# ------------------------------------------------- d2 双结束态
-
-def test_d2_recover_when_song_alive():
-    NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    _suspend_song(eng, remaining=200.0)
-    NOW[0] = 1006.0
-    eng.on_tick(NOW[0])  # 打断者完成 → 恢复
-    assert eng.state == "sequence" and eng.seq["rule_id"] == "song_a"
-    # 恢复后歌曲结束（deadline 到点）→ 既有超时机制走条件1 回默认池
+    # 无撤音指令（放弃=编排零动作，歌曲链路与答谢链路均不触碰）
+    assert [c for c in d["commands"] if type(c).__name__ == "CancelAudio"] == []
+    # song 结束（deadline 到点）→ 既有超时机制回默认轮播
     NOW[0] = 1201.0
     cmds = eng.on_tick(NOW[0])
     assert eng.state == "default"
-    assert eng.song_suspended is None
     assert [c for c in cmds if type(c).__name__ == "RestoreDefault"]
 
 
-def test_d2_default_pool_when_song_ended():
+def test_rejected_low_weight_keyword_also_abandoned():
+    """低权重 standard 触发（keyword 10 < song 20）同样放弃——放弃先于权重门
+    （不排队：歌曲期间关键词画面不接管也不排队，触发直接放弃）。"""
     NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    _suspend_song(eng, remaining=50.0)  # deadline=1050
-    NOW[0] = 1100.0                     # 打断者完成时歌曲已结束
+    kw = {"rule_id": "k1", "trigger_type": "keyword", "match": "任意",
+          "interrupt": "standard",
+          "sequence": {"main": {"segment": "K_词", "switch_at": "immediate",
+                                "duration_s": 5}}}
+    eng = _engine([_song_rule(), kw])
+    _song_hold_active(eng, remaining=200.0)
+    r = eng.decide_trigger("keyword", "任意词", {})
+    assert r["reason"] == "rejected"
+    assert r["accepted"] is False
+    assert eng.seq["rule_id"] == "song_a"
+    assert eng.pending_queue == []
+
+
+def test_rejected_queue_mode_also_abandoned_during_song_hold():
+    """song 在播 + interrupt=queue 规则触发=同样放弃（设计 8：动作编排无需保留
+    队列，只保留再次命中的点歌规则）——queue 分支不得先于放弃分支入队，
+    歌毕重放切换画面的旧行为已退役。"""
+    NOW[0] = 1000.0
+    kw = {"rule_id": "kq", "trigger_type": "keyword", "match": "任意",
+          "interrupt": "queue",
+          "sequence": {"main": {"segment": "K_队", "switch_at": "immediate",
+                                "duration_s": 5}}}
+    eng = _engine([_song_rule(), kw])
+    _song_hold_active(eng, remaining=200.0)
+    r = eng.decide_trigger("keyword", "任意词", {})
+    assert r["reason"] == "rejected"
+    assert r["accepted"] is False
+    assert eng.seq["rule_id"] == "song_a"     # 点歌画面保持
+    assert eng.pending_queue == []            # 编排队列零保留
+    # song 结束回默认：排队无残留，不发生重放切换
+    NOW[0] = 1201.0
     cmds = eng.on_tick(NOW[0])
     assert eng.state == "default"
-    assert eng.song_suspended is None
-    assert [c for c in cmds if type(c).__name__ == "RestoreDefault"]
+    assert eng.pending_queue == []
+    assert [c for c in cmds if type(c).__name__ == "LogCmd"
+            and "出队" in c.msg] == []
 
 
-# ------------------------------------------------- F-B 挂起期自校正
-
-def test_fb_on_song_started_refreshes_suspended_deadline():
+def test_rejected_then_song_queued_still_holds():
+    """放弃后 song×song 承接不受影响（d11 保持）——点歌队列照常追加。"""
     NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    _suspend_song(eng, remaining=200.0)  # deadline=1200
-    NOW[0] = 1003.0
-    cmds = eng.on_song_started("next_slice", 180.0, NOW[0])  # 打断者序列运行中
-    assert eng.song_suspended["deadline"] == 1183.0  # now+180（F-B 刷新）
-    assert eng.seq["rule_id"] == "g1"  # seq 未被扰动
-    assert any("F-B" in c.msg for c in cmds if hasattr(c, "msg"))
+    eng = _engine([_song_rule("song_a"), _song_rule("song_b"), _gift_rule()])
+    eng.cfg.rule_by_id("song_a").match = "晴天"
+    eng.cfg.rule_by_id("song_b").match = "七里香"
+    _song_hold_active(eng, remaining=200.0, match="晴天")
+    d = _trigger_gift(eng)
+    assert d["reason"] == "rejected"
+    before = dict(eng.seq)
+    r = _trigger_song(eng, "七里香")  # 另一 song 规则重触发 → d11 承接
+    assert r["reason"] == "song_queued"
+    assert r["accepted"] is True  # 歌曲请求被承接（音频侧入歌曲队列）
+    assert eng.seq == before  # 序列零扰动
 
 
 # ------------------------------------------------- d11 song×song
@@ -182,40 +191,11 @@ def test_d11_song_retrigger_holds_sequence():
     assert eng.seq == before
 
 
-# ------------------------------------------------- e9 恢复=基础档
-
-def test_e9_recovery_uses_base_tier():
-    NOW[0] = 1000.0
-    song = _song_rule("song_a", emotion_tiers=[
-        {"min_count": 2, "mood": "高档", "segment_overrides": {"main": "S_高档"}}])
-    eng = _engine([song, _gift_rule()])
-    _trigger_song(eng)
-    eng.counters["song_a"] = 3  # 模拟打断前已进高档（counters=3 → 档位二）
-    eng.on_song_started("s", 200.0, NOW[0])
-    _trigger_gift(eng)
-    assert eng.counters["song_a"] == 0  # D-4 清零
-    NOW[0] = 1006.0
-    eng.on_tick(NOW[0])  # 恢复
-    assert eng.seq["steps"][0]["segment"] == "S_主"  # 基础档（非 S_高档）
-
-
-# ------------------------------------------------- d22 硬上限 + 总开关
-
-def test_d22_watchdog_force_default_on_cap_exceeded():
-    NOW[0] = 1000.0
-    eng = _engine([_song_rule(), _gift_rule()])
-    _suspend_song(eng, remaining=200.0)
-    eng.song_suspended["entered_at"] = NOW[0] - 4000.0  # 超 3600s 硬上限
-    NOW[0] = 1006.0
-    with patch("utils.orchestration.choreographer.alarm_notifier") as alarm:
-        cmds = eng.on_tick(NOW[0])
-        assert eng.state == "default"
-        assert eng.song_suspended is None
-        assert alarm.alarm_error.called
-        assert not [c for c in cmds if type(c).__name__ == "RestoreDefault"] or True
-
+# ------------------------------------------------- d22 总开关
 
 def test_switch_off_falls_back_to_terminate_semantics():
+    """总开关 off：song hold 中 standard 触发回退现行抢占终止语义（d22）——
+    拒绝判定与挂起机制均被门控短路，旧 exit 衔接照常插入。"""
     NOW[0] = 1000.0
     eng = _engine([_song_rule(), _gift_rule()], arbitration_enable=False)
     r = _trigger_song(eng)
@@ -227,17 +207,3 @@ def test_switch_off_falls_back_to_terminate_semantics():
     # 旧 exit 衔接存在（_interrupt_sequence 原行为：exit 未开始则重插）
     assert eng.seq["rule_id"] == "g1"
     assert "interrupted" in eng.seq["steps"][0]["step_id"]  # 旧 exit 衔接（计数器跨用例累计）
-
-
-def test_d11_after_recovery_holds_again():
-    NOW[0] = 1000.0
-    eng = _engine([_song_rule("song_a"), _song_rule("song_b"), _gift_rule()])
-    eng.cfg.rule_by_id("song_a").match = "晴天"
-    eng.cfg.rule_by_id("song_b").match = "七里香"
-    _suspend_song(eng, remaining=200.0, match="晴天")
-    NOW[0] = 1006.0
-    eng.on_tick(NOW[0])  # 恢复 song_a hold
-    NOW[0] = 1008.0
-    r = _trigger_song(eng, "七里香")  # 恢复后另一 song 规则触发 → d11 hold
-    assert r["reason"] == "song_queued"
-    assert eng.seq["rule_id"] == "song_a"

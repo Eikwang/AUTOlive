@@ -323,7 +323,6 @@ class _LoopHost(QueueMixin, PlaybackMixin):
         self.voice_tmp_path_queue_not_empty = threading.Condition(
             lock=self.voice_tmp_path_queue_lock)
         self.config = _Cfg()
-        self.active_reread_top_999 = False
         self.edtalk_client = _ClientStub()
         self._backing_duck = {"v": 1.0}
 

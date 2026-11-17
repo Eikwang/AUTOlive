@@ -1,5 +1,7 @@
 ```mermaid
 flowchart TD
+    %% 图头 v2.13.2（2026-11-17 弹幕表情漏网根修批次）：拓扑不变——Filter 清洁链 remove_emoji 升级三级处理：表情括号三族匹配上限 16→32 + 迭代剥离至不动点（嵌套 [[爱心]）+ 未闭合标签兜底（开口+短标签直达串尾/空白，覆盖平台畸形标签与 max_char_len 截断截半形态——截断先于清洁，"...[爱"漏标签汉字）+ Unicode 补带（1F000-1F2FF/2300-23FF/20E3）。抖音实测 [爱心]/[赞]/[呲牙] 标准形态原链已覆盖，漏网通道=上述四类
+    %% 图头 v2.13.1（2026-11-17 动作编排审查批次，用户裁决 B/B）：拓扑不变——⑨-B 歌队列逐歌对应（on_song_started 命中不同 song 规则=直切新规则主线 hold，新规则计数+1/旧规则保留，受理 max 不收缩 deadline）；⑦-B resident 文案消费精确对齐（挂起登记 copy 锚点，trends_copywriting 完成回执挂起期登记 copy_done/恢复期 hold 精确提前结束，qtype 过滤+归一化包含守卫）；⑧ song hold 放弃补齐 queue 模式。机制注记第 7/8 条
     %% 图头 v2.13（2026-11-13 流程图全面对齐批次，改链必改图追溯执行）：六簇图-码漂移修正——D1 弹幕窗口聚合退役（DANMU 逐条透传，限速归 process_data 遗忘定时器，LIKE 聚合保留）；D2 黑名单统一拦截前移 Door 前置（先于限入窗口/去重/分发）；D3 过滤清洁链四连批次（用户名数字转文字三级清洁链/弹幕内容字符白名单/表情括号三族匹配/filter.enable 总开关归一/答谢用户名白名单收口）；D4 点歌间奏插播机制整批（歌曲时间轴锚+间奏窗口门/借位插播走口型推理/伴奏双轨闪避/队列容量分账/静音自适应识别）；D5 拼多多mall_id 接入+登录根修+tuber 角色库（采集与数字人配置面）；D6 翻译 LRU 缓存+LLM 并发信号量。伴奏双轨以注记呈现（终门 uc1a）；正文新增「机制注记」小节（渲染可见）；图头本批 7 行不折叠（v2.14 折叠挂账 TODOS）
     %% 图头 v2.12（2026-11-06 三强制拆除批次）：entrance/follow 权重两态回归系统优先级——on 态 d10 表外回读 filter.priority_mapping（覆盖顺序=arbitration_weights > priority_mapping）、off 态 _TRIGGER_PRIORITY_KEY 新增同名直取；打断模式回归规则配置（standard/queue 均合法）；10s 类型节流与装载告警退役（防御职责归上游 process_data 六类限入&去重管线）；username 清洗三件套保留
     %% 图头 v2.11（2026-11-06 协作机制流程审查批次 T3，uc1b 终门裁决）：消费回传语义澄清——回传=观测回执（QueueMixin.report_consumed 消费统计落账+编排实例匹配），不驱动下一消费（消费由播放循环自身串行推进）；本地（builtin）路径观测回执收敛至真实完成点单点（audio_core 完成回调），移交点仅保留编排实例匹配（W3 双计根修）；编排音轨条目重建透传 choreo_step_id（Q-1）
@@ -54,7 +56,7 @@ flowchart TD
     subgraph 弹幕前置处理
         %% v2.13 对齐（D1/D2/D3）：弹幕监听侧窗口聚合退役——DANMU 逐条透传进分类，限速与合并归 Door 遗忘定时器（LIKE 聚合保留）；
         %% Door=黑名单统一拦截最前置（名单内一切互动直接抛弃，先于限入窗口/去重/分发/关键词识别）→消息限入（遗忘窗口：首条立即分发+窗口末补发保留数）→限定时间重复丢弃；
-        %% Filter=违禁词/敏感词过滤+清洁链（用户名清洁三级链归「用户名数字转文字」开关、弹幕内容字符白名单清洁归「弹幕表情过滤」链、表情括号三族匹配；filter.enable 总开关归一）
+        %% Filter=违禁词/敏感词过滤+清洁链（用户名清洁三级链归「用户名数字转文字」开关、弹幕内容字符白名单清洁归「弹幕表情过滤」链、表情括号三族匹配+迭代剥离+未闭合兜底（2026-11-17 漏网根修）；filter.enable 总开关归一）
         System --> Listening[已开启 <br> 弹幕监听]:::listenNode
         Listening --> NoDM(无弹幕消息):::listenNode
         Listening --> HasDM(有弹幕消息):::listenNode
@@ -180,6 +182,9 @@ flowchart TD
 3. **借位插播**：间奏/前奏窗口内其他音频条目借窗口插播（点歌段之间穿插普通播报）；插播条目推数字人口型推理、不本地外放（用户模型①，2026-11-12 实测确认）；点歌应答文案先播不排队；窗口预检要求插播播完后歌曲段还能留足 3 秒（用户模型③）；时间轴保持前进——与 999 复读模式的唯一区别（用户模型⑤）。
 4. **伴奏双轨与闪避**（注记呈现，终门 uc1a）：伴奏经本地子进程播放（utils/audio/playback_manager.py 的 _start_backing_player，子进程不可用降级本地线程）；借位插播出声期伴奏压低至 50%（_backing_duck_hold 写 _BACKING_DUCK_FACTOR），播报播完按时长定时恢复（_backing_duck_release_later），人声段出队/停止路径立即恢复（_backing_duck_release_now）。
 5. **队列容量分账**：song 切片段不占普通音频队列容量（utils/audio/queue_manager.py 容量分账+voice 队列满载豁免，用户模型④）——80 条丢弃根修（2026-11-10 R4h）。
+6. **双门控背压**（2026-11-16 两批次）：①合成背压门——待播放队列普通条目深度 ≥ `play_audio.synth_gate_depth`（缺省 2）时合成线程暂停出队，消费出队回执唤醒（豁免：song 切片段/权重≥500/念白配对 pending 回复；min_start_play>门限取大防首播阈值互锁）；②弹幕↔回复配对门（念白单飞）——念白与 LLM 回复同 `reply_link`，念白出队登记 pending，其回复出队前后续念白留队（15s 超时兜底，无回复路径显式 abandon）。
+7. **song hold 编排放弃（2026-11-17 动作编排审查批次）**：点歌画面 hold 期间所有非 song 触发（gift/keyword/entrance/follow/dynamic_text，standard 与 queue 模式均同）一律放弃——不排队不挂起不切画面（设计 8「只保留再次命中的点歌规则」）；放弃分支先于 interrupt=queue 入队分支（原 queue 分支先入队、歌毕重放切换画面的行为已退役）；song×song 重触发仍走 d11 歌曲队列承接（accepted=true，序列保持 hold）。
+8. **⑨-B 歌队列逐歌对应 + ⑦-B resident 文案消费精确对齐（2026-11-17 动作编排审查批次，用户裁决 B/B）**：逐歌对应——歌队列中下一首人声切片起播（on_song_started 权威信号）命中**不同** song 规则时，画面直切新规则主线 hold（不重插旧离场=歌队列连续性；新规则计数+1 按档位升档、旧规则计数保留不清零=非打断语义），切歌受理 deadline=max(保险丝, 锚点+剩余时长) 不收缩，同规则重触发/无规则命中=保持当前画面仅刷新 deadline，编排总开关 off=回退既有刷新语义；文案精确对齐——resident 挂起时登记其文案匹配值锚点，trends_copywriting 完成回执（type+content 归一化双向包含匹配，qtype 过滤防他链路误配）：挂起期到达=登记 copy_done（打断者完成后跳过切回直回默认轮播，防 hold 闪帧）、恢复 hold 期到达=hold 精确提前结束回默认（不再只依赖 step_timeout_s 保险丝）。
 
 ### 弹幕管线（D1-D3）
 

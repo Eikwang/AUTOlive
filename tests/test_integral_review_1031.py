@@ -1,14 +1,17 @@
 # -*- coding: UTF-8 -*-
 """
-积分功能审查守卫测试（2026-10-31 积分审查批次）
+积分功能审查守卫测试（2026-10-31 积分审查批次；2026-11-16 限频批次更新）
 
 覆盖义务（任务书：审查数据接口/功能机制/数据库结构/整体流程）：
-- 12h 隐形限频（本批新增机制）：签到/入场窗口内静默拦截（不计分/不写库/不回复），
-  超窗自动恢复；礼物/关注/查询不受限频
-- 限频门卫语义：sign_num>0 / view_num>0——排除非本人行为 fresh INSERT 写入的
-  时间占位值（礼物先行用户不被假封锁首次签到）
-- 迁移：ensure_integral_entrance_ts_column 幂等（存量 9 列库补列、新装 no-op）
-- UPSERT CASE 列语义：last_entrance_ts 仅入场覆盖，与 last_sign_ts 互不干扰
+- 24h 滚动限频（2026-10-31 引入 12h，2026-11-16 批次 12h→24h 并扩展到关注）：
+  签到/入场/关注窗口内静默拦截（不计分/不写库/不回复），超窗自动恢复；
+  礼物/查询不受限频
+- 限频门卫语义：sign_num>0 / view_num>0 / last_follow_ts 直接判定——排除非本人
+  行为 fresh INSERT 写入的时间占位值（礼物先行用户不被假封锁首次签到）
+- 迁移：ensure_integral_entrance_ts_column / ensure_integral_follow_ts_column
+  幂等（存量 9 列库补列、新装 no-op）
+- UPSERT CASE 列语义：last_entrance_ts 仅入场覆盖，last_follow_ts 仅关注覆盖，
+  与 last_sign_ts 互不干扰
 - str/list 双形态归一（as_str_list）：UI 存量字符串污染容错——命令词精确匹配
   恢复（「签」不再子串误命中）、档位文案不再按字符随机
 - parse_db_ts/cooldown_active 容错（fail-open：脏数据不封死计分链）
@@ -51,10 +54,10 @@ CREATE TABLE IF NOT EXISTS integral (
 )
 '''
 
-# 与 utils/my_handle.py 建表 DDL 一致（新装形态，含 last_entrance_ts）
+# 与 utils/my_handle.py 建表 DDL 一致（新装形态，含 last_entrance_ts + last_follow_ts）
 FRESH_INTEGRAL_DDL = LEGACY_INTEGRAL_DDL.replace(
     "    last_ts DATETIME NOT NULL,\n",
-    "    last_ts DATETIME NOT NULL,\n    last_entrance_ts DATETIME,\n")
+    "    last_ts DATETIME NOT NULL,\n    last_entrance_ts DATETIME,\n    last_follow_ts DATETIME,\n")
 
 
 class _StubConfig:
@@ -134,7 +137,7 @@ def backdate(db, column, hours):
     return old
 
 
-# ============ 12h 隐形限频：签到 ============
+# ============ 24h 滚动限频：签到 ============
 
 class TestSignCooldown:
     def test_first_sign_scores_then_window_blocks(self, handler, db):
@@ -149,9 +152,9 @@ class TestSignCooldown:
         assert handler.my_handle.replies == [], "限频拦截为隐形语义，不回复"
 
     def test_window_expiry_resumes_scoring(self, handler, db):
-        """超窗（回拨 13 小时）后签到恢复计分。"""
+        """超窗（回拨 25 小时）后签到恢复计分。"""
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
-        backdate(db, "last_sign_ts", 13)
+        backdate(db, "last_sign_ts", 25)
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
         row = db.fetch_one("SELECT integral, sign_num FROM integral")
         assert row == (2, 2)
@@ -166,14 +169,27 @@ class TestSignCooldown:
         row = db.fetch_one("SELECT integral, sign_num FROM integral")
         assert row == (10 + 1, 1)
 
-    def test_gift_and_follow_not_rate_limited(self, handler, db):
-        """礼物/关注不受 12h 限频（任务书仅签到/入场）。"""
+    def test_gift_not_rate_limited_and_follow_24h_limited(self, handler, db):
+        """礼物不受限频（连打 3 次均计分）；关注 24h 滚动限频（窗口内仅首次计分）。"""
         for _ in range(3):
             assert handler.integral_handle("gift", {"platform": "dy", "username": "小明",
                                                     "gift_name": "小花", "total_price": 1.0}) is True
-            assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+
+        handler.my_handle.replies.clear()
+        # 窗口内重复关注：静默拦截（返回 True=消费该事件，不计分不回复）
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        assert handler.my_handle.replies == [], "关注限频拦截为隐形语义，不回复"
         row = db.fetch_one("SELECT integral, total_price FROM integral")
-        assert row == (10 * 3 + 1 * 3, 3)
+        assert row == (10 * 3 + 1, 3)
+
+    def test_follow_window_expiry_resumes_scoring(self, handler, db):
+        """关注超窗（回拨 25 小时）后恢复计分。"""
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        backdate(db, "last_follow_ts", 25)
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        row = db.fetch_one("SELECT integral FROM integral")
+        assert row == (2,)
 
     def test_query_not_rate_limited(self, handler, db):
         """查询为只读链路，连续查询均回复。"""
@@ -192,7 +208,7 @@ class TestSignCooldown:
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
 
 
-# ============ 12h 隐形限频：入场 ============
+# ============ 24h 滚动限频：入场 ============
 
 class TestEntranceCooldown:
     def test_first_entrance_scores_then_window_blocks(self, handler, db):
@@ -207,9 +223,9 @@ class TestEntranceCooldown:
         assert handler.my_handle.replies == []
 
     def test_window_expiry_resumes_scoring(self, handler, db):
-        """超窗（回拨 13 小时）后入场恢复计分。"""
+        """超窗（回拨 25 小时）后入场恢复计分。"""
         assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
-        backdate(db, "last_entrance_ts", 13)
+        backdate(db, "last_entrance_ts", 25)
         assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
         row = db.fetch_one("SELECT integral, view_num FROM integral")
         assert row == (2, 2)
@@ -263,6 +279,54 @@ class TestEntranceTsMigration:
         assert ensure_integral_entrance_ts_column(db) is True
 
 
+# ============ 迁移：ensure_integral_follow_ts_column（2026-11-16 批次） ============
+
+class TestFollowTsMigration:
+    def test_legacy_db_migration_and_idempotent(self, tmp_path):
+        """存量库补 last_follow_ts 列幂等；补列后关注限频全链可用。"""
+        database = SQLiteDB(str(tmp_path / "legacy_follow.db"))
+        try:
+            assert database.execute(LEGACY_INTEGRAL_DDL)
+            from utils.db import ensure_integral_follow_ts_column
+            assert ensure_integral_follow_ts_column(database) is True
+            assert ensure_integral_follow_ts_column(database) is True  # 幂等
+            cols = [row[1] for row in database.fetch_all("PRAGMA table_info(integral)")]
+            assert "last_follow_ts" in cols
+        finally:
+            database.close()
+
+    def test_fresh_ddl_migration_noop(self, db):
+        """新装库（DDL 已含列）：迁移 no-op 返回 True。"""
+        from utils.db import ensure_integral_follow_ts_column
+        assert ensure_integral_follow_ts_column(db) is True
+
+    def test_legacy_row_null_follow_ts_fails_open(self, handler, db):
+        """迁移前存量行（last_follow_ts 为 NULL）：关注 fail-open 放行。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        assert db.execute(
+            "INSERT INTO integral (platform, username, uid, integral, view_num, sign_num, "
+            "last_sign_ts, total_price, last_ts, last_entrance_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("dy", "老关注", "", 5, 0, 0, now, 0, now, None))
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "老关注"}) is True
+        row = db.fetch_one("SELECT integral FROM integral")
+        assert row == (6,)
+
+    def test_follow_does_not_clobber_other_ts(self, handler, db):
+        """UPSERT CASE：关注仅覆盖 last_follow_ts，不覆盖 last_entrance_ts。"""
+        assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
+        ts_after_entrance = db.fetch_one("SELECT last_entrance_ts, last_follow_ts FROM integral")
+
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        ts_after_follow = db.fetch_one("SELECT last_entrance_ts, last_follow_ts FROM integral")
+        assert ts_after_follow[0] == ts_after_entrance[0], "关注不得覆盖 last_entrance_ts"
+        assert ts_after_follow[1] is not None, "关注应覆盖 last_follow_ts"
+
+        # 窗口内再次关注被拦截（last_entrance_ts 刚更新不影响关注限频判定）
+        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        row = db.fetch_one("SELECT integral, view_num FROM integral")
+        assert row == (2, 1)
+
+
 # ============ 工具函数：parse_db_ts / cooldown_active / as_str_list ============
 
 class TestHelpers:
@@ -279,9 +343,9 @@ class TestHelpers:
         now = datetime(2026, 10, 31, 12, 0, 0)
         assert cooldown_active(None, now) is False                     # 从未计分
         assert cooldown_active("垃圾数据", now) is False               # fail-open
-        assert cooldown_active(now - timedelta(hours=11, minutes=59), now) is True
-        assert cooldown_active(now - timedelta(hours=12), now) is False   # 恰好 12h=超窗
-        assert cooldown_active(now - timedelta(hours=12, seconds=1), now) is False
+        assert cooldown_active(now - timedelta(hours=23, minutes=59), now) is True
+        assert cooldown_active(now - timedelta(hours=24), now) is False   # 恰好 24h=超窗
+        assert cooldown_active(now - timedelta(hours=24, seconds=1), now) is False
 
     def test_as_str_list(self):
         assert as_str_list("签到\n打卡") == ["签到", "打卡"]

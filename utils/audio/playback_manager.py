@@ -10,6 +10,7 @@ import traceback
 import os
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
+from .queue_manager import QueueMixin
 from utils.web_captions import get_captions_manager
 
 # 伴奏起播门等待上限（2026-11-04 人声对齐修复）：覆盖编排静默窗口上限
@@ -43,6 +44,11 @@ _OVERDUE_SKIP_LIMIT = 2
 # <此值 → 不再起插播音频（避免说一半）。用户口径：「进入间奏开始计时，不足
 # 3 秒时无需消费音频，或间奏空间本身就不足 3 秒，也无需消费音频」。
 _INTERLUDE_MIN_CONSUME_S = 3.0
+
+# 念白单飞门超时（2026-11-16 弹幕↔回复配对批次）：念白消费后其配对回复
+# 超此秒数仍未出队（LLM 失败/流式熔断/登记竞态遗漏）→ 强制放行后续念白，
+# 防配对等待卡死消费链。LLM+TTS 正常 3-8s，15s 覆盖慢速模型冗余。
+_READ_REPLY_GATE_TIMEOUT = 15.0
 
 # 伴奏闪避（2026-11-12 伴奏闪避批次，用户需求）：前奏/间奏窗口借位消费其它
 # 音频（播报/答谢等非歌曲音频）时伴奏压低系数——保证播报可辨；歌曲人声不
@@ -185,16 +191,6 @@ class PlaybackMixin:
             shutil.rmtree(seg_dir, ignore_errors=True)
             logger.info(f"[song] 切片目录已清理：{seg_dir}")
 
-    def _is_999_entry(self, data_json) -> bool:
-        """999 判定单一源（2026-11-05 编排优化批次 T2/e2）：经 audio_priority
-        统一判定——type 映射==999 或 priority_override==999（d18 规则级 999
-        载体）均触发 999 机制（active 标记/让位/单实例）。"""
-        try:
-            from utils.audio.audio_priority import entry_is_999
-            return entry_is_999(data_json, self.config.get("filter", "priority_mapping") or {})
-        except Exception:
-            return False
-
     def _song_gate_wait_s(self, data_json) -> float:
         """间奏窗口门（2026-11-09 失步根修）：队首 song 切片段未到「歌曲时间轴
         应到时刻」时返回剩余等待秒（>0=消费循环锁外短睡重查）；其余恒 0。
@@ -234,7 +230,7 @@ class PlaybackMixin:
         ① 垃圾时间（anchor["wrapping"]）：伴奏进程死（is_alive poll，fail-soft）
         → 清锚回 IDLE；否则**全直通 pop(0)**（自由消费，无窗口约束）。
         ② 唱歌时间（锚存在）：a) 到期 song 段（due≤now，含 last_end 保底）
-        → pop(i) 跳过其前插播条目（延后留队不丢；跳过区间含 999 豁免）=
+        → pop(i) 跳过其前插播条目（延后留队不丢）=
         间奏结束立刻切回人声；b) 队首=插播条目 → **窗口预检**——间奏窗口
         =[last_end, 下一 song 段 due]，剩余=窗口结束−now：剩余<3s 或窗口
         总长<3s 不起音频；插播音频时长（pydub 读 voice_path，fail-soft 放行）
@@ -289,8 +285,6 @@ class PlaybackMixin:
                     due = last_end  # 播完保底地板（F8：防插播后下段抢跑）
                 if now < due:
                     continue
-                if any(self._is_999_entry(e) for e in queue[:i]):
-                    return queue.pop(0), 0.0, False  # 999 豁免（最高优先级不延后）
                 anchor["skip_count"] = 0 if i == 0 else min(
                     skip_count + 1, _OVERDUE_SKIP_LIMIT)
                 return queue.pop(i), 0.0, False
@@ -337,7 +331,53 @@ class PlaybackMixin:
                     continue  # 超窗/不足 3s 余量 → 看下一条
                 return queue.pop(i), 0.0, True  # R5b：借位走 EDTalk 口型
             return None, gate_wait, False
+        # 念白单飞门（2026-11-16 弹幕↔回复配对批次）：song 窗口判定之后、
+        # 常规 pop 之前——无 pending 时零开销直通；有 pending（更早念白的
+        # 回复未出队）时仅放行非念白条目（=等待中的回复/插播音频），念白
+        # 一律留队。song 窗口分支已提前 return（点歌时间轴优先，fail-open
+        # 不参与配对门）。
+        rc_gate = self._read_reply_gate_locked(queue)
+        if rc_gate > 0:
+            return None, rc_gate, False
         return queue.pop(0), 0.0, False
+
+    def _read_reply_gate_locked(self, queue) -> float:
+        """念白单飞门（2026-11-16 弹幕↔回复配对批次，须在
+        voice_tmp_path_queue_lock 持有内调用）。
+
+        语义（用户中压实测口径）：念弹幕消费后、对应 AI 回复消费前，不消费
+        下一条念白——根治权重队列下念白（60）持续压制回复（50）导致的
+        「念了多条弹幕才回答第一条」。机制：念白出队时经 reply_gate_track_popped
+        登记 pending[link]；回复出队解除。门控期非念白条目正常放行（回复自己/
+        插播音频），仅念白留队。
+
+        fail-open：pending 空（常态）零开销直通；条目无 reply_link（未打标
+        旧条目/聊天源）不参与；超时 _READ_REPLY_GATE_TIMEOUT 强制放行；
+        生产端 abandon_reply_link（无回复路径）直接豁免。
+
+        Returns: 0.0=放行（调用方按常规 pop）；>0=门控等待秒数（调用方锁外
+        sleep 后重查；0.5=轮询节奏）。"""
+        now = time.monotonic()
+        with QueueMixin._reply_gate_lock:
+            pending = QueueMixin._reply_gate_pending
+            # pending 超时兜底：回复迟迟未出队（LLM 失败/竞态遗漏）→ 放弃
+            for lk in [lk for lk, ts in pending.items()
+                       if now - ts >= _READ_REPLY_GATE_TIMEOUT]:
+                del pending[lk]
+                QueueMixin._reply_gate_abandoned[lk] = now
+            if not pending:
+                return 0.0
+        # 有在途等待：允许弹出第一个非念白条目（等待中的回复或插播音频），
+        # 念白条目（含无 link 旧条目，保守一律留队）全部跳过
+        for i, entry in enumerate(queue):
+            if not isinstance(entry, dict):
+                return queue.pop(i), 0.0, False
+            if (entry.get("type") == "read_comment"
+                    or entry.get("producer_type") == "read_comment"):
+                continue
+            return queue.pop(i), 0.0, False
+        # 队列全是念白 → 等待回复合成入队（调用方 0.5s 轮询重查）
+        return 0.5
 
     def _next_song_due_locked(self, anchor):
         """队列中下一个 song 切片段的窗口结束时刻（due=t0+start−预补偿，含
@@ -560,97 +600,11 @@ class PlaybackMixin:
         self._backing_duck_cancel_restore()
         self._set_backing_duck(1.0)
 
-    def _on_edtalk_yield(self) -> bool:
-        """d19/uc2b（T7，2026-11-05 批次）：EDTalk 路径 999 让位编排——
-
-        pause（服务端消费冻结）→读游标（output_frames 差=已播帧）→resume
-        （答谢 push 前解冻，否则答谢帧不被消费）→答谢照常 push（flush 冻结段）
-        →答谢消费完成后剩余段从冻结游标重推（_repush_edtalk_999_remainder）。
-
-        Returns: True=已受理（999 在 EDTalk 飞行中——queue 终止让位链）；
-        False=非本路径（builtin 让位由 queue_manager 原逻辑承担）。pause 失败
-        =d17 fallback 降级（维持排序：999 播完答谢自然轮到），仍返回 True
-        （让位链已消费——bucket edtalk_yield_degraded）。"""
-        flight = getattr(self, "_edtalk_999_flight", None)
-        if not (isinstance(flight, dict) and flight.get("is_999")):
-            return False
-        client = getattr(self, "edtalk_client", None)
-        if client is None or not hasattr(client, "pause_output"):
-            return False
-        try:
-            paused = client.pause_output()
-            if not paused.get("ok", False):
-                try:
-                    from utils.obs_stats import record_drop
-                    record_drop("edtalk_yield_degraded")
-                except Exception:
-                    pass
-                logger.warning("[EDTalk] 999 让位降级维持排序（pause 失败——"
-                               "d17 fallback；999 播完答谢自然轮到）")
-                return True
-            cursor = client.get_output_frames()
-            start = flight.get("start_frames")
-            if cursor is not None and start is not None:
-                consumed = max(0, int(cursor) - int(start))
-                # 帧锁定音频切片：640 样本/帧（16000Hz / 25fps，render_loop 常量）
-                flight["resume_offset_samples"] = consumed * 640
-            client.resume_output()  # 答谢 push 前解冻
-            self._edtalk_resume_pending = flight
-            logger.info(f"[EDTalk] 999 让位受理（uc2b）：游标"
-                        f"={cursor if cursor is not None else '?'}, "
-                        f"答谢播毕重推剩余段（d19）")
-            return True
-        except Exception as e:
-            logger.warning(f"[EDTalk] 999 让位编排异常（降级维持排序）：{e}")
-            return True
-
-    async def _repush_edtalk_999_remainder(self, flight: dict):
-        """d19/uc2b：999 剩余 PCM 重推（从冻结游标切片→临时 wav→push_full）。
-        fail-soft：重推失败=999 尾段丢失（bucket+告警），不阻塞播放循环。"""
-        try:
-            import wave as _wave
-            path = flight.get("voice_path")
-            offset = int(flight.get("resume_offset_samples") or 0)
-            if not path or not os.path.isfile(path) or offset <= 0:
-                return  # 游标缺失/已播完（答谢期间自然播完）=无剩余
-            with _wave.open(path, "rb") as w:
-                total = w.getnframes()
-                if offset >= total:
-                    return
-                w.setpos(offset)
-                rest = w.readframes(total - offset)
-                rate, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
-            tmp = path + ".resume999.wav"
-            with _wave.open(tmp, "wb") as out:
-                out.setnchannels(ch)
-                out.setsampwidth(sw)
-                out.setframerate(rate)
-                out.writeframes(rest)
-            logger.info(f"[EDTalk] 999 剩余重推（uc2b 任意点恢复）："
-                        f"{offset}/{total} 帧（{rate}Hz）")
-            await self.edtalk_client.push_full(
-                tmp, content="999-remainder", wait_flight=True)
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            # 重推条目的消费回执（d19 口径：剩余段=原 999 的延续，补一次回执）
-            self.report_consumed("reread_top_priority", "999-remainder")
-        except Exception:
-            try:
-                from utils.obs_stats import record_drop
-                record_drop("edtalk_999_repush_fail")
-            except Exception:
-                pass
-            logger.error("[EDTalk] 999 剩余重推失败（尾段丢失）\n"
-                         + traceback.format_exc())
-
-
     async def _consume_edtalk_entry(self, data_json, voice_tmp_path):
         """EDTalk 路由条目消费（T2-批 2026-11-06 自 only_play_audio 原样提取）：
-        双轨伴奏起播门/编排静默窗口等待/song 起播锚/999 飞行登记/push_full/
-        字幕与编排完成回执/消费回执/999 剩余重推/切片清理。异常交由调用方
-        try/finally 释放 999 active 标记（W2 根修）。
+        双轨伴奏起播门/编排静默窗口等待/song 起播锚/在飞条目登记/push_full/
+        字幕与编排完成回执/消费回执/切片清理。异常交由调用方
+        （W2 根修 finally 兜底伴奏闪避清理）。
         """
         # R6 双轨（/autoplan 2026-10-23 批次）：song 消息带 backing_path
         # 伴奏轨时——人声轨推 EDTalk 驱动对口型（数字人端出声），伴奏轨
@@ -847,18 +801,10 @@ class PlaybackMixin:
                 if _remaining and _remaining > 0:
                     _song_choreo.on_song_started(
                         str(data_json.get("content", ""))[:40], _remaining)
-        # T7/d19（uc2b 让位游标基座）：999 飞行登记——push 受理前
-        # 读 output_frames 起点（consumed=pause 读数-起点=已播帧）
-        if self._is_999_entry(data_json):
-            try:
-                _start_frames = self.edtalk_client.get_output_frames()
-            except Exception:
-                _start_frames = None
-            self._edtalk_999_flight = {
-                "voice_path": voice_tmp_path,
-                "start_frames": _start_frames,
-                "is_999": True,
-            }
+        # 在飞条目登记（2026-11-16 段间让位批次）：push 受理前登记当前消费
+        # 条目——闲时门（task_scheduler._is_playback_idle）按此判定「EDTalk
+        # 在飞」；push 返回后由 finally 统一清理。
+        self._edtalk_current_entry = data_json
         # T7/d3（2026-11-05）：song 切片跳过飞行等待——切片时序
         # 锚定伴奏（uc4b），人声起即停答谢=push 即 flush 替换
         # （e5 口径：替换生效时刻=本次 push 受理时刻，非推送发起）
@@ -870,6 +816,7 @@ class PlaybackMixin:
                 wait_flight=_wait_flight,
             )
         finally:
+            self._edtalk_current_entry = None
             if _backing_gate is not None:
                 # 伴奏起播门放行（2026-11-04 人声对齐）：push_full 返回=
                 # 人声受理（preroll ~0.3s 后出声）→ 伴奏此刻起播，双轨同步。
@@ -969,12 +916,6 @@ class PlaybackMixin:
                     record_drop("song_interlude_backlog", _backlog)
             except Exception:
                 pass
-        # T7/d19/uc2b：999 挂起剩余重推（答谢消费完→任意点恢复；
-        # flush 已清冻结段，剩余从冻结游标重推）
-        _pend = getattr(self, "_edtalk_resume_pending", None)
-        if _pend is not None:
-            self._edtalk_resume_pending = None
-            await self._repush_edtalk_999_remainder(_pend)
         # T1 观测：消费延迟样本（入队→完成；_enqueued_at 缺失=旧条目跳过）
         try:
             from utils.obs_stats import record_latency
@@ -986,9 +927,6 @@ class PlaybackMixin:
             pass
         # ② 点歌切片末段清理（EDTalk 路径即时清）
         self._cleanup_song_segment_if_last(data_json)
-        # A7/F-5 短路声明：EDTalk 激活时 999 暂停-续播链路显式不可达——
-        # 本分支不进 builtin 播放器（push_full 帧锁定播放），999 按队列
-        # 优先级自然排序推送；999 单实例约束仍由 queue_manager 层保证。
 
     async def only_play_audio(self):
         """只进行普通音频播放"""
@@ -998,8 +936,8 @@ class PlaybackMixin:
                     # 出队选择（2026-11-10 R3 到期优先+上批窗口门，见
                     # _pop_next_entry_locked）：①song 序列内到期段优先——
                     # 锁内扫描找第一个「seq>0∧锚存在∧due 已到」切片段，其前
-                    # 插播条目延后留队不丢（跳过区间含 999 豁免；连续跳过达
-                    # _OVERDUE_SKIP_LIMIT 放行队首一条=答谢时效保障）；②无到
+                    # 插播条目延后留队不丢；连续跳过达
+                    # _OVERDUE_SKIP_LIMIT 放行队首一条=答谢时效保障；②无到
                     # 期段→队首窗口门（due 未到锁外短睡重查，答谢可随时插队
                     # 队首被优先消费=间奏插播 uc4b）；③窗口到期推送即 flush
                     # 残余答谢（d3 人声起即停）。非 song/首段/无锚 fail-open。
@@ -1014,12 +952,28 @@ class PlaybackMixin:
                             if data_json is None:
                                 continue  # 锁释放窗口内队列被清空（停止/flush）→ 回外层
                             break
+                        # 等待观测（2026-11-16 分桶）：song 窗口门与念白单飞门
+                        # 共用 gate_wait 通道，按锚存在性分桶避免观测混淆
                         try:
                             from utils.obs_stats import record_drop
-                            record_drop("song_gap_wait", round(_gate_wait, 1))
+                            if getattr(self, "_song_anchor", None):
+                                record_drop("song_gap_wait", round(_gate_wait, 1))
+                            else:
+                                record_drop("read_reply_gate_wait",
+                                            round(_gate_wait, 1))
                         except Exception:
                             pass
                         await asyncio.sleep(min(_gate_wait, 0.5))
+
+                    # 念白配对出队回执（2026-11-16 弹幕↔回复配对批次）：念白
+                    # 出队登记 pending、回复出队解除——门控时序的唯一登记点
+                    # （覆盖常规 pop/song 借位/门控放行所有返回路径）
+                    self.reply_gate_track_popped(data_json)
+
+                    # 合成背压门消费回执（2026-11-16 消费回传背压批次）：出队
+                    # =普通条目深度下降，唤醒门控中的合成线程（同一回执点覆盖
+                    # 常规 pop/song 借位/念白门放行所有返回路径）
+                    self.notify_synth_gate()
 
                     # 精简日志（2026-10-28）：整包 dict 倾倒退役——只留 type+content
                     # 摘要（完整字段可按需在合成/路由链路排查时临时加回）
@@ -1036,15 +990,6 @@ class PlaybackMixin:
                         self._backing_duck_release_now()
 
                     voice_tmp_path = data_json["voice_path"]
-
-                    # A7/T1（2026-10-22 审查批次）：999 单实例 active 标记——条目离开
-                    # 待播放队列即视为进入播放系统；完成/跳过/清空时释放（EDTalk 在
-                    # 本函数释放，builtin 经 release hook 在播放器线程释放）。
-                    # T2/e2：判定经 _is_999_entry 单一源（override==999 的规则级
-                    # 999 条目同样置位——让位门 active_reread_top_999 对其生效）。
-                    _was_999 = self._is_999_entry(data_json)
-                    if _was_999:
-                        self.active_reread_top_999 = True
 
                     # 字幕推送时序对齐（2026-10-25 用户实测批次）：出队公共段 push 已
                     # 退役——推送点=开播精确位：EDTalk→push_full 返回后（_captions_push）；
@@ -1068,18 +1013,15 @@ class PlaybackMixin:
                     # 「本地外放」理解错误已回滚。插播只发生在人声静音窗口
                     # （预算预检+时间戳调度），人声有声段不被打断。
                     if routes_to_edtalk(data_json, self.config):
-                        # T2-批（2026-11-06 协作机制流程审查，W2 根修）：999 active
-                        # 标记 finally 化——分支内任何异常逃逸（含 CancelledError 穿透）
-                        # 都释放标记，防 999 单实例门卡死复读专线（原释放点仅在正常
-                        # 完成路径，逃逸即悬挂）。分支体提取为 _consume_edtalk_entry
-                        # 逐字保持，仅移除正常路径内的冗余释放点——finally 统一承担。
+                        # T2-批（2026-11-06 协作机制流程审查，W2 根修）：分支内
+                        # 任何异常逃逸（含 CancelledError 穿透）由 finally 兜底
+                        # 清理伴奏闪避现场（原释放点仅在正常完成路径，逃逸即
+                        # 悬挂）。分支体提取为 _consume_edtalk_entry 逐字保持。
                         _consumed_ok = False
                         try:
                             await self._consume_edtalk_entry(data_json, voice_tmp_path)
                             _consumed_ok = True
                         finally:
-                            if _was_999:
-                                self.active_reread_top_999 = False
                             # 伴奏闪避（2026-11-12 伴奏闪避批次）：**受理=
                             # 播报出声**（push_full 返回）→ 此刻压低，受理+
                             # 时长估计定时恢复（AC-001/002）；异常=播报未出声
@@ -1204,16 +1146,19 @@ class PlaybackMixin:
     def stop_current_audio(self):
         """停止当前播放的音频
 
-        注意（EDTalk 模式语义变化，native E6）：edtalk_realtime 激活时本地播放
-        已被跳过，弹幕打断只作用于本地 mixer/audio_player；EDTalk 端无
-        flush-audio 契约端点，打断不会停止其音频播放。已列入 edtalk/README
-        语义变化清单。
+        EDTalk 模式（2026-11-16 聊天审查批次·打断闭嘴）：音频进入口型推理的
+        方式=整句 push_full——服务端只要还有音频在消费就持续推理口型，打断时
+        推送静音触发服务端 flush 替换（d3 替换语义）→ 数字人立即闭嘴。
+        （此前语义：EDTalk 端无 flush-audio 契约端点、静默跳过——已由
+        EDTalkClient.flush_silence 以 push 静音方式补齐，不再依赖新契约端点。）
         """
         if is_edtalk_active(self.config):
-            # EDTalk 契约无音频 flush 端点——静默跳过（保持既有调用方兼容）
             # 2026-11-10 F5/D15：伴奏子进程纳入停止链（协作 stop_event→短等
             # →terminate 兜底+exitcode 观测；daemon 线程时代不纳入治理属既有
             # 缺口，子进程化后缺口可见化）
             self._stop_backing_player()
+            client = getattr(self, "edtalk_client", None)
+            if client is not None:
+                client.flush_silence()
             return
         self.audio_player.skip_current_stream()

@@ -78,26 +78,24 @@ class TestDoTaskModes:
         assert args[0]["content"] in ("文案1",)
 
     def test_comment_mode_dispatch(self, scheduler):
-        """弹幕触发 LLM 模式（2026-10-27 对接发送弹幕）：先调度真实弹幕发送，
-        再 process_data(comment) 本地触发 LLM 对话。"""
+        """弹幕触发 LLM 模式（2026-11-14 回环驱动重构——设计对齐）：只调度真实
+        弹幕发送，不本地 process_data 模拟流通——LLM 由监听端自发声回环触发。"""
         ts, mh = scheduler
         ts.config._cfg["idle_time_task"]["copywriting"]["enable"] = False
         ts.config._cfg["idle_time_task"]["comment"]["enable"] = True
         ts.do_task(0, [], ["你是谁呀"], [])
         mh.send_live_danmu.assert_called_once_with("你是谁呀")
-        args = mh.process_data.call_args[0]
-        assert args[1] == "comment"
-        assert args[0]["content"] == "你是谁呀"
+        mh.process_data.assert_not_called()
 
-    def test_comment_mode_send_unavailable_degrades(self, scheduler):
-        """发送弹幕功能不可用（返回 None/未提交）→ 降级虚拟弹幕本地触发（零损失）。"""
+    def test_comment_mode_send_unavailable_skips(self, scheduler):
+        """发送弹幕功能不可用（返回 None/未提交）→ 本轮跳过不降级
+        （2026-11-14 设计对齐：本模式只走真实弹幕，不再虚拟弹幕本地触发）。"""
         ts, mh = scheduler
         ts.config._cfg["idle_time_task"]["copywriting"]["enable"] = False
         ts.config._cfg["idle_time_task"]["comment"]["enable"] = True
         mh.send_live_danmu = MagicMock(return_value=None)
         ts.do_task(0, [], ["你是谁呀"], [])
-        args = mh.process_data.call_args[0]
-        assert args[1] == "comment" and args[0]["content"] == "你是谁呀"
+        mh.process_data.assert_not_called()
 
     def test_local_audio_mode_song_direct(self, scheduler):
         """本地音频模式：song 直通（不经 TTS）。"""
@@ -116,7 +114,9 @@ class TestDoTaskModes:
         ts.config._cfg["idle_time_task"]["comment"]["enable"] = True
         ts.config._cfg["idle_time_task"]["local_audio"]["enable"] = True
         ts.do_task(0, ["文"], ["评"], ["音"])
-        calls = mh.process_data.call_count + mh.audio.audio_synthesis.call_count
+        # comment 模式出口为 send_live_danmu（2026-11-14 回环驱动——不 process_data）
+        calls = (mh.process_data.call_count + mh.audio.audio_synthesis.call_count
+                 + mh.send_live_danmu.call_count)
         assert calls == 1, "三模式全开时每周期只执行其一（E5 语义）"
 
     def test_empty_lists_skip_silently(self, scheduler):

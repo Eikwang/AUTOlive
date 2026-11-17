@@ -5,6 +5,7 @@
 
 import asyncio
 import copy
+import os
 import random
 import threading
 import time
@@ -145,7 +146,7 @@ class TaskScheduler:
         return self._emit_copy_task(schedule_config[index].get("copy"), "定时任务")
 
     @staticmethod
-    def _register_random_job(tag, min_seconds, max_seconds, task_fn):
+    def _register_random_job(tag, min_seconds, max_seconds, task_fn, run_now: bool = True):
         """
         注册自重排随机周期任务（H2 调度语义）：先执行一次 task_fn，随后按
         min~max 秒随机间隔重排自身——"每触发一次任务，等待随机周期执行下一个"
@@ -155,6 +156,8 @@ class TaskScheduler:
             min_seconds: 最小循环周期（秒）
             max_seconds: 最大循环周期（秒）
             task_fn: 任务执行函数
+            run_now: 注册后是否立即执行一次（首次启动注册=True 保持既有语义；
+                运行中配置变化重注册=False——改配置不应导致任务立即插播）
         """
         try:
             lo = max(1, int(float(min_seconds)))
@@ -178,10 +181,68 @@ class TaskScheduler:
 
             schedule.every(next_time).seconds.do(job).tag(tag)
 
-        job()
+        if run_now:
+            job()
+        else:
+            schedule.every(random.randint(lo, hi)).seconds.do(job).tag(tag)
 
-    def run_schedule(self):
-        """运行定时任务调度（存量单任务 / D-16 任务组，二选一接管）"""
+    # 配置热同步（2026-11-14 修复）：webui 与 main 各持内存副本且互不同步
+    # （config_watcher 未接线，SynthesisMixin 同款结论）——webui 保存的定时/
+    # 闲时任务配置 main 永远读进程启动快照，「修改配置无法开启」即此根因。
+    # mtime 门控惰性重载：文件未变仅 os.stat 零开销；变化才 Config.reload
+    # （类缓存刷新，进程内全部 Config 实例可见，与合成链热同步同语义）
+    _disk_config_mtime_seen = 0.0
+
+    def _sync_config_from_disk(self):
+        """调度链配置热同步（mtime 门控，未变化零开销）。"""
+        try:
+            cfg_path = getattr(Config, "_config_path", None) or "config.json"
+            mtime = os.path.getmtime(cfg_path)
+        except OSError:
+            return
+        if mtime == TaskScheduler._disk_config_mtime_seen:
+            return
+        TaskScheduler._disk_config_mtime_seen = mtime
+        try:
+            if Config.reload(str(cfg_path)):
+                logger.info("[config] 检测到 config.json 变化，任务调度链已热重载")
+        except Exception:
+            logger.error(f"任务调度链配置热重载失败：{traceback.format_exc()}")
+
+    def _schedule_signature(self):
+        """调度注册签名（enable/周期/组名变化→重注册）。
+
+        文案列表不参与签名：任务执行期经活引用/按下标重读 config，改文案
+        无需重注册；避免改文案触发任务立即插播。
+        """
+        try:
+            groups = self.config.get("schedule_groups") or []
+            tasks = self.config.get("schedule") or []
+            g_sig = [(str(g.get("name") or ""), g.get("min_interval"), g.get("max_interval"))
+                     for g in groups if isinstance(g, dict)]
+            t_sig = [(bool(t.get("enable")), t.get("time_min"), t.get("time_max"))
+                     for t in tasks if isinstance(t, dict)]
+            return repr((g_sig, t_sig))
+        except Exception:
+            return ""
+
+    def _emit_group_task(self, group_name: str):
+        """任务组执行（执行期按组名重读 config——组内文案修改运行期生效）"""
+        group = next((g for g in (self.config.get("schedule_groups") or [])
+                      if isinstance(g, dict) and str(g.get("name") or "").strip() == group_name), None)
+        if group is None:
+            logger.warning(f"任务组「{group_name}」已删除，跳过本次执行")
+            return
+        self._emit_copy_task(group.get("copywriting_list"), "定时任务")
+
+    def _register_schedule_jobs(self, run_now: bool = True):
+        """按当前配置注册调度任务（组接管优先，H2 语义不变；先清旧标签防重复）"""
+        for tag in getattr(self, "_sched_tags", []):
+            try:
+                schedule.clear(tag)
+            except Exception:
+                pass
+        tags = []
         try:
             # 任务组接管语义（H2：组循环周期=组内文案触发节奏，任务级周期字段
             # 废弃随迁移）——schedule_groups 非空时组语义接管，存量单任务 list
@@ -194,23 +255,43 @@ class TaskScheduler:
                         continue
                     self._register_random_job(
                         f"grp{gi}", group.get("min_interval"), group.get("max_interval"),
-                        lambda g=group: self._emit_copy_task(g.get("copywriting_list"), "定时任务"))
+                        lambda gn=str(group.get("name") or "").strip(): self._emit_group_task(gn),
+                        run_now=run_now)
+                    tags.append(f"grp{gi}")
             else:
                 # 存量单任务（enable/time_min/time_max/copy）——逐任务注册
-                # （2026-10-31 审查批次：原实现整循环单 try，单个任务周期参数
-                # 非法导致后续全部任务不注册）
+                # （2026-10-31 审查批次：单个任务周期参数非法不影响后续任务注册）
                 for index, task in enumerate(self.config.get("schedule") or []):
                     if not isinstance(task, dict) or not task.get("enable"):
                         continue
                     self._register_random_job(
                         index, task.get("time_min"), task.get("time_max"),
-                        lambda idx=index: self.schedule_task(idx))
-        except Exception as e:
-            logger.error(f"定时任务调度失败: {traceback.format_exc()}")
+                        lambda idx=index: self.schedule_task(idx), run_now=run_now)
+                    tags.append(index)
+        except Exception:
+            logger.error(f"定时任务调度注册失败: {traceback.format_exc()}")
+        self._sched_tags = tags
 
+    def run_schedule(self):
+        """运行定时任务调度（存量单任务 / D-16 任务组，二选一接管）
+
+        2026-11-14 修复：一次性注册改为签名比对动态重注册——webui 修改
+        enable/周期保存落盘后，经 _sync_config_from_disk 热重载、签名变化
+        即重注册，运行中开关/改周期即时生效（原实现仅启动时注册一次，
+        运行中开启任务需重启）。
+        """
+        self._sched_tags = []
+        self._last_sched_sig = None
         self.is_running = True
         while self.is_running:
             try:
+                self._sync_config_from_disk()
+                sig = self._schedule_signature()
+                if sig != self._last_sched_sig:
+                    if self._last_sched_sig is not None:
+                        logger.info("定时任务配置变化，重新注册调度")
+                    self._register_schedule_jobs(run_now=self._last_sched_sig is None)
+                    self._last_sched_sig = sig
                 schedule.run_pending()
             except Exception:
                 # 调度循环异常不再杀死线程（2026-10-31 审查批次：原实现 while
@@ -219,14 +300,12 @@ class TaskScheduler:
             time.sleep(1)  # 控制每次循环的间隔时间
 
     def start_schedule_thread(self):
-        """启动定时任务线程"""
-        schedule_config = self.config.get("schedule") or []
-        groups = self.config.get("schedule_groups") or []
-        if (any(isinstance(item, dict) and item.get("enable") for item in schedule_config)
-                or bool(groups) or self.platform == "dy"):
-            self.scheduler_thread = threading.Thread(target=self.run_schedule, daemon=True)
-            self.scheduler_thread.start()
-            logger.info("定时任务线程已启动")
+        """启动定时任务线程（常驻——enable/任务存在性判定移入调度循环，
+        运行中开启任务即时生效；原实现按启动快照决定是否创建线程，启动时
+        无任务则运行中永远无法开启）"""
+        self.scheduler_thread = threading.Thread(target=self.run_schedule, daemon=True)
+        self.scheduler_thread.start()
+        logger.info("定时任务线程已启动")
     
     def load_data_list(self, data_type: str) -> List:
         """
@@ -301,24 +380,21 @@ class TaskScheduler:
             self.my_handle.process_data(data, "idle_time_task")
 
         elif mode == "comment":
-            # 弹幕触发 LLM 模式（2026-10-27 架构调整：对接「发送弹幕」功能）：
-            # 闲时文案先调度发送弹幕功能以真实弹幕进直播间（观众可见；守卫链/
-            # 审计/dry-run/熔断全链生效，非阻塞提交，回执异步记日志），随后本地
-            # 照常触发 LLM 对话（弹幕触发LLM语义保持）——监听端 R39 自联回环
-            # 滤除保证自发送弹幕 ≤10s 窗口内不被二次处理；发送能力缺失（服务
-            # 未运行/无监听房间/平台未启用）降级为原虚拟弹幕本地触发，功能零损失。
+            # 弹幕触发 LLM 模式（2026-11-14 回环驱动重构——设计对齐）：闲时文案
+            # 以真实弹幕送进当前监听中的直播间（观众可见），LLM 对话由监听端
+            # 收到自发声回环正常触发（username=直播账号昵称，与真实观众弹幕
+            # 同链完全拟真）。原 2026-10-27 实现"真实弹幕+本地 process_data
+            # 虚拟触发"双路径已退役——内部流通念播"闲时任务说XXX"与设计不符。
+            # 发送能力缺失（服务未运行/无监听房间/管线异常）本轮跳过不降级
+            # （设计语义：本模式只走真实弹幕；失败告警面在发送回执链接入）。
             comment_content = self._pop_from_list(comment_copy_list, "comment")
             if comment_content is None:
                 return (last_mode, copywriting_copy_list, comment_copy_list, local_audio_path_list)
             send_result = self.my_handle.send_live_danmu(comment_content)
             if send_result is None or not send_result.get("submitted"):
-                logger.info(f"[闲时任务] 真实弹幕未提交"
-                            f"（{str((send_result or {}).get('reason_code') or '发送弹幕功能不可用')}）"
-                            f"——降级虚拟弹幕本地触发：{comment_content[:30]}")
-            data = {"platform": self.platform, "username": "闲时任务",
-                    "content": comment_content,
-                    "origin": "system-idle"}  # ③ 自源标记：编排跳过（keyword_hub）
-            self.my_handle.process_data(data, "comment")
+                logger.warning(f"[闲时任务] 真实弹幕未提交，本轮跳过"
+                               f"（{str((send_result or {}).get('reason_code') or '发送弹幕功能不可用')}）："
+                               f"{comment_content[:30]}")
 
         elif mode == "local_audio":
             # 本地音频模式：随机音频文件走 song 直通（不经 TTS，与点歌同路径）
@@ -352,9 +428,13 @@ class TaskScheduler:
         return data_list.pop(0)
 
     def start_idle_time_task_thread(self):
-        """闲时任务驱动线程（T8 接线：三机制判定 + 闲时窗口触发 do_task）"""
-        if not self.config.get("idle_time_task", "enable"):
-            return
+        """闲时任务驱动线程（T8 接线：三机制判定 + 闲时窗口触发 do_task）
+
+        2026-11-14 修复：线程常驻启动（enable 门控移入循环）——原实现在此
+        读一次 enable 即决定线程生死：启动时未开启则线程不创建，运行中开启
+        需重启才生效；且循环以 is_running 为存活条件，定时任务线程未启动时
+        该标志恒 False，闲时线程首轮即退出（闲时任务永不触发根因）。
+        """
 
         def run_idle_time_task():
             logger.info("闲时任务线程运行中...")
@@ -364,6 +444,13 @@ class TaskScheduler:
                 try:
                     time.sleep(5)
                     if self.my_handle is None:
+                        continue
+
+                    # 关闭期间不累计闲时（开关运行期生效：webui 保存→调度循环
+                    # mtime 热重载→此处实时读到 enable）
+                    if not self.config.get("idle_time_task", "enable"):
+                        my_global.global_idle_time = 0
+                        idle_wait = 0
                         continue
 
                     # 消息处理中 → 非闲时，重置计数
@@ -439,6 +526,28 @@ class TaskScheduler:
         self.idle_time_task_thread.start()
         logger.info("闲时任务线程已启动")
 
+    def _is_playback_idle(self) -> bool:
+        """闲时门（2026-11-15 批次：999 机制退役，动态文案改闲时入队）：
+        待合成队列空 + 待播放队列空 + 无 EDTalk 在飞条目 = 空闲。
+
+        队列与在飞登记都在宿主音频组件（my_handle.audio，2026-11-05 编排
+        优化批次 d4/d21 同一访问面）上；len() 读列表长度本身原子安全（库内
+        先例：消费循环不持锁读长度），在飞登记 _edtalk_current_entry 由
+        playback_manager._consume_edtalk_entry 维护（push 前 set / finally 清）。
+        宿主未就绪（my_handle/audio 缺失）= 忙（保守跳过本轮，防未初始化窗口
+        期入队）。"""
+        try:
+            audio = getattr(self.my_handle, "audio", None)
+            if audio is None:
+                return False
+            if len(getattr(audio, "message_queue", []) or []) > 0:
+                return False
+            if len(getattr(audio, "voice_tmp_path_queue", []) or []) > 0:
+                return False
+            return getattr(audio, "_edtalk_current_entry", None) is None
+        except Exception:
+            return False  # 访问面异常=忙（保守跳过，不阻塞任务线程）
+
     def start_trends_copywriting(self):
         """启动动态文案任务（T9 实装：本地文案→可选 LLM 改写→TTS 播放）"""
         if not self.config.get("trends_copywriting", "enable"):
@@ -487,8 +596,30 @@ class TaskScheduler:
             file_cursor = 0
             copy_cursor = 0
 
+            def _sleep_play_interval():
+                """文案播放间隔（单位：秒，任务书口径：完成一次文案生成后，
+                进行下次文案生成的间隔时间）——尊重用户设定值；下限 1s
+                仅防 0/负值忙转（原 10s 暗置下限覆盖用户配置，语义修正）。
+                分片睡眠保证 is_running 停止信号响应。"""
+                try:
+                    interval = int(self.config.get("trends_copywriting", "play_interval") or 60)
+                except (TypeError, ValueError):
+                    interval = 60
+                sleep_total = max(interval, 1)
+                for _ in range(sleep_total):
+                    if not self.is_running:
+                        break
+                    time.sleep(1)
+
             try:
                 while self.is_running:
+                    # 闲时门第一查（2026-11-15 批次：999 机制退役，动态文案改
+                    # 闲时入队）：开始生成本轮文案前系统忙 → 跳过本轮（不告警
+                    # 不重试，等下个 play_interval 周期再查）
+                    if not self._is_playback_idle():
+                        logger.info("动态文案本轮跳过：系统忙")
+                        _sleep_play_interval()
+                        continue
                     # UI-16 批次 R5②/EV-1f：文案来源双链——优先读前端直输 copy 列表
                     # （每项=一条文案）；copy 空时回退存量 folder_path 文件链（迁移期
                     # 兼容：页面迁移完成前存量行为不变；copy 非空即走新链）。
@@ -610,6 +741,13 @@ class TaskScheduler:
                         "username": "动态文案",
                         "content": resp_content,
                     }
+                    # 闲时门第二查（2026-11-15 批次）：生成（含 LLM 改写）期间
+                    # 系统转忙 → 丢弃本轮（不告警不重试；宁可少播一条文案，
+                    # 不与正片/插播抢声道）
+                    if not self._is_playback_idle():
+                        logger.info("动态文案本轮跳过：系统忙")
+                        _sleep_play_interval()
+                        continue
                     if self.my_handle is not None:
                         if t3_keyword:
                             # d4（2026-11-05 编排优化批次）：动态文案源直连——整段
@@ -646,19 +784,7 @@ class TaskScheduler:
                     else:
                         logger.warning("动态文案：my_handle 未就绪，本轮跳过播放")
 
-                    # 文案播放间隔（单位：秒，任务书口径：完成一次文案生成后，
-                    # 进行下次文案生成的间隔时间）——尊重用户设定值；下限 1s
-                    # 仅防 0/负值忙转（原 10s 暗置下限覆盖用户配置，语义修正）
-                    try:
-                        interval = int(self.config.get("trends_copywriting", "play_interval") or 60)
-                    except (TypeError, ValueError):
-                        interval = 60
-                    sleep_total = max(interval, 1)
-                    # 分片睡眠保证 is_running 停止信号响应
-                    for _ in range(sleep_total):
-                        if not self.is_running:
-                            break
-                        time.sleep(1)
+                    _sleep_play_interval()
 
             except Exception as e:
                 logger.error(f"动态文案任务失败: {traceback.format_exc()}")
@@ -669,6 +795,10 @@ class TaskScheduler:
     
     def start_all(self):
         """启动所有任务"""
+        # is_running 必须在派发线程前置位：闲时/动态文案线程循环以它为存活
+        # 条件——原实现仅在 run_schedule 内置位，定时任务线程未启动时恒为
+        # False，闲时任务线程首轮即退出
+        self.is_running = True
         self.start_schedule_thread()
         self.start_trends_copywriting()
         self.start_idle_time_task_thread()

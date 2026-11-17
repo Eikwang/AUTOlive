@@ -1,10 +1,10 @@
 """T8 收官守卫：resident 切回机制（d13/N2/C3）+观测分桶（X1/X4/e7）+矩阵格。
 
 覆盖裁决条款：
-- ③编排队列切回（d13/N2/C3）：dynamic_text 999 序列=resident——他键打断转挂起
-  （镜像音频面 uc5b 字面语义：任意 standard 触发让位，权重门不适用——§3 Case B
-  礼物答谢(30) 须打断 999 文案(999) 视觉）；打断者完成切回播报画面（保险丝
-  到期回默认=播报已结束的诚实降级）；默念（无规则）=零编排行为（N2）
+- ③编排队列切回（d13/N2/C3）：dynamic_text 序列=resident（2026-11-16 批次
+  判定放宽：不再要求 999）——他键打断转挂起（镜像音频面 uc5b 字面语义）；
+  打断者完成切回播报画面（保险丝到期回默认=播报已结束的诚实降级）；默念
+  （无规则）=零编排行为（N2）。插播/切回细节守卫见 test_choreo_t10。
 - d6 矩阵格：(a) 999×普通序列=999 抢占（权重门）；(c) 挂起×song 播完=切回
   （单槽语义：最新挂起覆盖——深层嵌套挂起栈不做，d22 看门狗兜底）
 - F-F：N 条答谢竞争一间奏窗（队列序=权重；切片 no-wait push 截断尾条=d3 机制）
@@ -69,11 +69,14 @@ def test_resident_flag_on_999_dynamic_text():
     assert eng.seq.get("resident") is True  # 999 dynamic_text=resident
 
 
-def test_resident_flag_off_for_normal_weight():
-    eng = _engine([_rule("dt", "dynamic_text")])  # 默认权重 15（d10 表）
+def test_resident_flag_on_dynamic_text_any_weight():
+    """2026-11-16 插播&切回批次（resident 判定放宽）：dynamic_text 类型序列
+    触发即注册 resident——不再要求规则 priority==999（999⊆dynamic_text 照常
+    resident，让位特权见 test_d13）。"""
+    eng = _engine([_rule("dt", "dynamic_text")])  # 默认权重 15（d10 表，非 999）
     r = _hit(eng, "dynamic_text")
     _accept(eng, r)
-    assert eng.seq.get("resident") is False
+    assert eng.seq.get("resident") is True  # dynamic_text 触发即 resident
 
 
 def test_d13_resident_yields_to_gift_bypassing_weight_gate():
@@ -98,16 +101,22 @@ def pytest_approx(v):
 
 
 def test_d13_recovery_back_to_broadcast_and_fuse_expiry():
-    """打断者完成→切回播报画面（resident hold+保险丝）；保险丝到期→默认池。"""
+    """打断者完成→切回播报画面（resident hold+保险丝）；保险丝到期→默认池。
+    （2026-11-16 批次：插播先播旧离场段=steps[-1] 衔接，打断者 main 在其
+    之后——时序含插播段与打断者两段接受回填。）"""
     NOW[0] = 1000.0
     eng = _resident_engine()
     _accept(eng, _hit(eng, "dynamic_text", "福利"))
     NOW[0] = 1003.0
-    d = _hit(eng, "gift", "小心心")  # 挂起（deadline=1063）
+    d = _hit(eng, "gift", "小心心")  # 挂起（deadline=1063）+ 插播旧离场段
     sw = next(c for c in d["commands"] if type(c).__name__ == "SwitchSegment")
-    eng.on_switch_result(sw.step_id, True, NOW[0])  # 切换接受（deadline 建立前提）
-    NOW[0] = 1009.0
-    eng.on_tick(NOW[0])  # gift 主步完成（duration 5）→ 条件1 → 切回
+    eng.on_switch_result(sw.step_id, True, NOW[0])  # 插播段接受（dl=1008）
+    NOW[0] = 1008.01
+    cmds = eng.on_tick(NOW[0])  # 插播段完成 → gift main 切换发出
+    sw2 = next(c for c in cmds if type(c).__name__ == "SwitchSegment")
+    eng.on_switch_result(sw2.step_id, True, NOW[0])  # gift main 接受（dl=1013.01）
+    NOW[0] = 1013.02
+    eng.on_tick(NOW[0])  # gift main 完成 → 条件1 恢复分支 → 切回
     assert eng.seq["rule_id"] == "dt"
     assert eng.seq.get("resident") is True
     assert eng.seq["steps"][0]["hold_for_song"] is False
@@ -127,10 +136,15 @@ def test_d6c_resident_recovery_reinterruptible():
     _accept(eng, _hit(eng, "dynamic_text", "福利"))
     NOW[0] = 1003.0
     d1 = _hit(eng, "gift", "小心心")
-    _accept(eng, d1)  # 切换接受（deadline 建立前提）
-    NOW[0] = 1009.0
-    eng.on_tick(NOW[0])  # 切回 resident
-    NOW[0] = 1011.0
+    _accept(eng, d1)  # 插播旧离场段接受（deadline 建立前提）
+    NOW[0] = 1008.01
+    cmds = eng.on_tick(NOW[0])  # 插播段完成 → gift main 切换发出
+    sw = next(c for c in cmds if type(c).__name__ == "SwitchSegment")
+    eng.on_switch_result(sw.step_id, True, NOW[0])  # gift main 接受
+    NOW[0] = 1013.02
+    eng.on_tick(NOW[0])  # gift main 完成 → 切回 resident
+    assert eng.seq["rule_id"] == "dt"
+    NOW[0] = 1015.0
     r2 = _hit(eng, "gift", "小心心")
     assert r2["reason"] == "interrupted"  # 再让位
     assert eng.song_suspended["kind"] == "resident"
@@ -183,7 +197,6 @@ def test_ff_n_answers_compete_queue_order():
     class _Q(QueueMixin):
         def __init__(self):
             self.config = _Cfg()
-            self.active_reread_top_999 = False
             self.message_queue = []
             self.message_queue_lock = threading.Lock()
             self.message_queue_not_empty = threading.Condition(lock=self.message_queue_lock)

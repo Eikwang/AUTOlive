@@ -1,4 +1,5 @@
-"""T7 插播接线守卫（2026-11-05 编排优化批次）。
+"""T7 插播接线守卫（2026-11-05 编排优化批次；2026-11-15 批次：999 机制退役，
+d19 让位编排改 barge-in 打断即弃，钩子路由测试保留）。
 
 覆盖裁决条款：
 - d4：动态文案源直连接线——facade on_dynamic_text（task_scheduler 格式化路径
@@ -6,18 +7,14 @@
 - d3/e5：song 切片跳过飞行等待（人声起即停答谢=push 即 flush 替换）+替换
   分桶（edtalk_answer_replaced；e5 口径=替换生效时刻为 push 受理时刻）
 - d16：队列插序——答谢(20)条目位次<下一段 song 切片（权重排序自然插队）
-- d19/uc2b：EDTalk 路径 999 让位编排（pause→游标→resume→答谢→剩余重推）
-  +queue a 触发钩子路由（EDTalk 优先，回落 builtin）+重推回执
+- d19（2026-11-15 改写）：EDTalk 路径 barge-in 打断即弃钩子路由（钩子受理
+  终止让位链；非本路径回落 builtin d12 b 让位）
 """
 import asyncio
-import os
 import threading
-import types
-import wave as _wave
 
 import pytest
 
-from utils.audio.audio_priority import entry_is_999
 from utils.audio.queue_manager import QueueMixin
 from utils.orchestration.choreographer import ChoreoEngine
 from utils.orchestration.config_model import load_choreography_config
@@ -129,7 +126,6 @@ class _FakeConfig:
 class _QueueFixture(QueueMixin):
     def __init__(self, mapping):
         self.config = _FakeConfig(mapping)
-        self.active_reread_top_999 = False
         self.message_queue = []
         self.message_queue_lock = threading.Lock()
         self.message_queue_not_empty = threading.Condition(lock=self.message_queue_lock)
@@ -170,118 +166,16 @@ def test_d16_answer_lands_before_next_song_slice():
     assert paths.index("thanks.mp3") < paths.index("seg1.mp3")  # d16：答谢<下一切片
 
 
-# ------------------------------------------------- d19/uc2b 让位编排
+# ------------------------------------------------- d19 让位裁决（2026-11-16 段间让位批次改写）
 
-class _FlightPlayer:
-    """EDTalk 让位编排桩（pause/cursor/resume 序列记录）。"""
-
-    def __init__(self, cursor_seq):
-        self.cursor_seq = list(cursor_seq)
-        self.calls = []
-
-    def pause_output(self):
-        self.calls.append("pause")
-        return {"ok": True}
-
-    def resume_output(self):
-        self.calls.append("resume")
-        return {"ok": True}
-
-    def get_output_frames(self):
-        self.calls.append("cursor")
-        return self.cursor_seq.pop(0) if self.cursor_seq else None
-
-    def push_full(self, path, content="", wait_flight=True):
-        self.calls.append(("push", os.path.basename(path), content))
-        return asyncio.run(asyncio.sleep(0)) or True
-
-
-def _playback_stub(monkeypatch, tmp_path, cursor_seq):
-    from utils.audio.playback_manager import PlaybackMixin
-
-    class _PB(PlaybackMixin):
-        pass
-
-    pb = _PB()
-    pb.config = _FakeConfig({"comment": 20, "reread_top_priority": 999})
-    pb.edtalk_client = _FlightPlayer(cursor_seq)
-    # 真 wav（999 源文件：1600 帧=0.1s@16k）
-    wav = tmp_path / "reread.wav"
-    with _wave.open(str(wav), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x01" * 1600)
-    pb._edtalk_999_flight = {"voice_path": str(wav), "start_frames": 100,
-                             "is_999": True, "samples": 1600}
-    return pb, str(wav)
-
-
-def test_d19_edtalk_yield_flow_pause_cursor_resume(monkeypatch, tmp_path):
-    """d19/uc2b 编排序列：pause→cursor→resume→pending 登记（答谢播毕重推）。"""
-    pb, wav = _playback_stub(monkeypatch, tmp_path, cursor_seq=[160])
-    # 光标序列：pause 后读=160（已播 60 帧=38400 样本；文件 1600 帧→重推时钳尾）
-    handled = pb._on_edtalk_yield()
-    assert handled is True
-    assert pb.edtalk_client.calls == ["pause", "cursor", "resume"]
-    flight = pb._edtalk_resume_pending
-    assert flight is not None
-    assert flight["resume_offset_samples"] == 38400  # 60 帧×640 样本/帧
-
-
-def test_d19_repush_remainder_slices_from_cursor(monkeypatch, tmp_path):
-    """剩余重推：从冻结游标切片写临时 wav+push_full+回执（d19 口径）。"""
-    pb, wav = _playback_stub(monkeypatch, tmp_path, cursor_seq=[100])
-    flight = {"voice_path": wav, "start_frames": 100, "is_999": True,
-              "resume_offset_samples": 640}  # 1 帧=640 样本 → 剩余 960 帧
-    asyncio.run(
-        pb._repush_edtalk_999_remainder(flight))
-    pushed = [c for c in pb.edtalk_client.calls if isinstance(c, tuple) and c[0] == "push"]
-    assert len(pushed) == 1
-    assert pushed[0][2] == "999-remainder"
-    # 切片正确性：临时 wav 帧数=1600-640=960
-    tmp_wav = [f for f in os.listdir(tmp_path) if f.endswith(".resume999.wav")]
-    if tmp_wav:  # push 桩不删临时文件时验证帧数
-        with _wave.open(str(tmp_path / tmp_wav[0]), "rb") as w:
-            assert w.getnframes() == 960
-
-
-def test_d19_yield_degraded_when_pause_fails(monkeypatch, tmp_path):
-    """pause 失败=d17 fallback 降级（维持排序）——仍受理让位链（返回 True）、
-    不登记重推。"""
-    pb, wav = _playback_stub(monkeypatch, tmp_path, cursor_seq=[100])
-    pb.edtalk_client.pause_output = lambda: {"ok": False, "status": 404}
-    handled = pb._on_edtalk_yield()
-    assert handled is True
-    assert getattr(pb, "_edtalk_resume_pending", None) is None
-
-
-def test_d19_hook_route_edtalk_first():
-    """queue a 触发路由：EDTalk 钩子优先（返回 True 终止让位链——builtin 不触发）；
-    钩子 False=回落 builtin request_yield。"""
-    q = _QueueFixture({"comment": 20, "reread_top_priority": 999}) if hasattr(
-        __import__(__name__), "_QueueFixture") else None
-    # 复用 T6 的 _QueueFixture 形态（本文件独立构造防耦合）
+def test_d19_priority_yield_edtalk_same_channel_gate():
+    """让位裁决（原 barge-in 钩子路由测试随打断即弃退役改写）：EDTalk 路由
+    的插播者不触发 builtin 让位（同声道前提）；非 EDTalk 路由（同声道）→
+    d12 b 让位（权重门生效）。EDTalk 路径插播由队列权重排序段间完成，
+    不再打断在播条目。"""
     from tests.test_choreo_t6_yield import _QueueFixture as _T6Queue, _YieldPlayer
-    q = _T6Queue({"comment": 20, "reread_top_priority": 999},
-                 _YieldPlayer(playing_weight=999))
-    q.active_reread_top_999 = True
-    edtalk_calls = []
-    q._edtalk_yield_hook = lambda: edtalk_calls.append(1) or True
-    q._maybe_interrupt_999_for({"type": "comment", "voice_path": "x.mp3"})
-    assert edtalk_calls == [1]
-    assert q.audio_player.yields == 0  # EDTalk 受理=终止链（builtin 不触发）
-    # 钩子 False → 回落 builtin
-    q2 = _T6Queue({"comment": 20, "reread_top_priority": 999},
-                  _YieldPlayer(playing_weight=999))
-    q2.active_reread_top_999 = True
-    q2._edtalk_yield_hook = lambda: False
-    q2._maybe_interrupt_999_for({"type": "comment", "voice_path": "x.mp3"})
-    assert q2.audio_player.yields == 1
-
-
-def test_d19_999_entry_judgment_single_source():
-    """flight 登记门=entry_is_999（T2 单一源）：override=999 的规则级条目同样
-    登记（d18 载体）。"""
-    assert entry_is_999({"type": "comment", "priority_override": 999},
-                        {"comment": 20}) is True
+    # d12 原始场景（EDTalk 未激活=同声道）：comment(20) > song(10) → 让位
+    q = _T6Queue({"comment": 20, "reread_top_priority": 500},
+                 _YieldPlayer(playing_weight=10))
+    q._maybe_priority_yield_for({"type": "comment", "voice_path": "x.mp3"})
+    assert q.audio_player.yields == 1

@@ -410,33 +410,6 @@ def test_overdue_resets_on_no_skip_consumption():
     assert data["type"] == "song" and pb._song_anchor["skip_count"] == 0
 
 
-def test_overdue_999_in_skip_zone_exempts():
-    """999 豁免：到期段的跳过区间含 999 条目 → 放弃本次到期优先（正常消费
-    队首=999 优先级最高+让位机制与延后交互未定义从简豁免，F5/D23）。"""
-    import time as _t
-    pb = _gate_pb()
-    class _C:
-        @staticmethod
-        def get(*keys):
-            if len(keys) == 1:
-                return {"comment": 20, "reread_top_priority": 999}.get(keys[0])
-            if keys == ("filter", "priority_mapping"):
-                return {"comment": 20, "reread_top_priority": 999}
-            return None
-    pb.config = _C()
-    pb.voice_tmp_path_queue = [
-        {"type": "reread_top_priority", "voice_path": "r", "content": "999"},
-        {"type": "song", "voice_path": "s1", "content": "s",
-         "song_segment": {"seq": 1, "total": 3, "seg_dir": "", "start_s": 10.0}},
-    ]
-    pb._song_anchor = {"t0": _t.monotonic() - 100.0, "last_end": 0.0}
-    with pb.voice_tmp_path_queue_lock:
-        data, gw, _borrowed = pb._pop_next_entry_locked()
-    assert data["type"] == "reread_top_priority"  # 999 被正常消费（未延后）
-    assert pb.voice_tmp_path_queue[0]["type"] == "song"  # song 段留队
-    assert pb._song_anchor.get("skip_count", 0) == 0
-
-
 def test_overdue_no_anchor_or_not_due_fail_open():
     """无锚/due 未到 → fail-open 直通（无锚 pop(0)；未到期→窗口门等待秒）。"""
     import time as _t

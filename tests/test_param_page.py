@@ -69,10 +69,11 @@ def test_preset_direction_interactive_vs_content():
     assert presets["互动优先"]["comment"] > presets["互动优先"]["schedule"]
     assert presets["内容优先"]["schedule"] > presets["内容优先"]["comment"]
     # 最高优先级复读各预设恒高位（安全兜底不随场景降）；
-    # abnormal_alarm 组已随 2026-10-26 报警重构退役，不再入预设
+    # abnormal_alarm 组已随 2026-10-26 报警重构退役，不再入预设；
+    # 2026-11-15 批次：999 特殊机制退役，恒高位改 500（脱离 999 域）
     for vals in presets.values():
         assert "abnormal_alarm" not in vals
-        assert vals["reread_top_priority"] == 999
+        assert vals["reread_top_priority"] == 500
 
 
 def test_preset_resource_saving_flattens():
@@ -100,10 +101,13 @@ def test_priority_entries_skip_missing_keys():
 
 
 def test_priority_entries_excludes_retired_items():
-    """uc3 裁决：图像识别/文案两项不再出现在条目清单。"""
+    """uc3 裁决：图像识别/文案两项不再出现在条目清单；
+    dynamic_text 已去重（2026-11-14：类型映射无消费点，与
+    trends_copywriting 在 UI 重复展示同名"动态文案"）。"""
     keys = set(_all_group_keys())
     assert "image_recognition_schedule" not in keys
     assert "copywriting" not in keys
+    assert "dynamic_text" not in keys
 
 
 def test_priority_entries_group_labels():

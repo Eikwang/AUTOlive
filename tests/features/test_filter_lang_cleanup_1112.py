@@ -202,6 +202,69 @@ class TestWiring:
 
 
 # ---------------------------------------------------------------------------
+# (a5) 表情标签漏网根修守卫（2026-11-17 批次：抖音实测 [爱心]/[赞]/[呲牙]
+#      漏出——标准形态原链已覆盖，漏网通道=未闭合/截断截半/超长/嵌套标签）
+# ---------------------------------------------------------------------------
+
+
+class TestEmojiTagHarden1117:
+    def _c(self):
+        from utils.common import Common
+        return Common()
+
+    def test_unclosed_tag(self):
+        """未闭合标签（无右括号）：标签汉字不得经中文白名单漏出。"""
+        c = self._c()
+        assert c.clean_danmaku_text("主播好美[爱心") == "主播好美"
+        assert c.clean_danmaku_text("好[爱心 呀") == "好 呀"
+        assert c.clean_danmaku_text("[赞") == ""
+        assert c.clean_username("[爱心]小明") == "小明"
+
+    def test_truncation_cut_tag(self):
+        """max_char_len 截断先于清洁截半标签（'...[爱' 形态）→ 未闭合兜底。"""
+        c = self._c()
+        # 198 字正文 + "[爱心]" 共 203 字 → max_char_len=200 截断恰好切在标签内
+        truncated = "很治愈" * 66 + "[爱心]"
+        cut = c.remove_extra_words(truncated, 30, 200)
+        assert cut == "很治愈" * 66 + "[爱"
+        assert c.clean_danmaku_text(cut) == "很治愈" * 66
+
+    def test_nested_and_orphan_brackets(self):
+        """嵌套/畸形括号：迭代剥离至不动点。"""
+        c = self._c()
+        assert c.clean_danmaku_text("[[爱心]]") == ""
+        assert c.clean_danmaku_text("[[爱心]") == ""
+        assert c.clean_danmaku_text("666[爱心][赞][呲牙]") == "666"
+
+    def test_long_tag_over_old_cap(self):
+        """超长标签（17-32 字符平台表情码）：旧上限 16 漏标签汉字，新上限 32 覆盖。"""
+        c = self._c()
+        assert c.clean_danmaku_text("好[" + "长" * 17 + "]") == "好"   # 旧上限 16 会漏
+        assert c.clean_danmaku_text("好[" + "长" * 32 + "]") == "好"
+
+    def test_douyin_reported_cases(self):
+        """用户实测报告三连（抖音监听）：[爱心]/[赞]/[呲牙] 必须清干净。"""
+        c = self._c()
+        assert c.clean_danmaku_text("主播[爱心][赞][呲牙]") == "主播"
+        assert c.clean_danmaku_text("[爱心]") == ""
+        assert c.clean_danmaku_text("[赞]") == ""
+        assert c.clean_danmaku_text("[呲牙]") == ""
+
+    def test_extra_unicode_bands(self):
+        """补带 Unicode emoji（杂项技术 ⌚⏰ / 麻将 🀄 / 键帽 5️⃣）遗弃。"""
+        c = self._c()
+        assert c.clean_danmaku_text("你好⏰🀄✨") == "你好"
+        assert c.clean_danmaku_text("点歌5️⃣") == "点歌5"
+
+    def test_wiring_iterative_and_open_pattern(self):
+        """接线守卫：remove_emoji 迭代剥离 + 未闭合兜底在位。"""
+        src = _src("utils/common/text_mixin.py")
+        assert "_EMOJI_TAG_OPEN_PATTERN" in src
+        assert "while prev != text:" in src
+        assert "self._EMOJI_TAG_OPEN_PATTERN.sub" in src
+
+
+# ---------------------------------------------------------------------------
 # (b) 过滤总开关断链根修（2026-11-12 实测：filter.enable 键缺失整组失效）
 # ---------------------------------------------------------------------------
 
@@ -313,4 +376,7 @@ class TestAudienceFallback:
         h = CommentHandler(mh)
         h._read_comment_replay("comment", "爱国*122", "点首歌")
         msg = mh.audio_synthesis_handle.call_args[0][0]
-        assert msg["content"].startswith("爱国122说:")
+        # 2026-11-14 数字转中文接线念播前缀："*"清洁 + 逐位数字转中文
+        # （docstring 语义"含数字转文字后的清洁名"；旧断言期待未转换的
+        # "爱国122说:"，与用户裁决"9527→九五二七"矛盾）
+        assert msg["content"].startswith("爱国一二二说:")

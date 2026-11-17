@@ -1,12 +1,12 @@
-"""T2/d21 blocker 守卫：999 判定单一源收敛 + 规则级 999 全链处置。
+"""T2 优先级单一源守卫（2026-11-05 编排优化批次 e2/d21；
+2026-11-15 批次：999 特殊机制退役——原 999 单实例/让位处置格移除，
+本文件保留有效权重判定与排序语义守卫，文件名保留历史批次标识）。
 
-覆盖裁决条款（2026-11-05 编排优化批次）：
-- e2：playback/queue/builtin 三处 999 判定统一经 utils.audio.audio_priority
-  （type 映射==999 或 priority_override==999 均触发 999 机制；防三份拷贝漂移）
-- d18：规则级 999（type 映射≠999 + priority_override=999）与映射 999 同权处置
-  （队列单实例 + builtin 让位判定 _item_priority + 播放出队 active 标记）
-- d21：三源 999 共存矩阵（trends_copywriting=999 / reread_top_priority=999 /
-  规则级 override=999 并存时单实例约束不互斥正确）
+覆盖裁决条款：
+- e2：playback/queue/builtin 三处有效权重判定统一经 utils.audio.audio_priority
+  （priority_override 优先于 type 映射；防三份拷贝漂移）
+- d21→改写：显式权重条目（编排插队 500 / 最高顺位复读 500 / 任意 override
+  值）按有效权重排序，override 条目可并存（999 特殊单实例约束已退役）
 """
 import json
 import os
@@ -15,13 +15,14 @@ import threading
 
 import pytest
 
-from utils.audio.audio_priority import entry_is_999, entry_priority
+from utils.audio.audio_priority import entry_priority
 from utils.audio.playback_manager import PlaybackMixin
 from utils.audio.queue_manager import QueueMixin
 
-# 三源 999 共存的映射表基座（d21：trends_copywriting=999 生产实证 config.json:86）
+# 显式权重条目并存场景的映射表基座（trends_copywriting/reread_top_priority
+# 生产实值=10/500，2026-11-15 批次 999 退役后对齐 config.json）
 PM = {"comment": 20, "gift": 20, "song": 10,
-      "trends_copywriting": 999, "reread_top_priority": 999}
+      "trends_copywriting": 10, "reread_top_priority": 500}
 
 
 # ------------------------------------------------- 单一判定源（e2）
@@ -33,7 +34,7 @@ def test_entry_priority_override_wins():
 
 def test_entry_priority_mapping_fallback():
     assert entry_priority({"type": "comment"}, PM) == 20
-    assert entry_priority({"type": "trends_copywriting"}, PM) == 999
+    assert entry_priority({"type": "trends_copywriting"}, PM) == 10
     assert entry_priority({"type": "bogus"}, PM) is None
     assert entry_priority({}, PM) is None
 
@@ -47,12 +48,6 @@ def test_entry_priority_none_safe():
     assert entry_priority({"type": "comment"}, None) is None
 
 
-def test_entry_is_999_both_sources():
-    assert entry_is_999({"type": "comment", "priority_override": 999}, PM)
-    assert entry_is_999({"type": "reread_top_priority"}, PM)
-    assert not entry_is_999({"type": "comment"}, PM)
-
-
 # ------------------------------------------------- playback 出队判定（e2①）
 
 class _PlaybackStub(PlaybackMixin):
@@ -60,16 +55,16 @@ class _PlaybackStub(PlaybackMixin):
         self.config = type("C", (), {"get": lambda self, *k: mapping})()
 
 
-def test_playback_is_999_entry_rule_level():
-    """d18：规则级 999（type=comment + override=999）出队判定为 999——
-    active_reread_top_999 让位门对其生效的前提。"""
+def test_playback_entry_priority_rule_level():
+    """override 权重条目出队判定按有效权重（编排插队 500/任意 override 值）。"""
     stub = _PlaybackStub(PM)
-    assert stub._is_999_entry({"type": "comment", "priority_override": 999}) is True
-    assert stub._is_999_entry({"type": "comment"}) is False
-    assert stub._is_999_entry({"type": "reread_top_priority"}) is True
+    from utils.audio.audio_priority import entry_priority
+    assert entry_priority({"type": "comment", "priority_override": 500},
+                          PM) == 500
+    assert entry_priority({"type": "comment"}, PM) == 20
 
 
-# ------------------------------------------------- queue 单实例+三源矩阵（e2③/d21）
+# ------------------------------------------------- queue 排序（e2③/d21 改写）
 
 class _FakeConfig:
     def __init__(self, mapping=None, max_len=100):
@@ -97,57 +92,46 @@ class _QueueFixture(QueueMixin):
         self.voice_tmp_path_queue_lock = threading.Lock()
         self.voice_tmp_path_queue_not_empty = threading.Condition(lock=self.voice_tmp_path_queue_lock)
         self.voice_tmp_path_queue_not_empty_flag = False
-        self.active_reread_top_999 = False
         self.audio_player = None
 
 
-def _rule999(rid="dtx"):
-    return {"type": "comment", "priority_override": 999,
+def _rule_top(rid="dtx", override=500):
+    return {"type": "comment", "priority_override": override,
             "voice_path": f"{rid}.mp3", "content": rid}
 
 
-@pytest.mark.parametrize("first,incoming", [
-    # 三源两两组合（d21）：映射 999（reread_top）× 规则级 999 × 映射 999（trends）
-    ({"type": "reread_top_priority", "voice_path": "a.mp3"}, _rule999("b")),
-    (_rule999("a"), {"type": "reread_top_priority", "voice_path": "b.mp3"}),
-    ({"type": "trends_copywriting", "voice_path": "a.mp3"}, _rule999("b")),
-    (_rule999("a"), {"type": "trends_copywriting", "voice_path": "b.mp3"}),
-    (_rule999("a"), _rule999("b")),
-])
-def test_rule_level_999_single_instance_matrix(first, incoming):
-    """三源 999 共存矩阵：任一来源的 999 在队时，另一来源的 999 一律单实例舍弃。"""
+def test_override_entries_coexist_and_sort_top():
+    """2026-11-15 批次改写（999 单实例约束退役）：多个显式权重条目并存入队，
+    按有效权重排序（规则1 同权接组尾：后到的 override 500 排在先到的映射
+    500 条目之后，两者均高于映射 20 的 comment）。"""
     q = _QueueFixture()
-    r1 = q.data_priority_insert("song", dict(first))
-    assert r1["code"] == 200
-    r2 = q.data_priority_insert("song", dict(incoming))
-    assert r2["code"] == 1, "第二个 999 必须被单实例约束舍弃"
-    assert len(q.voice_tmp_path_queue) == 1
+    r1 = q.data_priority_insert("song", {"type": "comment", "voice_path": "c.mp3"})
+    r2 = q.data_priority_insert("song", {"type": "reread_top_priority", "voice_path": "a.mp3"})
+    r3 = q.data_priority_insert("song", _rule_top("b"))
+    assert (r1["code"], r2["code"], r3["code"]) == (200, 200, 200)
+    assert len(q.voice_tmp_path_queue) == 3  # 无单实例互斥
+    assert q.voice_tmp_path_queue[0]["type"] == "reread_top_priority"  # 映射 500 > comment 20
+    assert q.voice_tmp_path_queue[1]["priority_override"] == 500  # 规则级 override 同权接组尾
+    assert q.voice_tmp_path_queue[2]["type"] == "comment"  # 映射 20 落尾
 
 
-def test_rule_level_999_sorts_as_999():
-    """规则级 999 条目按有效权重 999 排序（不被 type=comment=20 拉低）。"""
+def test_rule_level_override_sorts_as_weight():
+    """规则级 override 条目按有效权重排序（不被 type=comment=20 拉低）。"""
     q = _QueueFixture()
     q.data_priority_insert("song", {"type": "comment", "voice_path": "c.mp3"})
-    q.data_priority_insert("song", _rule999("top"))
-    assert q.voice_tmp_path_queue[0]["priority_override"] == 999
+    q.data_priority_insert("song", _rule_top("top"))
+    assert q.voice_tmp_path_queue[0]["priority_override"] == 500
 
 
-def test_rule_level_999_accepted_after_999_leaves():
-    """999 消费完成（队列空+active 标记释放）后，新 999 照常入队。"""
+def test_reread_top_priority_maps_500():
+    """2026-11-15 批次：reread_top_priority 映射 500（保持最高顺位、脱离 999
+    域——普通权重语义，无暂停/续播/让位/单实例特殊机制）。"""
     q = _QueueFixture()
-    q.data_priority_insert("song", _rule999("a"))
-    q.voice_tmp_path_queue.clear()  # 模拟消费完成
-    q.active_reread_top_999 = False
-    r = q.data_priority_insert("song", _rule999("b"))
-    assert r["code"] == 200
-
-
-def test_active_flag_blocks_999_from_any_source():
-    q = _QueueFixture()
-    q.active_reread_top_999 = True  # 播放器持有（出队置位，playback_manager:159）
-    assert q.data_priority_insert("song", _rule999("x"))["code"] == 1
-    assert q.data_priority_insert(
-        "song", {"type": "reread_top_priority", "voice_path": "y.mp3"})["code"] == 1
+    q.data_priority_insert("song", {"type": "comment", "voice_path": "c.mp3"})
+    q.data_priority_insert("song", {"type": "reread_top_priority", "voice_path": "top.mp3"})
+    assert q.voice_tmp_path_queue[0]["type"] == "reread_top_priority"
+    from utils.audio.audio_priority import entry_priority
+    assert entry_priority({"type": "reread_top_priority"}, PM) == 500
 
 
 # ------------------------------------------------- builtin 播放侧（e2②）
@@ -170,18 +154,18 @@ def _make_player(mapping):
 
 
 def test_builtin_item_priority_override_aware():
-    """e2②：builtin 播放侧 999 判定（_item_priority→is_999:430）对规则级 999 生效。"""
+    """e2②：builtin 播放侧有效权重判定对 override 生效（d12 让位判定源）。"""
     p = _make_player(PM)
-    assert p._item_priority({"type": "comment", "priority_override": 999}) == 999
+    assert p._item_priority({"type": "comment", "priority_override": 500}) == 500
     assert p._item_priority({"type": "comment"}) == 20
     assert p._item_priority({"type": "bogus"}) is None
 
 
 def test_builtin_data_priority_insert_override_sorts():
-    """e2②：builtin 队列插位按有效权重——规则级 999 落在 comment=20 之前。"""
+    """e2②：builtin 队列插位按有效权重——override 条目落在 comment=20 之前。"""
     p = _make_player(PM)
     p._data_priority_insert({"type": "comment", "voice_path": "c.mp3"})
-    p._data_priority_insert({"type": "comment", "priority_override": 999,
+    p._data_priority_insert({"type": "comment", "priority_override": 500,
                              "voice_path": "top.mp3"})
     assert p.audio_json_list[0]["voice_path"] == "top.mp3"
 

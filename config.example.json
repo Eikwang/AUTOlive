@@ -89,7 +89,6 @@
       "entrance": 20,
       "comment": 20,
       "song": 10,
-      "dynamic_text": 15,
       "read_comment": 20,
       "gift": 20,
       "follow": 20,
@@ -99,7 +98,7 @@
       "assistant_anchor_audio": 25,
       "talk": 30,
       "reread": 30,
-      "reread_top_priority": 999
+      "reread_top_priority": 500
     },
     "blacklist": {
       "enable": true,
@@ -441,7 +440,8 @@
     "path": "data/data.db",
     "comment_enable": true,
     "entrance_enable": true,
-    "gift_enable": true
+    "gift_enable": true,
+    "entrance_retention_days": 30
   },
   "trends_copywriting": {
     "enable": true,

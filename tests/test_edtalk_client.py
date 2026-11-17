@@ -175,8 +175,11 @@ def test_push_full_rate_limit_blocks(monkeypatch):
 
     src = _make_wav(16000, 0.5)
     asyncio.run(client.push_full(src))
-    # 应有一个 ≥ (5×1.2 - 0.5) 的阻塞 sleep（完成判定启发式生效）
-    assert any(t >= 5.0 for t in sleep_calls), f"期望背压 sleep，实际 {sleep_calls}"
+    # 应有总时长 ≥ (5×1.2 - 0.5) 的背压等待（完成判定启发式生效）；
+    # 2026-11-16 段间让位批次：barge-in 退役，飞行等待恢复单次完整睡眠
+    # （当前段播完才放行，插播由队列权重排序在段间完成）——只守等待总时长
+    total_wait = sum(t for t in sleep_calls)
+    assert total_wait >= 5.0, f"期望背压等待总时长 ≥5.0s，实际 {sleep_calls}"
     os.remove(src)
 
 

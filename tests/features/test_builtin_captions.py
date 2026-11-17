@@ -229,7 +229,8 @@ def test_stop_current_audio_dispatch():
     PlaybackMixin.stop_current_audio(mixin)
     assert calls == ["skip"], "builtin 常驻：应走 skip_current_stream"
 
-    # EDTalk 激活：静默跳过
+    # EDTalk 激活：伴奏停止 + 静音 flush 闭嘴（2026-11-16 聊天审查批次）
+    flush_calls = []
     class Cfg:
         def get(self, *keys):
             if keys == ("visual_body",):
@@ -239,8 +240,11 @@ def test_stop_current_audio_dispatch():
             return None
     mixin.config = Cfg()
     mixin._stop_backing_player = lambda: None  # 2026-11-10 R2：伴奏停止链接入 stub
+    mixin.edtalk_client = types.SimpleNamespace(
+        flush_silence=lambda *a, **k: flush_calls.append("flush"))
     PlaybackMixin.stop_current_audio(mixin)
-    assert calls == ["skip"], "EDTalk 激活时不追加调用"
+    assert calls == ["skip"], "EDTalk 激活时不走本地 skip"
+    assert flush_calls == ["flush"], "EDTalk 激活时停播应追加静音 flush（打断闭嘴）"
 
 
 # ---------- E-10-6：ensure-default 迁移 ----------

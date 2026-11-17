@@ -7,6 +7,7 @@
 
 import os
 import random
+import time
 import traceback
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
@@ -209,8 +210,8 @@ class CommentHandler:
         Args:
             data (dict): 数据（username/content）
             type (str, optional): 消息类型（reread | reread_top_priority）。
-                reread_top_priority 经 priority_mapping 取 999 权重（999 暂停-续播
-                链路语义保持，见审查记录 R6(a)）。
+                reread_top_priority 经 priority_mapping 取最高权重（2026-11-15
+                批次 999 特殊机制退役，映射 500 保持最高顺位）。
 
         Returns:
             bool: 是否触发并处理
@@ -223,7 +224,8 @@ class CommentHandler:
 
             # 复读归拢"聊天"（D2 终门 uc1a）：聊天 勾选→助播
             # 消息（外放绕行，不再抢占数字人——E-A4 声明的语义变更）；未勾选→原
-            # reread/reread_top_priority 消息（999 暂停-续播链路语义保持）。
+            # reread/reread_top_priority 消息（2026-11-15 批次 999 特殊机制退役，
+            # reread_top_priority 映射 500 保持最高顺位）。
             from .assistant_router import assistant_route, assistant_copy_message
             _reread_src = (data or {}).get("chat_source") or "comment"
             if assistant_route(self.my_handle.config, "reread", _reread_src):
@@ -232,7 +234,7 @@ class CommentHandler:
                     username=username, producer_type="reread", source=_reread_src,
                     hit_layer="direct")
             else:
-                # 构建消息（type 原样透传：reread_top_priority→999 权重映射）
+                # 构建消息（type 原样透传：reread_top_priority→最高权重映射）
                 message = {
                     "type": type if type in ("reread", "reread_top_priority") else "reread",
                     "tts_type": self.my_handle.config.get("audio_synthesis_type"),
@@ -312,8 +314,13 @@ class CommentHandler:
             logger.error(f"调音处理失败：{e}")
             return False
 
-    def _read_comment_replay(self, _chat_src, username, content):
+    def _read_comment_replay(self, _chat_src, username, content, reply_link=None):
         """念弹幕即时复读（2026-10-31 念弹幕审查批次重构）。
+
+        2026-11-16 弹幕↔回复配对批次：reply_link 非 None 时打标念白条目
+        （消费出口念白单飞门据此与 LLM 回复条目配对——念白消费后回复消费前
+        不消费下一条念白，根治弹幕快速进入时回复饿死）。助播同源条目同样
+        打标（producer_type=read_comment 为门控识别锚）。
 
         周期触发退役（用户裁决：系统已有限入/去重/优先级队列，不需要定时回放）
         ——过滤链完成的弹幕处理时直接入待合成队列，按 filter.priority_mapping
@@ -339,8 +346,13 @@ class CommentHandler:
             # 链上清洁后为空已 or 原文兜底——原文念播仍出乱码，此处对传入
             # username 再清洁（幂等），空则"观众"
             if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                # 先清洁过滤表情/特殊字符，后数字转中文（固定顺序）。数字转换
+                # 必须在本处落地：念播用户名以"9527说:"形式内嵌进 content，
+                # 助播通道绕过合成侧 username 关口（合成侧只转 message.username、
+                # 不转 content 内嵌前缀），缺失本步则 "9527" 被念成"九千五百二十七"
                 uname = (self.my_handle.common.clean_username(
                     uname, self.my_handle.config.get("need_lang")) or "观众")
+                uname = self.my_handle.common.convert_digits_to_chinese(uname) or uname
             try:
                 _rc_max_len = int(self.my_handle.config.get("read_comment", "username_max_len"))
             except (TypeError, ValueError):
@@ -353,9 +365,13 @@ class CommentHandler:
             rc_content = f"{_rc_prefix}{content}"
         from .assistant_router import assistant_route, assistant_copy_message
         if assistant_route(self.my_handle.config, "read_comment"):
-            self.my_handle.audio_synthesis_handle(assistant_copy_message(
+            _msg = assistant_copy_message(
                 self.my_handle.config, rc_content,
-                producer_type="read_comment", hit_layer="direct"))
+                producer_type="read_comment", hit_layer="direct")
+            if reply_link:
+                _msg["reply_link"] = reply_link
+            _msg.setdefault("producer_type", "read_comment")
+            self.my_handle.audio_synthesis_handle(_msg)
         else:
             self.my_handle.audio_synthesis_handle({
                 "type": "read_comment",
@@ -364,6 +380,7 @@ class CommentHandler:
                 "config": self.my_handle.config.get("filter"),
                 "username": username,
                 "content": rc_content,
+                "reply_link": reply_link,
             })
 
     def comment_handle(self, data):
@@ -450,7 +467,13 @@ class CommentHandler:
             # read_comment 优先级排序——"位于优先级排序之后"）；缓冲+定时回放
             # 机制删除。仅弹幕源（聊天页消息不入）；过滤链完成后到达此处的
             # 弹幕已经违禁/表情/语言/纯符号清洗。
-            self._read_comment_replay(_chat_src, username, content)
+            # 2026-11-16 弹幕↔回复配对批次：弹幕源生成配对 id——念白与下方
+            # LLM 回复条目同 id，消费出口念白单飞门据此保证「念白→回复→下
+            # 一条念白」消费顺序；无回复路径（下方各 return 分支）显式放弃
+            # 配对，聊天源无念白不打标。
+            _reply_link = f"rc-{time.time_ns()}" if _chat_src == "comment" else None
+            self._read_comment_replay(_chat_src, username, content,
+                                      reply_link=_reply_link)
 
             # ===== 关键词识别中枢（2026-10-25 核心架构调整，flowchartTD Keyword 节点）=====
             # 过滤链完成后单次识别全部功能的关键词命中，产出 rec 分发到各模块——
@@ -479,10 +502,23 @@ class CommentHandler:
                 submit(self.my_handle.db.execute, insert_data_sql,
                        (username, content, datetime.now()))
 
+            # 用户名数字转文字——提升到全部播报分派之前（2026-11-14 平台听感
+            # 差异修复）：原转换只在下方 LLM 块内，助播知识库（assistant_match_
+            # chain username=）与本地问答（data["username"] → render_answer
+            # {username} 变量渲染）等播报路径拿到的是未转换用户名，"9527" 被
+            # TTS 念成"九千五百二十七"，而 LLM 回复/念弹幕链正常——实测表现
+            # 即"有的平台转换、有的平台不转"（实为命中的回复链路不同）。
+            # 写库在上方已完成（保持过滤后原文口径）；ori_username 留原文。
+            if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
+                username = self.my_handle.common.convert_digits_to_chinese(username) or username
+                data["username"] = username
+
             # 0、积分机制运转（中枢已判定命令词命中，消费侧跳过重复匹配）
             if rec.integral_sign and self.my_handle.integral_handle("comment", data, hub_result=rec):
+                self.my_handle.abandon_reply_link(_reply_link)  # 无 LLM 回复→放弃念白配对
                 return
             if rec.integral_query and self.my_handle.integral_handle("crud", data, hub_result=rec):
+                self.my_handle.abandon_reply_link(_reply_link)  # 无 LLM 回复→放弃念白配对
                 return
 
             # 动作编排关键词订阅（/autoplan 2026-10-21 批次）：中枢识别时已判定并
@@ -495,6 +531,7 @@ class CommentHandler:
             # 与原实现等价——中枢侧 ktype 路由为第一道闸，此处保留链侧显式闸）
             if self.my_handle.config.get("key_mapping", "type") == "弹幕" or self.my_handle.config.get("key_mapping", "type") == "弹幕+回复":
                 if self.my_handle.key_mapping_handle("弹幕", data, hub_result=rec):
+                    self.my_handle.abandon_reply_link(_reply_link)  # 命中阻断→无 LLM 回复
                     return
 
             # 助播知识库前置匹配（E-A3 唯一插入点，D6 权威链序：助播KB→主KB→LLM；
@@ -517,6 +554,7 @@ class CommentHandler:
                     "聊天发送" if _is_chatbox else "弹幕信息",
                     dict(data, chat_source=_chat_src),
                     f"[助播音频] {_payload}", content_type="answer")
+                self.my_handle.abandon_reply_link(_reply_link)  # KB 音频即刻入队→无需配对
                 return
             if _hit_layer == "assistant_text":
                 from .assistant_router import assistant_copy_message
@@ -528,27 +566,27 @@ class CommentHandler:
                     "聊天发送" if _is_chatbox else "弹幕信息",
                     dict(data, chat_source=_chat_src),
                     _payload, content_type="answer")
+                self.my_handle.abandon_reply_link(_reply_link)  # KB 文本即刻入队→无需配对
                 return
 
             # 1、本地问答库匹配（spec C1：前置抢答仅 chat_type=local_qa 时生效——
             # 中枢已判定命中；chat_type≠local_qa 或未启用时 rec.local_qa_answer 恒空，
             # custom_llm/fastrag 模式词库改由 llm_handle 内托底调用）
             if rec.local_qa_answer and self.my_handle.local_qa_handle(data, hub_result=rec):
+                self.my_handle.abandon_reply_link(_reply_link)  # 问答即刻入队→无需配对
                 return
 
             # 2、点歌模式（中枢已判定意图：None=未触发静默交回弹幕链）
             if self.my_handle.choose_song_handle(data, hub_result=rec):
+                self.my_handle.abandon_reply_link(_reply_link)  # 歌曲切片即刻入队→无需配对
                 return
 
             # 5、LLM处理
             chat_type = self.my_handle.config.get("chat_type")
             if chat_type in self.my_handle.chat_type_list:
-                # 用户名数字转文字（filter.username_convert_digits_to_chinese，
-                # 原"数字转中文"）：链第二步（上方清洁之后，2026-11-12 过滤优化
-                # 批次）——仅重绑本局部变量供 LLM 输入使用（写库/聊天记录/
-                # 黑名单均不受影响；合成侧同名转换幂等，播报不受影响）
-                if self.my_handle.config.get("filter", "username_convert_digits_to_chinese"):
-                    username = self.my_handle.common.convert_digits_to_chinese(username) or username
+                # 用户名数字转文字已提升到写库后、全部播报分派之前（2026-11-14
+                # 平台听感差异修复）——本处原转换删除，此处 username 已为转换后
+                # 值；合成侧同名转换幂等，播报不受影响
 
                 # 构建数据（prompt 走共享构建器：弹幕模板→语言指令，ENG E-1）
                 data_json = {
@@ -563,19 +601,26 @@ class CommentHandler:
                 # 音频延迟从「全文生成完」缩短为「首句生成完」；不可流式/熔断/
                 # 零产出返回 None 自动回退下方全文链路（语义零变化）
                 if self.my_handle.chat_handler.stream_reply_gate(chat_type):
-                    def _build_stream_message(_c, _src=_chat_src, _u=username):
+                    def _build_stream_message(_c, _src=_chat_src, _u=username,
+                                              _rl=_reply_link):
+                        # 2026-11-16 弹幕↔回复配对批次：流式分句回复条目与念白
+                        # 同 reply_link，消费出口念白单飞门据此顺序消费
                         from .assistant_router import assistant_route as _ar, assistant_copy_message as _acm
                         if _ar(self.my_handle.config, "llm_reply", _src):
-                            return _acm(self.my_handle.config, _c, username=_u,
-                                        producer_type="llm_reply", source=_src,
-                                        hit_layer="llm")
+                            m = _acm(self.my_handle.config, _c, username=_u,
+                                     producer_type="llm_reply", source=_src,
+                                     hit_layer="llm")
+                            if _rl:
+                                m["reply_link"] = _rl
+                            return m
                         return {
                             "type": "comment",
                             "tts_type": self.my_handle.config.get("audio_synthesis_type"),
                             "data": self.my_handle.config.get(self.my_handle.config.get("audio_synthesis_type")),
                             "config": self.my_handle.config.get("filter"),
                             "username": _u,
-                            "content": _c
+                            "content": _c,
+                            "reply_link": _rl
                         }
                     _streamed = self.my_handle.chat_handler.llm_stream_reply(
                         chat_type, data_json, _build_stream_message)
@@ -599,14 +644,18 @@ class CommentHandler:
                 # None.parse_keys AttributeError（T4）
                 if self.my_handle.config.get("game", "enable"):
                     logger.warning("chat_type=game 已启用但游戏控制实现不存在（GameControl 已移除），忽略本次按键模拟请求")
+                self.my_handle.abandon_reply_link(_reply_link)  # 无 LLM 回复→放弃念白配对
                 return
             elif chat_type == "none":
+                self.my_handle.abandon_reply_link(_reply_link)  # 无 LLM 回复→放弃念白配对
                 return
             else:
                 resp_content = content
 
-            # 空数据结束
+            # 空数据结束（LLM 失败/熔断零产出→无回复条目，放弃配对；兜底：
+            # 生产端遗漏由消费门 15s 超时放行）
             if resp_content == "" or resp_content is None:
+                self.my_handle.abandon_reply_link(_reply_link)
                 return
 
             """
@@ -623,6 +672,7 @@ class CommentHandler:
             # 过滤已有实现，本批仅标注位置，不另加过滤链。
             resp_content = self.prohibitions_handle(resp_content)
             if resp_content is None:
+                self.my_handle.abandon_reply_link(_reply_link)  # 违禁丢弃→无回复条目
                 return
 
             # logger.info("resp_content=" + resp_content)
@@ -664,6 +714,10 @@ class CommentHandler:
                     "username": username,
                     "content": resp_content
                 }
+            if _reply_link:
+                # 2026-11-16 弹幕↔回复配对批次：回复条目与念白同 reply_link，
+                # 消费出口念白单飞门据此保证回复先于下一条念白消费
+                message["reply_link"] = _reply_link
 
             self.my_handle.audio_synthesis_handle(message)
 

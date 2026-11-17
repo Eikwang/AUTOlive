@@ -18,8 +18,8 @@ from utils.orchestration.choreographer import ChoreoEngine
 from utils.orchestration.config_model import RuleCfg, load_choreography_config
 
 NOW = [1000.0]
-PM = {"comment": 20, "gift": 20, "song": 10, "trends_copywriting": 999,
-      "entrance": 20, "follow": 20}  # entrance/follow 键=2026-11-06 拆除批次（验收载体防空心化）
+PM = {"comment": 20, "gift": 20, "song": 10, "trends_copywriting": 10,
+      "entrance": 20, "follow": 20}  # entrance/follow 键=2026-11-06 拆除批次（验收载体防空心化）；trends_copywriting=2026-11-15 批次 999 退役后实值
 
 
 def _rule(rid, t, match="x", interrupt="standard"):
@@ -57,7 +57,8 @@ def test_d10_branch_ownership():
 
 def test_d10_dynamic_text_not_polluted_by_trends_copywriting():
     """C1 守卫：dynamic_text 编排权重=15，绝不取 trends_copywriting 生产实值
-    999（污染后果：礼物 30 仍 > 999 为假——礼物应打断动态文案却被挡排队）。"""
+    （历史污染源：曾为 999——礼物 30 仍 > 999 为假，礼物应打断动态文案却被
+    挡排队；2026-11-15 批次 999 退役后实值=10，守卫仍防将来误挂高权重）。"""
     eng = _engine([_rule("dt", "dynamic_text", match="")], pm=dict(PM))
     dt = eng.cfg.rule_by_id("dt")
     assert eng._rule_priority(dt) == 15
@@ -207,7 +208,9 @@ def test_e6_interrupted_refreshes_anchor():
     assert eng.key_last["g"] == 1010.0
 
 
-# ------------------------------------------------- d22/uc5b builtin 999 挂起看门狗
+# ------------------------------------------------- d22/uc5b builtin 挂起看门狗
+# （2026-11-15 批次：999 机制退役，看门狗服务 d12 泛化让位的挂起态——
+# 方法/字段名保留历史命名，配置键 suspend_999_watchdog_s 不改防存量配置失读）
 
 def _suspended_player(monkeypatch=None):
     import os
@@ -228,8 +231,6 @@ def _suspended_player(monkeypatch=None):
     p.audio_json_list = []
     p.list_lock = threading.Lock()
     p._priority_provider = None
-    p._release_999_hook = None
-    p._playing_is_999 = False
     p._suspended_play = None
     p._interruptor_pending = False
     p._suspended_999 = None

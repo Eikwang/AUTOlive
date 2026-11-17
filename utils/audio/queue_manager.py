@@ -181,6 +181,134 @@ class QueueMixin:
     _cancelled_choreo_lock = threading.Lock()
     _CANCELLED_STEP_TTL_S = 300.0  # 覆盖最长音轨生命周期（编排答谢为短音轨，300s 冗余）
 
+    # 弹幕↔回复配对门状态（2026-11-16 中压实测批次：念白单飞）。生产端
+    # comment_handler 给念白（read_comment 及助播同源条目）与 LLM 回复条目
+    # 打同一 reply_link；消费出口（playback_manager 念白门）保证「念白 A →
+    # 回复 A 消费后」才放行念白 B——根治弹幕快速进入时念白持续消费、回复
+    # 堆积饿死（权重一致无法根治：回复经 LLM+TTS 延迟入队，生产时序天然
+    # 乱序）。类属性沿 _cancelled_choreo 模式（Mixin 无 __init__）。
+    _reply_gate_pending = {}    # reply_link -> monotonic（念白已消费、回复未出队）
+    _reply_gate_abandoned = {}  # reply_link -> monotonic（无回复路径显式放弃/超时兜底）
+    _reply_gate_lock = threading.Lock()
+    _REPLY_GATE_TTL_S = 120.0   # abandoned/pending 惰性清理上限
+
+    def abandon_reply_link(self, link):
+        """生产端放弃配对：本条弹幕走无 LLM 回复路径（积分/按键映射/助播KB/
+        本地问答/点歌/LLM 空回复等 return 分支）——对应念白不参与配对等待，
+        消费门直接放行。异常吞掉（登记失败退超时兜底语义）。"""
+        if not link:
+            return
+        try:
+            now = time.monotonic()
+            with QueueMixin._reply_gate_lock:
+                gates = QueueMixin._reply_gate_abandoned
+                for k in [k for k, ts in gates.items()
+                          if now - ts > QueueMixin._REPLY_GATE_TTL_S]:
+                    del gates[k]
+                gates[str(link)] = now
+                # 念白若已被消费（pending 在途），放弃=立即解除等待
+                QueueMixin._reply_gate_pending.pop(str(link), None)
+        except Exception:
+            logger.debug(f"放弃回复配对登记异常（忽略）：{traceback.format_exc()}")
+
+    def reply_gate_track_popped(self, data_json):
+        """消费出口出队回执（锁外调用，播放器移交前）：念白出队→登记 pending；
+        回复出队→解除 pending（回复开始消费，下一条念白放行）。异常吞掉。"""
+        try:
+            if not isinstance(data_json, dict):
+                return
+            link = data_json.get("reply_link")
+            if not link:
+                return
+            link = str(link)
+            is_rc = (data_json.get("type") == "read_comment"
+                     or data_json.get("producer_type") == "read_comment")
+            now = time.monotonic()
+            with QueueMixin._reply_gate_lock:
+                if link in QueueMixin._reply_gate_abandoned:
+                    return  # 已放弃路径：不登记不解除
+                if is_rc:
+                    QueueMixin._reply_gate_pending[link] = now
+                else:
+                    QueueMixin._reply_gate_pending.pop(link, None)
+        except Exception:
+            logger.debug(f"念白配对出队回执异常（忽略）：{traceback.format_exc()}")
+
+    # ---------- 合成背压门（2026-11-16 消费回传背压批次，用户高压实测） ----------
+    # 问题：合成线程无背压持续产音频，待播放队列不断增长（高压下打满 max_len
+    # 触发满载驱逐——驱逐发生在 TTS 之后=成本白付）。门控：待播放队列深度
+    # ≥门限时合成线程暂停 pop，消费出队回执（notify_synth_gate）后放行——
+    # 供需速率匹配，溢出从"合成后驱逐"前移到待合成队列（drop-only，合成前）。
+    _synth_gate_cond = threading.Condition()  # 消费出队回执唤醒（超时轮询兜底）
+    _SYNTH_GATE_BYPASS_PRIORITY = 500  # 高优豁免线（复读/编排 override=500）
+    _SYNTH_GATE_POLL_S = 1.0  # 门控等待上限=轮询周期（覆盖漏通知路径）
+
+    def _synth_gate_depth_limit(self):
+        """门限读侧（play_audio.synth_gate_depth，缺省 2；≤0=门禁用）。与首播
+        阈值互锁防御：min_start_play>门限时取大——保证阈值可达（否则高压下
+        待合成队列永不清空→E2 flush 不触发→永不开播）。"""
+        try:
+            limit = int(self.config.get("play_audio", "synth_gate_depth"))
+        except (TypeError, ValueError):
+            limit = 2
+        if limit <= 0:
+            return 0
+        try:
+            min_start = int(self.config.get("filter", "voice_tmp_path_queue_min_start_play") or 0)
+        except (TypeError, ValueError):
+            min_start = 0
+        return max(limit, min_start) if min_start > 0 else limit
+
+    def synth_gate_exempt(self, message) -> bool:
+        """豁免判定（与既有机制联动，缺一不可）：
+        - song 切片段：时间轴领先依赖预合成，门控会放大失步（e13 方向）；
+        - 权重 ≥500（复读 reread_top_priority=500/编排 override=500）：保真
+          "最高顺位"插队语义，不被门滞留 2 条播放时长；
+        - reply_link 命中在途 pending（念白配对门）：配对回复被门滞留时念白
+          单飞门 15s 超时兜底会被迫接管——配对机制退化为超时驱动，必须豁免；
+        - 非 dict 条目防御放行。"""
+        if not isinstance(message, dict):
+            return True
+        if message.get("type") == "song" and message.get("song_segment"):
+            return True
+        try:
+            from utils.audio.audio_priority import entry_priority
+            p = entry_priority(message, self.config.get("filter", "priority_mapping") or {})
+        except Exception:
+            p = None
+        if p is not None and int(p) >= QueueMixin._SYNTH_GATE_BYPASS_PRIORITY:
+            return True
+        link = message.get("reply_link")
+        return bool(link and str(link) in QueueMixin._reply_gate_pending)
+
+    def synth_gate_wait_s(self, message) -> float:
+        """合成背压门判定（须在 message_queue_lock 之外调用）。深度按普通条目
+        计（song 段=背景流不占容量，与满载分账同口径）。0=放行；>0=门控等待
+        秒数（调用方等消费出队回执唤醒，超时轮询重查——队首可能已变为豁免
+        条目，每轮重 peek 重判）。"""
+        limit = self._synth_gate_depth_limit()
+        if limit <= 0 or self.synth_gate_exempt(message):
+            return 0.0
+        depth = sum(1 for e in self.voice_tmp_path_queue
+                    if not (isinstance(e, dict) and e.get("type") == "song"
+                            and e.get("song_segment")))
+        return 0.0 if depth < limit else QueueMixin._SYNTH_GATE_POLL_S
+
+    def synth_gate_sleep(self, wait_s):
+        """门控等待：消费出队回执（notify_synth_gate）提前唤醒；超时轮询兜底
+        （覆盖 cancel_choreo_audio 等非常规出队路径的漏通知）。"""
+        with QueueMixin._synth_gate_cond:
+            QueueMixin._synth_gate_cond.wait(timeout=wait_s)
+
+    def notify_synth_gate(self):
+        """消费出队回执（消费循环每次成功出队后调用）：唤醒门控中的合成线程。
+        异常吞掉——回执不得影响消费链。"""
+        try:
+            with QueueMixin._synth_gate_cond:
+                QueueMixin._synth_gate_cond.notify_all()
+        except Exception:
+            pass
+
     def report_consumed(self, qtype: str = "", content: str = ""):
         """音频条目真实消费完成回执。
 
@@ -342,36 +470,30 @@ class QueueMixin:
         except Exception as e:
             logger.warning(f"连续对话待播舍弃判断异常（忽略）：{e}")
 
-    def _maybe_interrupt_999_for(self, data_json):
-        """A7 999 让位 + d12 通用高优让位（e3 泛化，2026-11-05 编排优化批次）。
+    def _maybe_priority_yield_for(self, data_json):
+        """新音频入队成功后的让位裁决（2026-11-16 段间让位批次：barge-in 打断
+        即弃退役，原 _maybe_barge_in_for 改名重写）。
 
-        触发裁决（builtin 播放器专属能力——UC1a 终门保留 builtin 为推荐播放器）：
-        a) 999 播放中（active 标记）+ 任意新音频入队成功 → 让位（方案 §3
-           「其它任何类型的消息到达都会暂停 999」字面语义，uc5b 严格形态）
-        b) 非 999 播放中 + 新音频有效权重严格高于在播条目 → 让位（d12：song
-           让位给答谢——builtin 整曲暂停=伴奏人声同停近似声明，e3；
-           同权重/更低=排队不打断，现行语义保持）
+        插播语义（2026-11-16 用户确认）收敛为：动态文案切分段（split_group，
+        权重低）在播时，更高权重音频入队 → 本方法仅处理 builtin 本地声道让位
+        （d12）；EDTalk 路径无需打断——正在播的文案段播完后，消费循环按权重
+        重新 pop，高权重音频先消费，剩余文案段自然续播（切回）。
+
+        d12 通用高优让位（2026-11-05 批次，保留）：builtin 在播条目 + 新音频
+        有效权重严格高于在播条目 → request_yield（song 让位给答谢——builtin
+        整曲暂停=伴奏人声同停近似声明，e3；同权重/更低=排队不打断）。
+        **同声道前提**（2026-11-13 助播并行根修）：插播者路由 EDTalk（推
+        数字人出声）时不让位——其不占本地声道，让位只会使在播条目陷入
+        「暂停→插播者推数字人→队列空续播回退 1s」循环：语句中段切断
+        （撕裂）+静默间隙（卡顿）+尾段逐次重放（重复），且违背助播并行
+        消费语义（2026-10-27 批次）；d12 原始场景=EDTalk 未激活同声道，
+        保持生效。
         已挂起时播放器侧自行忽略（R2-A7c 排队不打断）。仅 builtin 具备暂停-
-        续播机制；pygame 层不实现；EDTalk 路径任意点暂停=T6 spike 主路径
-        （F-A 静态可行，服务端端点+客户端降级包装）。
+        续播机制。
         """
         try:
             player = getattr(self, "audio_player", None)
-            # T7/d19：EDTalk 路径让位钩子优先（999 在 EDTalk 飞行中=uc2b 编排
-            # pause→游标→答谢→重推；返回 True=已受理，终止让位链）
-            hook = getattr(self, "_edtalk_yield_hook", None)
-            if callable(hook) and hook():
-                return
             if player is None or not hasattr(player, "request_yield"):
-                return
-            if getattr(self, "active_reread_top_999", False):
-                # a) 999 播放中：任意新音频触发让位（player 侧已挂起自忽略）
-                player.request_yield()
-                try:
-                    from utils.obs_stats import record_drop
-                    record_drop("builtin_yield_999")
-                except Exception:
-                    pass
                 return
             playing = (player.get_playing_weight()
                        if hasattr(player, "get_playing_weight") else None)
@@ -383,7 +505,12 @@ class QueueMixin:
             except Exception:
                 new_p = None
             if new_p is not None and playing is not None and new_p > playing:
-                # b) d12：严格更高权重新音频 → 在播条目让位
+                # 同声道前提（2026-11-13 助播并行根修）：插播者路由 EDTalk 时
+                # 不让位（routes_to_edtalk 单源判定，防条件漂移）
+                from utils.audio.playback_manager import routes_to_edtalk
+                if routes_to_edtalk(data_json, self.config):
+                    return
+                # ② d12：严格更高权重新音频 → 在播条目让位
                 player.request_yield()
                 try:
                     from utils.obs_stats import record_drop
@@ -391,7 +518,7 @@ class QueueMixin:
                 except Exception:
                     pass
         except Exception:
-            pass  # 让位触发失败不阻塞入队主流程（999 播完自然轮到插队音频）
+            pass  # 打断/让位触发失败不阻塞入队主流程（在播条目播完自然轮到插队音频）
 
     def data_priority_insert(self, type:str="等待合成消息", data_json:dict=None):
         # T1 观测面补齐包：入队时间戳（消费延迟=播放完成-_enqueued_at；_ 前缀=内部观测键，
@@ -448,8 +575,8 @@ class QueueMixin:
             return entry_priority({"type": audio_type}, priority_mapping)
 
         def _entry_priority(item):
-            """条目有效权重（O7，2026-10-28 消费批次；T2/e2 收敛）：条目自带
-            priority_override（编排插队 500/规则级 999，d18）优先于类型映射表——
+            """条目有效权重（O7，2026-10-28 消费批次）：条目自带
+            priority_override（编排插队 500）优先于类型映射表——
             既有条目权重比较、同权重组定位、最低优驱逐都必须按插队权重判定，
             否则 500 插队条目会被误当映射权重参与排序/驱逐。判定经
             audio_priority 单一源（与 playback/builtin 同源防漂移）。"""
@@ -460,9 +587,8 @@ class QueueMixin:
         new_data_priority = get_priority_level(data_json)
 
         # O7：新条目显式插队权重优先于类型映射表。通道值由注入方决定：
-        # 500=编排插队音轨（高于常规语音域 10~30，不触发 999 单实例约束）；
-        # 999=规则级 999 特殊机制（d18，2026-11-05 批次）——经下方单实例约束
-        # 与 _entry_priority 全链按 999 处置（单实例+让位+续播）。
+        # 500=编排插队音轨（高于常规语音域 10~30）与最高顺位复读
+        # （2026-11-15 批次：999 特殊机制退役，reread_top_priority 改映射 500）。
         _override = data_json.get("priority_override") if isinstance(data_json, dict) else None
         if _override is not None:
             try:
@@ -569,18 +695,16 @@ class QueueMixin:
             #   规则2 满 且同权重组存在 → 取代该组组首（最老）条目，新条目接组尾（净长度不变）
             #   规则3 满 且无同权重 且新权重 > 最低优组 → 插入后驱逐最低优组组首（最老）条目
             #   规则4 其余（满且新权重更低）→ 舍弃新音频
-            # 999 单实例约束优先于全部规则：系统中已存在 999（队列中或播放器持有 active 标记）
-            # 时新 999 一律舍弃（R2-A1）。
             # 注意：等待合成消息分支维持既有 drop-only 语义（设计仅规定待播放队列，不越权改动）。
             #
             # T1-批（2026-11-06 协作机制流程审查，W1 根修）：音频队列 M1 同款锁内化——
-            # 999 单实例检查/满载判定/规则 1-4 扫描与插入/同权重组与最低优组定位全部在
+            # 满载判定/规则 1-4 扫描与插入/同权重组与最低优组定位全部在
             # voice_tmp_path_queue_lock 内完成，消除「锁外算位、锁内插入」多生产者竞态
-            # （999 单实例并发双通过 / 规则 2/3 组首驱逐索引漂移 / 满载判定与插入间超限）。
+            # （规则 2/3 组首驱逐索引漂移 / 满载判定与插入间超限）。
             # 对齐 message_queue 分支 M1/M2（2026-10-28）。锁内零外部 IO：
             # _maybe_discard_pending_for_talk 内部自取本锁（锁外调用——触发集合不变，
             # 仅成功插入的 talk 条目触发，实际舍弃在消费侧 purge_talk_inputs）；
-            # _maybe_interrupt_999_for 涉及播放器 yield/EDTalk HTTP 暂停（锁外调用，
+            # _maybe_priority_yield_for 涉及播放器 yield 事件（锁外调用，
             # 锁内禁外部 IO）。
             queue = self.voice_tmp_path_queue
             max_len = int(self.config.get("filter", "voice_tmp_path_queue_max_len"))
@@ -616,21 +740,6 @@ class QueueMixin:
                     except Exception:
                         pass
                     return {"code": 1, "msg": f"编排已撤销音轨，丢弃迟到条目（step_id={_sid}）"}
-
-                # 999 单实例约束（R2-A1，优先于四规则）——检查与插入同锁原子化
-                if new_data_priority is not None and int(new_data_priority) == 999:
-                    active_999 = getattr(self, "active_reread_top_999", False)
-                    queue_has_999 = any(_priority_of(item) == 999 for item in queue)
-                    if active_999 or queue_has_999:
-                        logger.info(
-                            f"999 单实例约束：系统中已存在 999 权重音频"
-                            f"（{'播放器持有' if active_999 else '队列中'}），舍弃新 999：【{data_json.get('voice_path')}】")
-                        try:
-                            from utils.obs_stats import record_drop
-                            record_drop("audio_999_rejected")
-                        except Exception:
-                            pass
-                        return {"code": 1, "msg": "999 单实例约束，舍弃新 999 音频"}
 
                 # 未识别类型：维持既有语义——插队尾，满则丢弃
                 if new_data_priority is None:
@@ -736,12 +845,12 @@ class QueueMixin:
                                     pass
                                 insert_msg = {"code": 1, "msg": f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】"}
 
-            # 锁外收尾：D-22 待播舍弃通知与 999 让位钩子（均不得持锁调用——前者内部
-            # 自取本锁，后者触达播放器 yield/EDTalk HTTP）。原实现 discard 在插入前
+            # 锁外收尾：D-22 待播舍弃通知与 barge-in/让位裁决（均不得持锁调用——前者内部
+            # 自取本锁，后者触达播放器 yield/EDTalk 打断事件）。原实现 discard 在插入前
             # 评估、interrupt 在各插入点后调用；现统一为「插入成功才触发」，触发集合
             # 不变（未插入路径原实现同样不触发 interrupt；talk 条目被满载丢弃时原
             # 实现会多发一次舍弃通知——该通知语义本就指向实际舍弃，丢弃场景不发更准）。
             if inserted:
                 self._maybe_discard_pending_for_talk(data_json)
-                self._maybe_interrupt_999_for(data_json)
+                self._maybe_priority_yield_for(data_json)
             return insert_msg

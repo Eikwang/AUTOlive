@@ -566,6 +566,7 @@ class TestR39SelfEchoDedup(unittest.TestCase):
         svc._last_heartbeat = 0.0
         svc._no_active_warned = False
         svc._self_send = OrderedDict()
+        svc._idle_send_request_ids = OrderedDict()
         svc._self_echo_dropped = 0
         svc._cfg = lambda: {"rooms": [{"platform": "bilibili", "room_id": "23058",
                                        "enabled": True, "active": True}]}
@@ -626,8 +627,9 @@ class TestR39SelfEchoDedup(unittest.TestCase):
 
 
 class TestR39IdleSendWindow(unittest.TestCase):
-    """③ 闲时源回环窗扩展（2026-10-27）：真实弹幕进直播间可见延迟可超默认 10s，
-    闲时源条目 window_s=120s——默认窗边界外但闲时窗内的回放仍判自联回环。"""
+    """闲时源回执豁免（2026-11-14 回环驱动重构，替代原 120s 扩展窗）：
+    闲时弹幕触发LLM模式的发送回执按 request_id 豁免自联回环登记——自发声
+    回声放行进 comment 链触发 LLM 对话（设计语义）；手动发送回环滤除不回归。"""
 
     import time as _time
 
@@ -648,43 +650,51 @@ class TestR39IdleSendWindow(unittest.TestCase):
         svc._last_heartbeat = 0.0
         svc._no_active_warned = False
         svc._self_send = OrderedDict()
+        svc._idle_send_request_ids = OrderedDict()
         svc._self_echo_dropped = 0
         svc._cfg = lambda: {"rooms": [{"platform": "bilibili", "room_id": "23058",
                                        "enabled": True, "active": True}]}
         return svc
 
-    def test_idle_entry_blocked_within_120s(self):
-        """默认窗（10s）外、闲时窗（120s）内 → 仍判回环（30s 前发送的闲时文案）。"""
-        svc = self._svc()
-        svc._record_self_send({"sent_at": int(self._time.time()) - 30,
-                               "content": "闲时文案", "window_s": dc.SELF_SEND_WINDOW_IDLE_S})
-        self.assertTrue(svc._is_self_echo("闲时文案"))
+    @staticmethod
+    def _result_wire(sent_at, content, request_id="r1", status="sent"):
+        """DANMU_SEND_RESULT 尽力推送 wire（平铺形态，_normalize_wire 可解析）。"""
+        return {"contract_version": "1.0.0", "category": "command", "type": "DANMU_SEND_RESULT",
+                "platform": "bilibili", "room_id": "23058", "seq": 1, "timestamp": sent_at,
+                "engine": "send:pipeline",
+                "payload": {"type": "DANMU_SEND_RESULT", "request_id": request_id, "status": status,
+                            "sent_at": sent_at, "content": content}}
 
-    def test_default_entry_still_10s(self):
-        """无 window_s 的存量条目（整型 sent_at 与 (sent_at, 10) 元组两种形态）
-        默认窗语义不回归。"""
+    def test_idle_receipt_not_registered(self):
+        """闲时源回执（request_id 在豁免表）→ 不登记自联回环。"""
         svc = self._svc()
-        svc._record_self_send({"sent_at": int(self._time.time()) - 30, "content": "a"})
-        self.assertFalse(svc._is_self_echo("a"))     # 默认 10s 窗外 → 放行
-        svc._self_send["b"] = int(self._time.time()) - 30   # 存量整型形态
-        self.assertFalse(svc._is_self_echo("b"))
+        svc._idle_send_request_ids["idle-req-1"] = None
+        svc._on_wire(self._result_wire(int(self._time.time()), "闲时文案",
+                                       request_id="idle-req-1"))
+        self.assertEqual(len(svc._self_send), 0)
+        self.assertNotIn("idle-req-1", svc._idle_send_request_ids)  # 豁免条目消费即移除
 
-    def test_idle_entry_expires_after_120s(self):
-        """闲时窗（120s）外 → 放行（防同内容合法弹幕长期误杀）。"""
+    def test_idle_echo_passes_to_queue(self):
+        """闲时源自联回声 → 放行入队（进 comment 链触发 LLM），不判回环丢弃。"""
         svc = self._svc()
-        svc._record_self_send({"sent_at": int(self._time.time()) - 130,
-                               "content": "闲时文案", "window_s": dc.SELF_SEND_WINDOW_IDLE_S})
-        self.assertFalse(svc._is_self_echo("闲时文案"))
+        svc._idle_send_request_ids["idle-req-1"] = None
+        svc._on_wire(self._result_wire(int(self._time.time()), "闲时文案",
+                                       request_id="idle-req-1"))
+        svc._on_wire(_msg(payload={"type": "DANMU", "user_name": "直播账号",
+                                   "content": "闲时文案"}))
+        self.assertEqual(svc._queue.qsize(), 1)
+        self.assertEqual(svc._self_echo_dropped, 0)
 
-    def test_invalid_window_falls_back_default(self):
-        """window_s 非法（非数字）→ 回落默认窗，不抛异常。"""
+    def test_manual_receipt_still_registered(self):
+        """手动发送回执（request_id 不在豁免表）→ 照常登记，回声 ≤10s 窗内丢弃不回归。"""
         svc = self._svc()
-        svc._record_self_send({"sent_at": int(self._time.time()) - 30,
-                               "content": "w", "window_s": "bad"})
-        self.assertFalse(svc._is_self_echo("w"))
-        svc._record_self_send({"sent_at": int(self._time.time()), "content": "w2",
-                               "window_s": "bad"})
-        self.assertTrue(svc._is_self_echo("w2"))
+        svc._on_wire(self._result_wire(int(self._time.time()), "手动内容",
+                                       request_id="manual-req-1"))
+        self.assertIn("手动内容", svc._self_send)
+        svc._on_wire(_msg(payload={"type": "DANMU", "user_name": "主播",
+                                   "content": "手动内容"}))
+        self.assertEqual(svc._queue.qsize(), 0)
+        self.assertEqual(svc._self_echo_dropped, 1)
 
 
 class TestSendControlPlane(unittest.TestCase):
@@ -821,6 +831,7 @@ class TestIdleDanmuSend(unittest.TestCase):
                 return False
         svc._loop = _FakeLoop()
         svc._service_on = True
+        svc._idle_send_request_ids = OrderedDict()
         return svc
 
     def test_service_off_rejected(self):

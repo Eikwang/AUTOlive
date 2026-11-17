@@ -2,10 +2,11 @@
 """数据分析功能审查批次守卫测试（2026-10-31，批次号 data_analysis_review_1031）
 
 审查目标（任务书）：
-- 数据库各接口正确：integral 表 10 列（含 2026-10-31 积分批次新增 last_entrance_ts）
+- 数据库各接口正确：integral 表 11 列（含 2026-10-31 积分批次新增 last_entrance_ts
+  与 2026-11-16 限频批次新增 last_follow_ts）
   与积分图表 dataset dimensions 一致；ORDER BY f-string 拼接白名单守卫
 - 统计逻辑正确：弹幕关键词统计（jieba 分词+Top N）、积分统计四榜
-  （积分榜/观看榜/签到榜/金额榜——12h 限频口径与积分批次一致）
+  （积分榜/观看榜/签到榜/金额榜——24h 限频口径与积分批次一致）
 - 礼物榜单移除（用户裁决：与积分统计-金额榜重复展示）——后端/UI/模板/
   退役键登记全链
 - 在系统流程中正确应用：danmu 表写入口=database.comment_enable（弹幕链）、
@@ -31,7 +32,7 @@ def _src(rel: str) -> str:
     return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
 
-# 与 utils/my_handle.py config_load 建表 DDL 保持一致（10 列）
+# 与 utils/my_handle.py config_load 建表 DDL 保持一致（11 列）
 INTEGRAL_TABLE_DDL = '''
 CREATE TABLE IF NOT EXISTS integral (
     platform TEXT NOT NULL,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS integral (
     total_price INT NOT NULL,
     last_ts DATETIME NOT NULL,
     last_entrance_ts DATETIME,
+    last_follow_ts DATETIME,
     UNIQUE(platform, username, uid)
 )
 '''
@@ -90,11 +92,11 @@ def analysis_db(tmp_path):
     conn.execute(INTEGRAL_TABLE_DDL)
     conn.execute(DANMU_TABLE_DDL)
     conn.executemany(
-        "INSERT INTO integral VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO integral VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("douyin", "用户甲", "u1", 100, 5, 3, "2026-10-31 10:00:00", 520, "2026-10-31 10:00:00", None),
-            ("douyin", "用户乙", "u2", 200, 3, 8, "2026-10-31 09:00:00", 66, "2026-10-31 09:00:00", None),
-            ("douyin", "用户丙", "u3", 50, 9, 1, "2026-10-31 08:00:00", 1314, "2026-10-31 08:00:00", None),
+            ("douyin", "用户甲", "u1", 100, 5, 3, "2026-10-31 10:00:00", 520, "2026-10-31 10:00:00", None, None),
+            ("douyin", "用户乙", "u2", 200, 3, 8, "2026-10-31 09:00:00", 66, "2026-10-31 09:00:00", None, None),
+            ("douyin", "用户丙", "u3", 50, 9, 1, "2026-10-31 08:00:00", 1314, "2026-10-31 08:00:00", None, None),
         ],
     )
     conn.executemany(
@@ -141,20 +143,21 @@ class TestGiftBoardRemoved:
 
 class TestIntegralOption:
     def test_dimensions_match_table_columns(self, analysis_db):
-        """dataset dimensions 必须与 integral 表 10 列一致——积分批次新增
-        last_entrance_ts 后此前漏更（SELECT * 10 值 vs dimensions 9 维错位）。"""
+        """dataset dimensions 必须与 integral 表 11 列一致——积分批次新增
+        last_entrance_ts/last_follow_ts 后此前漏更（SELECT * 11 值 vs dimensions
+        维数错位）。"""
         da = _make_da(analysis_db)
         option = da.get_integral_option("integral", 10)
         assert option is not None
         dims = option["dataset"][0]["dimensions"]
         assert dims == ["platform", "username", "uid", "integral", "view_num",
                         "sign_num", "last_sign_ts", "total_price", "last_ts",
-                        "last_entrance_ts"]
+                        "last_entrance_ts", "last_follow_ts"]
         assert all(len(row) == len(dims) for row in option["dataset"][0]["source"])
 
     @pytest.mark.parametrize("sort_key,expected_first", [
         ("integral", "用户乙"),        # 积分榜：200 最高
-        ("view_num", "用户丙"),        # 观看榜：9 次最多（12h 限频口径=计分次数）
+        ("view_num", "用户丙"),        # 观看榜：9 次最多（24h 限频口径=计分次数）
         ("sign_num", "用户乙"),        # 签到榜：8 次最多
         ("total_price", "用户丙"),     # 金额榜：1314 元最多
     ])

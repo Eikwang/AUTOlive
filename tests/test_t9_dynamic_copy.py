@@ -14,6 +14,7 @@ T9 动态文案实装回归测试（/autoplan 断链批次）
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,6 +50,10 @@ def scheduler(tmp_path: Path):
 
     my_handle = MagicMock()
     my_handle.chat_type_list = ["custom_llm"]
+    # 闲时门判定面（2026-11-15 批次：动态文案改闲时入队——生成前/入队前两查
+    # my_handle.audio 的双队列与 EDTalk 在飞登记）：测试宿主默认全空闲
+    my_handle.audio = SimpleNamespace(
+        message_queue=[], voice_tmp_path_queue=[], _edtalk_current_entry=None)
 
     ts = TaskScheduler(config=config, common=common, my_handle=my_handle)
     ts.is_running = True

@@ -51,9 +51,6 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
     # 第一次触发voice_tmp_path_queue_not_empty标志
     voice_tmp_path_queue_not_empty_flag = False
 
-    # A7/T1（2026-10-22 审查批次）：999 权重音频"在系统中"标记（播放器持有或播放中）
-    active_reread_top_999 = False
-
     def __init__(self, config_path, type=1):
         self.config_path = config_path  
         self.config = Config(config_path)
@@ -98,14 +95,10 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
             self.config.get("audio_player") or {}, config_path=self.config_path)
         # A3（2026-10-22 审查批次）：完成回调注册随 play_audio.info_to_callback
         # 参数退役移除（回路死链；_fire_completion 对 None 回调自检跳过）。
-        # A7/T1：999 离开播放系统时清除 active 标记（完成/跳过/清空/停止均触发，
-        # 保证 999 单实例约束在条目释放后恢复放行）
-        Audio.audio_player.set_999_release_hook(
-            lambda: setattr(self, "active_reread_top_999", False))
-        # T7/d19（2026-11-05 批次）：EDTalk 路径 999 让位钩子——queue_manager
-        # a 触发先询本钩子（999 在 EDTalk 飞行中=uc2b 编排 pause→游标→答谢
-        # →剩余重推；返回 False=非 EDTalk 路径，回落 builtin 让位）
-        self._edtalk_yield_hook = self._on_edtalk_yield
+        # 2026-11-15 批次：999 release hook（A7/T1 active 标记联动）随 999 机制
+        # 退役一并移除（无生产者）。2026-11-16 段间让位批次：barge-in 打断钩子
+        # （_edtalk_barge_in_hook）随打断即弃机制退役一并移除——插播语义收敛为
+        # 「切分段 + 权重排序段间让位」（播完当前段再插播，剩余段自然续播）。
         # A5：权威优先级表读取器（Config 内存视图——合并迁移即时可见，不等落盘）
         Audio.audio_player.set_priority_provider(
             lambda: self.config.get("filter", "priority_mapping") or {})
@@ -119,7 +112,7 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         self.captions_manager.set_paused_getter(self._builtin_player_paused)
         self.captions_manager.set_error_notifier(self._captions_error_to_player)
         # F3（义务 Eng T1：独立注册点，不复用 set_completion_callback——其载荷固定
-        # 且被 A7 999 续播复用）：builtin 开播时推送字幕，时点=实际播放时点，
+        # 且被挂起续播复用）：builtin 开播时推送字幕，时点=实际播放时点，
         # 载荷 content/type/voice_path 三键。EDTalk 模式字幕走 playback_manager
         # 公共段推送（push_full 返回后）。
         if Audio.audio_player is not None and hasattr(Audio.audio_player, "set_started_callback"):
@@ -129,7 +122,7 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
             # 回调转发编排 on_audio_complete——外放/助播场景编排步推进由真实消费
             # 完成驱动（替代 F1 看门狗 60s 超时兜底）。载荷 item_type/item_content
             # 由 _fire_completion 携带被播条目 (type,content)，编排侧 (type,content)+
-            # 晚于入队时间匹配 inflight（CL-2），不匹配即忽略——999 续播/积压乱序安全。
+            # 晚于入队时间匹配 inflight（CL-2），不匹配即忽略——挂起续播/积压乱序安全。
             async def _choreo_completion_cb(data):
                 try:
                     _item = (data or {}).get("data") or {}

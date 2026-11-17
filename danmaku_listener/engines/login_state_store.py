@@ -26,6 +26,12 @@ from loguru import logger
 
 from danmaku_listener.engines.login_gate import has_login_cookie
 
+# 恢复日志去重（2026-11-14）：小红书等会话型登录 cookie（session cookie）不落盘
+# ——send_danmu/凭证提取每次瞬态 launch_persistent_context 都会命中"profile 丢
+# 登录"并从快照注入（设计内自愈，发送正常）。同一快照路径的首恢复保持 INFO
+# （状态可见），后续恢复降 DEBUG，消除逐弹幕刷屏。
+_RESTORE_LOGGED: set = set()
+
 
 async def snapshot_login_state(context, *, names: Iterable[str], path: str,
                                label: str) -> bool:
@@ -68,6 +74,13 @@ async def restore_login_state(context, *, names: Iterable[str], path: str,
     except Exception as e:  # noqa: BLE001
         logger.debug(f"[{label}] login restore failed: {type(e).__name__}")
         return False
-    logger.info(f"[{label}] 登录态快照恢复: {len(snap)} cookies"
-                "（profile 丢登录——硬杀/覆写/未落盘后自愈）")
+    key = str(Path(path).resolve())
+    if key not in _RESTORE_LOGGED:
+        _RESTORE_LOGGED.add(key)
+        logger.info(f"[{label}] 登录态快照恢复: {len(snap)} cookies"
+                    "（profile 丢登录——硬杀/覆写/未落盘后自愈；会话型 cookie"
+                    "瞬态启动常规注入，后续恢复不再重复 INFO）")
+    else:
+        logger.debug(f"[{label}] 登录态快照恢复: {len(snap)} cookies"
+                     "（会话型 cookie 瞬态启动常规自愈）")
     return True

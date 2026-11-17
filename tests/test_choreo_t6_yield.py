@@ -1,14 +1,15 @@
-"""T6 让位泛化+EDTalk 任意点暂停守卫（2026-11-05 编排优化批次）。
+"""T6 让位泛化+EDTalk 任意点暂停守卫（2026-11-05 编排优化批次；
+2026-11-15 批次：999 机制退役，e3 泛化让位保留为唯一让位面）。
 
 覆盖裁决条款：
-- e3：builtin 让位设施泛化——非 999 在播条目同样受理让位（通用高优让位槽）；
-  999 A7 语义保持（active 标记+任意新音频）；request_999_interrupt 兼容别名；
+- e3：builtin 让位设施泛化——任意在播条目受理让位（判定面=_playing_weight）；
   续播期再让位=重新挂起（条目不丢——泛化引入边缘的收口）
-- d12：queue_manager 让位裁决 a/b 双触发——a) 999 播放中任意新音频；
-  b) 非 999 播放中+严格更高权重新音频（song 让位给答谢）；同权/更低不触发；
-  分桶 builtin_yield_999/builtin_yield_priority
+- d12：queue_manager 让位裁决 b 触发（严格更高权重新音频，song 让位给答谢）；
+  同权/更低不触发；分桶 builtin_yield_priority（2026-11-15 批次：a 触发随
+  999 机制退役，裁决入口改名 _maybe_priority_yield_for——barge-in 打断即弃钩子①+让位②）
 - F-A/uc2b spike 实现：OutputStreamer 任意点暂停门（暂停=消费冻结零丢帧/
-  恢复=精确帧位续播）+service 端点+client 降级包装
+  恢复=精确帧位续播）+service 端点+client 降级包装（2026-11-15 批次：999 让位
+  编排退役，暂停端点保留为服务端控制面通用能力）
 - F-I：新端点纳入 app 级 _auth_guard（api_token 配置时 401）
 """
 import os
@@ -33,30 +34,22 @@ if _EDTALK_DIR not in sys.path:
 def _player(weight=None, suspended=None):
     from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER
     p = AUDIO_PLAY_CENTER.__new__(AUDIO_PLAY_CENTER)
-    p._playing_is_999 = (weight == 999)
-    p._playing_weight = weight
+    p._playing_weight = weight  # e3/d12：泛化让位判定源（2026-11-15 批次 999 退役）
     p._suspended_999 = suspended
     p._interrupt_999_event = threading.Event()
-    p._release_999_hook = None
     return p
 
 
-def test_e3_request_yield_non_999_playing():
-    """e3：非 999 在播条目受理让位（泛化核心——原 request_999_interrupt 门限
-    _playing_is_999 已解耦）。"""
+def test_e3_request_yield_playing():
+    """e3：在播条目受理让位（泛化核心——2026-11-15 批次 999 退役后判定面
+    统一为 _playing_weight）。"""
     p = _player(weight=10)  # song 切片在播
     p.request_yield()
     assert p._interrupt_999_event.is_set()
 
 
-def test_e3_999_alias_preserved():
-    p = _player(weight=999)
-    p.request_999_interrupt()  # 兼容别名（999 既有调用面/测试域）
-    assert p._interrupt_999_event.is_set()
-
-
 def test_e3_yield_ignored_when_suspended():
-    p = _player(weight=999, suspended={"type": "reread_top_priority"})
+    p = _player(weight=500, suspended={"type": "reread_top_priority"})
     p.request_yield()
     assert not p._interrupt_999_event.is_set()  # R2-A7c 排队不打断
 
@@ -73,9 +66,7 @@ def test_e3_resume_resuspends_instead_of_dropping():
     import time as _t
     from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER
     p = AUDIO_PLAY_CENTER.__new__(AUDIO_PLAY_CENTER)
-    p._release_999_hook = None
-    p._playing_is_999 = True
-    p._playing_weight = 999
+    p._playing_weight = 500
     p._current_output_rate = None
     p.pause_event = threading.Event()
     p.stream = None
@@ -88,17 +79,16 @@ def test_e3_resume_resuspends_instead_of_dropping():
     p._suspended_999_alarm_at = None
     p._interruptor_pending = False
     p._fire_completion = lambda item: None
-    p._release_999 = lambda: None
     p._finish_cleanup = lambda *a, **k: None
     p._post_play_interval = lambda: None
-    p._wait_loop = lambda is_999=False: "suspended"  # 续播期再次让位
+    p._wait_loop = lambda: "suspended"  # 续播期再次让位
     p._resume_suspended_999()
     assert p._suspended_999 == {"voice_path": "x.mp3"}  # 重新挂起（条目不丢）
     assert p._interruptor_pending is True
     assert p._suspended_999_at is not None
 
 
-# ------------------------------------------------- d12 队列侧 a/b 裁决
+# ------------------------------------------------- d12 队列侧 b 裁决
 
 class _FakeConfig:
     def __init__(self, mapping):
@@ -129,7 +119,6 @@ class _QueueFixture(QueueMixin):
     def __init__(self, mapping, player):
         self.config = _FakeConfig(mapping)
         self.audio_player = player
-        self.active_reread_top_999 = False
         self.message_queue = []
         self.message_queue_lock = threading.Lock()
         self.message_queue_not_empty = threading.Condition(lock=self.message_queue_lock)
@@ -139,34 +128,29 @@ class _QueueFixture(QueueMixin):
         self.voice_tmp_path_queue_not_empty_flag = False
 
 
-PM = {"comment": 20, "gift": 20, "song": 10, "reread_top_priority": 999}
-
-
-def test_d12_trigger_a_999_active_any_audio():
-    q = _QueueFixture(PM, _YieldPlayer(playing_weight=999))
-    q.active_reread_top_999 = True
-    q._maybe_interrupt_999_for({"type": "comment", "voice_path": "x.mp3"})
-    assert q.audio_player.yields == 1  # a) 999 播放中任意新音频
+PM = {"comment": 20, "gift": 20, "song": 10, "reread_top_priority": 500}
 
 
 def test_d12_trigger_b_higher_priority_yields_song():
-    """d12 核心：song(10) 播放中 comment(20) 入队 → 让位（builtin 降级语义）。"""
+    """d12 核心（2026-11-15 批次：999 退役，_maybe_interrupt_999_for 改名
+    _maybe_priority_yield_for）：song(10) 播放中 comment(20) 入队 → 让位（builtin
+    降级语义保留）。"""
     q = _QueueFixture(PM, _YieldPlayer(playing_weight=10))
-    q._maybe_interrupt_999_for({"type": "comment", "voice_path": "x.mp3"})
+    q._maybe_priority_yield_for({"type": "comment", "voice_path": "x.mp3"})
     assert q.audio_player.yields == 1
 
 
 def test_d12_equal_or_lower_no_yield():
     q = _QueueFixture(PM, _YieldPlayer(playing_weight=20))
-    q._maybe_interrupt_999_for({"type": "gift", "voice_path": "x.mp3"})  # 同权 20
-    q._maybe_interrupt_999_for({"type": "song", "voice_path": "x.mp3"})  # 低权 10
+    q._maybe_priority_yield_for({"type": "gift", "voice_path": "x.mp3"})  # 同权 20
+    q._maybe_priority_yield_for({"type": "song", "voice_path": "x.mp3"})  # 低权 10
     assert q.audio_player.yields == 0
 
 
 def test_d12_no_player_no_crash():
     q = _QueueFixture(PM, _YieldPlayer(playing_weight=10))
     q.audio_player = None
-    q._maybe_interrupt_999_for({"type": "comment", "voice_path": "x.mp3"})  # 不抛
+    q._maybe_priority_yield_for({"type": "comment", "voice_path": "x.mp3"})  # 不抛
 
 
 # ------------------------------------------------- F-A spike：OutputStreamer 暂停门
@@ -250,3 +234,33 @@ def test_client_wrapper_degrades_on_failure(monkeypatch):
     monkeypatch.setattr(_rq, "post", _boom)
     assert c.pause_output() == {"ok": False, "error": "refused"}
     assert c.resume_output()["ok"] is False
+
+
+def test_client_pause_success_normalizes_ok(monkeypatch):
+    """2026-11-14 实测修复回归：服务端成功体 {"paused": true}（无 ok 键）须
+    归一 ok=True——否则调用方 .get("ok", False)（2026-11-15 批次前为
+    _on_edtalk_yield 999 让位编排）把真实暂停成功误判为失败 → 走 d17 降级
+    分支且永不 resume → 服务端输出永久冻结（画面停住、口型音频不消费）。"""
+    from utils.edtalk_realtime.edtalk_client import EDTalkClient
+    c = EDTalkClient.__new__(EDTalkClient)
+    c.api_ip_port = "http://127.0.0.1:1"
+    c._auth_headers = lambda: {}
+    import requests as _rq
+
+    class _Resp:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    bodies = {"pause": {"paused": True}, "resume": {"paused": False}}
+
+    def _fake_post(url, **k):
+        key = "pause" if url.endswith("/output/pause") else "resume"
+        return _Resp(bodies[key])
+
+    monkeypatch.setattr(_rq, "post", _fake_post)
+    assert c.pause_output() == {"ok": True, "paused": True}
+    assert c.resume_output() == {"ok": True, "paused": False}

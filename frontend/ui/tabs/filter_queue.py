@@ -26,7 +26,6 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("gift", "礼物答谢"),
         ("follow", "关注答谢"),
         ("song", "点歌"),
-        ("dynamic_text", "动态文案"),
         ("integral", "积分"),
         ("key_mapping", "按键映射"),
     ]),
@@ -48,33 +47,37 @@ PRIORITY_GROUPS: List[Tuple[str, List[Tuple[str, str]]]] = [
     ]),
 ]
 
-# 预设值（数值越大越优先；最高优先级复读各预设恒高位。
+# 预设值（数值越大越优先；最高优先级复读各预设恒高位=500。2026-11-15 批次
+# 999 特殊机制退役，reread_top_priority 改 500——仍为全表最高顺位，脱离 999 域。
 # abnormal_alarm 组已随 2026-10-26 报警重构退役——本地音频报警不再产生该队列类型）
+# dynamic_text（2026-11-14 去重）：编排动态文案的音频条目经答谢链（type=gift 等）
+# + priority_override=500 插队，类型映射表不参与——priority_mapping.dynamic_text
+# 无消费点，从分组与预设移除（保留"系统任务-动态文案"=trends_copywriting）
 PRIORITY_PRESETS: Dict[str, Dict[str, int]] = {
     "互动优先": {
         "comment": 80, "read_comment": 75, "gift": 70, "follow": 65,
-        "entrance": 55, "song": 50, "dynamic_text": 48, "integral": 45, "key_mapping": 40,
+        "entrance": 55, "song": 50, "integral": 45, "key_mapping": 40,
         "talk": 35, "local_qa_audio": 30, "local_qa_text": 30, "reread": 25,
         "assistant_anchor_text": 20, "assistant_anchor_audio": 20,
         "schedule": 15, "trends_copywriting": 12, "idle_time_task": 10,
-        "reread_top_priority": 999,
+        "reread_top_priority": 500,
     },
     "内容优先": {
-        "schedule": 70, "trends_copywriting": 65, "song": 60, "dynamic_text": 58,
+        "schedule": 70, "trends_copywriting": 65, "song": 60,
         "idle_time_task": 55,
         "comment": 40, "read_comment": 35, "gift": 30, "follow": 28,
         "entrance": 25, "integral": 20, "key_mapping": 18,
         "talk": 15, "local_qa_audio": 15, "local_qa_text": 15, "reread": 12,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
-        "reread_top_priority": 999,
+        "reread_top_priority": 500,
     },
     "省资源": {
         "comment": 10, "read_comment": 10, "entrance": 10, "gift": 10,
-        "follow": 10, "song": 10, "dynamic_text": 10, "integral": 10, "key_mapping": 10,
+        "follow": 10, "song": 10, "integral": 10, "key_mapping": 10,
         "talk": 10, "local_qa_audio": 10, "local_qa_text": 10, "reread": 10,
         "assistant_anchor_text": 10, "assistant_anchor_audio": 10,
         "schedule": 10, "trends_copywriting": 10, "idle_time_task": 10,
-        "reread_top_priority": 999,
+        "reread_top_priority": 500,
     },
 }
 
@@ -128,6 +131,12 @@ def create_filter_queue_tab(
                     placeholder='正整数 例如：20，如果你不想开播前缓冲一定数量的音频，请配置0',
                     value=get_nested_value(config, "filter", "voice_tmp_path_queue_min_start_play")
                 ).style("width:100%;").tooltip('此功能用于缓存一定数量的音频后再开始播放。如果你不想开播前缓冲一定数量的音频，请配置0；如果你想提前准备一些音频，如因为TTS合成慢的原因，可以配置此值，让TTS提前合成你的其他任务触发的内容'), keys=("filter", "voice_tmp_path_queue_min_start_play"))
+                # 合成背压门（2026-11-16 消费回传背压批次）：消费回传驱动供需速率匹配
+                _auto_save(ui.input(
+                    label='合成背压门限（消费回传）',
+                    placeholder='正整数 例如：2，配置0关闭合成背压门',
+                    value=get_nested_value(config, "play_audio", "synth_gate_depth", default=2)
+                ).style("width:100%;").tooltip('待播放音频队列中普通音频达到此数量时，合成线程暂停取下一条消息（消费出队一条后继续），使合成速率贴合播放速率、避免队列持续积压高压。点歌切片、复读/编排等最高优先级（权重≥500）音频、待播放的弹幕回复不受此门限制。配置0=关闭背压门；调大可增加TTS抖动缓冲但队列积压更多；首次触发播放阈值大于此值时按阈值生效'), keys=("play_audio", "synth_gate_depth"))
 
     # ---------- 优先级（D5：单一有序列表+来源分组+预设按钮） ----------
     with ui.card().style(card_css):

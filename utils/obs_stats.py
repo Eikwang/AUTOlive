@@ -10,7 +10,6 @@ TTS 合成吞吐、编排静默窗口等待。全部写入点各自兜底（观�
 - message_queue_full    消息队列满载丢弃（低优/未识别类型插入位在末尾）
 - message_queue_evict   消息队列满载插队驱逐队尾（最低优组 FIFO 尾）
 - unknown_type_dropped  音频队列未识别类型满载丢弃
-- audio_999_rejected    999 单实例约束舍弃新 999
 - audio_rule4_dropped   音频队列四规则之规则4（满且新权重更低）舍弃
 - audio_same_tier_evict 音频队列同权重组首取代/高优插入驱逐最低优组首
 - talk_discard          连续对话待播舍弃（只播最新一条）

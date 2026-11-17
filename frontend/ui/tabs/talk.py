@@ -38,7 +38,7 @@ def create_talk_tab(
 
     # 聊天记录区域（UI-16 二轮验收任务 14：/callback 共享缓冲接线渲染，
     # ui.timer 轮询——timer 回调只读内存无同步 IO，沿事件循环安全先例）
-    from frontend.utils.chat_log_buffer import snapshot as _chat_snapshot
+    from frontend.utils.chat_log_buffer import snapshot as _chat_snapshot, version as _chat_version
     # 2026-10-25：聊天记录固定记录（弹幕/语音/聊天框互动），无开关——
     # talk.show_chat_log 已退役，来源白名单在 core 发送侧生效
 
@@ -192,7 +192,7 @@ def create_talk_tab(
                     ui.button('发送', on_click=lambda: _send_chat("comment"), color=button_internal_color).style(button_internal_css).tooltip("发送文本给LLM，模拟弹幕触发操作")
                     ui.button('直接复读', on_click=lambda: _send_chat("reread"), color=button_internal_color).style(button_internal_css).tooltip("直接合成文字并加入播放音频列表，不走AI对话系统流程")
                     ui.button('调教', on_click=lambda: _send_chat("tuning"), color=button_internal_color).style(button_internal_css).tooltip("指正AI的错误，并将该信息加入AI的上下文中用于后续对话，不进行TTS播报")
-                    ui.button('直接复读-插队首', on_click=lambda: _send_chat("reread_top_priority"), color=button_internal_color).style(button_internal_css).tooltip("直接合成音频并给最大权重，优先播放（999 暂停当前播放，复读完续播）")
+                    ui.button('直接复读-插队首', on_click=lambda: _send_chat("reread_top_priority"), color=button_internal_color).style(button_internal_css).tooltip("直接合成音频并给最高权重 500，队列排序最先播放（999 特殊机制已于 2026-11-15 退役）")
 
             # 对话打断（2026-10-30：全部控件接线自动保存——此前配置改动不落盘；
             # 打断关键词/清除类型/提示语由 conversation_manager 消费）
@@ -269,7 +269,7 @@ def create_talk_tab(
                         "gap:8px; width:100%; padding:4px; display:flex; "
                         "flex-direction:column; align-items:stretch;")
 
-    _chat_rendered_count = {"n": -1}
+    _chat_rendered_version = {"ver": -1}
 
     def _render_bubble(_entry: Dict):
         """单条聊天记录渲染（2026-10-30 气泡化）：
@@ -287,8 +287,11 @@ def create_talk_tab(
                 'max-width:90%; padding:0 6px;')
             return
         _is_answer = _ctype == 'answer'
-        _meta = (f"{_src_label or _entry.get('type', '')} · "
-                 f"{'AI' if _is_answer else _entry.get('username', '')} · "
+        # 平台标注（多平台监听区分消息来源；旧消息无 platform 字段则省略）
+        _platform = str(_entry.get('platform') or '')
+        _meta = (f"{_src_label or _entry.get('type', '')}"
+                 + (f"·{_platform}" if _platform else '')
+                 + f" · {'AI' if _is_answer else _entry.get('username', '')} · "
                  f"{_entry.get('timestamp', '')}")
         with ui.column().style(
                 f"width:100%; gap:2px; align-items:{'flex-end' if _is_answer else 'flex-start'};"):
@@ -303,10 +306,13 @@ def create_talk_tab(
                    'background:rgba(127,127,127,0.12); color:var(--text-body);'))
 
     def _refresh_chat_log():
-        entries = _chat_snapshot()
-        if len(entries) == _chat_rendered_count["n"]:
+        # 变更检测用缓冲版本号而非 len——deque(maxlen=200) 满载后 len 恒为
+        # 200，len 比对永远相等导致新消息（多平台监听下尤其明显）不再渲染
+        _ver = _chat_version()
+        if _ver == _chat_rendered_version["ver"]:
             return
-        _chat_rendered_count["n"] = len(entries)
+        _chat_rendered_version["ver"] = _ver
+        entries = _chat_snapshot()
         chat_log_container.clear()
         with chat_log_container:
             if not entries:

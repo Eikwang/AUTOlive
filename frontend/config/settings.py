@@ -205,14 +205,37 @@ class Settings:
         """
         if not keys:
             return
-        
+
         config = self._config
         for key in keys[:-1]:
-            if key not in config:
-                config[key] = {}
-            config = config[key]
-        
-        config[keys[-1]] = value
+            if isinstance(config, list):
+                # 列表下标键（如 schedule[0].enable → ("schedule","0","enable")）：
+                # 定时任务等 list 结构配置的字段落盘此前在此 TypeError 被上层
+                # 吞掉，UI 改动永不持久化（schedule.py 存量单任务保存丢失根因）
+                try:
+                    idx = int(key)
+                except ValueError:
+                    return
+                if 0 <= idx < len(config):
+                    config = config[idx]
+                else:
+                    return
+            else:
+                if not isinstance(config, dict):
+                    return
+                if key not in config:
+                    config[key] = {}
+                config = config[key]
+
+        if isinstance(config, list):
+            try:
+                idx = int(keys[-1])
+            except ValueError:
+                return
+            if 0 <= idx < len(config):
+                config[idx] = value
+        elif isinstance(config, dict):
+            config[keys[-1]] = value
     
     def update(self, data: Dict[str, Any]) -> None:
         """

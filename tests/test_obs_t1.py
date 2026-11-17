@@ -2,7 +2,7 @@
 """T1 观测面补齐包守卫测试（/autoplan main-20261031-201249 T1）。
 
 覆盖：obs_stats 计数器（分桶/并发/快照口径）+ queue_manager 丢弃点接线断言
-（满载/999/未识别/规则4）+ 三盲区报警调用（伴奏失败/伴奏缺失/闲时发送失败）
+（满载/未识别/规则4）+ 三盲区报警调用（伴奏失败/伴奏缺失/闲时发送失败）
 + get_audio_info 观测摘要叠加。
 """
 import threading
@@ -32,10 +32,10 @@ class TestObsStats(unittest.TestCase):
     def test_drop_bucket_and_total(self):
         record_drop("message_queue_full")
         record_drop("message_queue_full", 2)
-        record_drop("audio_999_rejected")
+        record_drop("edtalk_barge_in")
         snap = snapshot()
         self.assertEqual(snap["drops"]["message_queue_full"], 3)
-        self.assertEqual(snap["drops"]["audio_999_rejected"], 1)
+        self.assertEqual(snap["drops"]["edtalk_barge_in"], 1)
         self.assertEqual(snap["drop_total"], 4)
 
     def test_drop_concurrent_no_loss(self):
@@ -80,7 +80,8 @@ class TestObsStats(unittest.TestCase):
 
 
 class TestQueueManagerDropWiring(unittest.TestCase):
-    """queue_manager 丢弃点→obs_stats 接线断言（P-1 分桶口径）。"""
+    """queue_manager 丢弃点→obs_stats 接线断言（P-1 分桶口径；2026-11-15 批次
+    999 单实例约束随 999 机制退役，分桶格移除）。"""
 
     def _make_mixin(self):
         from utils.audio.queue_manager import QueueMixin
@@ -95,7 +96,6 @@ class TestQueueManagerDropWiring(unittest.TestCase):
         host.voice_tmp_path_queue_not_empty = _th.Condition(host.voice_tmp_path_queue_lock)
         host.message_queue_not_empty_flag = False
         host.voice_tmp_path_queue_not_empty_flag = False
-        host.active_reread_top_999 = False
         cfg = mock.MagicMock()
         cfg.get.side_effect = lambda *keys, **kw: {
             ("filter", "priority_mapping"): {},
@@ -113,18 +113,6 @@ class TestQueueManagerDropWiring(unittest.TestCase):
             host.data_priority_insert("等待合成消息", {"type": "comment", "content": str(i)})
         host.data_priority_insert("等待合成消息", {"type": "comment", "content": "第三条低优"})
         self.assertEqual(snapshot()["drops"].get("message_queue_full"), 1)
-
-    def test_audio_999_rejected_counted(self):
-        _reset_stats()
-        host = self._make_mixin()
-        mapping = {("filter", "priority_mapping"): {"reread_top_priority": 999},
-                   ("filter", "voice_tmp_path_queue_max_len"): 2,
-                   ("filter", "voice_tmp_path_queue_min_start_play"): 0}
-        host.config.get.side_effect = lambda *keys, **kw: mapping.get(keys, {})
-        host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "a.mp3"})
-        host.active_reread_top_999 = True
-        host.data_priority_insert("待播放音频列表", {"type": "reread_top_priority", "voice_path": "b.mp3"})
-        self.assertEqual(snapshot()["drops"].get("audio_999_rejected"), 1)
 
     def test_rule4_dropped_counted(self):
         _reset_stats()

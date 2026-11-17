@@ -121,6 +121,7 @@ _RETIRED_CONFIG_KEYS: list = [
     (("metahuman_stream",), "metahuman_stream 配置节已退役（2026-10-22 批次），整节不再读取，可删除"),
     (("game",), "game 配置节已退役（游戏控制实现已移除，chat_type=game 不可用），可删除"),
     (("audio_player", "priority_mapping"), "audio_player.priority_mapping 已收敛至 filter.priority_mapping（运行时自动合并迁移），可删除"),
+    (("filter", "priority_mapping", "dynamic_text"), "filter.priority_mapping.dynamic_text 已去重移除（2026-11-14：编排动态文案音频经答谢链 priority_override 插队，此键无消费点；动态文案权重见 trends_copywriting），可删除"),
     (("filter", "lang_filter"), "filter.lang_filter 已退役（语言过滤由顶层 need_lang 键驱动），可删除"),
     (("talk", "show_chat_log"), "talk.show_chat_log 已退役（2026-10-25 批次：聊天记录固定记录弹幕与聊天互动，不再需要开关），可删除"),
     (("talk", "no_recording_during_playback_sleep_interval"), "talk.no_recording_during_playback_sleep_interval 已退役（2026-10-30 聊天审查批次：待播放音频列表为 0 才进行录音检测，不再需要间隔参数），可删除"),

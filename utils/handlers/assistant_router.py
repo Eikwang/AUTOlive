@@ -34,7 +34,8 @@ ROUTE_TABLE = {
     "llm_reply": {"comment": "ai_chat", "chatbox": "chat"},
     # 主 KB 命中产线（local_qa_handle）：同上区分（D6，chat_type=local_qa 模式）
     "main_kb_hit": {"comment": "ai_chat", "chatbox": "chat"},
-    # 复读归拢"聊天"（D2 终门 uc1a：勾选后助播外放不再抢占数字人；未勾选维持 999 原链）
+    # 复读归拢"聊天"（D2 终门 uc1a：勾选后助播外放不再抢占数字人；未勾选维持
+    # 复读原链——999 特殊机制 2026-11-15 已退役，reread_top_priority 映射 500）
     "reread": {None: "chat"},
     # 念弹幕（念弹幕原文，直 TTS 不过知识库——D5）
     "read_comment": {None: "read_comment"},

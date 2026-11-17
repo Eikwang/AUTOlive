@@ -56,7 +56,9 @@ KNOWN_PRODUCER_TYPES = frozenset({
     "integral", "key_mapping", "song",
     "local_qa_text", "local_qa_audio",
     "assistant_anchor_text", "assistant_anchor_audio",
-    "dynamic_text",  # 2026-11-05 编排优化批次 d21：动态文案独立类型（编排规则 TTS 音频 type；权重 15 与编排面 d10 对齐）
+    # dynamic_text 移除（2026-11-15 批次）：编排动态文案音频经答谢链 type+
+    # priority_override 入队，类型映射无消费点（2026-11-14 去重的清单面收尾，
+    # 与 tests/features/test_queue_review_1031.py PRODUCER_TYPES 同口径）
 })
 
 
@@ -152,8 +154,9 @@ def check_priority_mapping_coverage(config):
             if missing:
                 warns.append(
                     f"filter.priority_mapping 缺键：{missing}——这些类型的消息将按未识别排队"
-                    f"（队尾+满则丢弃，trends_copywriting 断链例证）；请在优先级页补配或"
-                    f"对照 config.example.json")
+                    f"（队尾+满则丢弃，trends_copywriting 断链例证）；请对照 config.example.json"
+                    f"在 config.json 的 filter.priority_mapping 补键（优先级页缺省过滤不渲染"
+                    f"缺失键；预设按钮可整表写入但会覆盖定制权重）")
     except Exception:
         pass
     return warns
