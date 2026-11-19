@@ -488,6 +488,9 @@ class QueueMixin:
         （撕裂）+静默间隙（卡顿）+尾段逐次重放（重复），且违背助播并行
         消费语义（2026-10-27 批次）；d12 原始场景=EDTalk 未激活同声道，
         保持生效。
+        **组原子让位门**（2026-11-17 组原子消费批次）：在播条目属于非动态
+        文案切分段组 → 不让位（组原子语义：组播完前其他信息不得插入组中间，
+        新条目仅入队等待组完）；动态文案组维持本方法既有让位现状。
         已挂起时播放器侧自行忽略（R2-A7c 排队不打断）。仅 builtin 具备暂停-
         续播机制。
         """
@@ -509,6 +512,18 @@ class QueueMixin:
                 # 不让位（routes_to_edtalk 单源判定，防条件漂移）
                 from utils.audio.playback_manager import routes_to_edtalk
                 if routes_to_edtalk(data_json, self.config):
+                    return
+                # 组原子让位门（2026-11-17 组原子消费批次）：在播条目属于非
+                # 动态文案切分段组 → 不让位——组播完前其他信息不得插入组中间
+                # （新条目仅入队等待组完；消费循环组原子门保证组连续消费）。
+                # 动态文案组/非切分条目维持 d12 让位现状。fail-open：在播条目
+                # 不可得（无 get_playing_entry 能力）退既有让位语义。
+                playing_entry = (player.get_playing_entry()
+                                 if hasattr(player, "get_playing_entry") else None)
+                _psg = (playing_entry.get("split_group")
+                        if isinstance(playing_entry, dict) else None)
+                if (isinstance(_psg, dict) and _psg.get("id")
+                        and playing_entry.get("type") != "trends_copywriting"):
                     return
                 # ② d12：严格更高权重新音频 → 在播条目让位
                 player.request_yield()

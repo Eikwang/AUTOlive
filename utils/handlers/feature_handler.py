@@ -11,6 +11,8 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime
+from typing import Any
+
 from ..error_handler import handle_error, safe_execute
 from ..base import logger
 
@@ -142,6 +144,16 @@ _DEFAULT_QUERY_NO_RECORD_COPY = "{username}，您暂无积分，签到、互动�
 # 查询库不可达时的通用失败文案（DX CAP6：查询失败不静默）
 _DEFAULT_QUERY_ERROR_COPY = "积分查询失败，请稍后再试"
 
+# 积分累计播报默认文案（2026-11-17 积分播报批次）：config 缺
+# integral.<module>.broadcast_copy 时回退使用。变量 {username}=展示名
+# （数字转中文口径同回复文案）、{integral}=本次累计后的当前总积分
+_INTEGRAL_BROADCAST_DEFAULT_COPY = {
+    "sign": "感谢 {username} 签到，积分+1",
+    "gift": "{username} 的礼物已记入积分，当前 {integral} 分",
+    "entrance": "欢迎 {username} 回来，积分+1",
+    "follow": "感谢 {username} 关注，积分+1",
+}
+
 
 def parse_interval(interval_str):
     """解析 "lo-hi" 区间字符串为 (lo, hi) 浮点闭区间；格式非法返回 None。"""
@@ -200,7 +212,12 @@ class FeatureHandler:
     # 礼物/弹幕型自匹配与中枢命中组四处分派循环共用此常量）
     _KEYMAP_TRIGGERS = ["key_trigger_type", "serial_trigger_type"]
 
-    
+    # 黑名单规范化集合缓存（2026-11-17 热切机制批次）：签名比对+变更才重建——
+    # 名单每弹幕实时读语义不变，仅 NFKC/casefold 全表重算降为签名命中零开销。
+    # 类级缓存（CommentHandler._BADWORDS_CACHE 同款）：多实例共享，签名失配自愈
+    _BLACKLIST_SIG: Any = None       # 上次构建签名（原始条目元组）
+    _BLACKLIST_SET: Any = None       # 上次构建的规范化条目集合
+
     def __init__(self, my_handle):
         """
         初始化功能处理器
@@ -211,6 +228,11 @@ class FeatureHandler:
         self.my_handle = my_handle
         # 积分缺键告警去重（每个键仅警告一次，避免直播期间刷屏）
         self._integral_warned_keys = set()
+        # 2026-11-19 积分播报门控批次：本事件积分播报是否实际发生（写库成功且未限频
+        # 拦截且播报开关开启）。gift/entrance/follow 事件经 integral_handle 入口先复位、
+        # _integral_broadcast 实际入队播报后置 True——答谢抑制门（event_handler
+        # _integral_gate_suppress）据此判定是否跳过礼物/入场/关注答谢语音（防同事件双重播报）
+        self._integral_broadcast_fired = False
     
     def _qa_entries(self, source):
         """问答数据源解析（2026-10-31 本地问答审查批次）：config 内嵌行列表
@@ -460,6 +482,9 @@ class FeatureHandler:
             from .assistant_router import assistant_route, assistant_copy_message
             _src = (data or {}).get("chat_source") or "comment"
             if assistant_route(self.my_handle.config, "main_kb_hit", _src):
+                # 主 KB 直答=助播键语义（2026-11-19 助播权重保留批次）：
+                # assistant_anchor_text 类型映射即 KB 命中产线的排序身份，
+                # 不传 origin_type（不写 priority_override）
                 message = assistant_copy_message(
                     self.my_handle.config, resp_content,
                     username=username, producer_type="main_kb_hit", source=_src,
@@ -496,13 +521,16 @@ class FeatureHandler:
 
     def _song_copy_message(self, username, copy_text):
         """R4 助播路由（T1 收编为中央助手调用方）：assistant_anchor.type 含 "song"
-        → 文案走助播通道（type=assistant_anchor_text + 助播名，享受助播优先级）；
-        未开启走默认 TTS（type=comment 原路）。返回可直接 audio_synthesis_handle 的消息。"""
+        → 文案走助播通道（type=assistant_anchor_text + 助播名）；未开启走默认
+        TTS（type=comment 原路）。返回可直接 audio_synthesis_handle 的消息。
+        2026-11-19 助播权重保留批次：点歌答复非 KB 产线，改判后经 origin_type
+        保留 song 产线原权重（仅换出口不改排序身份）。"""
         from .assistant_router import assistant_route, assistant_copy_message
         if assistant_route(self.my_handle.config, "song"):
             return assistant_copy_message(
                 self.my_handle.config, copy_text,
-                username=username, producer_type="song", hit_layer="direct")
+                username=username, producer_type="song", hit_layer="direct",
+                origin_type="song")
         return {
             "type": "comment",
             "tts_type": self.my_handle.config.get("audio_synthesis_type"),
@@ -848,6 +876,12 @@ class FeatureHandler:
                   积分链消费（静默拦截不计分），不再落入 LLM/助播链
         """
         try:
+            # 2026-11-19 积分播报门控批次：gift/entrance/follow 事件每次先复位「积分播报
+            # 实际发生」标志（置于 enable 检查前——积分关/限频/写库失败等未播报路径
+            # 也不会残留上一事件的 True，答谢抑制门据此回退答谢照旧）
+            if type in ("gift", "entrance", "follow"):
+                self._integral_broadcast_fired = False
+
             # 检查是否启用积分（中枢判定通道下保留双检：热载竞态兜底，成本可忽略）
             if not self.my_handle.config.get("integral", "enable"):
                 return False
@@ -952,7 +986,12 @@ class FeatureHandler:
             message = assistant_copy_message(
                 self.my_handle.config, resp_content,
                 username=data.get("username", ""), producer_type="integral",
-                hit_layer="direct")
+                hit_layer="direct",
+                # 积分回复非 KB 产线：改判助播保留原产线 comment 权重——积分
+                # 回复实际产出 type=comment，priority_mapping 的遗留键
+                # "integral" 无产线消费（2026-11-19 助播权重保留批次，用户未
+                # 裁决删除，暂保留键不清理）
+                origin_type="comment")
         else:
             message = {
                 "type": "comment",
@@ -1000,6 +1039,76 @@ class FeatureHandler:
             logger.warning("积分档位文案缺失，本行为积分已计入但不回复")
             return False
         return self._integral_format_and_reply(copy_list, data, variables)
+
+    def _integral_broadcast(self, module, data):
+        """积分累计播报（2026-11-17 积分播报批次）：积分累计成功（写库成功且未被
+        限频拦截）后按模块 broadcast 开关判定——开启则以 integral.<module>.broadcast_copy
+        模板组装播报文案（{username}/{integral} 变量填充，{integral}=本次累计后的当前
+        总积分，取自写库后的最新行），复用 _integral_reply 通道入队（type=comment，
+        与查询回复同 type/权重口径）。开关关闭（默认 False）/文案缺失/总积分查询失败/
+        变量填充失败均静默跳过（播报为 best-effort，不影响积分主流程）；限频拦截与
+        写库失败在调用方提前 return，不会走到本方法。
+
+        2026-11-19 积分播报门控批次：返回值改为可判定标志——True=本事件播报实际
+        发生（文案已入队），False=未播报（开关关/文案缺失/总积分查询失败/变量填充
+        失败/异常）。实际入队成功同步置 _integral_broadcast_fired=True，答谢抑制门
+        （event_handler._integral_gate_suppress）据此抑制同事件的礼物/入场/关注答谢
+        语音（防双重播报）。
+
+        Args:
+            module (str): 积分模块名（sign/gift/entrance/follow）
+            data (dict): 行为数据（platform/username/uid 等）
+
+        Returns:
+            bool: 播报是否实际发生
+        """
+        try:
+            self._integral_broadcast_fired = False
+            enabled = self.my_handle.config.get("integral", module, "broadcast")
+            if not enabled:
+                return False  # 开关缺省/关闭：保持现状不播报（只写库）
+            copy_template = self.my_handle.config.get("integral", module, "broadcast_copy")
+            if not copy_template:
+                copy_template = _INTEGRAL_BROADCAST_DEFAULT_COPY.get(module)
+                self._integral_warn_once(f"integral.{module}.broadcast_copy",
+                                         f"积分配置缺少 integral.{module}.broadcast_copy，使用默认播报文案")
+            if not copy_template:
+                return False
+
+            platform, username, uid = self._integral_identity(data)
+            row = self._integral_fetch_row(platform, username, uid)
+            if row is None:
+                # 累计后总积分取不到（库瞬时不可达等）：跳过播报（best-effort）
+                logger.warning(f"[积分播报] {module} 累计后总积分查询失败，跳过播报：{username}")
+                return False
+            variables = {
+                "username": self._integral_display_name(username),
+                "integral": int(row[0] or 0),
+            }
+            result = self.my_handle.common.get_random_str_in_list_and_format(
+                None, [str(copy_template)], variables)
+            content = result.get("content") if result and result.get("ret") == 0 else None
+            if not content:
+                logger.warning(f"[积分播报] {module} 播报文案变量替换失败，跳过播报：{username}")
+                return False
+            self._integral_reply(data, content)
+            # 2026-11-19 积分播报门控批次：实际入队成功——标记本事件播报已发生
+            self._integral_broadcast_fired = True
+            return True
+        except Exception:
+            # CAP6 partial：积分已计入，播报失败 log 记录不算失败
+            logger.error(traceback.format_exc())
+            logger.error("[积分播报] 播报失败（积分已计入，播报缺失不影响主流程）")
+            return False
+
+    def integral_broadcast_fired(self):
+        """2026-11-19 积分播报门控批次：本事件积分播报是否实际发生（写库成功且未
+        限频拦截且播报开关开启，文案已实际入队）。
+
+        答谢抑制门（event_handler._integral_gate_suppress）判定依据；标志语义为
+        「单事件瞬时态」——gift/entrance/follow 事件经 integral_handle 入口复位、
+        _integral_broadcast 实际入队后置 True。"""
+        return bool(getattr(self, "_integral_broadcast_fired", False))
 
     def _integral_sign_handle(self, data, hub_result=None):
         """签到计分：弹幕命中签到命令词 → UPSERT 计分（sign_num 自增）+ 按签到次数档位回复。
@@ -1063,6 +1172,8 @@ class FeatureHandler:
             "get_integral": points,
             "sign_num": new_sign_num,
         })
+        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
+        self._integral_broadcast("sign", data)
         return True
 
     def _integral_gift_handle(self, data):
@@ -1107,6 +1218,8 @@ class FeatureHandler:
             "total_price": total_price,
             "get_integral": points,
         })
+        # 2026-11-17 积分播报批次：累计成功（写库成功）后按开关播报
+        self._integral_broadcast("gift", data)
         return True
 
     def _integral_entrance_handle(self, data):
@@ -1154,6 +1267,8 @@ class FeatureHandler:
             "get_integral": points,
             "entrance_num": new_view_num,
         })
+        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
+        self._integral_broadcast("entrance", data)
         return True
 
     def _integral_follow_handle(self, data):
@@ -1202,6 +1317,8 @@ class FeatureHandler:
             "username": self._integral_display_name(username),
             "get_integral": points,
         })
+        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
+        self._integral_broadcast("follow", data)
         return True
 
     def _integral_query_handle(self, data, hub_result=None):
@@ -1492,6 +1609,11 @@ class FeatureHandler:
         S-2 匹配语义：平台 UID 优先，其次 NFKC+去全部空白+casefold 规范化匹配
         （防全角/零宽字符/首尾空格/大小写绕过）。
 
+        2026-11-17 热切机制批次：名单值每事件实时读（改名单/开关即时生效不变），
+        规范化集合按「签名比对+变更才重建」缓存——高频路径（每弹幕）此前全表
+        重算 NFKC/casefold（名单数百人 × 每条弹幕线性放大）；签名=原始条目
+        元组，内容变化（含换行名单重排）即失效重建。
+
         Args:
             data (dict): 数据（含 username，可能含 uid）
 
@@ -1516,7 +1638,14 @@ class FeatureHandler:
             if not entries:
                 return False  # 空名单=功能关闭（UI 无独立开关）
 
-            normalized_entries = {self._normalize_blacklist_entry(e) for e in entries}
+            # 签名比对+变更才重建（2026-11-17 热切机制批次）：签名命中直接复用
+            # 上次规范化集合，未命中重建并更新缓存
+            sig = tuple(entries)
+            if FeatureHandler._BLACKLIST_SIG != sig or FeatureHandler._BLACKLIST_SET is None:
+                FeatureHandler._BLACKLIST_SET = {
+                    self._normalize_blacklist_entry(e) for e in entries}
+                FeatureHandler._BLACKLIST_SIG = sig
+            normalized_entries = FeatureHandler._BLACKLIST_SET
 
             # UID 优先匹配（弹幕链路载荷含 uid 时）
             uid = data.get("uid")

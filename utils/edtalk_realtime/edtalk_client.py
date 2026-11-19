@@ -39,6 +39,10 @@ FLIGHT_MARGIN = 1.05
 # FLIGHT_MARGIN 时间启发式承担）
 _POLL_INTERVAL = 0.2
 _POLL_DEADLINE = 1.0
+# 2026-11-17 热切机制批次：连接基址解析 TTL 缓存（秒）——resolve_api_base 每
+# 次调用读运行时文件（磁盘 IO），push_full 属逐句音频路径，不做每请求 open；
+# 端口变更（服务重启自动换端口写运行时文件/配置 api_ip_port 修改）最迟 TTL 内生效
+_API_BASE_TTL_S = 60.0
 
 
 def _resample_pcm(pcm_bytes: bytes, width: int, channels: int, rate: int) -> bytes:
@@ -130,12 +134,28 @@ def _ensure_wav_riff(path: str):
 class EDTalkClient:
     """EDTalk realtime_serve HTTP 客户端（单例，挂在 Audio 类上）。"""
 
-    def __init__(self, config_data: dict):
+    def __init__(self, config_data: dict = None, config_obj=None):
+        """2026-11-17 热切机制批次：连接级参数（api_ip_port/api_token）改运行期现读。
+
+        - config_data：启动快照（edtalk_realtime 节），作 config_obj 缺失时的
+          回退基线（旧签名兼容——测试/外部直调仍可只传节 dict）；
+        - config_obj：共享 Config 实例（utils/config.py 类级缓存，Config.get
+          实时读内存）——audio_core 注入，热重载（webui 落盘→合成链 mtime
+          门控 Config.reload）后每请求取到新值，零磁盘 IO。
+
+        连接语义说明：本客户端为 HTTP 通道（每请求独立 session，无长连 ws），
+        连接地址/令牌变更即下次请求生效，无"重连"概念；enable 开关关断由
+        push_full 入口实时门控（停止新发送）即时生效。
+        """
         self.config_data = config_data or {}
+        self._config_obj = config_obj
         # 端口解析统一走运行时文件（webui 拉起后写入，支持占用自动切换）；
-        # config api_ip_port 仅作存量/测试回退（2026-10-26 配置面收敛）
+        # config api_ip_port 仅作存量/测试回退（2026-10-26 配置面收敛）。
+        # 构造时解析一次作初始值兼 TTL 缓存预热（运行期经 _api_base() 现读刷新）。
         from utils.edtalk_realtime.runtime import resolve_api_base
         self.api_ip_port = resolve_api_base(self.config_data)
+        self._api_base_cache = self.api_ip_port
+        self._api_base_at = time.monotonic()
         # 推送健康度（运营可见：webui 经 main.py /edtalk_status 轮询）
         self.failure_count = 0
         self.last_error = ""
@@ -146,15 +166,58 @@ class EDTalkClient:
         # 推送锁：串行化推送（多消息来源防护）
         self._push_lock = asyncio.Lock()
 
+    # ---------- 2026-11-17 热切机制批次：配置现读 ----------
+    def _live_section(self) -> dict:
+        """edtalk_realtime 节现读：共享 Config 内存视图优先（零 IO、热重载即见），
+        回退构造快照（config_obj 缺失时的旧语义）。"""
+        if self._config_obj is not None:
+            try:
+                section = self._config_obj.get("edtalk_realtime")
+                if isinstance(section, dict):
+                    return section
+            except Exception:
+                pass
+        return self.config_data or {}
+
+    def _api_base(self) -> str:
+        """连接基址现读（TTL 缓存防每请求磁盘 IO，见 _API_BASE_TTL_S 注释）。"""
+        now = time.monotonic()
+        if now - self._api_base_at < _API_BASE_TTL_S:
+            return self._api_base_cache
+        try:
+            # 局部导入（对齐 __init__ 先例）；resolve_api_base 的 legacy 回退按
+            # 全量 config 形态取 edtalk_realtime.api_ip_port——包装节 dict 保持
+            # 该回退对节内现读值生效
+            from utils.edtalk_realtime.runtime import resolve_api_base
+            base = resolve_api_base({"edtalk_realtime": self._live_section()})
+        except Exception:
+            base = self._api_base_cache
+        self._api_base_cache = base or self._api_base_cache
+        self._api_base_at = now
+        return self._api_base_cache
+
+    def _edtalk_enabled(self) -> bool:
+        """enable 开关现读（helpers.is_edtalk_active 同源语义：visual_body 双键
+        判定）。config_obj 缺失（旧签名/测试替身）时维持构造时行为不门控。"""
+        if self._config_obj is None:
+            return True
+        try:
+            if self._config_obj.get("visual_body") != "edtalk_realtime":
+                return False
+            return bool(self._config_obj.get("edtalk_realtime", "enable"))
+        except Exception:
+            return True
+
     def _auth_headers(self) -> dict:
-        token = (self.config_data.get("api_token") or "").strip()
+        # 热切机制批次：api_token 现读（原读构造快照引用，热重载后失效）
+        token = str((self._live_section().get("api_token") or "")).strip()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def _get_status(self, session: aiohttp.ClientSession) -> dict:
         """GET /status；失败返回 {}。"""
         try:
             async with session.get(
-                f"{self.api_ip_port}/status", headers=self._auth_headers(), timeout=aiohttp.ClientTimeout(total=3)
+                f"{self._api_base()}/status", headers=self._auth_headers(), timeout=aiohttp.ClientTimeout(total=3)
             ) as resp:
                 if resp.status == 200:
                     return await resp.json()
@@ -220,6 +283,16 @@ class EDTalkClient:
             True = 推送成功；False = 失败（已降级记录）
         """
         async with self._push_lock:
+            # 2026-11-17 热切机制批次：enable 关断即时生效——推送入口现读
+            # visual_body+edtalk_realtime.enable 双键（is_edtalk_active 同源），
+            # 关断后停止一切新发送（HTTP 通道无长连可断，逐句门控即"断开"语义）。
+            # 上游分流（synthesis_manager/playback_manager）同样实时判定，此处为
+            # 竞态窗口内已入队推送的兜底闸；关断按显式决策记 debug（非故障，
+            # 不计失败计数不告警）。
+            if not self._edtalk_enabled():
+                logger.debug("[EDTalk] edtalk_realtime.enable=false（现读），跳过推送："
+                             f"{content[:30]}")
+                return False
             wav_path, tmp_created = pcm_path, False
             try:
                 # RIFF 归一（2026-10-25 实测修复）：edge_tts 产物是 mp3（无 RIFF 头），
@@ -236,7 +309,7 @@ class EDTalkClient:
                     if wait_flight:
                         await self._wait_flight_complete(session, self.last_duration_s)
                     async with session.post(
-                        f"{self.api_ip_port}/audio/push_full",
+                        f"{self._api_base()}/audio/push_full",
                         json={"pcm_base64": payload},
                         headers=self._auth_headers(),
                     ) as resp:
@@ -322,7 +395,7 @@ class EDTalkClient:
             samples = max(1, int(TARGET_RATE * duration_s))
             pcm = b"\x00\x00" * samples  # int16 单声道静音
             resp = requests.post(
-                f"{self.api_ip_port}/audio/push_full",
+                f"{self._api_base()}/audio/push_full",
                 json={"pcm_base64": base64.b64encode(pcm).decode("ascii")},
                 headers=self._auth_headers(),
                 timeout=5,
@@ -346,7 +419,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/output/pause",
+                f"{self._api_base()}/output/pause",
                 json={},
                 headers=self._auth_headers(),
                 timeout=5,
@@ -370,7 +443,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.get(
-                f"{self.api_ip_port}/status",
+                f"{self._api_base()}/status",
                 headers=self._auth_headers(),
                 timeout=3,
             )
@@ -388,7 +461,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/output/resume",
+                f"{self._api_base()}/output/resume",
                 json={},
                 headers=self._auth_headers(),
                 timeout=5,
@@ -406,7 +479,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/segment/switch",
+                f"{self._api_base()}/segment/switch",
                 json={"segment": segment, "at": at},
                 headers=self._auth_headers(),
                 timeout=5,
@@ -425,7 +498,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/lip/params",
+                f"{self._api_base()}/lip/params",
                 json={"mode": mode},
                 headers=self._auth_headers(),
                 timeout=3,
@@ -446,7 +519,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/repair/params",
+                f"{self._api_base()}/repair/params",
                 json={"mode": mode},
                 headers=self._auth_headers(),
                 timeout=3,
@@ -467,7 +540,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/gaze/params",
+                f"{self._api_base()}/gaze/params",
                 json={"mode": mode},
                 headers=self._auth_headers(),
                 timeout=3,
@@ -491,7 +564,7 @@ class EDTalkClient:
         try:
             import requests
             resp = requests.post(
-                f"{self.api_ip_port}/segment/schedule",
+                f"{self._api_base()}/segment/schedule",
                 json={"sequence": list(sequence), "align": bool(align),
                       "loop": loop if loop in ("forward", "pingpong") else "forward"},
                 headers=self._auth_headers(),
@@ -506,7 +579,7 @@ class EDTalkClient:
         """GET /status 同步版（供 webui 控制区轮询直连）。"""
         try:
             import requests
-            resp = requests.get(f"{self.api_ip_port}/status", headers=self._auth_headers(), timeout=3)
+            resp = requests.get(f"{self._api_base()}/status", headers=self._auth_headers(), timeout=3)
             return resp.json() if resp.status_code == 200 else {}
         except Exception:
             return {}

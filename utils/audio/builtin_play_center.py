@@ -181,11 +181,15 @@ class _CallbackLoop:
 class AUDIO_PLAY_CENTER:
     """内置播放器（进程内队列播放：插队/暂停/续播/跳过/清队）"""
 
-    def __init__(self, config_data, config_path="config.json"):
+    def __init__(self, config_data, config_path="config.json", config_obj=None):
         # config_data = config.get("audio_player") 快照（priority_mapping 等静态语义）；
         # device_index / queue_max 播放时经 config_path 现场读取（eng E 系"写了不读"修复）。
+        # 2026-11-17 热切机制批次：config_obj=共享 Config 实例（audio_core 注入）——
+        # _hot_value 升级为内存现读优先（零每事件磁盘 IO，与合成链 mtime 门控
+        # Config.reload 同源同步）；config.json 现读保留为回退（config_obj 缺失/节缺键）。
         self.config_data = config_data or {}
         self.config_path = config_path
+        self._config_obj = config_obj
 
         self.audio = pyaudio.PyAudio()
         self.stream = None
@@ -216,6 +220,7 @@ class AUDIO_PLAY_CENTER:
         self._suspended_999_alarm_at = None  # 本挂起期看门狗已告警标记（去重）
         self._suspended_play = None    # 挂起现场 {"wf","tmp_audio_path"}（流=self.stream）
         self._playing_weight = None    # 当前播放条目有效权重（e3/d12 泛化让位判定；None=空闲）
+        self._playing_entry = None     # 当前播放条目原始数据（2026-11-17 组原子消费批次：组原子让位门判定源）
         self._current_output_rate = 0  # 输出采样率（F-5：回退 1 秒帧数折算基准）
         self._underrun_count = 0       # 输出欠载计数（2026-11-13 抗 underrun 观测）
         self._use_mci = False          # 当前条目是否走 MCI 原生播放后端
@@ -238,7 +243,20 @@ class AUDIO_PLAY_CENTER:
 
     # ---------- 配置现读 ----------
     def _hot_value(self, key, default):
-        """播放时现场读 audio_player.<key>（config.json 单文件模式）"""
+        """播放时现读 audio_player.<key>。
+
+        2026-11-17 热切机制批次：优先共享 Config 内存现读（零磁盘 IO；合成链
+        mtime 门控 Config.reload 后类缓存刷新，本视图即时同新），节存在但键缺
+        失/Config 不可用时回退 config.json 现场读取（原语义），再回退启动快照。
+        device_index 变更=下一条目播放时生效（流打开时读取）；已开播条目不受
+        影响（设备切换类属"重建生效"，不做运行中迁移）。"""
+        if self._config_obj is not None:
+            try:
+                section = self._config_obj.get("audio_player")
+                if isinstance(section, dict) and section.get(key) is not None:
+                    return section.get(key)
+            except Exception:
+                pass
         cfg_all = _load_config_file(self.config_path)
         if cfg_all is None:
             return (self.config_data or {}).get(key, default)
@@ -440,6 +458,14 @@ class AUDIO_PLAY_CENTER:
         """当前播放条目有效权重（d12 b 触发判定用；None=空闲/未知）。"""
         return self._playing_weight
 
+    def get_playing_entry(self):
+        """当前播放条目原始数据（2026-11-17 组原子消费批次：queue_manager
+        组原子让位门判定源——在播条目 split_group 组型决定是否让位；None=
+        空闲/未知/挂起窗口。与 _current（字幕摘要）分离：摘要截断不含
+        split_group。挂起恢复路径不回填（fail-open 退既有让位语义，可接受
+        ——组原子门已阻断非文案组被挂起，恢复态条目必为文案组/非组条目）。"""
+        return self._playing_entry
+
     def _wait_loop(self):
         """播放等待循环（A7 重构，F-2 修复；2026-11-15 批次：999 机制退役，
         原 is_999 参数随 999 专属分支删除——泛化让位分支对任意在播条目生效）。
@@ -493,6 +519,7 @@ class AUDIO_PLAY_CENTER:
                 pass
         self._current = None
         self._playing_weight = None
+        self._playing_entry = None  # 2026-11-17 组原子消费批次：在播条目原始数据同清
         self._use_mci = False
 
     def _resume_suspended_999(self):
@@ -605,6 +632,7 @@ class AUDIO_PLAY_CENTER:
             time.sleep(interval)
 
     def _play_item(self, data_json):
+        self._playing_entry = None
         voice_path = data_json.get("voice_path")
         if not voice_path or not os.path.isfile(voice_path):
             self._record_error(f"音频文件不存在，跳过：{voice_path}")
@@ -649,6 +677,9 @@ class AUDIO_PLAY_CENTER:
 
         wf = wave.open(tmp_audio_path, "rb")
         self._skip_event.clear()
+        # 2026-11-17 组原子消费批次：在播条目原始数据（组原子让位门判定源；
+        # 与 _current 摘要分离——摘要截断不含 split_group）
+        self._playing_entry = data_json
         self._current = {
             "type": data_json.get("type", ""),
             "content": str(data_json.get("content", ""))[:20],
@@ -804,9 +835,25 @@ class AUDIO_PLAY_CENTER:
         T2/e2（2026-11-05）：条目有效权重经 audio_priority 单一源——
         priority_override 优先于类型映射（编排插队 500 在 builtin 队列同样
         生效；2026-11-15 批次 999 机制退役，reread_top_priority 映射 500 保持
-        最高顺位；与 queue_manager._entry_priority 同源防漂移）。"""
+        最高顺位；与 queue_manager._entry_priority 同源防漂移）。
+
+        组原子地板（2026-11-17 组原子消费批次）：pending 区存在非动态文案
+        切分段组（split_group）时，新条目不得插到其 pending 段之前——组段经
+        play() 提前移交后已脱离消费循环队列，消费循环的组原子门管不到移交层，
+        不设地板则后到高权重条目按权重插队会把移交中的组段拆散=组中间插播
+        （违背组原子语义）。地板=最后一个非文案组 pending 段位置+1；插队只
+        能落在组段之后（地板下移不触达 insert_index 显式定位路径——编排
+        显式定位机制不越权改写）。"""
         from utils.audio.audio_priority import entry_priority
         priority_mapping = self._priority_mapping()
+
+        # 组原子地板扫描（O(n)，队列上限 queue_max 有界）
+        group_floor = 0
+        for i, item in enumerate(self.audio_json_list):
+            _sg = item.get("split_group") if isinstance(item, dict) else None
+            if (isinstance(_sg, dict) and _sg.get("id")
+                    and item.get("type") != "trends_copywriting"):
+                group_floor = i + 1
 
         new_priority = entry_priority(audio_json, priority_mapping)
         if new_priority is None:
@@ -818,6 +865,8 @@ class AUDIO_PLAY_CENTER:
                 if item_priority is not None and item_priority >= new_priority:
                     insert_position = i + 1
                     break
+            if insert_position < group_floor:
+                insert_position = group_floor  # 组原子地板：不让插到组 pending 段前
         self.audio_json_list.insert(insert_position, audio_json)
 
     def pause_stream(self):

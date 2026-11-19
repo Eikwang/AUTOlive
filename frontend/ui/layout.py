@@ -4,6 +4,7 @@ UI布局模块
 负责创建主界面布局
 """
 import asyncio
+import json
 
 from nicegui import ui
 from typing import Dict, Any, Optional
@@ -21,7 +22,91 @@ CONFIRM_CLOSE_PATHS: Dict[tuple, Dict[str, str]] = {
         "title": "确认关闭过滤总开关",
         "message": "关闭后违禁词过滤同时失效——直播中可能播出违禁内容",
     },
+    # 2026-11-17 热切机制批次：弹幕监听关闭升级为运行面即时停监听（此前=重启
+    # 生效无即时风险），与过滤总开关同入 D-24 防呆语义——防直播中误点一下
+    # 即全平台停听
+    ("danmaku_listener", "enabled"): {
+        "title": "确认关闭弹幕监听",
+        "message": "运行中关闭将立即停止全部平台监听（弹幕/礼物事件中断），重启系统前不再恢复",
+    },
 }
+
+
+# ============ 二级菜单开关热切（2026-11-17 热切机制批次） ============
+# 开关此前=纯配置意图（单键窄写落盘，重启系统后生效——enable_paths.py 注记）。
+# 本批次升级：写盘成功后旁路调用 main 运行面切换端点，运行中即时生效；main
+# 不可达（webui 与 main 分离/未启动，连接拒绝）时静默回退「重启生效」语义，
+# 现有 toast 不变。分流先例：platform_config.py _write_rooms/_write_keywords
+# （running 走窄端点、离线直写 config）与 choreography/integral 开关迁移批次。
+
+# 热切路径注册表：config 路径 → 运行面切换说明（仅注册已具备运行面切换端点的
+# 路径；未注册路径维持「重启生效」语义不变）
+HOT_APPLY_PATHS: Dict[tuple, str] = {
+    # 弹幕监听总开关 → /danmaku/service/toggle（main 端启停监听线程/在线重建）
+    ("danmaku_listener", "enabled"): "danmaku_service_toggle",
+    # 编排总开关 → /choreography/rules（整节=磁盘权威节点校验+热换装+持久化，
+    # 管理页「应用」同链路；choreography.enable 快照消费——不经换装不生效）
+    ("choreography", "enable"): "choreography_rules_apply",
+}
+
+_HOT_SESSION: Optional[Any] = None    # 本机控制面直连 Session（惰性创建）
+
+
+def _hot_api_session():
+    """本机控制面专用 Session（trust_env=False——platform_config._LOCAL_SESSION
+    同款根因：系统代理环境下 127.0.0.1 请求会被代理吞掉）。"""
+    global _HOT_SESSION
+    if _HOT_SESSION is None:
+        import requests as _requests
+        _HOT_SESSION = _requests.Session()
+        _HOT_SESSION.trust_env = False
+        _HOT_SESSION.proxies = {"http": None, "https": None}
+    return _HOT_SESSION
+
+
+def _hot_api_post(path: str, body: dict, timeout: float = 30.0) -> Optional[dict]:
+    """本机控制面 POST（仅热切旁路使用）。
+
+    Returns:
+        dict: HTTP 200 → 响应 JSON；非 200 → {"_status": code, **响应 JSON}
+        （编排端点把 409/503 语义内嵌在 200 body，_status 兜底真实 HTTP 态）。
+        None = main 不可达（连接拒绝/超时）——调用方回退「重启生效」语义。
+    """
+    try:
+        resp = _hot_api_session().post(f"{_main_api_base_static()}{path}",
+                                       json=body, timeout=timeout)
+        data = resp.json() if resp.content else {}
+        if resp.status_code == 200:
+            return data if isinstance(data, dict) else {}
+        return {"_status": resp.status_code, **(data if isinstance(data, dict) else {})}
+    except Exception:
+        return None
+
+
+def _main_api_base_static() -> str:
+    """main 控制面 API 基址（config.json api_port 为真相源；platform_config
+    _api_base 先例：回落值须为出货控制面端口 8082——回落 8000 曾致运行面
+    轮询全部打错端口）。webui 与 main 同机（模块级函数取不到 self.config，
+    直接读磁盘——platform_config._disk_danmaku_section 同款磁盘真相口径）。"""
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            port = int((json.load(f).get("api_port")) or 8082)
+    except Exception:
+        port = 8082
+    return f"http://127.0.0.1:{port}"
+
+
+def _disk_choreography_node() -> Optional[dict]:
+    """磁盘 config.json 的 choreography 节（编排热应用整节载荷——写者矩阵
+    磁盘权威，此刻 enable 已由窄写更新）。读失败返回 None（跳过热切回退）。"""
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            node = json.load(f).get("choreography")
+        return node if isinstance(node, dict) else {}
+    except Exception:
+        logger.warning("[layout] 磁盘 choreography 节读取失败（跳过运行面热切）",
+                       exc_info=True)
+        return None
 
 
 class RuntimeStatusStrip:
@@ -1522,6 +1607,9 @@ class DrawerLayout:
         if ok:
             ui.notify(position="top", type="positive",
                       message=f"已{'开启' if e.value else '关闭'} {func_name}")
+            # 热切（2026-11-17 热切机制批次）：注册路径写盘成功后旁路调用运行面
+            # 切换端点（运行中即时生效；main 不可达=静默回退重启生效语义）
+            self._schedule_hot_apply(path, bool(e.value))
             # DG-B1：当前配置页状态条实时同步
             if (self.config_status_label is not None
                     and self._current_page_enable_path == path):
@@ -1541,6 +1629,9 @@ class DrawerLayout:
             ok = set_cb(*path, value=False, _notify=False)
             if ok:
                 ui.notify(position="top", type="positive", message=f"已关闭 {func_name}")
+                # 热切（2026-11-17 热切机制批次）：注册路径关闭落盘后同样旁路
+                # 调用运行面切换（弹幕监听=立即停听）
+                self._schedule_hot_apply(path, False)
                 if (self.config_status_label is not None
                         and self._current_page_enable_path == path):
                     self.config_status_label.set_visibility(True)
@@ -1561,6 +1652,72 @@ class DrawerLayout:
                 ui.button("确认关闭", on_click=_apply_close).props("unelevated no-caps").style(
                     "background: var(--color-danger); color: var(--text-on-primary);")
         dialog.open()
+
+    # ---------- 二级菜单开关热切（2026-11-17 热切机制批次） ----------
+
+    def _schedule_hot_apply(self, path: tuple, value: bool) -> None:
+        """开关写盘成功后调度运行面热切（async 旁路任务）。
+
+        设计约束：开关 handler 是同步体，禁止内联阻塞 HTTP（卡 UI 事件循环）
+        ——经事件循环任务后台执行；无运行循环（测试/非 NiceGUI 上下文）静默
+        跳过=回退重启生效语义。未注册路径（HOT_APPLY_PATHS）直接跳过。
+        """
+        if tuple(path) not in HOT_APPLY_PATHS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._hot_apply_enable(tuple(path), bool(value)))
+
+    async def _hot_apply_enable(self, path: tuple, value: bool) -> None:
+        """运行面热切执行体（事件循环任务；呈现语义见分支注记）。
+
+        热切成功=追加一条 positive 运行态 toast（配置 toast 已表达写盘成功）；
+        main 不可达（None）=静默回退「重启生效」——现有开关 toast 语义不变；
+        显式失败/未生效=warning 带原因与 fix_hint。
+        """
+        key = tuple(path)
+        if key == ("danmaku_listener", "enabled"):
+            # 端点自落盘 enabled（与窄写幂等）+服务启停/在线重建（svc None 且
+            # target=true 在线 build+start；target=false 停监听线程）
+            result = await asyncio.to_thread(
+                _hot_api_post, "/danmaku/service/toggle", {"enabled": value}, 45.0)
+            if result is None:
+                logger.info("[layout] 弹幕监听运行面不可达（回退重启生效语义）")
+                return
+            if result.get("success"):
+                ui.notify(position="top", type="positive",
+                          message=("弹幕监听已即时开启" if value else "弹幕监听已即时停止")
+                          + "（运行中生效）")
+            else:
+                msg = str(result.get("error") or "弹幕监听运行面切换失败")
+                if result.get("fix_hint"):
+                    msg += f"｜{result['fix_hint']}"
+                ui.notify(position="top", type="warning", duration=8, message=msg)
+            return
+        if key == ("choreography", "enable"):
+            node = _disk_choreography_node()
+            if node is None:
+                return
+            result = await asyncio.to_thread(
+                _hot_api_post, "/choreography/rules", node, 30.0)
+            if result is None:
+                logger.info("[layout] 编排运行面不可达（回退重启生效语义）")
+                return
+            if result.get("applied"):
+                ui.notify(position="top", type="positive",
+                          message=f"编排总开关已即时{'启用' if value else '停用'}（运行中生效）")
+            elif result.get("reason") == "edtalk_unreachable":
+                ui.notify(position="top", type="warning", duration=8,
+                          message="编排总开关已保存、暂未生效（EDTalk 不可达，就绪后重试「应用」）")
+            elif result.get("status") == 409 or result.get("_status") == 409:
+                ui.notify(position="top", type="warning", duration=8,
+                          message="编排序列执行中，总开关已保存、暂未生效（序列结束可重试「应用」）")
+            else:
+                detail = result.get("message") or result.get("error") or "未知原因"
+                ui.notify(position="top", type="warning", duration=8,
+                          message=f"编排运行面切换未生效：{detail}")
 
     def _clear_config_page(self):
         """清除配置页内容（先取消页内 Timer，防旧页定时器操作已删元素）。

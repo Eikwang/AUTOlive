@@ -136,7 +136,10 @@ class EventHandler:
             if assistant_route(self.my_handle.config, type2):
                 message = assistant_copy_message(
                     self.my_handle.config, resp_content,
-                    username=username, producer_type=type2, hit_layer="direct")
+                    username=username, producer_type=type2, hit_layer="direct",
+                    # 答谢非 KB 产线：改判助播保留原产线权重（gift/entrance/follow
+                    # 各自映射值，2026-11-19 助播权重保留批次）
+                    origin_type=type2)
             else:
                 message = {
                     "type": type2,
@@ -153,6 +156,41 @@ class EventHandler:
         except Exception as e:
             logger.error(f"答谢文案生成失败（{type2}，不中断主流程）：{e}")
             return None
+
+    def _integral_gate_suppress(self, module: str):
+        """积分播报冲突门控（2026-11-19 积分播报门控批次）：同事件积分播报实际发生时
+        抑制答谢语音（防「积分播报+答谢」双重播报；积分播报优先）。
+
+        判定条件：integral.enable && integral.<module>.enable && integral.<module>.broadcast
+        均开启，且本事件积分侧实际完成了播报（写库成功且未限频拦截、文案实际入队——
+        feature_handler._integral_broadcast 置标志，经 integral_broadcast_fired() 读取）。
+        积分未开启/模块或播报开关关闭/限频拦截/写库失败（播报未发生）→ 答谢照旧。
+
+        抑制范围仅答谢语音本路：编排画面规则（on_entrance/on_follow/编排接管）、
+        写库、按键映射等副作用不受本门影响。
+
+        Args:
+            module (str): 积分模块名（gift/entrance/follow）
+
+        Returns:
+            bool: True=抑制答谢（本事件积分播报已实际发生）
+        """
+        try:
+            if not self.my_handle.config.get("integral", "enable"):
+                return False
+            if not self.my_handle.config.get("integral", module, "enable"):
+                return False
+            if not self.my_handle.config.get("integral", module, "broadcast"):
+                return False
+            if self.my_handle.feature_handler.integral_broadcast_fired():
+                logger.info(f"[积分播报门控] {module} 积分播报已实际发生，抑制答谢语音（防双重播报，积分播报优先）")
+                return True
+            # 播报开关开启但本事件未播报（限频/写库失败等）：回退答谢照旧
+            logger.info(f"[积分播报门控] {module} 积分播报开关开启但本事件未播报（限频/写库失败等），答谢照旧")
+            return False
+        except Exception:
+            logger.debug(f"[积分播报门控] {module} 判定异常（默认答谢照旧）", exc_info=True)
+            return False
 
     def gift_handle(self, data):
         """
@@ -213,7 +251,8 @@ class EventHandler:
                 lowest_price = float(self.my_handle.config.get("thanks", "lowest_price") or 0)
             except (TypeError, ValueError):
                 lowest_price = 0
-            if not rec.choreo_takeover and float(total_price or 0) >= lowest_price:
+            if not rec.choreo_takeover and float(total_price or 0) >= lowest_price \
+                    and not self._integral_gate_suppress("gift"):
                 self._thanks_generate("gift", data, {
                     "gift_name": gift_name,
                     "gift_num": gift_num,
@@ -258,8 +297,10 @@ class EventHandler:
                 '''
                 self.my_handle.db.execute(insert_data_sql, (username, datetime.now()))
 
-            # 1、入场答谢（T6 恢复：即时/周期双通道 + E-2 限流）
-            self._thanks_generate("entrance", data, {})
+            # 1、入场答谢（T6 恢复：即时/周期双通道 + E-2 限流；2026-11-19 积分播报
+            # 门控批次：积分播报实际发生时抑制欢迎语——积分播报优先，未发生则答谢照旧）
+            if not self._integral_gate_suppress("entrance"):
+                self._thanks_generate("entrance", data, {})
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"入场处理失败：{e}")
@@ -288,8 +329,10 @@ class EventHandler:
             # 0、积分机制运转（C1：关注行为计分，新增规则键缺键走安全默认；写库失败不中断主流程）
             self.my_handle.integral_handle("follow", data)
 
-            # 1、关注答谢（T6 恢复：即时/周期双通道 + E-2 限流）
-            self._thanks_generate("follow", data, {})
+            # 1、关注答谢（T6 恢复：即时/周期双通道 + E-2 限流；2026-11-19 积分播报
+            # 门控批次：积分播报实际发生时抑制关注答谢——积分播报优先，未发生则答谢照旧）
+            if not self._integral_gate_suppress("follow"):
+                self._thanks_generate("follow", data, {})
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"关注处理失败：{e}")
@@ -351,7 +394,9 @@ class EventHandler:
             if assistant_route(self.my_handle.config, "schedule"):
                 message = assistant_copy_message(
                     self.my_handle.config, content,
-                    username=username, producer_type="schedule", hit_layer="direct")
+                    username=username, producer_type="schedule", hit_layer="direct",
+                    # 定时任务非 KB 产线：改判助播保留原产线权重（2026-11-19 助播权重保留批次）
+                    origin_type="schedule")
             else:
                 # 构建消息
                 message = {
@@ -395,7 +440,9 @@ class EventHandler:
                     message = assistant_copy_message(
                         self.my_handle.config, content,
                         username=username, producer_type="idle_time_task",
-                        hit_layer="direct")
+                        hit_layer="direct",
+                        # 闲时任务非 KB 产线：改判助播保留原产线权重（2026-11-19 助播权重保留批次）
+                        origin_type="idle_time_task")
                 else:
                     # 构建消息
                     message = {

@@ -140,6 +140,12 @@ def render_answer(text, username=None):
 _text_cache = {}
 # 音频目录缓存：dir -> (mtime, [filenames])
 _audio_cache = {}
+# config 内嵌词库缓存（2026-11-17 热切机制批次）：source -> (sig, entries)。
+# 文件词库走 mtime 缓存（load_qa_library），config 内嵌词库此前每条消息全量
+# 解析+jieba 预分词（本地问答+助播两库每弹幕线性叠加）；签名=行内容元组，
+# 词库实时读语义不变（改词库即时生效），仅变更才重建。按 source 分槽——
+# 主 local_qa 与助播知识库两源并存时互不踢槽。
+_qa_config_cache: dict = {}
 
 
 def _split_kb_line(line):
@@ -200,9 +206,20 @@ def parse_qa_entries(lines, source="config"):
 
 
 def load_qa_entries_from_config(lines, source="config"):
-    """config 内嵌问答数据加载（本地问答审查批次新增）：异常按空词条集降级。"""
+    """config 内嵌问答数据加载（本地问答审查批次新增）：异常按空词条集降级。
+
+    2026-11-17 热切机制批次：签名比对+变更才重建——签名=行内容元组（内容
+    变化即失效，词库实时读语义不变），高频路径（每弹幕）命中签名时直接复用
+    上次解析+预分词结果；非可迭代入参（脏数据）走异常降级空词条集，不缓存。
+    """
     try:
-        return parse_qa_entries(lines, source)
+        sig = tuple(lines) if lines is not None else None
+        cached = _qa_config_cache.get(source)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        entries = parse_qa_entries(lines, source)
+        _qa_config_cache[source] = (sig, entries)
+        return entries
     except Exception as e:
         logger.error(f"问答词库加载失败（按空词条集处理）：{source}，{e}")
         return []
@@ -413,11 +430,44 @@ def assistant_match_chain(config, source, content, username=None):
     return ("miss", None)
 
 
+def _origin_priority_override(config, origin_type):
+    """改判助播时的原产线权重归一（2026-11-19 助播权重保留批次）。
+
+    按 filter.priority_mapping 查 origin_type 键值并数值化（字符串数字
+    "90"→90；浮点串归 float；非法值/键缺失/映射缺失→None=不设 override，
+    消息维持 assistant_anchor_text/audio 类型映射语义——即助播 KB 命中
+    产线的既有排序身份）。
+    """
+    try:
+        mapping = config.get("filter", "priority_mapping") or {}
+        raw = mapping.get(origin_type) if isinstance(mapping, dict) else None
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def assistant_copy_message(config, content, username=None, producer_type="", source=None,
-                           hit_layer="direct", extra=None):
+                           hit_layer="direct", extra=None, origin_type=None):
     """构建助播消息（E-A2）：type=assistant_anchor_text、助播音色（E-E1 规范化
     回落）、助播名；返回 dict 附内部元数据（业务链不消费，仅供路由守卫测试
-    读取）。extra 合入业务键（如 content_type）。"""
+    读取）。extra 合入业务键（如 content_type）。
+
+    origin_type（2026-11-19 助播权重保留批次）：非 KB 命中产线改判助播时传
+    原产线 type——按 filter.priority_mapping 查原产线权重写入 priority_override
+    （仅换出口不改排序身份：gift/schedule 等改判后仍按原权重参与 queue_manager
+    entry_priority 解析）；None（助播 KB 命中产线，含 assistant_match_chain 与
+    main_kb_hit 直答）不写——priority_mapping 的 assistant_anchor_text/audio
+    两键只指 KB 命中消息。extra 含 priority_override 时（编排插队 500）后合入
+    优先，编排语义不变。"""
     try:
         anchor_name = config.get("assistant_anchor", "username") or DEFAULT_ANCHOR_NAME
     except Exception:
@@ -438,6 +488,10 @@ def assistant_copy_message(config, content, username=None, producer_type="", sou
             "ts": time.time(),
         },
     }
+    if origin_type is not None:
+        _ov = _origin_priority_override(config, origin_type)
+        if _ov is not None:
+            message["priority_override"] = _ov
     if extra:
         message.update(extra)
     return message

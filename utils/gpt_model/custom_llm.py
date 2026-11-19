@@ -144,7 +144,19 @@ def migrate_legacy_config(data):
 class Custom_LLM:
     """OpenAI-compatible 自定义 LLM 通道（C4 收敛后唯一形态）。"""
 
-    def __init__(self, data):
+    def __init__(self, data, config_obj=None):
+        """2026-11-17 热切机制批次：LLM 参数改每请求现读。
+
+        - data：启动快照（custom_llm 节 dict）——迁移后作回退基线（旧签名兼容）；
+        - config_obj：共享 Config 实例（Config.get 实时读内存）——my_handle/
+          chat_handler 注入；webui 落盘→主进程 mtime 门控 Config.reload 后，
+          model/api_key/base_url/temperature/system_prompt 每请求取到新值
+          （llm 模型名/密钥修改运行中生效）。
+
+        客户端复用语义：本通道为无状态 HTTP（每请求新建 aiohttp session），
+        无需"密钥变更才重建客户端"的签名比对——现读即天然热切，单例对象
+        长期复用零重建。
+        """
         migrated, changed = migrate_legacy_config(data)
         if changed:
             logger.info(
@@ -152,6 +164,20 @@ class Custom_LLM:
                 "（base_url/model/api_key/max_tokens/temperature）；旧键已移除（C4）"
             )
         self.config_data = migrated
+        self._config_obj = config_obj
+
+    def _live_config(self) -> dict:
+        """custom_llm 节现读（2026-11-17 热切机制批次）：共享 Config 内存视图
+        优先（零磁盘 IO、热重载即见，幂等迁移兜底旧形态键），回退构造快照。"""
+        if self._config_obj is not None:
+            try:
+                section = self._config_obj.get("custom_llm")
+                if isinstance(section, dict):
+                    migrated, _ = migrate_legacy_config(section)
+                    return migrated
+            except Exception:
+                pass
+        return self.config_data
 
     def _build_prompt(self, data):
         """构建 user prompt：兼容 {"prompt": ...}（脚本直调）与运行时弹幕数据 {"content": ...}。"""
@@ -160,16 +186,18 @@ class Custom_LLM:
         return str(data or "")
 
     def _build_headers(self):
-        """固定请求头；api_key 空则不带 Authorization（本地 Ollama 场景）。"""
+        """固定请求头；api_key 空则不带 Authorization（本地 Ollama 场景）。
+        2026-11-17 热切机制批次：api_key 每请求现读（密钥修改运行中生效）。"""
         headers = {"Content-Type": "application/json"}
-        api_key = str(self.config_data.get("api_key") or "").strip()
+        api_key = str(self._live_config().get("api_key") or "").strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
     def _chat_completions_url(self):
-        """{base_url}/chat/completions（base_url 已含尾路径则不重复拼接）。"""
-        base = str(self.config_data.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+        """{base_url}/chat/completions（base_url 已含尾路径则不重复拼接）。
+        2026-11-17 热切机制批次：base_url 每请求现读。"""
+        base = str(self._live_config().get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         if base.endswith(_CHAT_COMPLETIONS):
             return base
         return base + _CHAT_COMPLETIONS
@@ -182,24 +210,27 @@ class Custom_LLM:
         2026-10-30 动态文案审查批次：system_prompt_override（请求级人设替换，
         任务书「提示词转换」语义）——非空时**替换**配置的 system_prompt
         （而非拼接），动态文案请求以「提示词转换内容」为人设；弹幕/语音路径
-        不传该键，行为不变。"""
+        不传该键，行为不变。
+        2026-11-17 热切机制批次：model/max_tokens/temperature/system_prompt
+        每请求现读（模型名/参数修改运行中生效）。"""
+        cfg = self._live_config()
         messages = []
         override = str(system_prompt_override or "").strip()
         if override:
             system_prompt = override
         else:
-            system_prompt = str(self.config_data.get("system_prompt") or "").strip()
+            system_prompt = str(cfg.get("system_prompt") or "").strip()
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         body = {
-            "model": str(self.config_data.get("model") or DEFAULT_MODEL),
+            "model": str(cfg.get("model") or DEFAULT_MODEL),
             "messages": messages,
         }
-        max_tokens = self.config_data.get("max_tokens")
+        max_tokens = cfg.get("max_tokens")
         if max_tokens not in (None, ""):
             body["max_tokens"] = int(max_tokens)
-        temperature = self.config_data.get("temperature")
+        temperature = cfg.get("temperature")
         if temperature not in (None, ""):
             body["temperature"] = float(temperature)
         return body

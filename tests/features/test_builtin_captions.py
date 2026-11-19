@@ -25,6 +25,8 @@ def make_player(config_data, config_file=None):
     from utils.audio.builtin_play_center import AUDIO_PLAY_CENTER
     p = AUDIO_PLAY_CENTER.__new__(AUDIO_PLAY_CENTER)
     p.config_data = config_data
+    # 2026-11-17 热切批次：Config 现读句柄，桩置 None 维持文件回退语义
+    p._config_obj = None
     p.config_path = config_file or os.path.join(tempfile.gettempdir(), "__no_such_config__.json")  # 隔离：防读仓库真实 config.json
     p.stream = None
     p.pause_event = threading.Event()

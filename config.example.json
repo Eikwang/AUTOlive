@@ -482,6 +482,8 @@
     "entrance": {
       "enable": true,
       "get_integral": 1,
+      "broadcast": false,
+      "broadcast_copy": "欢迎 {username} 回来，积分+1",
       "copywriting": [
         {
           "entrance_num_interval": "0-3",
@@ -509,6 +511,8 @@
     "follow": {
       "enable": true,
       "get_integral": 1,
+      "broadcast": false,
+      "broadcast_copy": "感谢 {username} 关注，积分+1",
       "copywriting": [
         "{username}感谢关注，获得{get_integral}点积分"
       ]
@@ -516,6 +520,8 @@
     "gift": {
       "enable": true,
       "get_integral_proportion": 10.0,
+      "broadcast": false,
+      "broadcast_copy": "{username} 的礼物已记入积分，当前 {integral} 分",
       "copywriting": [
         {
           "gift_price_interval": "0-1",
@@ -549,6 +555,8 @@
         "打卡喵"
       ],
       "get_integral": 1,
+      "broadcast": false,
+      "broadcast_copy": "感谢 {username} 签到，积分+1",
       "copywriting": [
         {
           "sign_num_interval": "0-3",

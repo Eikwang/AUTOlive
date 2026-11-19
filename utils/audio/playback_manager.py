@@ -10,7 +10,7 @@ import traceback
 import os
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
-from .queue_manager import QueueMixin
+from .queue_manager import QueueMixin, _split_group_note
 from utils.web_captions import get_captions_manager
 
 # 伴奏起播门等待上限（2026-11-04 人声对齐修复）：覆盖编排静默窗口上限
@@ -218,8 +218,76 @@ class PlaybackMixin:
         return remaining if remaining > 0 else 0.0
 
     def _pop_next_entry_locked(self):
+        """出队选择总入口（2026-11-17 组原子消费批次）：先过组原子门
+        （_group_atomic_pop_locked——同消息切分段组开始消费后连续消费完成，
+        其他优先级信息不得插入组中间；唯一例外动态文案 trends_copywriting
+        维持 2026-11-16 段间让位批次的段边界插队现状），未命中再走既有
+        出队选择逻辑 _pop_select_locked（2026-11-10 R4 窗口预算模型）。"""
+        forced = self._group_atomic_pop_locked()
+        if forced is not None:
+            return forced
+        data_json, gate_wait, borrowed = self._pop_select_locked()
+        # 组上下文登记（2026-11-17 组原子消费批次）：切分段出队即登记组绑定
+        # （id+type）；非切分段不清 ctx——组完成判定由组原子门扫描驱动
+        # （队列无同组剩余段=组完成，门内清除），song 锚/借位等旁路出队不
+        # 丢组上下文（歌毕恢复组原子续消费）。
+        sg = data_json.get("split_group") if isinstance(data_json, dict) else None
+        if isinstance(sg, dict) and sg.get("id"):
+            self._atomic_group_ctx = {"id": sg["id"], "type": data_json.get("type", "")}
+        return data_json, gate_wait, borrowed
+
+    def _group_atomic_pop_locked(self):
+        """组原子门（2026-11-17 组原子消费批次，须在 voice_tmp_path_queue_lock
+        持有内调用）。
+
+        语义（用户口径）：同一消息切分的片段（split_group 组绑定）视为一个
+        组，开始消费后连续消费完成——念弹幕 2 段+弹幕回复 4 段场景：念弹幕组
+        播完前弹幕回复不得插入；弹幕回复组播完前其他信息不得插入。唯一例外
+        动态文案（trends_copywriting）：其分段组保持 2026-11-16 段间让位批次
+        的刻意设计（段边界允许高优插队/让位）。
+
+        判定：队列中还存在在播/刚播组（_atomic_group_ctx=上一个出队切分段）
+        的下一段 → 组未完成 → 强制续消费同组下一段（无视队列中更高权重条目）；
+        无同组剩余段 → 组完成（ctx 清除）→ 恢复正常权重 pop。
+
+        边界与防死锁：组内段被队满丢弃/合成失败跳过=该段永不入队，扫描自然
+        落空视为已消费（组推进不卡死）；单段组出队后扫描即落空=天然原子。
+        song 切片走 song_segment 字段（非 split_group），不受本门影响。
+
+        fail-open（点歌时间轴优先，沿念白单飞门先例）：song 锚存在（t0 有值）
+        时不生效——组原子不破坏「间奏结束立刻切回人声」与编排插队音轨
+        （priority_override=500）对歌曲间奏的插播（插播发生在间奏窗口边界
+        而非同组段间）；锚清除（垃圾时间结束/收尾）后组原子恢复。
+
+        Returns: None=未命中（调用方走 _pop_select_locked）；
+                 (data_json, 0.0, False)=强制续消费的同组下一段。"""
+        ctx = getattr(self, "_atomic_group_ctx", None)
+        if not isinstance(ctx, dict) or not ctx.get("id"):
+            return None
+        anchor = getattr(self, "_song_anchor", None)
+        if anchor and anchor.get("t0") is not None:
+            return None  # 点歌时间轴优先（fail-open，不破坏间奏插播语义）
+        if ctx.get("type") == "trends_copywriting":
+            return None  # 动态文案组：维持段边界插队现状（2026-11-16 批次设计）
+        queue = self.voice_tmp_path_queue
+        gid = ctx.get("id")
+        idx = next((i for i, e in enumerate(queue)
+                    if isinstance(e, dict)
+                    and isinstance(e.get("split_group"), dict)
+                    and e["split_group"].get("id") == gid), None)
+        if idx is None:
+            self._atomic_group_ctx = None  # 组完成（无同组剩余段）→ 正常权重 pop
+            return None
+        entry = queue.pop(idx)
+        logger.info(f"组原子续消费：无视插队条目续播同组下一段"
+                    f"{_split_group_note(entry)}")
+        return entry, 0.0, False
+
+    def _pop_select_locked(self):
         """出队选择（2026-11-10 R4 窗口预算模型——用户实测反馈重构，须在
-        voice_tmp_path_queue_lock 持有内调用）。
+        voice_tmp_path_queue_lock 持有内调用；2026-11-17 组原子消费批次
+        原方法体原样提取为 _pop_select_locked，组原子门前置见
+        _pop_next_entry_locked）。
 
         用户设计预期（2026-11-10 实测反馈）：伴奏响=唱歌时间；其它消费音频
         只能在间奏期间消费；间奏剩余不足 3s（或间奏本身不足 3s）不再起音频

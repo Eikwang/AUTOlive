@@ -80,7 +80,9 @@ class ChatHandler:
             chat_type (str): 聊天类型
             config (dict): 配置
         """
-        GPT_MODEL.set_model_config(chat_type, config.get(chat_type))
+        # 2026-11-17 热切机制批次：注入共享 Config 实例——LLM 通道每请求现读节配置
+        GPT_MODEL.set_model_config(chat_type, config.get(chat_type),
+                                   config_obj=self.my_handle.config)
         self.my_handle.__dict__[chat_type] = GPT_MODEL.get(chat_type)
 
     def handle_chat_type(self):
@@ -187,6 +189,13 @@ class ChatHandler:
             # 获取模型
             model = self.my_handle.__dict__.get(chat_type)
             if model is None:
+                # 2026-11-17 热切机制批次：chat_type 运行中切换生效——config_load
+                # 已注册全部通道（custom_llm/fastrag），此处惰性取当前通道模型，
+                # 改 chat_type 后新通道即用（原要求"重启系统"）
+                model = GPT_MODEL.get(chat_type)
+                if model is not None:
+                    self.my_handle.__dict__[chat_type] = model
+            if model is None:
                 logger.error(
                     f"模型 {chat_type} 未初始化；fix=检查 config chat_type 与对应配置节"
                     f"（custom_llm/fastrag），重启系统")
@@ -274,6 +283,12 @@ class ChatHandler:
                 熔断开路/流式失败零产出/空输出（调用方回退 llm_handle 全文链路）
         """
         model = self.my_handle.__dict__.get(chat_type)
+        if model is None:
+            # 2026-11-17 热切机制批次：chat_type 运行中切换生效（与 llm_handle 同源
+            # 惰性解析——config_load 已注册全部通道）
+            model = GPT_MODEL.get(chat_type)
+            if model is not None:
+                self.my_handle.__dict__[chat_type] = model
         if model is None or not hasattr(model, "stream_resp_sync"):
             return None
         breaker = self._get_breaker(chat_type)
@@ -476,9 +491,12 @@ class ChatHandler:
                     def _build_stream_message(_c, _u=username):
                         from .assistant_router import assistant_route as _ar, assistant_copy_message as _acm
                         if _ar(self.my_handle.config, "llm_reply", "voice"):
+                            # voice 源经 ROUTE_TABLE 恒不路由（uc2a）——本分支现
+                            # 实不可达；origin_type="talk" 为语义归位（若未来放开
+                            # voice 改判，保留原产线 talk 权重，2026-11-19 助播权重保留批次归类）
                             return _acm(self.my_handle.config, _c, username=_u,
                                         producer_type="llm_reply", source="voice",
-                                        hit_layer="llm")
+                                        hit_layer="llm", origin_type="talk")
                         return {
                             "type": "talk",
                             # talk_stream 标记（D-22）：流式回复分句豁免连续对话

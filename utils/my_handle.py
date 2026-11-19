@@ -171,8 +171,12 @@ class My_handle(metaclass=SingletonMeta):
     # 配置加载
     def config_load(self):
         # 设置GPT_Model全局模型列表（基础功能 2026-10-22：三通道按配置初始化）
-        GPT_MODEL.set_model_config("custom_llm", My_handle.config.get("custom_llm"))
-        GPT_MODEL.set_model_config("fastrag", My_handle.config.get("fastrag"))
+        # 2026-11-17 热切机制批次：注入共享 Config 实例——custom_llm/fastrag 节
+        # 参数（model/api_key/base_url/host/port 等）每请求现读，修改运行中生效
+        GPT_MODEL.set_model_config("custom_llm", My_handle.config.get("custom_llm"),
+                                   config_obj=My_handle.config)
+        GPT_MODEL.set_model_config("fastrag", My_handle.config.get("fastrag"),
+                                   config_obj=My_handle.config)
 
         # 启动警告（spec R2-1/DX CAP6-8：通道可用性与配置开关错配时明示+fix 指引）
         _chat_type = My_handle.config.get("chat_type")

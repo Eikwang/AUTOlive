@@ -15,14 +15,16 @@ from utils.gpt_model.fastrag_llm import Fastrag_LLM
 class GPT_Model:
     openai = None
 
-    def set_model_config(self, model_name, config):
+    def set_model_config(self, model_name, config, config_obj=None):
+        # 2026-11-17 热切机制批次：透传共享 Config 实例（config_obj）——LLM 通道
+        # 每请求现读节配置（model/api_key/base_url 等修改运行中生效）
         model_classes = {
             "custom_llm": Custom_LLM,
             "fastrag": Fastrag_LLM,
         }
 
         if model_name in model_classes:
-            setattr(self, model_name, model_classes[model_name](config))
+            setattr(self, model_name, model_classes[model_name](config, config_obj=config_obj))
 
     def get(self, name):
         logger.info("GPT_MODEL: 进入get方法")

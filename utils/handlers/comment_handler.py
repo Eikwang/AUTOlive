@@ -232,7 +232,9 @@ class CommentHandler:
                 message = assistant_copy_message(
                     self.my_handle.config, content,
                     username=username, producer_type="reread", source=_reread_src,
-                    hit_layer="direct")
+                    hit_layer="direct",
+                    # 复读非 KB 产线：改判助播保留原产线权重（仅换出口不改排序身份）
+                    origin_type="reread")
             else:
                 # 构建消息（type 原样透传：reread_top_priority→最高权重映射）
                 message = {
@@ -367,7 +369,9 @@ class CommentHandler:
         if assistant_route(self.my_handle.config, "read_comment"):
             _msg = assistant_copy_message(
                 self.my_handle.config, rc_content,
-                producer_type="read_comment", hit_layer="direct")
+                producer_type="read_comment", hit_layer="direct",
+                # 念弹幕非 KB 产线：改判助播保留原产线权重（2026-11-19 助播权重保留批次）
+                origin_type="read_comment")
             if reply_link:
                 _msg["reply_link"] = reply_link
             _msg.setdefault("producer_type", "read_comment")
@@ -543,6 +547,8 @@ class CommentHandler:
             _hit_layer, _payload = assistant_match_chain(
                 self.my_handle.config, _chat_src, content, username=username)
             if _hit_layer == "assistant_audio":
+                # KB 音频命中（2026-11-19 助播权重保留批次）：assistant_anchor_audio
+                # 类型映射即 KB 命中产线的排序身份，不写 priority_override
                 self.my_handle.audio_synthesis_handle({
                     "type": ASSISTANT_AUDIO_TYPE,
                     "tts_type": "none",
@@ -558,6 +564,8 @@ class CommentHandler:
                 return
             if _hit_layer == "assistant_text":
                 from .assistant_router import assistant_copy_message
+                # KB 文本命中：assistant_anchor_text 类型映射即排序身份，不传
+                # origin_type（不写 priority_override，2026-11-19 助播权重保留批次）
                 self.my_handle.audio_synthesis_handle(assistant_copy_message(
                     self.my_handle.config, _payload,
                     username=username, producer_type="kb_chain", source=_chat_src,
@@ -609,7 +617,10 @@ class CommentHandler:
                         if _ar(self.my_handle.config, "llm_reply", _src):
                             m = _acm(self.my_handle.config, _c, username=_u,
                                      producer_type="llm_reply", source=_src,
-                                     hit_layer="llm")
+                                     hit_layer="llm",
+                                     # LLM 回复非 KB 产线：改判助播保留原产线
+                                     # comment 权重（2026-11-19 助播权重保留批次）
+                                     origin_type="comment")
                             if _rl:
                                 m["reply_link"] = _rl
                             return m
@@ -704,7 +715,10 @@ class CommentHandler:
                 message = assistant_copy_message(
                     self.my_handle.config, resp_content,
                     username=username, producer_type="llm_reply", source=_chat_src,
-                    hit_layer="llm")
+                    hit_layer="llm",
+                    # LLM 回复非 KB 产线：改判助播保留原产线 comment 权重
+                    # （2026-11-19 助播权重保留批次）
+                    origin_type="comment")
             else:
                 message = {
                     "type": "comment",

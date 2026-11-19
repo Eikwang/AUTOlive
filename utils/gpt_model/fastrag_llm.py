@@ -30,14 +30,47 @@ def _get_aiohttp():
 class Fastrag_LLM:
     """fastrag 知识库 LLM 通道（接口对齐 Custom_LLM.get_resp_sync(data_json)）。"""
 
-    def __init__(self, data):
+    def __init__(self, data, config_obj=None):
+        """2026-11-17 热切机制批次：fastrag host/port 改每请求现读。
+
+        - data：启动快照（fastrag 节 dict）——作回退基线（旧签名兼容）；
+        - config_obj：共享 Config 实例——chat_handler 注入，host/port 修改
+          运行中下次请求生效（无状态 HTTP 每请求独立 session，无需重建）。
+        """
         cfg = data if isinstance(data, dict) else {}
+        self.config_data = cfg
+        self._config_obj = config_obj
+        # 构造时解析一次作快照字段（日志/兼容展示用）；请求端点经 _query_urls()
+        # 现读——host/port 热切
         self.host = str(cfg.get("host") or DEFAULT_FASTRAG_HOST).strip() or DEFAULT_FASTRAG_HOST
         self.port = cfg.get("port") or 11420
         base = f"http://{self.host}:{self.port}"
         # ENG E-8：host 限定 http(s) 形态（默认 http://localhost:{port}）
         self.query_url = base + "/query"
         self.query_url_stream = base + "/query_stream"
+
+    def _live_section(self) -> dict:
+        """fastrag 节现读（2026-11-17 热切机制批次）：共享 Config 内存视图优先，
+        回退构造快照。"""
+        if self._config_obj is not None:
+            try:
+                section = self._config_obj.get("fastrag")
+                if isinstance(section, dict):
+                    return section
+            except Exception:
+                pass
+        return self.config_data
+
+    def _query_urls(self):
+        """现读 host/port 重建查询端点 (query_url, query_url_stream)。"""
+        cfg = self._live_section()
+        host = str(cfg.get("host") or DEFAULT_FASTRAG_HOST).strip() or DEFAULT_FASTRAG_HOST
+        try:
+            port = cfg.get("port") or 11420
+        except Exception:
+            port = 11420
+        base = f"http://{host}:{port}"
+        return base + "/query", base + "/query_stream", f"{host}:{port}"
 
     def _build_prompt(self, data):
         """对齐 Custom_LLM：兼容 {"prompt": ...} 与运行时弹幕数据 {"content": ...}。"""
@@ -70,16 +103,18 @@ class Fastrag_LLM:
         """
         aiohttp = _get_aiohttp()
         payload = self._build_payload(data)
+        # 2026-11-17 热切机制批次：host/port 每请求现读
+        query_url, _, host_port = self._query_urls()
         try:
             client_timeout = aiohttp.ClientTimeout(total=_QUERY_TIMEOUT)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
-                async with session.post(self.query_url, json=payload) as response:
+                async with session.post(query_url, json=payload) as response:
                     status = response.status
                     text = await response.text()
                     if status != 200:
                         logger.error(
                             f"LLM_FALLBACK fastrag /query 失败(非200, HTTP {status}, "
-                            f"{self.host}:{self.port}, 超时{_QUERY_TIMEOUT}s)；"
+                            f"{host_port}, 超时{_QUERY_TIMEOUT}s)；"
                             f"请确认 fastrag.enable=true 且服务已启动、核对 fastrag.port，"
                             f"或将 chat_type 改为 custom_llm/local_qa")
                         return None
@@ -89,25 +124,25 @@ class Fastrag_LLM:
                         if answer is None:
                             logger.error(
                                 f"LLM_FALLBACK fastrag /query 失败(解析失败: 无 answer 字段, "
-                                f"{self.host}:{self.port})；请核对 fastrag 服务版本与契约"
+                                f"{host_port})；请核对 fastrag 服务版本与契约"
                                 f"（edtalk/fastrag/api_client.py）")
                             return None
                         return str(answer)
                     except (json.JSONDecodeError, TypeError) as e:
                         logger.error(
                             f"LLM_FALLBACK fastrag /query 失败(解析失败: {type(e).__name__}, "
-                            f"{self.host}:{self.port})；请核对 fastrag 服务版本与契约"
+                            f"{host_port})；请核对 fastrag 服务版本与契约"
                             f"（edtalk/fastrag/api_client.py）")
                         return None
         except asyncio.TimeoutError:
             logger.error(
-                f"LLM_FALLBACK fastrag /query 失败(超时 {_QUERY_TIMEOUT}s, {self.host}:{self.port})；"
+                f"LLM_FALLBACK fastrag /query 失败(超时 {_QUERY_TIMEOUT}s, {host_port})；"
                 f"请确认 fastrag 服务已启动且未挂起，或将 chat_type 改为 custom_llm/local_qa")
             return None
         except aiohttp.ClientError as e:
             logger.error(
-                f"LLM_FALLBACK fastrag /query 失败(连接拒绝: {type(e).__name__}, "
-                f"{self.host}:{self.port})；请确认 fastrag.enable=true 且服务已启动、"
+                f"LLM_FALLBACK fastrag /query 失败(连接拒绝: {type(e).__name__}, {host_port})；"
+                f"请确认 fastrag.enable=true 且服务已启动、"
                 f"核对 fastrag.port（WebUI 知识库页），或将 chat_type 改为 custom_llm/local_qa")
             return None
         except Exception as e:
@@ -139,14 +174,16 @@ class Fastrag_LLM:
         """
         aiohttp = _get_aiohttp()
         payload = self._build_payload(data)
+        # 2026-11-17 热切机制批次：host/port 每请求现读
+        _, query_url_stream, host_port = self._query_urls()
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 async with session.post(
-                        self.query_url_stream, json=payload) as response:
+                        query_url_stream, json=payload) as response:
                     if response.status != 200:
                         raise RuntimeError(
-                            f"fastrag /query_stream HTTP {response.status}（{self.host}:{self.port}）")
+                            f"fastrag /query_stream HTTP {response.status}（{host_port}）")
                     buffer = ""
                     async for raw in response.content:
                         line = raw.decode("utf-8", errors="replace").strip()
@@ -173,7 +210,7 @@ class Fastrag_LLM:
                         raise RuntimeError("fastrag 流式零产出")
         except asyncio.TimeoutError:
             logger.error(
-                f"LLM_FALLBACK fastrag /query_stream 超时 {timeout}s（{self.host}:{self.port}）；"
+                f"LLM_FALLBACK fastrag /query_stream 超时 {timeout}s（{host_port}）；"
                 f"回退全文链路")
             raise
         except Exception as e:

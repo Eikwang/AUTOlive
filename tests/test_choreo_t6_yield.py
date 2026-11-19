@@ -227,6 +227,12 @@ def test_client_wrapper_degrades_on_failure(monkeypatch):
     from utils.edtalk_realtime.edtalk_client import EDTalkClient
     c = EDTalkClient.__new__(EDTalkClient)
     c.api_ip_port = "http://127.0.0.1:1"
+    # 2026-11-17 热切批次：__new__ 绕过 __init__，手工补热切实例态
+    # （_config_obj=None 维持旧签名不门控；api_base 走 TTL 命中不触发现读）
+    c._config_obj = None
+    import time as _time
+    c._api_base_cache = c.api_ip_port
+    c._api_base_at = _time.monotonic()
     c._auth_headers = lambda: {}
     import requests as _rq
     def _boom(*a, **k):
@@ -244,6 +250,11 @@ def test_client_pause_success_normalizes_ok(monkeypatch):
     from utils.edtalk_realtime.edtalk_client import EDTalkClient
     c = EDTalkClient.__new__(EDTalkClient)
     c.api_ip_port = "http://127.0.0.1:1"
+    # 2026-11-17 热切批次：同上补热切实例态（TTL 命中走缓存基址）
+    c._config_obj = None
+    import time as _time
+    c._api_base_cache = c.api_ip_port
+    c._api_base_at = _time.monotonic()
     c._auth_headers = lambda: {}
     import requests as _rq
 

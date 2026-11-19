@@ -92,7 +92,8 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         # 选择配置（play_audio.player）与外部 AUDIO_PLAYER HTTP 客户端一并退役。
         # 调用点（playback_manager play/stop_current_audio）零逻辑改动。
         Audio.audio_player = BUILTIN_PLAY_CENTER(
-            self.config.get("audio_player") or {}, config_path=self.config_path)
+            self.config.get("audio_player") or {}, config_path=self.config_path,
+            config_obj=self.config)  # 2026-11-17 热切机制批次：内存现读注入
         # A3（2026-10-22 审查批次）：完成回调注册随 play_audio.info_to_callback
         # 参数退役移除（回路死链；_fire_completion 对 None 回调自检跳过）。
         # 2026-11-15 批次：999 release hook（A7/T1 active 标记联动）随 999 机制
@@ -146,7 +147,11 @@ class Audio(QueueMixin, PlaybackMixin, SynthesisMixin, UtilsMixin):
         # （2026-10-20 实测修复：原两行被缩进进 _captions_error_to_player 尾部，
         # 仅字幕错误回调触发时才创建——正常启动 self.edtalk_client 恒缺失，
         # playback_manager.only_play_audio 每条音频 AttributeError）
-        self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"))
+        # 2026-11-17 热切机制批次：注入共享 Config 实例——连接地址/api_token/
+        # enable 改运行期现读（原构造快照 dict，运行中改 edtalk_realtime 不生效）；
+        # HTTP 通道每请求独立 session，地址/令牌变更下次请求即生效（无重连概念）
+        self.edtalk_client = EDTalkClient(self.config.get("edtalk_realtime"),
+                                          config_obj=self.config)
         register_client(self.edtalk_client)
 
     def _merge_legacy_priority_mapping(self):
