@@ -152,6 +152,26 @@ class MainApplication:
             else:
                 logger.info("gpt_sovits.backend=api：使用用户自备外部 api_v2（"
                             f"{self.config.get('gpt_sovits', 'api_ip_port')}），AUTOlive 不拉起不托管")
+                # 启动就绪门控（2026-11-19 批次）：外部 api_v2 通道后台健康探测——
+                # 首次探测成功 → mark_ready("gsv")（快模块线程/弹幕延迟连接的
+                # wait_ready 等待点）。api_v2 不拉起不托管（F11），就绪时刻未知；
+                # 探测循环直至可达（wait_ready 侧 STARTUP_READY_TIMEOUT_S 超时兜底）。
+                def _probe_gsv_api_ready(cfg):
+                    import urllib.request as _urllib
+                    from utils.readiness import mark_ready
+                    _base = str(cfg.get("gpt_sovits", "api_ip_port")
+                                or "http://127.0.0.1:9880").rstrip("/")
+                    while True:
+                        try:
+                            with _urllib.urlopen(f"{_base}/docs", timeout=3) as _resp:
+                                if _resp.status == 200:
+                                    mark_ready("gsv")
+                                    return
+                        except Exception:
+                            pass
+                        time.sleep(2.0)
+                threading.Thread(target=_probe_gsv_api_ready, args=(self.config,),
+                                 name="gsv-api-ready-probe", daemon=True).start()
             # RVC 变声服务（P2-1）：控制面常驻，音频流按需经前端启停。
             # 2026-10-30 变声独立化（用户裁决）：rvc_vc.enabled（二级菜单「变声」
             # 开关，enable_paths.svc 映射）=true 时启动系统同时启动变声；false 不启动。
@@ -195,6 +215,30 @@ class MainApplication:
             if self.danmaku_svc is not None:
                 threading.Thread(target=self.danmaku_svc.start, name="svc-start-danmaku", daemon=True).start()
                 logger.info("DanmakuListener 托管服务拉起已后台启动")
+            # EDTalk 数字人就绪探测（2026-11-19 启动就绪门控批次）：启用时后台轮询
+            # realtime_serve /status，首次成功 → mark_ready("edtalk")（快模块线程/
+            # 弹幕延迟连接的门控等待点）。realtime_serve 由前端 start_programs 拉起、
+            # EDTalk 客户端为 HTTP 通道（无长连）——"连接成功"=首次探测成功。
+            try:
+                from utils.edtalk_realtime.helpers import is_edtalk_active
+                if is_edtalk_active(self.config):
+                    _edtalk_client = getattr(self.my_handle.audio, "edtalk_client", None)
+                    if _edtalk_client is not None:
+                        def _probe_edtalk_ready(client):
+                            from utils.readiness import mark_ready
+                            while True:
+                                try:
+                                    if client.get_status():
+                                        mark_ready("edtalk")
+                                        return
+                                except Exception:
+                                    pass
+                                time.sleep(2.0)
+                        threading.Thread(target=_probe_edtalk_ready, args=(_edtalk_client,),
+                                         name="edtalk-ready-probe", daemon=True).start()
+                        logger.info("EDTalk 就绪探测已后台启动（就绪前弹幕连接/快模块任务被门控延后）")
+            except Exception:
+                logger.error(f"EDTalk 就绪探测装配失败（不阻断主程序）: {traceback.format_exc()}")
         except Exception:
             logger.error(f"托管服务初始化失败（不阻断主程序）: {traceback.format_exc()}")
     

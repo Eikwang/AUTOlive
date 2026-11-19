@@ -157,40 +157,14 @@ class EventHandler:
             logger.error(f"答谢文案生成失败（{type2}，不中断主流程）：{e}")
             return None
 
-    def _integral_gate_suppress(self, module: str):
-        """积分播报冲突门控（2026-11-19 积分播报门控批次）：同事件积分播报实际发生时
-        抑制答谢语音（防「积分播报+答谢」双重播报；积分播报优先）。
-
-        判定条件：integral.enable && integral.<module>.enable && integral.<module>.broadcast
-        均开启，且本事件积分侧实际完成了播报（写库成功且未限频拦截、文案实际入队——
-        feature_handler._integral_broadcast 置标志，经 integral_broadcast_fired() 读取）。
-        积分未开启/模块或播报开关关闭/限频拦截/写库失败（播报未发生）→ 答谢照旧。
-
-        抑制范围仅答谢语音本路：编排画面规则（on_entrance/on_follow/编排接管）、
-        写库、按键映射等副作用不受本门影响。
-
-        Args:
-            module (str): 积分模块名（gift/entrance/follow）
-
-        Returns:
-            bool: True=抑制答谢（本事件积分播报已实际发生）
-        """
-        try:
-            if not self.my_handle.config.get("integral", "enable"):
-                return False
-            if not self.my_handle.config.get("integral", module, "enable"):
-                return False
-            if not self.my_handle.config.get("integral", module, "broadcast"):
-                return False
-            if self.my_handle.feature_handler.integral_broadcast_fired():
-                logger.info(f"[积分播报门控] {module} 积分播报已实际发生，抑制答谢语音（防双重播报，积分播报优先）")
-                return True
-            # 播报开关开启但本事件未播报（限频/写库失败等）：回退答谢照旧
-            logger.info(f"[积分播报门控] {module} 积分播报开关开启但本事件未播报（限频/写库失败等），答谢照旧")
-            return False
-        except Exception:
-            logger.debug(f"[积分播报门控] {module} 判定异常（默认答谢照旧）", exc_info=True)
-            return False
+    # _integral_gate_suppress 已移除（2026-11-19 积分记录前移批次）：答谢抑制
+    # 判定收敛为挂载点播报返回值——积分记分已在消息入口（限入/去重/遗忘窗口之前）
+    # 异步完成并挂 IntegralScoreContext，gift/entrance/follow 链经
+    # feature_handler.integral_announce_if_scored(data, module) 消费 ctx：
+    # ctx 存在且记分成功 → 按 broadcast 开关播报（播报发生=抑制答谢，积分播报
+    # 优先）；未记分/未播报（积分手关/模块关/限频拦截/写库失败/广播关）→ 答谢照旧。
+    # 原「enable 三检查 + integral_broadcast_fired() 标志」语义由 ctx 存在性与
+    # 播报返回值等价承载（ctx 仅在积分与模块 enable 全开且写库成功时挂播报上下文）。
 
     def gift_handle(self, data):
         """
@@ -209,8 +183,17 @@ class EventHandler:
 
             logger.info(f"[{username}]送出了 {gift_num} 个 {gift_name}")
 
-            # 0、积分机制运转（C1：礼物行为计分；写库失败不中断礼物主流程）
-            self.my_handle.integral_handle("gift", data)
+            # 0、积分播报挂载（2026-11-19 积分记录前移批次）：积分记分已在消息入口
+            # （限入/去重/遗忘窗口之前）异步完成——此处消费 ctx 播报（防重：不再
+            # 重复记分）。broadcast 开且记分成功 → 播报积分获得文案（档位文案优先/
+            # 内置默认文案兜底——2026-11-19 播报文案收敛批次）+ 答谢抑制（积分播报优先）；未记分/未播报（广播关/
+            # 限频/写库失败/积分手关）→ 答谢照旧、零积分播报。挂载异常不中断礼物主流程。
+            _integral_announced = False
+            try:
+                _integral_announced = self.my_handle.feature_handler.integral_announce_if_scored(data, "gift")
+            except Exception:
+                logger.error(traceback.format_exc())
+                logger.error("[积分播报] 礼物挂载点播报异常（答谢照旧，不影响主流程）")
 
             # 记录数据库
             if self.my_handle.config.get("database", "gift_enable"):
@@ -252,7 +235,7 @@ class EventHandler:
             except (TypeError, ValueError):
                 lowest_price = 0
             if not rec.choreo_takeover and float(total_price or 0) >= lowest_price \
-                    and not self._integral_gate_suppress("gift"):
+                    and not _integral_announced:
                 self._thanks_generate("gift", data, {
                     "gift_name": gift_name,
                     "gift_num": gift_num,
@@ -286,8 +269,15 @@ class EventHandler:
             except Exception as _choreo_err:
                 logger.debug(f"入场编排触发异常（忽略）：{_choreo_err}")
 
-            # 0、积分机制运转（C1：入场行为计分；写库失败不中断入场主流程）
-            self.my_handle.integral_handle("entrance", data)
+            # 0、积分播报挂载（2026-11-19 积分记录前移批次）：记分已在消息入口
+            # （限入前）异步完成——此处消费 ctx 播报（防重：不再重复记分），
+            # 播报实际发生时抑制欢迎语（积分播报优先），未发生则答谢照旧
+            _integral_announced = False
+            try:
+                _integral_announced = self.my_handle.feature_handler.integral_announce_if_scored(data, "entrance")
+            except Exception:
+                logger.error(traceback.format_exc())
+                logger.error("[积分播报] 入场挂载点播报异常（答谢照旧，不影响主流程）")
 
             # 记录数据库
             if self.my_handle.config.get("database", "entrance_enable"):
@@ -299,7 +289,7 @@ class EventHandler:
 
             # 1、入场答谢（T6 恢复：即时/周期双通道 + E-2 限流；2026-11-19 积分播报
             # 门控批次：积分播报实际发生时抑制欢迎语——积分播报优先，未发生则答谢照旧）
-            if not self._integral_gate_suppress("entrance"):
+            if not _integral_announced:
                 self._thanks_generate("entrance", data, {})
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -326,12 +316,19 @@ class EventHandler:
             except Exception as _choreo_err:
                 logger.debug(f"关注编排触发异常（忽略）：{_choreo_err}")
 
-            # 0、积分机制运转（C1：关注行为计分，新增规则键缺键走安全默认；写库失败不中断主流程）
-            self.my_handle.integral_handle("follow", data)
+            # 0、积分播报挂载（2026-11-19 积分记录前移批次）：记分已在消息入口
+            # （限入前）异步完成——此处消费 ctx 播报（防重：不再重复记分），
+            # 播报实际发生时抑制关注答谢（积分播报优先），未发生则答谢照旧
+            _integral_announced = False
+            try:
+                _integral_announced = self.my_handle.feature_handler.integral_announce_if_scored(data, "follow")
+            except Exception:
+                logger.error(traceback.format_exc())
+                logger.error("[积分播报] 关注挂载点播报异常（答谢照旧，不影响主流程）")
 
             # 1、关注答谢（T6 恢复：即时/周期双通道 + E-2 限流；2026-11-19 积分播报
             # 门控批次：积分播报实际发生时抑制关注答谢——积分播报优先，未发生则答谢照旧）
-            if not self._integral_gate_suppress("follow"):
+            if not _integral_announced:
                 self._thanks_generate("follow", data, {})
         except Exception as e:
             logger.error(traceback.format_exc())

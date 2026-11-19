@@ -91,6 +91,11 @@ class TimerHandler:
         # 为语音对话/系统生成消息——去重与遗忘窗口均不适用（语音对话被"遗忘"
         # 即丢回复；系统任务低频无需限流），立即异步分发保持与首条消息同语义
         if timer_flag not in self._FORGET_FLAGS:
+            # 2026-11-19 积分记录前移批次：talk（语音对话）同样入口记分——语音
+            # 签到词原语义经 chat_handler 积分链记分+终结，记分前移后统一入口
+            # 挂 ctx（签到词预匹配命中才挂），chat_handler 消费点消费（语义不变）；
+            # schedule/idle_time_task 不涉及积分记分（entry 内自过滤）
+            self.my_handle.feature_handler.integral_score_entry(timer_flag, data)
             threading.Thread(target=self._dispatch, args=(timer_flag, [data]),
                              name=f"direct-dispatch-{timer_flag}", daemon=True).start()
             return
@@ -103,6 +108,15 @@ class TimerHandler:
         # comment/chat 链内既有拦截保留双保险（聊天框源不经此路径）。
         if self.my_handle.blacklist_handle(data):
             return
+
+        # 2026-11-19 积分记录前移批次（用户裁决）：积分记分前移——监听到事件即
+        # 记分（写库），不受限入去重/遗忘窗口影响（修复限入时间较长时被过滤的
+        # 入场/关注/礼物/签到事件漏记积分）。插入点=黑名单之后（名单内用户
+        # 「不进行任何处理」含积分）、去重/遗忘窗口之前；异步 daemon 线程执行
+        # 记分段（写库重试不阻塞监听 worker），播报上下文容器 IntegralScoreContext
+        # 同步挂上 data["integral_gain_ctx"]，限入后挂载点（comment/chat 链签到
+        # 消费点、event_handler 答谢链）消费 ctx 播报。幂等：单事件仅此处调用一次。
+        self.my_handle.feature_handler.integral_score_entry(timer_flag, data)
 
         # 最近互动用户名记录 + 闲时计时刷新（2026-10-31 定时任务/闲时任务审查
         # 批次接线）：{last_username} 数据源此前全库零调用恒"未知用户"；

@@ -136,11 +136,13 @@ def fast_retry_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_sign_cooldown(monkeypatch):
-    """关闭 24h 滚动限频（2026-10-31 批次引入 12h，2026-11-16 批次 12h→24h 并扩展
-    到关注）：本文件用例专注 UPSERT 语义，连续签到/入场/关注计分用例不受限频窗口
-    拦截；限频语义由 test_integral_review_1031.py 专测。"""
-    monkeypatch.setattr(feature_handler_module, "INTEGRAL_COOLDOWN_HOURS", 0)
+def no_window_cooldown(monkeypatch):
+    """关闭自然日固定窗口（2026-11-19 积分窗口语义批次，替代原 24h 滚动限频——
+    旧形态经 monkeypatch INTEGRAL_COOLDOWN_HOURS=0 关闭，现已不生效）：本文件用例
+    专注 UPSERT 语义，连续签到/入场计分用例不受同自然日窗口拦截；窗口语义由
+    test_integral_review_1031.py / test_integral_window_semantics_20261119.py 专测。
+    关注一生一次（last_follow_ts 非 NULL 即拦截，无常量可关）由用例自行处理。"""
+    monkeypatch.setattr(feature_handler_module, "same_day_active", lambda last_ts, now: False)
 
 
 # ============ A1 表迁移 ============
@@ -185,8 +187,16 @@ class TestMigration:
 class TestUpsertSemantics:
     def test_same_user_two_signs_single_row_accumulated(self, handler):
         """同用户两次签到：不产生重复行 + 积分累加 + sign_num 自增。"""
+        # 2026-11-19 播报开关统管修复批次：档位回复纳入 broadcast 门，开启开关验证签到回复链路
+        # 2026-11-19 积分记录前移批次：记分/播报分离——记分经 integral_handle，
+        # 回复由限入后消费点 integral_sign_consume 消费 ctx 触发
+        cfg = base_config()
+        cfg["integral"]["sign"]["broadcast"] = True
+        handler.my_handle.config = _StubConfig(cfg)
         for _ in range(2):
-            assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
+            data = {"platform": "dy", "username": "小明", "content": "签到"}
+            assert handler.integral_handle("comment", data) is True
+            assert handler.integral_sign_consume(data) is True
 
         rows = handler.my_handle.db.fetch_all("SELECT integral, sign_num FROM integral")
         assert len(rows) == 1
@@ -221,12 +231,15 @@ class TestUpsertSemantics:
         assert row_after_entrance[3] == row_after_gift[4]  # total_price 不变
 
     def test_follow_scoring_with_default_keys(self, handler, caplog):
-        """关注计分（新增规则键）：config 缺键用安全默认 1 分，缺键告警仅一次。"""
+        """关注计分（新增规则键）：config 缺键用安全默认 1 分，缺键告警仅一次。
+        2026-11-19 积分窗口语义批次：关注一生一次（last_follow_ts 非 NULL 即拦截），
+        第二次关注前回置 NULL（模拟迁移存量 fail-open 形态）以保持连打计分形态。"""
         cfg = base_config()
         assert "follow" not in cfg["integral"]
         handler.my_handle.config = _StubConfig(cfg)
 
         assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        assert handler.my_handle.db.execute("UPDATE integral SET last_follow_ts = NULL")
         assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
         row = handler.my_handle.db.fetch_one("SELECT integral, sign_num, view_num FROM integral")
         assert row[0] == 2 and row[1] == 0 and row[2] == 0

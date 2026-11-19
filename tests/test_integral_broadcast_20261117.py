@@ -1,16 +1,26 @@
 # -*- coding: UTF-8 -*-
 """
-积分播报守卫测试（2026-11-17 积分播报批次）
+积分播报守卫测试（2026-11-17 积分播报批次；2026-11-19 积分记录前移批次、
+播报文案收敛批次更新）
 
 覆盖义务（任务书）：
 - 播报开关默认关闭（缺键/false）：签到/礼物/入场/关注积分累计只写库，
-  broadcast 路径不产生任何播报 TTS（既有档位回复现状不变）
-- 开启后写库成功：按 integral.<module>.broadcast_copy 播报，
-  {username}/{integral} 变量填充正确（{integral}=本次累计后的当前总积分，
-  取自写库后最新行）；缺 broadcast_copy 键回退内置默认文案（warn_once）
+  broadcast 路径不产生任何播报 TTS（2026-11-19 播报开关统管修复批次起：
+  档位回复一并纳入 broadcast 门，关闭=零积分播报）
+- 开启后写库成功：播报文案优先级=档位文案/平铺文案（ctx 路径）→ 内置默认文案
+  兜底（2026-11-19 播报文案收敛批次：播报文案独立配置项退役——{username}/
+  {integral} 变量由内置默认模板填充，{integral}=本次累计后的当前总积分，
+  取自写库后最新行）
 - 播报入队与查询回复同通道：type=comment（复用 _integral_reply）
-- 限频拦截（24h 窗口内重复签到/入场/关注）：静默不播报；超窗恢复播报
+- 窗口限频拦截（2026-11-19 积分窗口语义批次：签到/入场=自然日固定窗口、关注=
+  一生一次；同日/已计分重复行为）：静默不播报；跨日（次日 0 点起）恢复播报
 - 写库失败：不播报（CAP6 partial 语义不破）
+
+2026-11-19 积分记录前移批次：记分/播报分离——积分链（integral_handle）只记分
+（写库+挂 IntegralScoreContext），播报由限入后挂载点消费 ctx 触发（签到=
+integral_sign_consume；gift/entrance/follow=integral_announce_if_scored）。
+本文件用例改为「记分 → 挂载点消费」两段式驱动；follow 档位文案（copywriting）
+收敛纳入统一门（平铺文案优先/内置默认文案兜底/开关门控）。
 
 纪律：pytest tmp_path 独立测试 DB 文件（同 test_integral_review_1031.py）。
 """
@@ -46,11 +56,9 @@ CREATE TABLE IF NOT EXISTS integral (
 )
 '''
 
-# 可识别的播报模板标记（与档位回复文案无交集，便于精确断言播报是否入队）
-BC_SIGN = "播报标记{username}签到当前{integral}分"
-BC_GIFT = "播报标记{username}礼物当前{integral}分"
-BC_ENTRANCE = "播报标记{username}入场当前{integral}分"
-BC_FOLLOW = "播报标记{username}关注当前{integral}分"
+# 内置默认文案兜底播报的期望内容直接内联在各用例断言中（渲染形态以
+# feature_handler._INTEGRAL_BROADCAST_DEFAULT_COPY 为准；2026-11-19 播报文案
+# 收敛批次起为唯一兜底文案源）
 
 
 class _StubConfig:
@@ -102,7 +110,7 @@ class _BrokenWriteDB:
 
 def base_config():
     """镜像 config.json 积分节的最小配置（enable 全开 + 档位文案固定单条；
-    broadcast/broadcast_copy 缺省=存量配置升级形态，播报默认关）。"""
+    broadcast 缺省=存量配置升级形态，播报默认关）。"""
     return {
         "integral": {
             "enable": True,
@@ -132,6 +140,14 @@ def tts_contents(fake):
             if isinstance(r, dict) and r.get("type") == "comment"]
 
 
+def announce(handler, data, module):
+    """2026-11-19 积分记录前移批次：记分/播报两段式驱动——记分（integral_handle
+    同步直调形态挂 IntegralScoreContext）后由限入后挂载点消费 ctx 播报。"""
+    if module == "sign":
+        return handler.integral_sign_consume(data)
+    return handler.integral_announce_if_scored(data, module)
+
+
 @pytest.fixture
 def db(tmp_path):
     """新装形态测试库。"""
@@ -156,9 +172,10 @@ def fast_retry_sleep(monkeypatch):
     monkeypatch.setattr(feature_handler_module.time, "sleep", lambda *_: None)
 
 
-def backdate(db, column, hours):
-    """把指定时间列回拨 hours 小时（模拟超窗状态）。"""
-    old = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S.%f")
+def backdate(db, column, days):
+    """把指定时间列回拨 days 天（2026-11-19 积分窗口语义批次：自然日窗口跨日
+    模拟——减 1 天必落在前一自然日，次日 0 点起重新可计）。"""
+    old = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S.%f")
     assert db.execute(f"UPDATE integral SET {column} = ?", (old,))
     return old
 
@@ -176,6 +193,8 @@ class TestBroadcastDisabledByDefault:
 
         row = db.fetch_one("SELECT integral FROM integral")
         assert row == (1 + 10 + 1 + 1,), "四类累计均写库成功"
+        # 2026-11-19 积分记录前移批次：开关关时挂载点消费同样零播报（未消费形态
+        # 也不产生残留播报）
         builtin_marks = [tpl.format(username="小明", integral=13)
                          for tpl in feature_handler_module._INTEGRAL_BROADCAST_DEFAULT_COPY.values()]
         for content in tts_contents(fake):
@@ -183,72 +202,97 @@ class TestBroadcastDisabledByDefault:
                 assert mark not in content, "开关缺省不得播报内置默认文案"
 
     def test_explicit_false_no_broadcast(self, handler, fake, db):
-        """broadcast 显式 False：配置了播报文案也不播报（只写库）。"""
+        """broadcast 显式 False：档位文案/平铺文案一并停播（2026-11-19 统一门：
+        零积分播报，只写库）。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": False, "broadcast_copy": BC_SIGN})
-        cfg["integral"]["gift"].update({"broadcast": False, "broadcast_copy": BC_GIFT})
-        cfg["integral"]["entrance"].update({"broadcast": False, "broadcast_copy": BC_ENTRANCE})
-        cfg["integral"]["follow"].update({"broadcast": False, "broadcast_copy": BC_FOLLOW})
+        cfg["integral"]["sign"].update({"broadcast": False})
+        cfg["integral"]["gift"].update({"broadcast": False})
+        cfg["integral"]["entrance"].update({"broadcast": False})
+        cfg["integral"]["follow"].update({"broadcast": False})
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is True
+        # consume 返回值=终结判定（计分成功即消费该弹幕，与播报无关）；零播报由
+        # tts_contents 断言（2026-11-19 积分记录前移批次）
+        assert announce(handler, data, "sign") is True, "计分成功=消费该弹幕（终结判定）"
         row = db.fetch_one("SELECT integral FROM integral")
         assert row == (1,)
-        contents = tts_contents(fake)
-        assert len(contents) == 1, "只保留既有档位回复一条，无额外播报"
-        assert "播报标记" not in contents[0]
+        assert tts_contents(fake) == [], "播报关闭=零积分播报（档位回复一并停播）"
 
 
 # ============ 开启播报：写库成功 → 播报（变量填充正确） ============
 
 class TestBroadcastEnabled:
     def test_sign_broadcast_filled_variables(self, handler, fake, db):
-        """签到播报：{username}/{integral} 变量填充正确。"""
+        """签到播报：档位文案缺失回退内置默认文案（{username} 变量填充正确；
+        2026-11-19 播报文案收敛批次：兜底文案源收敛为内置默认文案）。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
+        cfg["integral"]["sign"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["sign"]["copywriting"] = [{"sign_num_interval": "0-999999999"}]
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is True
+        assert announce(handler, data, "sign") is True, "挂载点消费触发播报"
         row = db.fetch_one("SELECT integral FROM integral")
         assert row == (1,)
-        assert "播报标记小明签到当前1分" in tts_contents(fake), \
-            "播报文案变量填充正确（{integral}=本次累计后的当前总积分）"
+        assert "感谢 小明 签到，积分+1" in tts_contents(fake), \
+            "内置默认文案变量填充正确"
 
     def test_gift_broadcast_total_after_accumulation(self, handler, fake, db):
-        """礼物播报：{integral} 取写库后累计总积分（存量 1 分 + 礼物 10 分 = 11）。"""
+        """礼物播报：{integral} 取写库后累计总积分（存量 1 分 + 礼物 10 分 = 11；
+        档位文案缺失回退内置默认文案）。"""
         cfg = base_config()
-        cfg["integral"]["gift"].update({"broadcast": True, "broadcast_copy": BC_GIFT})
+        cfg["integral"]["gift"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["gift"]["copywriting"] = [{"gift_price_interval": "0-999999999"}]
         handler.my_handle.config = _StubConfig(cfg)
 
         assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
         handler.my_handle.replies.clear()
-        assert handler.integral_handle("gift", {"platform": "dy", "username": "小明",
-                                                "gift_name": "小花", "total_price": 1.0}) is True
-        assert "播报标记小明礼物当前11分" in tts_contents(fake)
+        data = {"platform": "dy", "username": "小明", "gift_name": "小花", "total_price": 1.0}
+        assert handler.integral_handle("gift", data) is True
+        assert announce(handler, data, "gift") is True
+        assert "小明 的礼物已记入积分，当前 11 分" in tts_contents(fake)
 
     def test_entrance_and_follow_broadcast(self, handler, fake, db):
-        """入场/关注播报：各累计成功后按各自开关播报。"""
+        """入场/关注播报：各累计成功后按各自开关播报（2026-11-19 积分记录前移
+        批次：follow 档位文案收敛纳入统一门——平铺文案优先/内置默认文案兜底，
+        本用例清空 copywriting 走内置默认文案兜底路径验证）。"""
         cfg = base_config()
-        cfg["integral"]["entrance"].update({"broadcast": True, "broadcast_copy": BC_ENTRANCE})
-        cfg["integral"]["follow"].update({"broadcast": True, "broadcast_copy": BC_FOLLOW})
+        cfg["integral"]["entrance"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["entrance"]["copywriting"] = [{"entrance_num_interval": "0-999999999"}]
+        cfg["integral"]["follow"].update({"broadcast": True})
+        cfg["integral"]["follow"]["copywriting"] = []  # 清空平铺文案 → 内置默认文案兜底
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
-        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        e_data = {"platform": "dy", "username": "小明"}
+        assert handler.integral_handle("entrance", e_data) is True
+        assert announce(handler, e_data, "entrance") is True
+        f_data = {"platform": "dy", "username": "小明"}
+        assert handler.integral_handle("follow", f_data) is True
+        assert announce(handler, f_data, "follow") is True
         contents = tts_contents(fake)
-        assert "播报标记小明入场当前1分" in contents
-        assert "播报标记小明关注当前2分" in contents
+        assert "欢迎 小明 回来，积分+1" in contents
+        assert "感谢 小明 关注，积分+1" in contents
         assert db.fetch_one("SELECT integral FROM integral") == (2,)
 
     def test_broadcast_channel_aligned_with_query_reply(self, handler, fake, db):
         """播报消息与查询回复同通道：type=comment 且消息字段结构一致。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
+        cfg["integral"]["sign"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["sign"]["copywriting"] = [{"sign_num_interval": "0-999999999"}]
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is True
+        assert announce(handler, data, "sign") is True
         broadcast = [r for r in fake.replies if isinstance(r, dict)
-                     and r.get("content") == "播报标记小明签到当前1分"]
+                     and r.get("content") == "感谢 小明 签到，积分+1"]
         assert broadcast, "开启播报应有播报消息入队"
         assert broadcast[0].get("type") == "comment", "播报与查询回复同 type=comment 口径"
 
@@ -258,74 +302,103 @@ class TestBroadcastEnabled:
         assert query_msg, "查询回复通道可用（对照）"
         assert set(broadcast[0].keys()) == set(query_msg[-1].keys()), "播报复用查询回复的消息结构"
 
-    def test_missing_broadcast_copy_falls_back_to_builtin(self, handler, fake, db):
-        """开启播报但缺 broadcast_copy 键：回退内置默认文案（变量填充）。"""
+    def test_tier_copy_missing_falls_back_to_builtin(self, handler, fake, db):
+        """开启播报且档位/平铺文案缺失：回退内置默认文案（变量填充）。
+        copywriting 全缺（档位文案优先链全空）才走内置默认兜底。"""
         cfg = base_config()
         cfg["integral"]["follow"].update({"broadcast": True})
+        cfg["integral"]["follow"]["copywriting"] = []  # 档位文案优先链清空 → 内置默认兜底
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        data = {"platform": "dy", "username": "小明"}
+        assert handler.integral_handle("follow", data) is True
+        assert announce(handler, data, "follow") is True
         assert "感谢 小明 关注，积分+1" in tts_contents(fake)
 
     def test_per_module_switch_independent(self, handler, fake, db):
         """开关按模块独立：仅签到开启时，礼物累计不播报。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
-        cfg["integral"]["gift"].update({"broadcast_copy": BC_GIFT})  # 开关缺省=关
+        cfg["integral"]["sign"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["sign"]["copywriting"] = [{"sign_num_interval": "0-999999999"}]
+        cfg["integral"]["gift"].update({"broadcast": False})  # 显式关
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
-        assert handler.integral_handle("gift", {"platform": "dy", "username": "小明",
-                                                "gift_name": "小花", "total_price": 1.0}) is True
+        s_data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", s_data) is True
+        assert announce(handler, s_data, "sign") is True
+        g_data = {"platform": "dy", "username": "小明", "gift_name": "小花", "total_price": 1.0}
+        assert handler.integral_handle("gift", g_data) is True
+        assert announce(handler, g_data, "gift") is False, "礼物开关关闭挂载点零播报"
         contents = tts_contents(fake)
-        assert "播报标记小明签到当前1分" in contents
-        assert not any("播报标记小明礼物" in c for c in contents), "礼物开关关闭不播报"
+        assert "感谢 小明 签到，积分+1" in contents
+        assert not any("礼物已记入积分" in c for c in contents), "礼物开关关闭不播报"
 
 
 # ============ 限频拦截：不播报 ============
 
 class TestBroadcastCooldownBlocked:
     def test_sign_cooldown_no_broadcast(self, handler, fake, db):
-        """24h 窗口内重复签到：静默拦截（返回 True 消费弹幕），不播报。"""
+        """同日窗口内重复签到（自然日固定窗口）：静默拦截（返回 True 消费弹幕），
+        不播报。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
+        cfg["integral"]["sign"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["sign"]["copywriting"] = [{"sign_num_interval": "0-999999999"}]
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
-        assert any("播报标记" in c for c in tts_contents(fake)), "首次签到应有播报（对照）"
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is True
+        assert announce(handler, data, "sign") is True
+        assert any("感谢 小明 签到" in c for c in tts_contents(fake)), "首次签到应有播报（对照）"
 
         fake.replies.clear()
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
+        blocked = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", blocked) is True
+        assert announce(handler, blocked, "sign") is True, "限频拦截=消费弹幕（终结判定 True）"
         assert fake.replies == [], "限频拦截为隐形语义：不播报也不回复"
         assert db.fetch_one("SELECT integral FROM integral") == (1,), "窗口内重复签到不计分"
 
     def test_entrance_and_follow_cooldown_no_broadcast(self, handler, fake, db):
-        """24h 窗口内重复入场/关注：静默拦截不播报。"""
+        """同日窗口内重复入场/已计分（一生一次）重复关注：静默拦截不播报。"""
         cfg = base_config()
-        cfg["integral"]["entrance"].update({"broadcast": True, "broadcast_copy": BC_ENTRANCE})
-        cfg["integral"]["follow"].update({"broadcast": True, "broadcast_copy": BC_FOLLOW})
+        cfg["integral"]["entrance"].update({"broadcast": True})
+        cfg["integral"]["follow"].update({"broadcast": True})
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
-        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        e_data = {"platform": "dy", "username": "小明"}
+        f_data = {"platform": "dy", "username": "小明"}
+        assert handler.integral_handle("entrance", e_data) is True
+        assert handler.integral_handle("follow", f_data) is True
 
         fake.replies.clear()
-        assert handler.integral_handle("entrance", {"platform": "dy", "username": "小明"}) is True
-        assert handler.integral_handle("follow", {"platform": "dy", "username": "小明"}) is True
+        e_block = {"platform": "dy", "username": "小明"}
+        f_block = {"platform": "dy", "username": "小明"}
+        assert handler.integral_handle("entrance", e_block) is True
+        assert handler.integral_handle("follow", f_block) is True
+        assert announce(handler, e_block, "entrance") is False, "窗口内重复入场未记分零播报"
+        assert announce(handler, f_block, "follow") is False, "窗口内重复关注未记分零播报"
         assert fake.replies == [], "窗口内重复入场/关注静默拦截不播报"
         assert db.fetch_one("SELECT integral FROM integral") == (2,)
 
     def test_cooldown_expiry_broadcast_resumes(self, handler, fake, db):
-        """超窗（回拨 25 小时）后播报恢复，{integral} 反映累计后总积分。"""
+        """跨日（回拨 1 天，前一自然日）后播报恢复，{integral} 反映累计后总积分
+        （2026-11-19 积分窗口语义批次：自然日窗口次日重置，替代原 24h 滚动超窗）。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
+        cfg["integral"]["sign"].update({"broadcast": True})
+        # 档位块无 copywriting → 统一门文案链走内置默认文案兜底
+        cfg["integral"]["sign"]["copywriting"] = [{"sign_num_interval": "0-999999999"}]
         handler.my_handle.config = _StubConfig(cfg)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
-        backdate(db, "last_sign_ts", 25)
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is True
+        assert announce(handler, data, "sign") is True
+        backdate(db, "last_sign_ts", 1)
         fake.replies.clear()
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is True
-        assert "播报标记小明签到当前2分" in tts_contents(fake)
+        resumed = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", resumed) is True
+        assert announce(handler, resumed, "sign") is True
+        assert "感谢 小明 签到，积分+1" in tts_contents(fake)
         assert db.fetch_one("SELECT integral FROM integral") == (2,)
 
 
@@ -335,23 +408,26 @@ class TestBroadcastDbFailure:
     def test_sign_db_write_failure_no_broadcast(self, handler, fake, db):
         """写库失败（重试耗尽）：返回 False，不播报也不回复。"""
         cfg = base_config()
-        cfg["integral"]["sign"].update({"broadcast": True, "broadcast_copy": BC_SIGN})
+        cfg["integral"]["sign"].update({"broadcast": True})
         handler.my_handle.config = _StubConfig(cfg)
         handler.my_handle.db = _BrokenWriteDB(db)
 
-        assert handler.integral_handle("comment", {"platform": "dy", "username": "小明", "content": "签到"}) is False
+        data = {"platform": "dy", "username": "小明", "content": "签到"}
+        assert handler.integral_handle("comment", data) is False
+        assert announce(handler, data, "sign") is False, "写库失败未记分，挂载点零播报（CAP6）"
         assert fake.replies == [], "写库失败不播报"
         assert db.fetch_one("SELECT integral FROM integral") is None, "写库未发生"
 
     def test_gift_db_write_failure_no_broadcast(self, handler, fake, db):
         """礼物写库失败：不播报。"""
         cfg = base_config()
-        cfg["integral"]["gift"].update({"broadcast": True, "broadcast_copy": BC_GIFT})
+        cfg["integral"]["gift"].update({"broadcast": True})
         handler.my_handle.config = _StubConfig(cfg)
         handler.my_handle.db = _BrokenWriteDB(db)
 
-        assert handler.integral_handle("gift", {"platform": "dy", "username": "小明",
-                                                "gift_name": "小花", "total_price": 1.0}) is False
+        data = {"platform": "dy", "username": "小明", "gift_name": "小花", "total_price": 1.0}
+        assert handler.integral_handle("gift", data) is False
+        assert announce(handler, data, "gift") is False
         assert fake.replies == []
         assert db.fetch_one("SELECT integral FROM integral") is None
 

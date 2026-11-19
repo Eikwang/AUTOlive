@@ -272,6 +272,20 @@ class TaskScheduler:
             logger.error(f"定时任务调度注册失败: {traceback.format_exc()}")
         self._sched_tags = tags
 
+    def _gate_startup_ready(self, source: str):
+        """启动就绪门控（2026-11-19 批次）：慢模块（GSV/数字人）就绪前不产出任务。
+
+        快模块线程（定时任务/闲时任务/动态文案）入口阻塞等待——就绪前门控阻断
+        任务源头（无需报错降级处理）；超时兜底强制继续（一次性告警在
+        readiness.wait_ready 内），单服务挂死不永久卡死快模块。键集合按当前
+        config 启用状态动态确定（readiness.required_keys）。
+        """
+        try:
+            from utils.readiness import wait_ready, required_keys, STARTUP_READY_TIMEOUT_S
+            wait_ready(required_keys(self.config), STARTUP_READY_TIMEOUT_S)
+        except Exception:
+            logger.error(f"[{source}] 启动门控异常（放行继续，不阻断）: {traceback.format_exc()}")
+
     def run_schedule(self):
         """运行定时任务调度（存量单任务 / D-16 任务组，二选一接管）
 
@@ -280,6 +294,9 @@ class TaskScheduler:
         即重注册，运行中开关/改周期即时生效（原实现仅启动时注册一次，
         运行中开启任务需重启）。
         """
+        # 启动就绪门控（2026-11-19 批次）：先于首次注册——run_now=True 的
+        # 立即首跑也不得早于慢模块就绪
+        self._gate_startup_ready("定时任务")
         self._sched_tags = []
         self._last_sched_sig = None
         self.is_running = True
@@ -437,6 +454,8 @@ class TaskScheduler:
         """
 
         def run_idle_time_task():
+            # 启动就绪门控（2026-11-19 批次）：慢模块就绪前不触发闲时任务
+            self._gate_startup_ready("闲时任务")
             logger.info("闲时任务线程运行中...")
             last_mode = 0
             idle_wait = 0  # 两队列机制空闲确认后的等待累计（秒）
@@ -600,6 +619,8 @@ class TaskScheduler:
             return None
 
         def run_trends_copywriting():
+            # 启动就绪门控（2026-11-19 批次）：慢模块就绪前不生成/入队文案
+            self._gate_startup_ready("动态文案")
             logger.info("动态文案任务线程运行中...")
             file_cursor = 0
             copy_cursor = 0

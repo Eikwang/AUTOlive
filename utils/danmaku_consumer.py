@@ -1066,6 +1066,14 @@ class DanmakuListenerService:
         except Exception:
             logger.warning("[danmaku_listener] web.app 全局 bridge 对齐失败（发送房间判定将失败）", exc_info=True)
 
+        # 启动就绪门控（2026-11-19 批次·用户裁决：弹幕监听延迟连接）：监听
+        # 服务本体（settings/bridge/web_console）照常拉起，平台房间连接
+        # （_inject_rooms）延后到慢模块（GSV/数字人）就绪——启动期完全无互动。
+        # to_thread 等待不阻塞事件循环；超时兜底强制继续（一次性告警在
+        # readiness.wait_ready 内），防单服务挂死永不连房。
+        from utils.readiness import wait_ready, required_keys, STARTUP_READY_TIMEOUT_S
+        await asyncio.to_thread(wait_ready, required_keys(), STARTUP_READY_TIMEOUT_S)
+
         # rooms 注入 + ghost 对账（Eng A5）：config 为权威源
         await self._inject_rooms()
 

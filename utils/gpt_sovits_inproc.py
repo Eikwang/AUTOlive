@@ -315,6 +315,12 @@ class GptSovitsInproc:
                 return
             logger.info(f"[gsv-inproc] 模型加载完成 {time.time() - t0:.1f}s（v2ProPlus 四件套+SV）")
             self._set_state(ST_READY)
+            # 启动就绪门控（2026-11-19 批次）：引擎就绪即放行 "gsv" 键（快模块
+            # 线程/弹幕延迟连接的 wait_ready 等待点）。原设计在 warmup 完成处
+            # 置位，但 warmup 可能跳过（参考音频缺失）或失败——_load 置 READY
+            # 是恒达的就绪点；mark_ready 幂等，warmup 完成处二次置位无害。
+            from utils.readiness import mark_ready
+            mark_ready("gsv")
         except Exception as e:
             logger.error("[gsv-inproc] 模型加载失败", exc_info=True)
             self._set_state(ST_ERROR, str(e))
@@ -452,6 +458,10 @@ class GptSovitsInproc:
                 "streaming_mode": False,
             }, out)
             logger.info("[gsv-inproc] 预热完成")
+            # 启动就绪门控（2026-11-19 批次）：预热完成=引擎可合成，置位 "gsv"
+            # 键（_load 置 READY 处已先行置位，此处幂等兜底）
+            from utils.readiness import mark_ready
+            mark_ready("gsv")
         except Exception as e:
             logger.warning(f"[gsv-inproc] 预热失败（不阻塞启动）: {e}")
 

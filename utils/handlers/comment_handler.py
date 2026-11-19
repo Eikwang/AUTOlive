@@ -517,8 +517,15 @@ class CommentHandler:
                 username = self.my_handle.common.convert_digits_to_chinese(username) or username
                 data["username"] = username
 
-            # 0、积分机制运转（中枢已判定命令词命中，消费侧跳过重复匹配）
-            if rec.integral_sign and self.my_handle.integral_handle("comment", data, hub_result=rec):
+            # 0、积分机制运转（2026-11-19 积分记录前移批次：签到记分已在消息入口
+            # （限入/去重/遗忘窗口之前）异步完成并挂 IntegralScoreContext——此处
+            # 消费 ctx：等写库落定 → broadcast 开播报积分获得文案（档位文案优先/
+            # 内置默认文案兜底——2026-11-19 播报文案收敛批次）→ 终结判定（计分成功或限频拦截=积分链消费，
+            # 弹幕不再流向 LLM/助播链；写库失败/积分手关=未消费照旧走链）。
+            # 查询链（crud）不涉及记分，保持原 integral_handle 同步回复不动。
+            # 中枢命中守卫保留：rec.integral_sign=False 的弹幕不消费 ctx（防
+            # 非签到弹幕被误终结——入口预匹配与中枢词表一致性异常时 fail-open）
+            if rec.integral_sign and self.my_handle.feature_handler.integral_sign_consume(data):
                 self.my_handle.abandon_reply_link(_reply_link)  # 无 LLM 回复→放弃念白配对
                 return
             if rec.integral_query and self.my_handle.integral_handle("crud", data, hub_result=rec):

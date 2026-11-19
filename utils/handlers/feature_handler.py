@@ -7,6 +7,7 @@
 
 import os
 import random
+import threading
 import time
 import traceback
 from collections import deque
@@ -57,11 +58,70 @@ ON CONFLICT(platform, username, uid) DO UPDATE SET
 # WAL 与 busy_timeout 已在 utils/db.py 连接初始化处统一设置。
 INTEGRAL_DB_MAX_ATTEMPTS = 3
 
-# 签到/入场/关注 24h 滚动限频（2026-10-31 积分审查批次引入，2026-11-16 批次
-# 12h→24h 并扩展到关注，防频繁刷分）：距上次「计分」签到/入场/关注不足 24 小时，
-# 本行为不计分、不写库、不回复（隐形=无配置项，静默拦截）。礼物/查询不受限频。
-# 解析失败的库时间戳视为从未计分（fail-open，脏数据不封死计分链）。
+# ~~签到/入场/关注 24h 滚动限频~~（2026-10-31 积分审查批次引入 12h，2026-11-16
+# 批次 12h→24h 并扩展到关注；2026-11-19 积分窗口语义批次退役）：窗口语义按用户
+# 裁决收敛——签到/入场改固定时间窗口（自然日，见 same_day_active），关注改一生
+# 一次（last_follow_ts 非 NULL 即拦截）。本常量仅剩遗留引用（cooldown_active，
+# 保留防误伤），运行链路不再消费。
 INTEGRAL_COOLDOWN_HOURS = 24
+
+
+# ============ 积分记录前移批次（2026-11-19） ============
+#
+# 用户裁决的目标设计：积分记分原挂在限入（重复弹幕过滤/遗忘窗口）之后——限入
+# 时间较长时，被过滤的入场/关注/礼物/签到事件漏记积分。修复：
+#   记分：直接与弹幕监听对接（timer_handler.process_data 黑名单之后、限入去重/
+#        遗忘窗口之前）——监听到事件即记分（写库），不受限入/去重/遗忘窗口影响；
+#   播报：仍在限入去重之后、与答谢/念弹幕同层级——只有通过限入（会被正常答谢/
+#        念弹幕处理）的事件才播报积分获得文案，避免每条积分记录都播报。
+
+# 参与入口记分的分发类型（2026-11-19 积分记录前移批次）：comment（签到，需预
+# 匹配签到命令词）/gift/entrance/follow 四类弹幕事件 + talk（语音对话——语音
+# 签到词原语义经 chat_handler 积分链记分+终结，记分前移后统一入口挂 ctx，
+# chat_handler 消费点消费，语义不变）。like/room_stats/schedule/idle_time_task
+# 不涉及积分记分，不挂 ctx。
+INTEGRAL_ENTRY_TYPES = frozenset({"comment", "gift", "entrance", "follow", "talk"})
+
+# 入口异步记分 → 限入后挂载点播报 的等待上限（秒）：记分 worker 含写库重试
+# 退避（0.1s+0.2s）+ SQLite 写耗时，正常毫秒级完成；5s 上限 fail-open——超时
+# 按未记分处理（零播报+答谢照旧），不挂死主链。
+INTEGRAL_CTX_WAIT_S = 5.0
+
+
+class IntegralScoreContext:
+    """积分记分上下文（2026-11-19 积分记录前移批次）：消息入口异步记分与限入后
+    播报挂载点之间的结果容器，挂在 data["integral_gain_ctx"] 随事件传递。
+
+    异步方案与竞态权衡：记分以 daemon 线程执行（写库重试退避最长 ~0.3s 不阻塞
+    监听 worker），ctx 容器在监听线程内同步挂上 data（dict 键写入 GIL 原子），
+    worker 完成后置 ready Event；限入后挂载点（comment/chat 链签到消费点、
+    event_handler 答谢链）以 wait() 同步等写库完成再播报——保证播报侧必然在
+    写库后执行（_integral_broadcast 的 {integral}=累计后总积分查询、答谢抑制
+    判定无竞态）。若改纯异步 fire-and-forget，挂载点可能读到未就绪 ctx（误判
+    失败→答谢双重播报）或写库前查询总分（{integral} 错值）；同步等待代价仅
+    毫秒级（上限 5s fail-open），对时序最稳妥。
+    """
+
+    __slots__ = ("module", "ready", "scored", "blocked", "blocks",
+                 "interval_key", "metric_value", "variables", "copy_list")
+
+    def __init__(self, module):
+        self.module = module            # 积分模块名（sign/gift/entrance/follow）
+        self.ready = threading.Event()  # 记分段（含写库）是否已完成
+        self.scored = False             # True=写库成功（可播报）
+        self.blocked = False            # True=窗口/资格拦截（自然日窗口或关注一生一次；不计分不写库，静默）
+        # 播报上下文（scored=True 时填充）：档位表/区间键/档位 metric/文案变量
+        self.blocks = None
+        self.interval_key = None
+        self.metric_value = None
+        self.variables = {}
+        # 平铺文案兜底（follow 无档位路径：档位文案优先语义下作为统一门首选
+        # 兜底；sign/gift/entrance 走 blocks 档位选择，此字段为 None）
+        self.copy_list = None
+
+    def wait(self, timeout=INTEGRAL_CTX_WAIT_S):
+        """等待记分段完成（写库落定）；超时返回 False（调用方按未记分 fail-open）。"""
+        return self.ready.wait(timeout)
 
 
 def parse_db_ts(value):
@@ -77,7 +137,10 @@ def parse_db_ts(value):
 
 
 def cooldown_active(last_ts, now):
-    """行为是否处于 24 小时限频窗口内。
+    """~~行为是否处于 24 小时限频窗口内~~（遗留保留，2026-11-19 积分窗口语义批次
+    标注：原 sign/entrance/follow 三个调用方已全部改造——sign/entrance 改自然日
+    固定窗口（same_day_active）、follow 改一生一次（last_follow_ts 非 NULL 即
+    拦截），本函数运行链路已无调用方，保留仅为避免外部引用误伤）。
 
     Args:
         last_ts: 库中上次计分时间（datetime 或 ISO 字符串；None/解析失败=从未计分）
@@ -90,6 +153,27 @@ def cooldown_active(last_ts, now):
     if ts is None:
         return False
     return (now - ts).total_seconds() < INTEGRAL_COOLDOWN_HOURS * 3600
+
+
+def same_day_active(last_ts, now):
+    """行为是否与当前时刻同属一个自然日（2026-11-19 积分窗口语义批次，用户裁决）。
+
+    固定时间窗口语义（替代原 24h 滚动窗口）：last_ts 与 now 的本地时区日期
+    （date()）相同=当日已计分（拦截）；跨日（次日 0 点起）重新可计。row 值可能为
+    datetime 或 sqlite 存储的 ISO 字符串，统一经 parse_db_ts 解析（NULL/解析失败
+    =从未计分，fail-open 放行，与原 cooldown_active 容错口径一致）。
+
+    Args:
+        last_ts: 库中上次计分时间（datetime 或 ISO 字符串；None/解析失败=从未计分）
+        now (datetime): 当前时间
+
+    Returns:
+        bool: True=同自然日已计分（应拦截本次计分）
+    """
+    ts = parse_db_ts(last_ts)
+    if ts is None:
+        return False
+    return ts.date() == now.date()
 
 
 def as_str_list(value):
@@ -144,9 +228,10 @@ _DEFAULT_QUERY_NO_RECORD_COPY = "{username}，您暂无积分，签到、互动�
 # 查询库不可达时的通用失败文案（DX CAP6：查询失败不静默）
 _DEFAULT_QUERY_ERROR_COPY = "积分查询失败，请稍后再试"
 
-# 积分累计播报默认文案（2026-11-17 积分播报批次）：config 缺
-# integral.<module>.broadcast_copy 时回退使用。变量 {username}=展示名
-# （数字转中文口径同回复文案）、{integral}=本次累计后的当前总积分
+# 积分累计播报默认文案（2026-11-17 积分播报批次引入；2026-11-19 播报文案收敛
+# 批次起为统一门唯一兜底文案源——档位文案/平铺文案缺失时回退使用）。
+# 变量 {username}=展示名（数字转中文口径同回复文案）、{integral}=本次累计后
+# 的当前总积分
 _INTEGRAL_BROADCAST_DEFAULT_COPY = {
     "sign": "感谢 {username} 签到，积分+1",
     "gift": "{username} 的礼物已记入积分，当前 {integral} 分",
@@ -228,11 +313,6 @@ class FeatureHandler:
         self.my_handle = my_handle
         # 积分缺键告警去重（每个键仅警告一次，避免直播期间刷屏）
         self._integral_warned_keys = set()
-        # 2026-11-19 积分播报门控批次：本事件积分播报是否实际发生（写库成功且未限频
-        # 拦截且播报开关开启）。gift/entrance/follow 事件经 integral_handle 入口先复位、
-        # _integral_broadcast 实际入队播报后置 True——答谢抑制门（event_handler
-        # _integral_gate_suppress）据此判定是否跳过礼物/入场/关注答谢语音（防同事件双重播报）
-        self._integral_broadcast_fired = False
     
     def _qa_entries(self, source):
         """问答数据源解析（2026-10-31 本地问答审查批次）：config 内嵌行列表
@@ -858,49 +938,183 @@ class FeatureHandler:
 
     def integral_handle(self, type, data, hub_result=None):
         """
-        积分处理（C1 链路补全）：签到/礼物/入场/关注四类行为计分 + 查询命令回复
+        积分处理（C1 链路补全）：签到/礼物/入场/关注四类行为记分 + 查询命令回复
+
+        2026-11-19 积分记录前移批次：本方法收敛为「记分段」执行体——enable 检查/
+        身份/档位/写库/限频，播报上下文写入 data["integral_gain_ctx"]（IntegralScore-
+        Context），播报本身移至限入后挂载点消费（comment/chat 链签到消费点、
+        event_handler 答谢链 integral_announce_if_scored）。原四个 handler 内的
+        直接播报调用移除（防重：限入后链不再重复记分，只消费 ctx 播报）。
 
         2026-10-25 识别中枢改造：hub_result 非 None=中枢已判定命令词命中
-        （comment/crud 型跳过 enable+命令词重复匹配，调用由中枢命中驱动）；
-        None=自行匹配。gift/entrance/follow 型无文本匹配，hub_result 不参与。
+        （crud 型查询消费点继续使用）；comment 记分仅由入口 worker 调用（无
+        hub_result，签到命令词在记分段内自匹配）。
 
         Args:
-            type (str): 行为类型（comment=签到检测 / gift / entrance / follow / crud=查询）
+            type (str): 行为类型（comment=签到记分 / gift / entrance / follow / crud=查询）
             data (dict): 行为数据（platform/username/uid/content/gift_name/total_price 等）
-            hub_result (KeywordResult | None): 识别中枢结果
+            hub_result (KeywordResult | None): 识别中枢结果（仅查询链使用）
 
         Returns:
-            bool: 是否触发并处理。失败语义（CAP6）：写库失败 log 后返回 False，
-                  不抛出、不中断直播主流程（False 即状态条告警标记，状态条归另一工作流消费）。
-                  2026-10-31 补充：签到处于限频窗口（2026-11-16 批次起为 24h）时返回 True——该弹幕已被
-                  积分链消费（静默拦截不计分），不再落入 LLM/助播链
+            bool: 是否记分成功或限频拦截（True=积分链已消费该事件）。失败语义（CAP6）：
+                  写库失败 log 后返回 False，不抛出、不中断直播主流程。
+                  签到处于 24h 限频窗口时返回 True——该弹幕已被积分链消费（静默
+                  拦截不计分），不再落入 LLM/助播链
         """
         try:
-            # 2026-11-19 积分播报门控批次：gift/entrance/follow 事件每次先复位「积分播报
-            # 实际发生」标志（置于 enable 检查前——积分关/限频/写库失败等未播报路径
-            # 也不会残留上一事件的 True，答谢抑制门据此回退答谢照旧）
-            if type in ("gift", "entrance", "follow"):
-                self._integral_broadcast_fired = False
-
-            # 检查是否启用积分（中枢判定通道下保留双检：热载竞态兜底，成本可忽略）
+            if type == "crud":
+                return self._integral_query_handle(data, hub_result=hub_result)
+            if type not in ("comment", "gift", "entrance", "follow"):
+                return False
             if not self.my_handle.config.get("integral", "enable"):
                 return False
 
-            if type == "crud":
-                return self._integral_query_handle(data, hub_result=hub_result)
+            # 记分上下文：入口异步模式由 integral_score_entry 预挂（监听线程同步
+            # 创建，worker 复用填充）；同步直调形态（测试/兼容路径）此处自建并
+            # 挂上 data——两形态共用同一消费协议（ctx.ready 置位后挂载点可消费）
+            ctx = data.get("integral_gain_ctx") if isinstance(data, dict) else None
+            if not isinstance(ctx, IntegralScoreContext):
+                ctx = IntegralScoreContext("sign" if type in ("comment", "talk") else type)
+                if isinstance(data, dict):
+                    data["integral_gain_ctx"] = ctx
+
             if type == "comment":
-                return self._integral_sign_handle(data, hub_result=hub_result)
-            if type == "gift":
-                return self._integral_gift_handle(data)
-            if type == "entrance":
-                return self._integral_entrance_handle(data)
-            if type == "follow":
-                return self._integral_follow_handle(data)
-            return False
+                scored = self._integral_sign_handle(data, ctx)
+            elif type == "gift":
+                scored = self._integral_gift_handle(data, ctx)
+            elif type == "entrance":
+                scored = self._integral_entrance_handle(data, ctx)
+            else:
+                scored = self._integral_follow_handle(data, ctx)
+            return scored
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"积分处理失败：{e}")
             return False
+        finally:
+            # 记分段落定（成功/拦截/失败/异常全路径）——挂载点 wait() 放行
+            ctx_ref = data.get("integral_gain_ctx") if isinstance(data, dict) else None
+            if isinstance(ctx_ref, IntegralScoreContext):
+                ctx_ref.ready.set()
+
+    # ---- 消息入口记分（2026-11-19 积分记录前移批次） ----
+
+    def integral_score_entry(self, type, data):
+        """消息入口积分记分（用户裁决）：监听到事件即记分，不受限入去重/遗忘窗口
+        影响（修复限入时间较长时被过滤的入场/关注/礼物/签到事件漏记积分）。
+
+        调用点=timer_handler.process_data：限流类型在黑名单拦截之后（名单内用户
+        「不进行任何处理」含积分）、去重/遗忘窗口之前；talk 直通类型在异步分发
+        之前。异步权衡：daemon 线程执行记分段（写库重试退避最长 ~0.3s 不阻塞监听
+        worker），ctx 容器同步挂上 data["integral_gain_ctx"]（dict 键写入 GIL 原子），
+        限入后挂载点经 ctx.wait 等写库完成再播报（时序见 IntegralScoreContext）。
+
+        幂等/防重：单事件仅由入口调用一次；data 已挂 IntegralScoreContext（重复
+        入口调用等理论形态）不重复记分。integral.enable 关 → 不启动记分（ctx 不挂，
+        挂载点消费=答谢照旧/走 LLM，与积分手关语义一致）。
+        """
+        try:
+            if type not in INTEGRAL_ENTRY_TYPES:
+                return
+            if not self.my_handle.config.get("integral", "enable"):
+                return
+            if type == "comment":
+                # 签到命令词预匹配：未命中不启动记分任务（ctx 不挂，弹幕照常走链）；
+                # 命中则 module=sign。与记分段内匹配共用词表解析（热载一致性）。
+                content = str(data.get("content", "") or "").strip()
+                if content not in self._integral_sign_cmds():
+                    return
+                module = "sign"
+            elif type == "talk":
+                # talk 直通类型仅签到语义（原 chat_handler 积分链），查询词不在
+                # 入口预匹配（查询回复保持原链同步处理，不涉及记分）
+                content = str(data.get("content", "") or "").strip()
+                if content not in self._integral_sign_cmds():
+                    return
+                module = "sign"
+            else:
+                module = type
+            if isinstance(data.get("integral_gain_ctx"), IntegralScoreContext):
+                return  # 防重：已有上下文不重复记分
+            ctx = IntegralScoreContext(module)
+            data["integral_gain_ctx"] = ctx
+            threading.Thread(target=self._integral_score_worker, args=(type, data, ctx),
+                             name=f"integral-score-{module}", daemon=True).start()
+        except Exception:
+            # 入口记分调度异常不阻断消息主链（记分缺失=漏记，不挂死监听）
+            logger.error(traceback.format_exc())
+            logger.error("[积分] 入口记分调度异常（本事件未记分）")
+
+    def _integral_score_worker(self, type, data, ctx):
+        """入口记分 worker（daemon 线程）：执行记分段，完成后置 ready（含异常全路径）。
+        写库重试退避逻辑随迁（_integral_db_write 在记分段内执行）。"""
+        try:
+            self.integral_handle(type, data)
+        except Exception:
+            logger.error(traceback.format_exc())
+            logger.error("[积分] 入口记分异常（本事件未记分，不影响主链）")
+        finally:
+            ctx.ready.set()
+
+    def _integral_sign_cmds(self):
+        """签到命令词解析（入口预匹配与记分段共用）：config 缺键回退默认词 + warn_once。"""
+        sign_cmds = as_str_list(self.my_handle.config.get("integral", "sign", "cmd"))
+        if not sign_cmds:
+            sign_cmds = ["签到", "打卡"]
+            self._integral_warn_once("integral.sign.cmd", "积分配置缺少 integral.sign.cmd，使用默认签到命令词：签到/打卡")
+        return sign_cmds
+
+    def _integral_ctx_get(self, data):
+        """取事件挂载的记分上下文（无/形态非法返回 None——同步直调兼容形态）。"""
+        if isinstance(data, dict):
+            ctx = data.get("integral_gain_ctx")
+            if isinstance(ctx, IntegralScoreContext):
+                return ctx
+        return None
+
+    # ---- 限入后挂载点消费（2026-11-19 积分记录前移批次） ----
+
+    def integral_sign_consume(self, data):
+        """签到弹幕消费点（comment/chat 链，限入后）：消费入口记分结果——播报挂载
+        （broadcast 开）+ 终结判定。
+
+        Returns:
+            bool: True=积分链已消费该弹幕（计分成功或限频拦截，调用方 return 终结，
+                  不再流向 LLM/助播链）；False=积分未消费（积分手关/签到词未命中/
+                  写库失败），弹幕照旧走常规链路（原 integral_handle 返回 False 语义）。
+        """
+        ctx = self._integral_ctx_get(data)
+        if ctx is None or ctx.module != "sign":
+            return False
+        # 等记分段（写库）落定再判定——时序权衡见 IntegralScoreContext
+        if not ctx.wait(INTEGRAL_CTX_WAIT_S):
+            logger.warning("[积分] 入口记分等待超时，签到弹幕按未消费处理（走常规链路）")
+            return False
+        if ctx.blocked:
+            return True  # 24h 限频拦截：静默消费（防刷分弹幕进 LLM，原语义）
+        if not ctx.scored:
+            return False  # 写库失败（CAP6）：积分链未消费，弹幕照旧走常规链路
+        self._integral_gain_announce(ctx, data)
+        return True
+
+    def integral_announce_if_scored(self, data, module):
+        """礼物/入场/关注挂载点播报（event_handler 答谢链，限入后）：消费入口记分
+        结果，按 integral.<module>.broadcast 开关播报积分获得文案（档位文案优先/
+        内置默认文案兜底——2026-11-19 播报文案收敛批次）。
+
+        Returns:
+            bool: 播报是否实际发生——答谢抑制判定依据（播报发生→抑制答谢语音，
+                  积分播报优先；广播关/限频拦截/写库失败/入口未启动记分→答谢照旧）。
+        """
+        ctx = self._integral_ctx_get(data)
+        if ctx is None or ctx.module != module:
+            return False
+        if not ctx.wait(INTEGRAL_CTX_WAIT_S):
+            logger.warning(f"[积分] 入口记分等待超时，{module} 按未记分处理（答谢照旧）")
+            return False
+        if not ctx.scored:
+            return False
+        return self._integral_gain_announce(ctx, data)
 
     def _integral_identity(self, data):
         """提取积分身份三元组 (platform, username, uid)。
@@ -1040,20 +1254,53 @@ class FeatureHandler:
             return False
         return self._integral_format_and_reply(copy_list, data, variables)
 
-    def _integral_broadcast(self, module, data):
-        """积分累计播报（2026-11-17 积分播报批次）：积分累计成功（写库成功且未被
-        限频拦截）后按模块 broadcast 开关判定——开启则以 integral.<module>.broadcast_copy
-        模板组装播报文案（{username}/{integral} 变量填充，{integral}=本次累计后的当前
-        总积分，取自写库后的最新行），复用 _integral_reply 通道入队（type=comment，
-        与查询回复同 type/权重口径）。开关关闭（默认 False）/文案缺失/总积分查询失败/
-        变量填充失败均静默跳过（播报为 best-effort，不影响积分主流程）；限频拦截与
-        写库失败在调用方提前 return，不会走到本方法。
+    def _integral_gain_announce(self, ctx, data):
+        """积分获得播报统一门（2026-11-19 积分记录前移批次：ctx 版）。
 
-        2026-11-19 积分播报门控批次：返回值改为可判定标志——True=本事件播报实际
-        发生（文案已入队），False=未播报（开关关/文案缺失/总积分查询失败/变量填充
-        失败/异常）。实际入队成功同步置 _integral_broadcast_fired=True，答谢抑制门
-        （event_handler._integral_gate_suppress）据此抑制同事件的礼物/入场/关注答谢
-        语音（防双重播报）。
+        播报段与记分段分离后，本方法由限入后挂载点消费 ctx 调用
+        （integral_sign_consume / integral_announce_if_scored）——挂载点已在
+        通过限入之后（与答谢/念弹幕同层级），只有通过限入的事件才播报积分
+        获得文案（被限入过滤的事件仅记分不播报，避免每条积分记录都播报）。
+
+        统一语义（用户裁决，2026-11-19 播报开关统管批次确立、本批次 ctx 化）：
+        开启=播报一次积分获得文案（档位文案优先：sign/gift/entrance 走 ctx.blocks
+        档位选择，follow 走 ctx.copy_list 平铺文案；档位文案缺失时用内置默认文案
+        兜底——2026-11-19 播报文案收敛批次：播报文案独立配置项退役）；关闭=零积分
+        播报（答谢照旧，由挂载点返回值判定）。
+
+        Returns:
+            bool: 播报是否实际发生（挂载点答谢抑制判定依据）
+        """
+        try:
+            if not self.my_handle.config.get("integral", ctx.module, "broadcast"):
+                return False
+            # 档位文案优先：档位表选择播报（sign/gift/entrance）
+            if ctx.blocks and self._integral_tier_reply(ctx.blocks, ctx.interval_key, ctx.metric_value, data, ctx.variables):
+                return True
+            # 平铺文案兜底（follow：无档位路径的档位文案）
+            if ctx.copy_list and self._integral_format_and_reply(ctx.copy_list, data, ctx.variables):
+                return True
+            # 再兜底：文案缺失/未命中时用内置默认文案回退（2026-11-19 播报文案收敛批次）
+            return self._integral_broadcast(ctx.module, data)
+        except Exception:
+            logger.error(traceback.format_exc())
+            logger.error(f"[积分播报] {ctx.module} 获得播报统一门异常（积分已计入，播报缺失不影响主流程）")
+            return False
+
+    def _integral_broadcast(self, module, data):
+        """积分累计播报（2026-11-17 积分播报批次；2026-11-19 播报文案收敛批次起
+        仅承担内置默认文案兜底播报）：积分累计成功（写库成功且未被限频拦截）后按
+        模块 broadcast 开关判定——开启则以内置默认播报文案组装播报（{username}/
+        {integral} 变量填充，{integral}=本次累计后的当前总积分，取自写库后的最新
+        行），复用 _integral_reply 通道入队（type=comment，与查询回复同 type/权重
+        口径）。档位文案/平铺文案优先级由 _integral_gain_announce 统一门承担，
+        本方法仅在文案链全空时作为兜底被调用。开关关闭（默认 False）/总积分查询
+        失败/变量填充失败均静默跳过（播报为 best-effort，不影响积分主流程）。
+
+        2026-11-19 积分记录前移批次：调用方已收敛为 _integral_gain_announce 统一门
+        （挂载点消费 ctx），写库时序由 ctx.wait 保证（播报侧必然在写库后执行）；
+        True=本事件播报实际发生（文案已入队），False=未播报（开关关/总积分查询
+        失败/变量填充失败/异常）——挂载点据此判定答谢抑制。
 
         Args:
             module (str): 积分模块名（sign/gift/entrance/follow）
@@ -1063,15 +1310,10 @@ class FeatureHandler:
             bool: 播报是否实际发生
         """
         try:
-            self._integral_broadcast_fired = False
             enabled = self.my_handle.config.get("integral", module, "broadcast")
             if not enabled:
                 return False  # 开关缺省/关闭：保持现状不播报（只写库）
-            copy_template = self.my_handle.config.get("integral", module, "broadcast_copy")
-            if not copy_template:
-                copy_template = _INTEGRAL_BROADCAST_DEFAULT_COPY.get(module)
-                self._integral_warn_once(f"integral.{module}.broadcast_copy",
-                                         f"积分配置缺少 integral.{module}.broadcast_copy，使用默认播报文案")
+            copy_template = _INTEGRAL_BROADCAST_DEFAULT_COPY.get(module)
             if not copy_template:
                 return False
 
@@ -1092,8 +1334,6 @@ class FeatureHandler:
                 logger.warning(f"[积分播报] {module} 播报文案变量替换失败，跳过播报：{username}")
                 return False
             self._integral_reply(data, content)
-            # 2026-11-19 积分播报门控批次：实际入队成功——标记本事件播报已发生
-            self._integral_broadcast_fired = True
             return True
         except Exception:
             # CAP6 partial：积分已计入，播报失败 log 记录不算失败
@@ -1101,19 +1341,10 @@ class FeatureHandler:
             logger.error("[积分播报] 播报失败（积分已计入，播报缺失不影响主流程）")
             return False
 
-    def integral_broadcast_fired(self):
-        """2026-11-19 积分播报门控批次：本事件积分播报是否实际发生（写库成功且未
-        限频拦截且播报开关开启，文案已实际入队）。
-
-        答谢抑制门（event_handler._integral_gate_suppress）判定依据；标志语义为
-        「单事件瞬时态」——gift/entrance/follow 事件经 integral_handle 入口复位、
-        _integral_broadcast 实际入队后置 True。"""
-        return bool(getattr(self, "_integral_broadcast_fired", False))
-
-    def _integral_sign_handle(self, data, hub_result=None):
-        """签到计分：弹幕命中签到命令词 → UPSERT 计分（sign_num 自增）+ 按签到次数档位回复。
-
-        hub_result 非 None=中枢已判定签到命中（跳过 enable+命令词重复匹配）。"""
+    def _integral_sign_handle(self, data, ctx):
+        """签到记分段（2026-11-19 积分记录前移批次）：弹幕命中签到命令词 → UPSERT
+        计分（sign_num 自增）。播报上下文写入 ctx（档位文案/变量），播报由限入后
+        消费点（integral_sign_consume）按 broadcast 开关执行。"""
         enable = self.my_handle.config.get("integral", "sign", "enable")
         if enable is None:
             self._integral_warn_once("integral.sign.enable", "积分配置缺少 integral.sign.enable，按默认开启处理")
@@ -1122,16 +1353,10 @@ class FeatureHandler:
             return False
 
         content = str(data.get("content", "") or "").strip()
-        # 审查修复（发布批次）：缺键告警提到 hub 守卫外——hub_result 非 None 时
-        # 也须感知存量缺 integral.sign.cmd 配置（warn_once 自去重，每键仅一次）
-        sign_cmds = as_str_list(self.my_handle.config.get("integral", "sign", "cmd"))
-        if not sign_cmds:
-            sign_cmds = ["签到", "打卡"]
-            self._integral_warn_once("integral.sign.cmd", "积分配置缺少 integral.sign.cmd，使用默认签到命令词：签到/打卡")
-        if hub_result is None:
-            # 命令词精确匹配（避免「签到啦」等前缀弹幕误触发计分回复）
-            if content not in sign_cmds:
-                return False
+        # 命令词精确匹配（避免「签到啦」等前缀弹幕误触发计分回复）；词表解析与
+        # 入口预匹配共用 _integral_sign_cmds（热载一致性）
+        if content not in self._integral_sign_cmds():
+            return False
 
         platform, username, uid = self._integral_identity(data)
         if not username:
@@ -1139,13 +1364,16 @@ class FeatureHandler:
 
         row = self._integral_fetch_row(platform, username, uid)
         now = datetime.now()
-        # 24h 滚动限频（防刷分）：门卫 sign_num>0——上次签到真实发生过才看
-        # last_sign_ts（排除非签到事件 fresh INSERT 写入的 now 占位值）。
-        # 窗口内静默拦截：不计分、不写库、不回复（view/sign 次数与积分同步
-        # 不动，保持「总打卡次数=计分次数」口径）。返回 True=该弹幕已被积分
-        # 链消费，不再落入 LLM/助播链（防刷分弹幕刷出 AI 回复）。
-        if row and int(row[2] or 0) > 0 and cooldown_active(row[4], now):
-            logger.info(f"[积分] 用户 {username} 签到处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+        # 固定时间窗口（自然日，2026-11-19 积分窗口语义批次，替代原 24h 滚动限频）：
+        # 门卫 sign_num>0——上次签到真实发生过才看 last_sign_ts（排除非签到事件
+        # fresh INSERT 写入的 now 占位值）。last_sign_ts 与当前时刻同属一个自然日
+        # （本地时区 date() 相同）即拦截，次日 0 点起重新可计；NULL/解析失败=从未
+        # 计分（fail-open 放行）。窗口内静默拦截：不计分、不写库、不播报（view/sign
+        # 次数与积分同步不动，保持「总打卡次数=计分次数」口径）。记分段标记
+        # ctx.blocked，消费点返回 True=该弹幕已被积分链消费，不再落入 LLM/助播链。
+        if row and int(row[2] or 0) > 0 and same_day_active(row[4], now):
+            logger.info(f"[积分] 用户 {username} 签到当日已计分（自然日窗口），本次不计分")
+            ctx.blocked = True
             return True
 
         old_sign_num = int(row[2]) if row else 0
@@ -1166,18 +1394,22 @@ class FeatureHandler:
             logger.error(f"签到积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
-        # CAP6 定序=先写库后回复；写库成功回复失败=partial（积分已计入，log 记录）
-        self._integral_tier_reply(blocks, "sign_num_interval", new_sign_num, data, {
+        # 记分段完成：播报上下文入 ctx（限入后消费点判定 broadcast 开关再播报，
+        # 档位文案优先/内置默认文案兜底由 _integral_gain_announce 统一门承担）
+        ctx.scored = True
+        ctx.blocks = blocks
+        ctx.interval_key = "sign_num_interval"
+        ctx.metric_value = new_sign_num
+        ctx.variables = {
             "username": username,
             "get_integral": points,
             "sign_num": new_sign_num,
-        })
-        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
-        self._integral_broadcast("sign", data)
+        }
         return True
 
-    def _integral_gift_handle(self, data):
-        """礼物计分：积分=int(比例×礼物总价)（显式取整，规则进 D-20），按礼物价值档位回复。"""
+    def _integral_gift_handle(self, data, ctx):
+        """礼物记分段（2026-11-19 积分记录前移批次）：积分=int(比例×礼物总价)
+        （显式取整，规则进 D-20）。播报上下文写入 ctx，播报由限入后挂载点消费。"""
         enable = self.my_handle.config.get("integral", "gift", "enable")
         if enable is None:
             self._integral_warn_once("integral.gift.enable", "积分配置缺少 integral.gift.enable，按默认开启处理")
@@ -1210,20 +1442,23 @@ class FeatureHandler:
             logger.error(f"礼物积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
-        self._integral_tier_reply(blocks, "gift_price_interval", total_price, data, {
+        ctx.scored = True
+        ctx.blocks = blocks
+        ctx.interval_key = "gift_price_interval"
+        ctx.metric_value = total_price
+        ctx.variables = {
             "username": self._integral_display_name(username),
             "gift_name": data.get("gift_name", "礼物"),
             "gift_num": data.get("gift_num", data.get("num", 1)),
             "unit_price": data.get("unit_price", 0),
             "total_price": total_price,
             "get_integral": points,
-        })
-        # 2026-11-17 积分播报批次：累计成功（写库成功）后按开关播报
-        self._integral_broadcast("gift", data)
+        }
         return True
 
-    def _integral_entrance_handle(self, data):
-        """入场计分：view_num（计分入场次数，24h 限频窗口内不计）+1，积分按入场次数档位累加。"""
+    def _integral_entrance_handle(self, data, ctx):
+        """入场记分段（2026-11-19 积分记录前移批次）：view_num（计分入场次数，同
+        自然日已计分则不计）+1，积分按入场次数档位累加。播报上下文写入 ctx。"""
         enable = self.my_handle.config.get("integral", "entrance", "enable")
         if enable is None:
             self._integral_warn_once("integral.entrance.enable", "积分配置缺少 integral.entrance.enable，按默认开启处理")
@@ -1237,12 +1472,14 @@ class FeatureHandler:
 
         row = self._integral_fetch_row(platform, username, uid)
         now = datetime.now()
-        # 24h 滚动限频（防刷分）：门卫 view_num>0——上次入场计分真实发生过才看
-        # last_entrance_ts（NULL=迁移前存量/从未计分，fail-open 放行）。
-        # 窗口内静默拦截：不计分、不写库（view_num 即「总获得积分的进场次数」，
-        # 与 {entrance_num} 变量口径一致）、不回复。
-        if row and int(row[1] or 0) > 0 and cooldown_active(row[5], now):
-            logger.info(f"[积分] 用户 {username} 入场处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+        # 固定时间窗口（自然日，2026-11-19 积分窗口语义批次，替代原 24h 滚动限频）：
+        # 门卫 view_num>0——上次入场计分真实发生过才看 last_entrance_ts。同自然日
+        # （本地时区 date() 相同）已计即拦截，次日 0 点起重新可计；NULL=迁移前存量
+        # /从未计分（fail-open 放行）。窗口内静默拦截：不计分、不写库（view_num 即
+        # 「总获得积分的进场次数」，与 {entrance_num} 变量口径一致）、不播报。
+        if row and int(row[1] or 0) > 0 and same_day_active(row[5], now):
+            logger.info(f"[积分] 用户 {username} 入场当日已计分（自然日窗口），本次不计分")
+            ctx.blocked = True
             return True
 
         old_view_num = int(row[1]) if row else 0
@@ -1262,17 +1499,21 @@ class FeatureHandler:
             logger.error(f"入场积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
-        self._integral_tier_reply(blocks, "entrance_num_interval", new_view_num, data, {
+        ctx.scored = True
+        ctx.blocks = blocks
+        ctx.interval_key = "entrance_num_interval"
+        ctx.metric_value = new_view_num
+        ctx.variables = {
             "username": self._integral_display_name(username),
             "get_integral": points,
             "entrance_num": new_view_num,
-        })
-        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
-        self._integral_broadcast("entrance", data)
+        }
         return True
 
-    def _integral_follow_handle(self, data):
-        """关注计分（新增规则键）：config 缺 integral.follow 节时用安全默认并仅告警一次。"""
+    def _integral_follow_handle(self, data, ctx):
+        """关注记分段（2026-11-19 积分记录前移批次，新增规则键缺键走安全默认仅告警
+        一次）。播报上下文写入 ctx（follow 无档位路径，ctx.blocks=None → 统一门走
+        平铺文案/内置默认文案兜底）。"""
         platform, username, uid = self._integral_identity(data)
         if not username:
             return False
@@ -1292,18 +1533,26 @@ class FeatureHandler:
                                      "积分配置缺少 integral.follow.get_integral，使用默认值 1")
         points = int(points)
 
+        # follow 档位文案（平铺列表，无档位区间）：作为统一门「档位文案优先」的
+        # 首选兜底——broadcast 开启时优先播报本文案；缺失（None）时统一门回退
+        # 内置默认文案（2026-11-19 积分记录前移批次：follow 纳入统一门，原「档位
+        # 回复不受开关门控」遗留语义收敛；2026-11-19 播报文案收敛批次：兜底收敛为
+        # 内置默认文案）
         copy_list = as_str_list(self.my_handle.config.get("integral", "follow", "copywriting"))
         if not copy_list:
-            copy_list = ["{username}感谢关注，获得{get_integral}点积分"]
-            self._integral_warn_once("integral.follow.copywriting", "积分配置缺少 integral.follow.copywriting，使用默认关注文案")
+            self._integral_warn_once("integral.follow.copywriting",
+                                     "积分配置缺少 integral.follow.copywriting，播报回退内置默认文案")
+            copy_list = None
 
         now = datetime.now()
-        # 24h 滚动限频（2026-11-16 批次：关注与签到/入场同口径，防反复取关-关注刷分）：
-        # 直接看 last_follow_ts（NULL=迁移前存量/从未计分，fail-open 放行）。
-        # 窗口内静默拦截：不计分、不写库、不回复。
+        # 一生一次（2026-11-19 积分窗口语义批次，用户裁决；收敛原 2026-11-16 批次的
+        # 24h 滚动限频「关注与签到/入场同口径」语义）：last_follow_ts 非 NULL 即拦截
+        # ——取关后重新关注永不重得；NULL=迁移前存量/从未计分（fail-open 放行一次）。
+        # 静默拦截：不计分、不写库、不播报。
         row = self._integral_fetch_row(platform, username, uid)
-        if row and cooldown_active(row[6], now):
-            logger.info(f"[积分] 用户 {username} 关注处于 {INTEGRAL_COOLDOWN_HOURS} 小时限频窗口内，本次不计分")
+        if row and row[6] is not None:
+            logger.info(f"[积分] 用户 {username} 关注已计过分（一生一次），本次不计分")
+            ctx.blocked = True
             return True
 
         # 列占位语义同礼物：last_sign_ts 传 now 占位（UPSERT CASE 不消费），
@@ -1313,12 +1562,15 @@ class FeatureHandler:
             logger.error(f"关注积分写库失败（已重试 {INTEGRAL_DB_MAX_ATTEMPTS} 次），本次积分未计入：{username}")
             return False
 
-        self._integral_format_and_reply(copy_list, data, {
+        ctx.scored = True
+        ctx.blocks = None  # follow 无档位路径：统一门走 copy_list/内置默认文案兜底
+        ctx.interval_key = None
+        ctx.metric_value = None
+        ctx.variables = {
             "username": self._integral_display_name(username),
             "get_integral": points,
-        })
-        # 2026-11-17 积分播报批次：累计成功（写库成功且未被限频拦截）后按开关播报
-        self._integral_broadcast("follow", data)
+        }
+        ctx.copy_list = copy_list
         return True
 
     def _integral_query_handle(self, data, hub_result=None):

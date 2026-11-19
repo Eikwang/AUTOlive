@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from utils.keyword_hub import KeywordHub, KeywordResult
-from utils.handlers.feature_handler import FeatureHandler
+from utils.handlers.feature_handler import FeatureHandler, IntegralScoreContext
 from utils.handlers.comment_handler import CommentHandler
 
 
@@ -163,25 +163,30 @@ class TestSourceRouting:
 class TestConsumerTrustsHubResult:
     """hub_result 非 None=中枢已判定，消费侧跳过重复匹配直接执行。"""
 
-    def test_integral_sign_trusts_hub(self):
-        """内容不含签到词，中枢判定命中仍计分（hub_result 通道）；None 时自匹配不命中。"""
+    def test_integral_sign_driven_by_ctx(self):
+        """签到记分段由命令词自匹配驱动（2026-11-19 积分记录前移批次：匹配收敛到
+        入口 integral_score_entry，hub_result 通道退役）。命中签到词计分并置
+        ctx.scored；不含签到词不计分不写库；消费侧（integral_sign_consume）仅凭
+        ctx 判定终结，不再重复匹配。"""
         mh = MagicMock()
         mh.config = _FakeConfig({"integral": {"enable": True}})
         fh = FeatureHandler(mh)
         data = {"platform": "douyin", "username": "tester", "uid": "1",
                 "content": "今天天气不错"}  # 内容不含签到命令词
-        rec = KeywordResult(source="comment")
-        rec.integral_sign = True
+        ctx = IntegralScoreContext("sign")
         with patch.object(FeatureHandler, "_integral_fetch_row", return_value=None), \
-             patch.object(FeatureHandler, "_integral_db_write", return_value=True) as m_write, \
-             patch.object(FeatureHandler, "_integral_tier_reply"):
-            assert fh._integral_sign_handle(data, hub_result=rec) is True
-            m_write.assert_called_once()
-        # 兼容路径：hub_result=None 时同内容自匹配 → 不命中不写库
+             patch.object(FeatureHandler, "_integral_db_write", return_value=True) as m_write:
+            assert fh._integral_sign_handle(data, ctx) is False
+            m_write.assert_not_called()
+        # 命中签到词：自匹配计分（不依赖 hub_result）
+        data2 = dict(data, content="签到")
+        ctx2 = IntegralScoreContext("sign")
         with patch.object(FeatureHandler, "_integral_fetch_row", return_value=None), \
-             patch.object(FeatureHandler, "_integral_db_write", return_value=True) as m_write2:
-            assert fh._integral_sign_handle(data, hub_result=None) is False
-            m_write2.assert_not_called()
+             patch.object(FeatureHandler, "_integral_db_write", return_value=True) as m_write2, \
+             patch.object(FeatureHandler, "_integral_tier_blocks", return_value=[]):
+            assert fh._integral_sign_handle(data2, ctx2) is True
+            m_write2.assert_called_once()
+            assert ctx2.scored is True
 
     def test_key_mapping_trusts_hub_groups(self):
         """中枢命中组直接分派（内容无关仍触发）；空命中组不触发。"""
@@ -405,7 +410,7 @@ class TestChainWiringSourceGuard:
         src = inspect.getsource(mod)
         assert src.count('keyword_recognize(data, "comment")') == 1, \
             "弹幕链必须恰好单次调用识别中枢（零重复匹配守卫）"
-        for call in ('integral_handle("comment", data, hub_result=rec)',
+        for call in ('integral_sign_consume(data)',
                      'integral_handle("crud", data, hub_result=rec)',
                      'key_mapping_handle("弹幕", data, hub_result=rec)',
                      'local_qa_handle(data, hub_result=rec)',
@@ -427,7 +432,7 @@ class TestChainWiringSourceGuard:
         from utils.handlers import chat_handler as mod
         src = inspect.getsource(mod)
         assert src.count('keyword_recognize(data, "talk")') == 1
-        for call in ('integral_handle("comment", data, hub_result=rec)',
+        for call in ('integral_sign_consume(data)',
                      'integral_handle("crud", data, hub_result=rec)',
                      'key_mapping_handle("弹幕", data, hub_result=rec)',
                      'local_qa_handle(data, hub_result=rec)',
