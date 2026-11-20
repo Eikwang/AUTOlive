@@ -322,7 +322,7 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "stream_reply": True,        # fastrag 流式输出开关（2026-10-29 用户裁决独立键）
     "llm_quant_bits": 16,        # LLM 量化：4=INT4 / 8=INT8 / 16=BF16（启动 env 注入）
     "reranker_quant_bits": 16,   # Reranker 量化：4/8/16（同上）
-    "embedder_device": "cpu",    # Embedder 设备：cpu / cuda-fp16 / cuda（同上）
+    "embedder_device": "cuda-fp16",    # Embedder 设备：cpu / cuda-fp16 / cuda（同上；2026-11-20 对齐上游默认）
     # 对话人设与生成参数（2026-10-30 修复回答规则重启丢失：UI『应用并重启』
     # 时写回此节作为回显真源；服务端运行态真源仍为 fastrag-python
     # config_override.py——P2 补丁优先级 override > 本默认，语义不变）

@@ -143,49 +143,8 @@ def _create_fastrag_card(
             return "请先放入 .md/.txt 文件到 edtalk/fastrag/knowledgebase/ 目录"
         return None
 
-    def _stop_fastrag_server_if_running():
-        """构建前先停 server（python 路线：Windows 下 server 持有索引句柄会
-        PermissionError）。wmic 精确按命令行特征杀 python server.py（避免误伤
-        其他 python）；wmic 缺失（Win11 24H2+ 按需功能，DX F7）时回退
-        PowerShell Get-CimInstance，均失败输出可行动日志。"""
-        killed = False
-        try:
-            out = subprocess.run(
-                ["wmic", "process", "where",
-                 "name='python.exe' and commandline like '%fastrag-python%server.py%'",
-                 "get", "processid"],
-                capture_output=True, text=True, timeout=15,
-            )
-            for line in (out.stdout or "").splitlines():
-                pid = line.strip()
-                if pid.isdigit():
-                    subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
-                                   capture_output=True, timeout=10)
-                    killed = True
-        except FileNotFoundError:
-            logger.warning("wmic 不可用（Win11 24H2+ 按需功能），回退 PowerShell 探测 fastrag server 进程")
-        except Exception as e:
-            logger.warning(f"wmic 探测 fastrag server 失败（可能未运行）：{e}")
-        if not killed:
-            # DX F7 备选链：PowerShell Get-CimInstance 按命令行特征精确杀
-            try:
-                _ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-                       "Where-Object { $_.CommandLine -like '*fastrag-python*server.py*' } | "
-                       "Select-Object -ExpandProperty ProcessId")
-                out = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", _ps],
-                    capture_output=True, text=True, timeout=20,
-                )
-                for line in (out.stdout or "").splitlines():
-                    pid = line.strip()
-                    if pid.isdigit():
-                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
-                                       capture_output=True, timeout=10)
-                        killed = True
-            except Exception as e:
-                logger.warning(
-                    f"停止 fastrag server 失败（可能未运行）：{e}；"
-                    f"fix=手动结束 python server.py 进程后重试构建，否则索引文件可能被占用")
+    # 停服实现已收编至 frontend/main.py（AutoliveApp.stop_fastrag_server，
+    # 2026-11-19：与应用重启共用同一 wmic/PowerShell 精确杀链路）
 
     def _notify_alive(kind: str, message: str):
         """后台线程通知（client 存活守卫）：构建耗时 ~20s，期间页面刷新/重连
@@ -203,9 +162,13 @@ def _create_fastrag_card(
 
     def _run_build_index():
         """后台线程：构建知识库索引（『构建索引』按钮）。"""
+        from frontend.main import AutoliveApp
         try:
             import subprocess
-            _stop_fastrag_server_if_running()
+            # 计划内停服（构建需释放索引句柄）：置标记屏噪——监控线程观测到
+            # fastrag 退出时跳过「外围程序退出」告警（2026-11-19 修复误报）
+            AutoliveApp._fastrag_planned_stop = True
+            AutoliveApp.stop_fastrag_server()
             # 解释器解析与启动路径同源（Eng A1：resolve_interpreter 四级链，
             # 消除硬编码默认 llm.py:159 旧分叉——解释器挪位后构建/启动不再分裂）
             from utils.edtalk_realtime.runtime import resolve_interpreter
@@ -238,6 +201,8 @@ def _create_fastrag_card(
             logger.error(f"构建索引异常：{e}")
             _notify_alive("negative", f"构建异常：{e}")
         finally:
+            from frontend.main import AutoliveApp as _A
+            _A._fastrag_planned_stop = False
             build_btn.set_enabled(True)
             build_spinner.set_text("")
 
@@ -477,7 +442,7 @@ def _create_fastrag_card(
                 ).props("outlined").style("width:100%;")
                 ui.select(
                     options={"cpu": "CPU（省显存 ~1.8GB）", "cuda-fp16": "GPU FP16（推荐生产）", "cuda": "GPU FP32（显存较高）"},
-                    value=get_nested_value(config, "fastrag", "embedder_device", default="cpu"),
+                    value=get_nested_value(config, "fastrag", "embedder_device", default="cuda-fp16"),
                     on_change=lambda e: set_config_callback("fastrag", "embedder_device", value=e.value),
                     label="Embedder 设备",
                 ).props("outlined").style("width:100%;")
@@ -495,7 +460,7 @@ def _create_fastrag_card(
             tpl_dirty = {"v": False}
             _TPL_KEYS = [
                 ("system_role", "人设（SYSTEM_ROLE）", "你是一位专业、友好的线上销售，现在正在进行直播。"),
-                ("answer_rules", "回答规则（ANSWER_RULES）", ""),
+                ("system_rules", "回答规则（SYSTEM_RULES）", ""),
                 ("temperature", "生成温度 temperature（0-1）", 0.3),
                 ("top_p", "Top-p（0-1）", 0.9),
                 ("max_new_tokens", "最大生成 token 数", 128),
@@ -550,7 +515,9 @@ def _create_fastrag_card(
                     vals = {k: (i.value or "") for k, i in tpl_inputs.items()}
                     lines.append(f"SYSTEM_ROLE = {vals['system_role']!r}")
                     if vals["answer_rules"]:
-                        lines.append(f"ANSWER_RULES = {vals['answer_rules']!r}")
+                        # 2026-11-20 上游同步：服务端键 ANSWER_RULES → SYSTEM_RULES
+                        # （config 存储键仍为 template.answer_rules，仅 override 写入键迁移）
+                        lines.append(f"SYSTEM_RULES = {vals['answer_rules']!r}")
                     lines.append(f"LLM_TEMPERATURE = {float(vals['temperature'] or 0.3)}")
                     lines.append(f"LLM_TOP_P = {float(vals['top_p'] or 0.9)}")
                     lines.append(f"LLM_MAX_NEW_TOKENS = {int(vals['max_new_tokens'] or 128)}")
@@ -574,39 +541,49 @@ def _create_fastrag_card(
                 except Exception as e:
                     ui.notify(position="top", type="negative", message=f"模板落盘失败：{e}")
                     return
-                # 重启服务（python 路线：杀 server.py+由系统重启或手动拉起）
-                # 阻塞段（wmic 停服+health 探测）在 worker 线程执行——结果回
-                # 事件循环侧处置（回滚/通知）
-                def _blocking_restart() -> str:
-                    _stop_fastrag_server_if_running()
-                    import requests
-                    try:
-                        requests.get(
-                            f"http://127.0.0.1:{get_nested_value(config, 'fastrag', 'port', default=11420)}/health",
-                            timeout=2)
-                        return "still_running"  # 仍在运行（其他实例）
-                    except Exception:
-                        return "stopped"  # 已停止=正常
-
-                restart_state = await asyncio.to_thread(_blocking_restart)
-                if restart_state == "still_running":
-                    # 回滚 override（DX F-7）
+                # 重启服务（2026-11-19 修复：原实现只停不启——server 被杀后仅
+                # 提示"随下次运行系统拉起"，系统运行中场景知识库服务直接失联，
+                # 监控线程还会误报「外围程序退出」。现经 restart_fastrag 完成停服
+                # →等端口释放→重新拉起闭环，拉起链路与『运行系统』完全同源。
+                # 阻塞段（wmic 停服+端口等待+Popen）在 worker 线程执行——对齐
+                # audio_play 断联根修模式，防事件循环阻塞断联重载）
+                from frontend.main import AutoliveApp
+                if not bool(get_nested_value(config, "fastrag", "enable", default=False)):
+                    # 服务未启用：无进程可重启，模板落盘即生效路径（下次启用随系统拉起）
+                    tpl_dirty["v"] = False
+                    tpl_dirty_label.style("display:none")
+                    ui.notify(position="top", type="positive",
+                              message="模板已保存（fastrag 未启用——开关开启后随『运行系统』生效）")
+                    return
+                _app = AutoliveApp.APP_HOLDER.get("app")
+                if _app is None:
+                    # 主实例不可达（边缘态）：回退只停语义，由下次『运行系统』拉起
+                    await asyncio.to_thread(AutoliveApp.stop_fastrag_server)
+                    tpl_dirty["v"] = False
+                    tpl_dirty_label.style("display:none")
+                    ui.notify(position="top", type="positive",
+                              message="模板已生效（服务管理器不可达，fastrag 将随下次『运行系统』拉起）")
+                    return
+                ok, reason, fix_hint = await asyncio.to_thread(_app.restart_fastrag)
+                if not ok:
+                    # 回滚 override（DX F-7：失败场景保持文件与运行态一致）
                     if os.path.exists(backup):
                         shutil.copy2(backup, override)
-                    ui.notify(position="top", type="negative",
-                              message="problem=服务重启失败；cause=旧服务仍在运行；fix=停止系统后重新运行系统（模板已回滚）")
+                    ui.notify(position="top", type="negative", timeout=10,
+                              message=f"fastrag 服务重启失败：{reason}" +
+                                      (f"｜{fix_hint}" if fix_hint else "（模板已回滚）"))
                     return
                 tpl_dirty["v"] = False
                 tpl_dirty_label.style("display:none")
                 ui.notify(position="top", type="positive",
-                          message="模板已生效（fastrag 服务将随下次『运行系统』拉起；直播中重启请错峰）")
+                          message="模板已生效，fastrag 服务已重启")
 
             ui.button("应用并重启 fastrag 服务", on_click=_apply_template_and_restart).props("outline")
 
         # ---------- 区分文案（native F8；C4 收敛后仅余生成参数一侧） ----------
         ui.label("本页『对话人设与生成参数』= fastrag 生成行为（人设/回答规则/长度/温度），"
                  "由系统全面接管：保存经 config_override.py 覆盖服务端内置值，随服务重启生效"
-                 "（ANSWER_RULES 为显式配置，不同功能模块可各设不同规则）；"
+                 "（SYSTEM_RULES 为显式配置，不同功能模块可各设不同规则）；"
                  "LLM_DO_SAMPLE=True 与 enable_thinking=False 为系统固定默认，不提供配置；"
                  "LLM 请求通道（端点/格式）在上方『自定义LLM』卡片配置（OpenAI-compatible 固定协议）。"
                  "两侧分工勿混淆，改错一侧会出现『模板不生效』。").style(

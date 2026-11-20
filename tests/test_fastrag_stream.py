@@ -103,7 +103,7 @@ class TestFastragConfigQuant:
         mod = _load_fastrag_config(None)
         assert mod.LLM_QUANT_BITS == 16
         assert mod.RERANKER_QUANT_BITS == 16
-        assert mod.EMBEDDER_DEVICE == "cpu"
+        assert mod.EMBEDDER_DEVICE == "cuda-fp16"  # 2026-11-20 对齐上游默认
 
     def test_quant_invalid_fails_fast(self):
         os.environ["FASTRAG__LLM_QUANT_BITS"] = "7"

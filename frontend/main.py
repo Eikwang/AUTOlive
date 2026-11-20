@@ -234,6 +234,12 @@ class AutoliveApp:
     _shared_running = False
     _shared_subprocesses = {}
 
+    # fastrag 计划内停服标记（类级：script mode 重入共享）：『应用并重启 fastrag
+    # 服务』/『构建索引』按钮主动杀 server 前置位，_monitor_subprocesses 观测到
+    # fastrag 退出时据此跳过「外围程序退出」告警（否则计划内停服被误报为异常，
+    # 2026-11-19 用户实测反馈）
+    _fastrag_planned_stop = False
+
     # 最近异常环形缓冲（D1 状态条数据源）：类级 deque（script mode 重入共享），
     # 监控（_monitor_subprocesses）与启动编排（run_external_program / D-14）都写入，
     # 消息入缓冲前经 redact_exception 脱敏（DX 义务）。
@@ -825,7 +831,7 @@ class AutoliveApp:
         for _key, _default, _domain in (
                 ("llm_quant_bits", 16, (4, 8, 16)),
                 ("reranker_quant_bits", 16, (4, 8, 16)),
-                ("embedder_device", "cpu", ("cpu", "cuda-fp16", "cuda"))):
+                ("embedder_device", "cuda-fp16", ("cpu", "cuda-fp16", "cuda"))):
             _val = fastrag_cfg.get(_key, _default)
             if _val not in _domain:
                 logger.warning(
@@ -859,6 +865,93 @@ class AutoliveApp:
         # main.py 拉起代码——fastrag.enable=true 时 main.py 双拉起、首个进程成孤儿
         # （my_subprocesses["main"] 被覆盖，stop_programs 只杀得到第二个）。
         # main.py 的拉起由 run_external_program → _start_main_system 唯一负责，此处不再拉起。
+
+    def stop_fastrag_server():
+        """停 fastrag server（模块级：不依赖实例，构建索引/应用重启两处共用）。
+
+        Windows 下 server 持有索引句柄会 PermissionError，wmic 精确按命令行
+        特征杀 python server.py（避免误伤其他 python）；wmic 缺失（Win11
+        24H2+ 按需功能，DX F7）时回退 PowerShell Get-CimInstance，均失败
+        输出可行动日志。
+        """
+        killed = False
+        try:
+            out = subprocess.run(
+                ["wmic", "process", "where",
+                 "name='python.exe' and commandline like '%fastrag-python%server.py%'",
+                 "get", "processid"],
+                capture_output=True, text=True, timeout=15,
+            )
+            for line in (out.stdout or "").splitlines():
+                pid = line.strip()
+                if pid.isdigit():
+                    subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                                   capture_output=True, timeout=10)
+                    killed = True
+        except FileNotFoundError:
+            logger.warning("wmic 不可用（Win11 24H2+ 按需功能），回退 PowerShell 探测 fastrag server 进程")
+        except Exception as e:
+            logger.warning(f"wmic 探测 fastrag server 失败（可能未运行）：{e}")
+        if not killed:
+            # DX F7 备选链：PowerShell Get-CimInstance 按命令行特征精确杀
+            try:
+                _ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                       "Where-Object { $_.CommandLine -like '*fastrag-python*server.py*' } | "
+                       "Select-Object -ExpandProperty ProcessId")
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", _ps],
+                    capture_output=True, text=True, timeout=20,
+                )
+                for line in (out.stdout or "").splitlines():
+                    pid = line.strip()
+                    if pid.isdigit():
+                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                                       capture_output=True, timeout=10)
+                        killed = True
+            except Exception as e:
+                logger.warning(
+                    f"停止 fastrag server 失败（可能未运行）：{e}；"
+                    f"fix=手动结束 python server.py 进程后重试")
+
+    def restart_fastrag(self):
+        """计划内重启 fastrag server（『应用并重启 fastrag 服务』按钮，2026-11-19
+        修复：原实现只停不启——server 被杀后监控线程误报「进程退出」，服务也
+        不会自动拉起，需整系统重启才恢复）。
+
+        流程：置计划内停服标记（监控屏噪）→ 杀旧 server → 等端口释放
+        （避免 _start_fastrag 端口预检把垂死进程误判占用）→ 经 _start_fastrag
+        重新拉起（预检/量化 env 注入/日志落盘全同启动链路）。
+
+        Returns:
+            (ok, reason, fix_hint)——语义同 _start_fastrag。
+        """
+        AutoliveApp._fastrag_planned_stop = True
+        try:
+            AutoliveApp.stop_fastrag_server()
+            # 等端口释放（最多 ~8s）：taskkill /F 立即杀但 TIME_WAIT/句柄回收
+            # 有毫秒级延迟，立即拉起会撞端口预检误报「已被占用」
+            fastrag_cfg = self.config._config.get("fastrag") or {}
+            try:
+                port = int(fastrag_cfg.get("port", 11420))
+            except (TypeError, ValueError):
+                port = 11420
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
+                    _probe.settimeout(0.5)
+                    if _probe.connect_ex(("127.0.0.1", port)) != 0:
+                        break
+                time.sleep(0.3)
+            ok, reason, fix_hint = self._start_fastrag(self.config._config)
+            if not ok:
+                # 启动失败且旧进程已被杀：清理死句柄（标记仍在位，监控静默跳过）；
+                # 端口占用（旧实例存活）时 poll()=None 不清理，保持托管
+                _proc = self.my_subprocesses.get("fastrag")
+                if _proc is not None and _proc.poll() is not None:
+                    self.my_subprocesses.pop("fastrag", None)
+            return ok, reason, fix_hint
+        finally:
+            AutoliveApp._fastrag_planned_stop = False
 
     def stop_program(self, name):
         """停止一个正在运行的程序及其所有子进程（与原文件 webui-bak.py L246-269 一致）
@@ -1443,6 +1536,11 @@ class AutoliveApp:
                         self.push_exception("main", f"auto_run 自动重拉失败：{reason}",
                                             fix_hint=fix_hint)
             else:
+                # fastrag 计划内停服（应用重启/构建索引按钮主动杀）：静默清理
+                # 不告警（2026-11-19 修复：误报「外围程序退出」挂前端异常条）
+                if name == "fastrag" and AutoliveApp._fastrag_planned_stop:
+                    logger.info(f"fastrag 进程退出（exit={code}）——计划内重启/停服，跳过告警")
+                    continue
                 self.push_exception(name, f"外围程序退出（exit={code}）")
                 ui.notify(position="top", type="warning",
                           message=f"外围程序 {name} 已退出（exit={code}）——请查看日志")

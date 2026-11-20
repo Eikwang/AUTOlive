@@ -35,7 +35,7 @@ def test_ensure_defaults_fills_missing_sections(tmp_path):
     assert settings.get("fastrag", "stream_reply") is True
     assert settings.get("fastrag", "llm_quant_bits") == 16
     assert settings.get("fastrag", "reranker_quant_bits") == 16
-    assert settings.get("fastrag", "embedder_device") == "cpu"
+    assert settings.get("fastrag", "embedder_device") == "cuda-fp16"  # 2026-11-20 对齐上游默认
     # 内部量键不再注入
     ed = settings.get("edtalk_realtime")
     for internal in ("port", "api_ip_port", "interpreter_path", "segments",
@@ -375,7 +375,7 @@ def test_fastrag_python_cmd_and_env(tmp_path, monkeypatch):
     assert captured["env"]["FASTRAG__SERVER__PORT"] == "11420"
     assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
     assert captured["env"]["FASTRAG__RERANKER_QUANT_BITS"] == "16"
-    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cpu"
+    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cuda-fp16"  # 2026-11-20 对齐上游
     assert captured["shell"] is False
     assert "fastrag" in app.my_subprocesses
 
@@ -388,7 +388,7 @@ def test_fastrag_invalid_quant_falls_back(tmp_path, monkeypatch):
     ok, reason, fix = app._start_fastrag(cfg)
     assert ok is True
     assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
-    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cpu"
+    assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cuda-fp16"  # 2026-11-20 对齐上游
 
 
 def test_fastrag_preflight_index_missing(tmp_path, monkeypatch):
