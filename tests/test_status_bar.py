@@ -303,6 +303,78 @@ def test_monitor_peripheral_death_module_alarm(tmp_path, monkeypatch):
     assert modules == ["digital_human", "llm"]
 
 
+def test_monitor_fastrag_planned_stop_no_alarm(tmp_path, monkeypatch):
+    """fastrag 计划内停服（应用重启/构建索引按钮主动杀）：监控静默清理
+    不弹「外围程序退出」、不触发 LLM 模块报警、不入异常缓冲
+    （2026-11-19 修复误报挂前端异常条）。"""
+    import nicegui.ui as nicegui_ui
+
+    calls = []
+    fake = SimpleNamespace(
+        alarm_error=lambda *a, **k: calls.append(a) or True,
+        MODULE_DIGITAL_HUMAN="digital_human", MODULE_LLM="llm")
+    monkeypatch.setattr("frontend.main.alarm_notifier", fake)
+    monkeypatch.setattr(AutoliveApp, "_fastrag_planned_stop", True)
+
+    app = _fake_autolive(tmp_path)
+    app.running_flag = True
+    dead_fr = MagicMock()
+    dead_fr.poll.return_value = 1
+    app.my_subprocesses = {"fastrag": dead_fr}
+
+    app._monitor_subprocesses()
+
+    assert "fastrag" not in app.my_subprocesses  # 死句柄静默清理
+    assert nicegui_ui.NOTIFY_CALLS == []         # 不弹「外围程序退出」
+    assert calls == []                           # 不触发 LLM 模块报警
+    assert not any(e["module"] == "fastrag"
+                   for e in AutoliveApp.recent_exceptions())
+
+
+def test_restart_fastrag_relaunch(tmp_path, monkeypatch):
+    """restart_fastrag：停服→等端口→经 _start_fastrag 重新拉起（与启动链
+    同源），执行期计划内停服标记在位，事后复位。"""
+    app = _fake_autolive(tmp_path)
+    app.config._config = {"fastrag": {"enable": True, "port": 11420}}
+    stopped = []
+    monkeypatch.setattr(AutoliveApp, "stop_fastrag_server",
+                        lambda: stopped.append(True))
+    launched = []
+
+    def _fake_start(cfg):
+        assert AutoliveApp._fastrag_planned_stop is True  # 执行期屏噪标记在位
+        launched.append(cfg)
+        app.my_subprocesses["fastrag"] = MagicMock()
+        return True, "", ""
+
+    monkeypatch.setattr(app, "_start_fastrag", _fake_start)
+
+    ok, reason, fix_hint = app.restart_fastrag()
+
+    assert (ok, reason, fix_hint) == (True, "", "")
+    assert stopped == [True]
+    assert launched == [app.config._config]
+    assert AutoliveApp._fastrag_planned_stop is False  # 标记事后复位
+
+
+def test_restart_fastrag_failure_cleans_dead_handle(tmp_path, monkeypatch):
+    """重启拉起失败且旧进程已被杀：死句柄被清理（不留给监控误报）。"""
+    app = _fake_autolive(tmp_path)
+    app.config._config = {"fastrag": {"enable": True, "port": 11420}}
+    monkeypatch.setattr(AutoliveApp, "stop_fastrag_server", lambda: None)
+    dead = MagicMock()
+    dead.poll.return_value = 1  # 旧进程已死
+    app.my_subprocesses = {"fastrag": dead}
+    monkeypatch.setattr(app, "_start_fastrag",
+                        lambda cfg: (False, "fastrag 索引不完整", "构建索引"))
+
+    ok, reason, fix_hint = app.restart_fastrag()
+
+    assert ok is False
+    assert "fastrag" not in app.my_subprocesses
+    assert AutoliveApp._fastrag_planned_stop is False
+
+
 def test_monitor_auto_run_restart_success(tmp_path, monkeypatch):
     """auto_run 重拉成功：flag 恢复 True。"""
     app = _fake_autolive(tmp_path)
