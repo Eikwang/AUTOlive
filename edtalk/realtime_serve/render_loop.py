@@ -100,6 +100,13 @@ class RenderLoop:
     # finishes before returning to idle (closed mouth) mode.
     AUDIO_END_GRACE_S = 1.0
 
+    # 句尾静音填充时长（秒，原版 crop_pad_audio 机制还原）。TTS 切片常在字尾
+    # 戛然而止，而 mel 滑窗对末帧向前钳制（重复最后一个语音帧）→ 收口系数停留
+    # 在开口形状，句后 hold 窗口原样持有 → 句间/句尾嘴巴保持张开。句尾补静音
+    # （≥ mel 滑窗 0.2s 跨度 + 2 帧偏移）让末段帧的 mel 窗完全落在静音内 →
+    # 口型自然闭合；填充帧的音频 chunk 为全零，帧锁定播放听感无感。
+    AUDIO_TAIL_SILENCE_S = 0.3
+
     # Lip frames per Audio2Lip chunk (125 = 5s at 25fps). Small enough
     # that one chunk (~100-200ms GPU) never starves the render loop.
     LIP_CHUNK_FRAMES = 125
@@ -491,7 +498,13 @@ class RenderLoop:
             if self.output_streamer is not None:
                 self.output_streamer.reset_preroll()
 
-            # Run Audio2Lip on the audio as-is (no padding)
+            # 句尾静音填充（AUDIO_TAIL_SILENCE_S，原版机制还原）后再转 mel：
+            # 末段帧的 mel 窗完全落入静音 → 收口系数闭合，hold 窗口不再持有
+            # 开口末帧（详见类常量注释）。
+            tail_frames = int(round(self.AUDIO_TAIL_SILENCE_S * self.target_fps))
+            if tail_frames > 0:
+                pcm_float = np.pad(
+                    pcm_float, (0, tail_frames * (16000 // self.target_fps)))
             mel_input, bs, T = self.audio_processor.pcm_to_mel(pcm_float)
             if mel_input is None or T <= 0:
                 print("[RenderLoop] process_full_audio: empty audio, ignored")

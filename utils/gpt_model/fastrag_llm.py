@@ -13,6 +13,7 @@ fastrag：fastrag 知识库 HTTP 通道（基础功能版块 2026-10-22 批次�
 """
 import asyncio
 import json
+import threading
 import traceback
 
 from utils.base import logger
@@ -48,6 +49,30 @@ class Fastrag_LLM:
         # ENG E-8：host 限定 http(s) 形态（默认 http://localhost:{port}）
         self.query_url = base + "/query"
         self.query_url_stream = base + "/query_stream"
+        # 多轮对话历史（2026-11-20 整合对齐批次）：对齐上游 api_client.LiveStreamBot
+        # 契约——[{"role": "user"/"assistant", "content": str, "references": [str]?}]，
+        # assistant 条目携带上一轮 references（追问指代消解靠「来源」随 history 回传）。
+        # 仅弹幕链路（data 无非空 system_role）参与：动态文案改写与弹幕上下文隔离。
+        self.history: list = []
+        self.history_max_rounds = 1  # 与上游 LiveStreamBot 默认一致
+        self._history_lock = threading.Lock()
+
+    def _is_dynamic_copy(self, data) -> bool:
+        """动态文案链路判定：data 带非空 system_role 即改写请求（不参与弹幕历史）。"""
+        return (isinstance(data, dict)
+                and bool(str(data.get("system_role") or "").strip()))
+
+    def _record_history(self, question: str, answer: str, references=None):
+        """记录一轮完整对话（弹幕链路，调用方保证已成功）；裁剪保留最近 N 轮。"""
+        with self._history_lock:
+            self.history.append({"role": "user", "content": question})
+            entry = {"role": "assistant", "content": answer}
+            if references:
+                entry["references"] = list(references)[:1]  # 对齐 LiveStreamBot：refs[:1]
+            self.history.append(entry)
+            keep = self.history_max_rounds * 2
+            if len(self.history) > keep:
+                self.history = self.history[-keep:]
 
     def _live_section(self) -> dict:
         """fastrag 节现读（2026-11-17 热切机制批次）：共享 Config 内存视图优先，
@@ -90,6 +115,10 @@ class Fastrag_LLM:
             system_role = str(data.get("system_role") or "").strip()
             if system_role:
                 payload["system_role"] = system_role
+            elif self.history:
+                # 弹幕链路（2026-11-20 整合对齐批次）：随请求回传多轮历史——
+                # 追问指代消解（上游引擎按「对话历史」+assistant「来源」做池合并）
+                payload["history"] = list(self.history)
         return payload
 
     async def get_resp(self, data):
@@ -127,6 +156,11 @@ class Fastrag_LLM:
                                 f"{host_port})；请核对 fastrag 服务版本与契约"
                                 f"（edtalk/fastrag/api_client.py）")
                             return None
+                        # 弹幕链路成功后记录本轮（2026-11-20 整合对齐批次）：
+                        # question=发送原文；references 供下一轮 history「来源」携带
+                        if not self._is_dynamic_copy(data):
+                            self._record_history(payload["question"], str(answer),
+                                                 resp.get("references"))
                         return str(answer)
                     except (json.JSONDecodeError, TypeError) as e:
                         logger.error(
@@ -174,6 +208,7 @@ class Fastrag_LLM:
         """
         aiohttp = _get_aiohttp()
         payload = self._build_payload(data)
+        question = payload["question"]  # 提前捕获（循环内 payload 变量被复用为帧文本）
         # 2026-11-17 热切机制批次：host/port 每请求现读
         _, query_url_stream, host_port = self._query_urls()
         try:
@@ -185,6 +220,7 @@ class Fastrag_LLM:
                         raise RuntimeError(
                             f"fastrag /query_stream HTTP {response.status}（{host_port}）")
                     buffer = ""
+                    _done_refs = None
                     async for raw in response.content:
                         line = raw.decode("utf-8", errors="replace").strip()
                         if not line.startswith("data:"):
@@ -197,6 +233,9 @@ class Fastrag_LLM:
                         except (json.JSONDecodeError, TypeError):
                             continue  # 畸形帧跳过（对齐 custom_llm 容错）
                         if frame.get("done"):
+                            # 终帧（2026-11-20 起携带 references——kb 路由时非空，
+                            # chat 路由为空列表）：捕获供历史「来源」携带
+                            _done_refs = frame.get("references")
                             break  # 纯终止帧：不产出任何文本（Eng A2）
                         err = frame.get("error")
                         if err:
@@ -208,6 +247,11 @@ class Fastrag_LLM:
                     if not buffer:
                         # 零产出（服务端未产出任何 delta）——按流式失败回退
                         raise RuntimeError("fastrag 流式零产出")
+                    # 弹幕链路流式成功后记录本轮（2026-11-20 整合对齐批次）：
+                    # question=发送原文；终帧 references 供下一轮 history「来源」携带。
+                    # 流中途失败不记录——回退全文链 get_resp 成功后由其记录，防重复
+                    if not self._is_dynamic_copy(data):
+                        self._record_history(question, buffer, _done_refs)
         except asyncio.TimeoutError:
             logger.error(
                 f"LLM_FALLBACK fastrag /query_stream 超时 {timeout}s（{host_port}）；"

@@ -103,7 +103,16 @@ class _MciStream:
             if rc != 0:
                 raise RuntimeError(f"MCI play 失败 rc={rc}")
         else:
-            self._cmd(f"resume {self._alias}")
+            # resume 重试（2026-11-20 卡住审查批次）：原静默吞错——resume 失败
+            # 后 mode 停 paused，配合旧 is_active(paused=active) 即永久卡住。
+            # MCI 偶发设备忙（waveOut 竞争）重试可恢复。
+            for attempt in range(3):
+                rc, _ = self._cmd(f"resume {self._alias}")
+                if rc == 0:
+                    return
+                time.sleep(0.05)
+            logger.warning(f"MCI resume 连续 3 次失败 rc={rc}（alias={self._alias}）"
+                           "——续播可能失效，条目将被判完成（丢尾段不卡死）")
 
     def stop_stream(self):
         if self._closed:
@@ -118,10 +127,18 @@ class _MciStream:
         self._cmd(f"close {self._alias}")
 
     def is_active(self):
+        """仅 "playing" 视为活跃（2026-11-20 卡住审查批次）。
+
+        旧实现 paused 也算 active：resume 静默失败（_cmd 吞错）后 mode 永久
+        停在 paused → _wait_loop 把死态当在播 → 永久卡住（需手动跳过）。
+        paused 语义由 _wait_loop 的 pause_event 分支管理（手动暂停/让位挂起
+        均先置位 pause_event，不依赖 MCI paused 状态），故此处排除 paused——
+        resume 失败时 mode 停 paused → is_active False → 条目判完成（丢尾段
+        但不卡死；配合 start_stream 重试降低概率）。"""
         if self._closed:
             return False
         _, mode = self._cmd(f"status {self._alias} mode")
-        return mode in ("playing", "paused")
+        return mode == "playing"
 
     def position_ms(self):
         """当前播放位置（毫秒；让位挂起回退基准）。"""
@@ -494,12 +511,16 @@ class AUDIO_PLAY_CENTER:
                     pass
                 logger.info("在播条目让位挂起（新音频插播，design 情况1；字幕 E-4 同步）")
                 return "suspended"
-            if self.pause_event.is_set():
-                # F-2：手动暂停保持等待（不退出循环、不误报完成），恢复后从暂停点继续
-                time.sleep(0.1)
-                continue
             if self._skip_event.is_set() or self._stop_flag.is_set():
                 return "skipped"
+            if self.pause_event.is_set():
+                # F-2：手动暂停保持等待（不退出循环、不误报完成），恢复后从暂停点继续
+                # （2026-11-20 卡住审查批次：skip 检查提到 pause 前——暂停态下
+                # 「跳过当前」按钮此前不可达，暂停+跳过组合=永久卡死）
+                if self._skip_event.is_set() or self._stop_flag.is_set():
+                    return "skipped"
+                time.sleep(0.1)
+                continue
             if self.stream is None or not self.stream.is_active():
                 return "completed"
             time.sleep(0.1)

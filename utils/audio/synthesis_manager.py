@@ -569,17 +569,20 @@ class SynthesisMixin:
                 # 丢弃风险（log warning，不打断切分——防丢优先于防提示）。
                 _group_id = f"{message['type']}_{time.time_ns()}"
                 _total = len(sentences)
-                try:
-                    _mq_max = int(self.config.get("filter", "message_queue_max_len"))
-                    _mq_now = len(self.message_queue)
-                    if _total > max(0, _mq_max - _mq_now):
-                        logger.warning(
-                            f"[长回复切分] {message['type']} 共 {_total} 段，消息队列余量 "
-                            f"{max(0, _mq_max - _mq_now)}——超容部分将被丢弃（"
-                            f"filter.message_queue_max_len={_mq_max}）；"
-                            f"fix=调大队列上限或关闭 play_audio.text_split_enable")
-                except Exception:
-                    pass
+                # 2026-11-21 动态文案审查批次：动态文案分段=分账编组（queue_manager
+                # 满载豁免+容量分账），无丢弃面——容量预检告警不适用
+                if message['type'] != "trends_copywriting":
+                    try:
+                        _mq_max = int(self.config.get("filter", "message_queue_max_len"))
+                        _mq_now = len(self.message_queue)
+                        if _total > max(0, _mq_max - _mq_now):
+                            logger.warning(
+                                f"[长回复切分] {message['type']} 共 {_total} 段，消息队列余量 "
+                                f"{max(0, _mq_max - _mq_now)}——超容部分将被丢弃（"
+                                f"filter.message_queue_max_len={_mq_max}）；"
+                                f"fix=调大队列上限或关闭 play_audio.text_split_enable")
+                    except Exception:
+                        pass
                 for _seq, s in enumerate(sentences):
                     message_copy = deepcopy(message)  # 创建 message 的副本
                     message_copy["content"] = s  # 修改副本的 content

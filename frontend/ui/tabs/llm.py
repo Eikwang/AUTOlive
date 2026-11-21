@@ -146,17 +146,22 @@ def _create_fastrag_card(
     # 停服实现已收编至 frontend/main.py（AutoliveApp.stop_fastrag_server，
     # 2026-11-19：与应用重启共用同一 wmic/PowerShell 精确杀链路）
 
+    # 渲染期捕获 client（2026-11-20 修复）：原实现调 nicegui.client.get()——
+    # nicegui 3.16 已无该属性（module has no attribute 'get'，AttributeError
+    # 被兜底吞掉→构建结果 toast 全部丢失只留日志）。对齐 trends_copywriting
+    # 范式（2026-10-30）：后台线程通知须 `with client:` 显式进入渲染期捕获的
+    # client 上下文；页面已刷新/断开则异常降级日志。
+    from nicegui import context as _ng_context
+    _build_client = _ng_context.client
+
     def _notify_alive(kind: str, message: str):
         """后台线程通知（client 存活守卫）：构建耗时 ~20s，期间页面刷新/重连
-        会替换 NiceGUI client——向已删除 client 发通知会被吞掉（实测 log2.txt
-        「Client has been deleted」，成功提示丢失致用户误判失败）。is_deleted()
-        预检 + 降级日志；同时兜 try/except 防 notify 其他异常外溢。"""
-        from nicegui import client as _ng_client
+        会替换 NiceGUI client——向已删除 client 发通知会抛错（实测 log2.txt
+        「Client has been deleted」，成功提示丢失致用户误判失败）。
+        `with client:` 显式进入上下文；断开/异常由降级日志兜底，不外溢。"""
         try:
-            if _ng_client.get().is_deleted():
-                logger.info(f"[build-index] 页面已刷新，跳过前端通知（{kind}）：{message}")
-                return
-            ui.notify(position="top", type=kind, message=message)
+            with _build_client:
+                ui.notify(position="top", type=kind, message=message)
         except Exception as _e:
             logger.info(f"[build-index] 前端通知失败（{kind}）：{message}（{_e}）")
 
@@ -459,11 +464,15 @@ def _create_fastrag_card(
                       "流式失败零产出时自动回退全文链")
             tpl_dirty = {"v": False}
             _TPL_KEYS = [
-                ("system_role", "人设（SYSTEM_ROLE）", "你是一位专业、友好的线上销售，现在正在进行直播。"),
-                ("system_rules", "回答规则（SYSTEM_RULES）", ""),
+                ("system_role", "人设（SYSTEM_ROLE）", "你叫老王，你是一位专业、友好的线上销售，现在正在进行直播工作，在直播间为客户答疑解惑。"),
+                # 2026-11-20 上游同步：服务端键 ANSWER_RULES → SYSTEM_RULES；
+                # config 存储键统一为 answer_rules（修复：此前 UI 键集误用
+                # system_rules 与保存链 vals['answer_rules'] 错位→应用重启时
+                # KeyError 模板落盘失败；回显真源 config.fastrag.template.answer_rules）
+                ("answer_rules", "回答规则（SYSTEM_RULES，每条一行）", ""),
                 ("temperature", "生成温度 temperature（0-1）", 0.3),
                 ("top_p", "Top-p（0-1）", 0.9),
-                ("max_new_tokens", "最大生成 token 数", 128),
+                ("max_new_tokens", "最大生成 token 数", 256),
                 ("max_answer_length", "答案最大字符数", 80),
             ]
             tpl_inputs = {}
@@ -478,12 +487,23 @@ def _create_fastrag_card(
 
             with ui.grid(columns=2):
                 for key, label, default in _TPL_KEYS:
-                    tpl_inputs[key] = FormField.create_input(
-                        label=label,
-                        value=str(get_nested_value(config, "fastrag", "template", key, default=default)),
-                        on_change=lambda e, k=key: (_save_tpl_input(k, e.value), _mark_tpl_dirty()),
-                        style="width:100%;",
-                    )
+                    _val = str(get_nested_value(config, "fastrag", "template", key, default=default))
+                    if key == "answer_rules":
+                        # 2026-11-20 整合对齐批次：回答规则为多行块（每条一行）——
+                        # 单行 ui.input 会把粘贴的多行规则折叠成一行（规则序号
+                        # 语义被打平，用户实测反馈）；textarea 保留换行
+                        tpl_inputs[key] = ui.textarea(
+                            label=label,
+                            value=_val,
+                            on_change=lambda e, k=key: (_save_tpl_input(k, e.value), _mark_tpl_dirty()),
+                        ).style("width:100%;").props("outlined autosize")
+                    else:
+                        tpl_inputs[key] = FormField.create_input(
+                            label=label,
+                            value=_val,
+                            on_change=lambda e, k=key: (_save_tpl_input(k, e.value), _mark_tpl_dirty()),
+                            style="width:100%;",
+                        )
             tpl_dirty_label = ui.label("").style("color: var(--color-warning); display:none")
 
             def _mark_tpl_dirty():

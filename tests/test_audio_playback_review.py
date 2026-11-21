@@ -176,6 +176,22 @@ class TestQueueFourRules:
         fx.data_priority_insert("待播放音频列表", _item("w200", "normal"))
         assert called == []
 
+    def test_interrupt_not_requested_for_assistant_entry(self):
+        """2026-11-20 助播插队审查批次：助播条目豁免让位——并行锚点声道
+        （ASSISTANT_PLAYBACK_TYPES）不打断在播音频，仅保留排序语义。
+        用户实测「开启助播不停插队+在播音频播一小段即挂起」根因。"""
+        fx = self._fixture(6)
+        called = []
+        fx.audio_player = types.SimpleNamespace(
+            request_yield=lambda: called.append(1),
+            get_playing_weight=lambda: 10)
+        fx.data_priority_insert("待播放音频列表", {
+            "type": "assistant_anchor_audio", "voice_path": "a.wav",
+            "priority_override": 40})
+        assert called == []
+        # 排序语义保留：仍按权重 40 入队（高于在播未消耗的对比条目）
+        assert fx.voice_tmp_path_queue[-1]["type"] == "assistant_anchor_audio"
+
 
 # ---------------------------------------------------------------------------
 # A2：变速迁移（clamp / pitch 换算）
@@ -1288,3 +1304,95 @@ class TestT6CancelLateEnqueue:
         assert removed == 2
         assert all(d.get("choreo_step_id") != "s1" for d in host.voice_tmp_path_queue)
         assert all(d.get("choreo_step_id") != "s1" for d in host.message_queue)
+
+
+# ---------------------------------------------------------------------------
+# 分账编组（2026-11-21 动态文案审查批次）：动态文案分段=背景流——满载豁免
+# 不丢弃、容量分账不挤占、队尾追加 seq 保序、普通消息可插队、驱逐不碰切片
+# ---------------------------------------------------------------------------
+
+def _trends_slice(label, seq=0, total=1):
+    return {"type": "trends_copywriting",
+            "split_group": {"id": f"tg_{label}", "seq": seq, "total": total},
+            "content": label, "voice_path": f"trends-{label}.wav"}
+
+
+class TestTrendsSliceAccounting:
+    """动态文案分段分账编组（对齐 song 切片段豁免语义，R4f/R4g/R4h 同构）"""
+
+    def _fixture(self, max_len):
+        cfg = _FakeConfig(priority_mapping={"comment": 30, "idle_time_task": 10,
+                                            "trends_copywriting": 10},
+                          max_len=max_len, min_start_play=0,
+                          extra={("filter", "message_queue_max_len"): max_len})
+        return _QueueFixture(config=cfg)
+
+    def test_message_queue_slice_exempt_from_full_drop(self):
+        """待合成队列普通容量满载：动态文案分段豁免丢弃，队尾追加 seq 保序
+        （旧语义=第 1 段起整组丢弃——百段长文案不可消费）。"""
+        fx = self._fixture(2)
+        for i in range(2):
+            assert fx.data_priority_insert("等待合成消息", {
+                "type": "comment", "content": f"普通{i}"})["code"] == 200
+        for seq in range(5):
+            r = fx.data_priority_insert("等待合成消息", _trends_slice(f"s{seq}", seq, 5))
+            assert r["code"] == 200, f"分段满载豁免失败 seq={seq}"
+        assert len(fx.message_queue) == 7
+        assert [e["split_group"]["seq"] for e in fx.message_queue
+                if e["type"] == "trends_copywriting"] == [0, 1, 2, 3, 4]
+
+    def test_message_queue_normal_insert_cuts_before_slices(self):
+        """普通消息在切片在场时可正常插队（更高权重插到文案段之前），
+        满载插队驱逐跳过切片。"""
+        fx = self._fixture(1)
+        fx.data_priority_insert("等待合成消息", _trends_slice("a", 0, 2))
+        fx.data_priority_insert("等待合成消息", _trends_slice("b", 1, 2))
+        # comment(30) > trends(10)：满载插队，驱逐跳过切片（普通容量 0<1 未满，
+        # 直接规则1 权重序插入队首）
+        assert fx.data_priority_insert("等待合成消息", {
+            "type": "comment", "content": "插队"})["code"] == 200
+        assert [e["type"] for e in fx.message_queue] == [
+            "comment", "trends_copywriting", "trends_copywriting"]
+        assert [e["split_group"]["seq"] for e in fx.message_queue
+                if e["type"] == "trends_copywriting"] == [0, 1]
+
+    def test_message_queue_evict_skips_slices(self):
+        """满载插队驱逐：队尾驱逐跳过背景流切片（普通条目被驱逐）。"""
+        fx = self._fixture(1)
+        fx.data_priority_insert("等待合成消息", {
+            "type": "comment", "content": "旧普通"})
+        fx.data_priority_insert("等待合成消息", _trends_slice("a", 0, 2))
+        fx.data_priority_insert("等待合成消息", _trends_slice("b", 1, 2))
+        # 普通容量 1 已满，comment(30) 插队 → 驱逐普通旧条目（非切片）
+        assert fx.data_priority_insert("等待合成消息", {
+            "type": "comment", "content": "新普通"})["code"] == 200
+        types = [e["type"] for e in fx.message_queue]
+        assert types.count("comment") == 1
+        assert types.count("trends_copywriting") == 2
+
+    def test_voice_queue_slice_exempt_full_and_no_evict(self):
+        """待播放队列普通容量满载：分段满载豁免接组尾；同权重取代不碰切片。"""
+        fx = self._fixture(2)
+        for i in range(2):
+            assert fx.data_priority_insert("待播放音频列表", _item("idle_time_task", f"old{i}"))["code"] == 200
+        for seq in range(3):
+            r = fx.data_priority_insert("待播放音频列表", _trends_slice(f"s{seq}", seq, 3))
+            assert r["code"] == 200, f"分段满载豁免失败 seq={seq}"
+        # 同权重普通条目（idle_time_task=10）满载取代组首：候选排除切片
+        assert fx.data_priority_insert("待播放音频列表", _item("idle_time_task", "new"))["code"] == 200
+        assert sum(1 for e in fx.voice_tmp_path_queue
+                   if e["type"] == "trends_copywriting") == 3
+        assert sum(1 for e in fx.voice_tmp_path_queue
+                   if e["type"] == "idle_time_task") == 2
+        # 分段 seq 保序（组尾追加）
+        assert [e["split_group"]["seq"] for e in fx.voice_tmp_path_queue
+                if e["type"] == "trends_copywriting"] == [0, 1, 2]
+
+    def test_voice_queue_normal_insert_cuts_before_slices(self):
+        """待播放队列：更高权重普通条目插到文案段之前（段间让位入口）。"""
+        fx = self._fixture(1)
+        fx.data_priority_insert("待播放音频列表", _trends_slice("a", 0, 2))
+        fx.data_priority_insert("待播放音频列表", _trends_slice("b", 1, 2))
+        assert fx.data_priority_insert("待播放音频列表", _item("comment", "插队"))["code"] == 200
+        assert [e["type"] for e in fx.voice_tmp_path_queue] == [
+            "comment", "trends_copywriting", "trends_copywriting"]

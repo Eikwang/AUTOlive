@@ -218,6 +218,9 @@ def _set_copy(ts, entries):
 def _fake_choreo(accepted=False):
     ch = MagicMock()
     ch.on_keyword = MagicMock(return_value=accepted)
+    # 2026-11-21 语义修正批次：显式设定 on_dynamic_text 返回值——自动
+    # MagicMock 返回 truthy，accepted=False（no_match）场景从未真正模拟过
+    ch.on_dynamic_text = MagicMock(return_value=accepted)
     return ch
 
 
@@ -240,7 +243,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("给大家介绍洗洁精")  # d4：内容整段直连
+        fake.on_dynamic_text.assert_called_once_with("一号链接")  # 2026-11-21 语义修正：关键词优先直连
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "给大家介绍洗洁精"
 
@@ -251,7 +254,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("第一段|第二段")  # d4：首分隔符后文案整段
+        fake.on_dynamic_text.assert_called_once_with("关键词")  # 2026-11-21 语义修正：首个分隔符前的关键词直连
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "第一段|第二段"
 
@@ -262,7 +265,7 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("文案内容")  # d4：内容整段直连（关键词字段退役出编排链）
+        fake.on_dynamic_text.assert_called_once_with("1号链接")  # 2026-11-21 语义修正：规范化关键词直连
 
     def test_empty_keyword_falls_back_to_full_chain(self, config_chain_scheduler):
         """关键词为空=向下兼容：整行原文走既有全链（hub 识别照旧）。"""
@@ -298,7 +301,10 @@ class TestKeywordCopyOrthogonal:
         fake = _fake_choreo(False)  # no_match
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("照常播放的文案")  # d4：未命中仍无条件直通（spec R2①）
+        # 2026-11-21 语义修正：关键词未命中 → 回退整段文案（d4 内容匹配兼容），
+        # 两次调用都执行且不重复派发（关键词命中即返回）
+        assert [c.args[0] for c in fake.on_dynamic_text.call_args_list] == [
+            "未命中词", "照常播放的文案"]
         mh.keyword_recognize.assert_not_called()  # 文案部分不进 hub
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "照常播放的文案"
@@ -391,6 +397,6 @@ class TestKeywordCopyDegrade:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("改写后|含竖线|的输出")  # d4：LLM 改写后整段直连
+        fake.on_dynamic_text.assert_called_once_with("关键词")  # 2026-11-21 语义修正：关键词优先直连（LLM 改写不影响触发词）
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "改写后|含竖线|的输出"

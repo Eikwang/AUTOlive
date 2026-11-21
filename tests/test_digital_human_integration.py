@@ -75,6 +75,15 @@ class TestEdtalkSideSourceGuards:
         # 热切属性初始化
         assert "self.lip_mode: str = 'on'" in src
 
+    def test_render_loop_has_tail_silence_padding(self):
+        # 2026-11-20 句尾静音填充守卫（原版 crop_pad_audio 机制还原）：
+        # 整合时丢了句尾补静音 → 收口系数停留开口形状 → 句间/句尾嘴巴张开。
+        src = _src("edtalk/realtime_serve/render_loop.py")
+        assert "AUDIO_TAIL_SILENCE_S" in src
+        # process_full_audio 在转 mel 前句尾补零（帧对齐）
+        assert "tail_frames * (16000 // self.target_fps)" in src
+        assert "pcm_float, (0, tail_frames" in src
+
 
 # ======================================================================
 # 2. AUTOlive 素材管理（行为级）

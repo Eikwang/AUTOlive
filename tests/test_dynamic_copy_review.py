@@ -103,27 +103,62 @@ class TestFastragSystemRole:
         assert 'json={"question": question}' not in src
 
     def test_server_contract_system_role(self):
-        """服务端 /query /query_stream 契约：system_role 可选字段+贯穿下发。"""
+        """服务端 /query /query_stream 契约：system_role 可选字段+贯穿下发。
+
+        2026-11-20 上游同步重构后形态：双端点均贯穿 system_role + history
+        （多轮追问消解），query_stream 额外经 refs_out 在终帧携带 references。
+        """
         srv = _src("edtalk/fastrag/fastrag-python/server.py")
         assert srv.count("system_role: Optional[str] = None") == 2
-        assert "rag.query(request.question, system_role=request.system_role)" in srv
-        assert "rag.query_stream(request.question, system_role=request.system_role)" in srv
+        assert srv.count("system_role=request.system_role") == 2  # /query + /query_stream
+        assert srv.count("history=_dump_history(request.history)") == 2
+        assert "refs_out=refs_out" in srv
+        assert "{'done': True, 'references': refs_out}" in srv  # 终帧携带参考
 
     def test_native_threading(self):
-        """fastrag_native 五处签名贯穿 + 替换语义（空值回落配置 SYSTEM_ROLE）。"""
+        """fastrag_native 签名贯穿 + 替换语义（空值回落配置 SYSTEM_ROLE）。
+
+        2026-11-20 上游同步重构：签名从 (question, mode, system_role) 变为
+        (question, history, system_role)；五处 system_role 形参贯穿
+        （query/_query_impl/generate_answer/_build_prompt_text/query_stream）。
+        """
         nat = _src("edtalk/fastrag/fastrag-python/fastrag_native.py")
-        assert "async def query(self, question: str, mode: str = \"mini\", system_role: str = None)" in nat
-        assert "_query_impl, question, mode, system_role" in nat
-        assert "def _query_impl(self, question: str, mode: str = \"mini\", system_role: str = None)" in nat
-        assert "self.generate_answer(question, context, system_role=system_role)" in nat
-        assert "def generate_answer(self, question: str, context: List[Dict], system_role: str = None)" in nat
-        assert "def _build_prompt_text(self, question: str, context: List[Dict], system_role: str = None)" in nat
-        # 替换语义：非空替换，空值回落配置人设
-        assert 'effective_system_role = str(system_role or "").strip() or SYSTEM_ROLE' in nat
-        assert "return f\"\"\"{effective_system_role}请根据以下参考资料回答问题。" in nat
-        # 流式路径同语义
-        assert "async def query_stream(self, question: str, mode: str = \"mini\", system_role: str = None)" in nat
-        assert "_build_prompt_text(question, context, system_role=system_role)" in nat
+        assert nat.count("system_role: str = None") == 6  # 五处贯穿 + _gen_kwargs_for 改写判定
+        assert nat.count("history: Optional[List[Dict]] = None") == 6
+        assert "_query_impl, question, history, system_role" in nat
+        assert nat.count("system_role=system_role") == 4  # _query_impl→generate_answer、query_stream→_build_messages、两处→_gen_kwargs_for
+        # 语义修正（2026-11-21 用户裁决）：system 人设恒为服务端配置 SYSTEM_ROLE
+        # （请求级 system_role 承载改写指令，走「回答规则」区，不再替换人设）
+        assert "effective_role = SYSTEM_ROLE" in nat
+        assert 'effective_role = str(system_role or "").strip() or SYSTEM_ROLE' not in nat
+        # 流式路径出参：refs_out 供终帧携带参考（消费侧 history 回传闭环）
+        assert "refs_out: Optional[List[str]] = None" in nat
+
+    def test_no_hard_truncate_of_answers(self):
+        """2026-11-21 用户裁决：「答案最大字符数」仅作用于提示词规则
+        {max_answer_length}（软限制，允许超出）——移除 _smart_truncate 回复
+        硬截与流式 max_len×1.5 折算（kb/chat 生成上限=路由模式 token 参数）。"""
+        nat = _src("edtalk/fastrag/fastrag-python/fastrag_native.py")
+        assert "_smart_truncate" not in nat
+        assert "answer = self._smart_truncate" not in nat
+        assert nat.count("int(max_len * 1.5)") == 1  # 仅改写分支保留（按原文长度放宽）
+        assert "max(16, LLM_MAX_NEW_TOKENS if route_mode" in nat
+
+    def test_rewrite_mode_bypasses_time_and_kb(self):
+        """改写模式（system_role 非空）= 纯文本变换：不注入时间上下文、跳过
+        知识库检索——2026-11-21 实证批次：带货文案以「今天的商品」开头误触
+        _TIME_HINT_RE + KB 检索命中，改写答案退化成「今天是…/明天是…」播报。"""
+        nat = _src("edtalk/fastrag/fastrag-python/fastrag_native.py")
+        # _build_messages：改写模式不注入时间上下文；改写指令注入「回答规则」区
+        assert 'now_text = "" if is_rewrite else self._time_text(question)' in nat
+        assert 'time_block = f"时间信息：{now_text}\\n" if now_text else ""' in nat
+        assert "rules_block = str(system_role).strip()" in nat
+        # 生成参数放宽（2026-11-21 用户裁决）：改写不沿用对话 token 上限
+        assert 'if str(system_role or "").strip():' in nat
+        assert "REWRITE_LLM_MAX_NEW_TOKENS" in nat
+        assert "REWRITE_ANSWER_HEADROOM" in nat
+        # _query_impl / query_stream：改写模式跳过检索（chat + 空上下文）
+        assert nat.count('route_mode, context = "chat", []') == 2
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +215,16 @@ class TestTaskSchedulerRewrite:
         """随机生成开关：随机取 random.choice / 顺序取游标推进（双链一致）。"""
         src = self._src()
         assert src.count('self.config.get("trends_copywriting", "random_play")') == 2
+
+    def test_t3_keyword_triggers_choreo(self):
+        """2026-11-21 用户裁决：T3「关键词|文案」的关键词用于触发动作编排——
+        拆分后关键词已从文案剥离，须以关键词为 match_value 触发 dynamic_text；
+        未命中回退整段文案（保留 d4 内容匹配兼容）。原实现传 resp_content
+        （不含关键词）→ 按关键词配置的规则恒 no_match（10:22 实证日志）。"""
+        src = self._src()
+        assert "_choreo.on_dynamic_text(t3_keyword)" in src
+        assert "_choreo.on_dynamic_text(resp_content)" in src
+        assert "动态文案已触发动作编排（关键词={t3_keyword}）" in src
 
 
 # ---------------------------------------------------------------------------

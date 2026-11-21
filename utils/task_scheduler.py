@@ -553,25 +553,23 @@ class TaskScheduler:
         self.idle_time_task_thread.start()
         logger.info("闲时任务线程已启动")
 
-    def _is_playback_idle(self) -> bool:
-        """闲时门（2026-11-15 批次：999 机制退役，动态文案改闲时入队）：
-        待合成队列空 + 待播放队列空 + 无 EDTalk 在飞条目 = 空闲。
+    def _is_synth_queue_idle(self) -> bool:
+        """动态文案触发门（2026-11-21 用户裁决：触发机制只看待合成消息队列）：
+        message_queue 为空即触发——已合成音频躺在待播放队列/数字人播报中
+        **不阻止**新任务触发（分段队尾追加+插队让位由分账编组保证，播报中
+        的旧内容照常消费）。原三条件闲时门（+待播放队列空+无 EDTalk 在飞）
+        退役——旧门会因待播放队列积压长期判定"忙"，长文案任务完成后下一个
+        任务要等整段播报结束才触发，触发节奏不透明。
 
-        队列与在飞登记都在宿主音频组件（my_handle.audio，2026-11-05 编排
-        优化批次 d4/d21 同一访问面）上；len() 读列表长度本身原子安全（库内
-        先例：消费循环不持锁读长度），在飞登记 _edtalk_current_entry 由
-        playback_manager._consume_edtalk_entry 维护（push 前 set / finally 清）。
-        宿主未就绪（my_handle/audio 缺失）= 忙（保守跳过本轮，防未初始化窗口
-        期入队）。"""
+        队列在宿主音频组件（my_handle.audio，2026-11-05 编排优化批次 d4/d21
+        同一访问面）上；len() 读列表长度本身原子安全（库内先例：消费循环不
+        持锁读长度）。宿主未就绪（my_handle/audio 缺失）= 忙（保守跳过本轮，
+        防未初始化窗口期入队）。"""
         try:
             audio = getattr(self.my_handle, "audio", None)
             if audio is None:
                 return False
-            if len(getattr(audio, "message_queue", []) or []) > 0:
-                return False
-            if len(getattr(audio, "voice_tmp_path_queue", []) or []) > 0:
-                return False
-            return getattr(audio, "_edtalk_current_entry", None) is None
+            return len(getattr(audio, "message_queue", []) or []) == 0
         except Exception:
             return False  # 访问面异常=忙（保守跳过，不阻塞任务线程）
 
@@ -642,10 +640,11 @@ class TaskScheduler:
 
             try:
                 while self.is_running:
-                    # 闲时门第一查（2026-11-15 批次：999 机制退役，动态文案改
-                    # 闲时入队）：开始生成本轮文案前系统忙 → 跳过本轮（不告警
-                    # 不重试，等下个 play_interval 周期再查）
-                    if not self._is_playback_idle():
+                    # 触发门第一查（2026-11-21 用户裁决：触发机制只看待合成消
+                    # 息队列——队列为空即触发；已合成音频播报中不阻止新任务，
+                    # 段间让位由分账编组保证）。开始生成本轮文案前忙 → 跳过本
+                    # 轮（不告警不重试，等下个 play_interval 周期再查）
+                    if not self._is_synth_queue_idle():
                         logger.info("动态文案本轮跳过：系统忙")
                         _sleep_play_interval()
                         continue
@@ -770,29 +769,34 @@ class TaskScheduler:
                         "username": "动态文案",
                         "content": resp_content,
                     }
-                    # 闲时门第二查（2026-11-15 批次）：生成（含 LLM 改写）期间
-                    # 系统转忙 → 丢弃本轮（不告警不重试；宁可少播一条文案，
-                    # 不与正片/插播抢声道）
-                    if not self._is_playback_idle():
+                    # 触发门第二查（2026-11-21 用户裁决：同第一查，只看待合成
+                    # 消息队列）：生成（含 LLM 改写）期间队列转忙 → 丢弃本轮
+                    # （不告警不重试；宁可少播一条文案，不挤占待合成队列）
+                    if not self._is_synth_queue_idle():
                         logger.info("动态文案本轮跳过：系统忙")
                         _sleep_play_interval()
                         continue
                     if self.my_handle is not None:
                         if t3_keyword:
-                            # d4（2026-11-05 编排优化批次）：动态文案源直连——整段
-                            # 文案内容作为 match_value 触发 dynamic_text 规则（独立
-                            # 类型，不走关键词匹配/on_keyword；match 可空=任意源事
-                            # 件命中）。原 T3 关键词路径（t3_keyword→on_keyword）退
-                            # 役：动态文案归类"弹幕关键词"类型即用户方案 §3 明示的
-                            # 错误分类。正交声明无条件适用：no_match/enable=false/
-                            # 被拒只影响画面不影响文案（文案照常入播放链）。
+                            # d4（2026-11-05 编排优化批次）+ T3 语义修正（2026-11-21
+                            # 用户裁决批次）：「关键词|文案」的关键词仅用于触发动作
+                            # 编排——T3 拆分已把关键词从文案剥离，原传 resp_content
+                            #（不含关键词）导致按关键词配置的 dynamic_text 规则恒
+                            # no_match（2026-11-21 10:22 实证日志"动态文案未触发
+                            # 编排（no_match/未启用）"）。改为关键词优先匹配；未
+                            # 命中回退整段文案（保留 d4 内容匹配规则兼容；关键词
+                            # 命中即返回，不重复派发）。正交声明无条件适用：
+                            # no_match/enable=false/被拒只影响画面不影响文案
+                            #（文案照常入播放链）。
                             try:
                                 from utils.orchestration import get_choreographer
                                 _choreo = get_choreographer()
                                 if _choreo is not None:
-                                    _accepted = bool(_choreo.on_dynamic_text(resp_content))
+                                    _accepted = bool(_choreo.on_dynamic_text(t3_keyword))
+                                    if not _accepted:
+                                        _accepted = bool(_choreo.on_dynamic_text(resp_content))
                                     if _accepted:
-                                        logger.info("动态文案已直连触发动作编排（d4 dynamic_text）")
+                                        logger.info(f"动态文案已触发动作编排（关键词={t3_keyword}）")
                                     else:
                                         # Eng H1：no_match/未启用分支降 debug 防刷屏
                                         logger.debug("动态文案未触发编排（no_match/未启用）")

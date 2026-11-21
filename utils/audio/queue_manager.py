@@ -508,6 +508,18 @@ class QueueMixin:
             except Exception:
                 new_p = None
             if new_p is not None and playing is not None and new_p > playing:
+                # 助播豁免（2026-11-20 助播插队审查批次，用户裁决）：助播条目
+                # （assistant_anchor_*，权重 40）不触发让位——助播是并行锚点
+                # 声道（playback_manager ASSISTANT_PLAYBACK_TYPES：无口型语义、
+                # 永远本地外放），设计预期「除动态文案切分段外无插队机制」；
+                # 助播分句连续入队经 d12 反复打断 talk(30)/integral(30)/
+                # entrance(30) 等本地在播条目=实测「助播不停插队+在播音频
+                # 播一小段即挂起」根因。助播高权重仅保留排序语义（在播条目
+                # 播完后助播先消费），不打断。
+                if isinstance(data_json, dict):
+                    from utils.audio.playback_manager import ASSISTANT_PLAYBACK_TYPES
+                    if data_json.get("type") in ASSISTANT_PLAYBACK_TYPES:
+                        return
                 # 同声道前提（2026-11-13 助播并行根修）：插播者路由 EDTalk 时
                 # 不让位（routes_to_edtalk 单源判定，防条件漂移）
                 from utils.audio.playback_manager import routes_to_edtalk
@@ -569,14 +581,23 @@ class QueueMixin:
         # 定义 type 到优先级的映射，相同优先级的 type 映射到相同的值，值越大优先级越高
         priority_mapping = self.config.get("filter", "priority_mapping")
 
+        def _is_bg_slice(e):
+            """背景流切片判定（2026-11-21 动态文案审查批次， song 切片段 /
+            动态文案分段——编组序列不可丢，满载豁免+容量分账共用）"""
+            return (isinstance(e, dict)
+                    and ((e.get("type") == "song" and e.get("song_segment"))
+                         or (e.get("type") == "trends_copywriting"
+                             and isinstance(e.get("split_group"), dict))))
+
         def _normal_queue_len(q):
             """容量分账（R4h，2026-11-11 song4.log 实测）：song 切片段=背景流
             **不占用普通音频的队列容量**——满载判定只数普通条目（80 处实测
             丢弃：song 段 5 条占满 4 容量后，答谢/入场全部被规则 4 扔掉=前奏/
-            间奏零消费）。song 段自身满载豁免（接组尾，消费回落）。"""
-            return sum(1 for e in q if not (isinstance(e, dict)
-                        and e.get("type") == "song"
-                        and e.get("song_segment")))
+            间奏零消费）。song 段自身满载豁免（接组尾，消费回落）。
+            2026-11-21 动态文案审查批次：动态文案分段（trends_copywriting+
+            split_group）同入分账编组——长文案（2000 字/百段）不因普通消息
+            挤占容量被丢弃；段间让位语义由 playback_manager 组原子门放行。"""
+            return sum(1 for e in q if not _is_bg_slice(e))
 
         def get_priority_level(data_json):
             """根据 data_json 的 'type' 键返回优先级，未定义的 type 或缺失 'type'
@@ -642,6 +663,14 @@ class QueueMixin:
                       and data_json.get("song_segment")):
                     insert_position = len(self.message_queue)
                     logger.debug(f"song 切片段追加队尾（不插队）position={insert_position}")
+                elif (isinstance(data_json, dict)
+                      and data_json.get("type") == "trends_copywriting"
+                      and isinstance(data_json.get("split_group"), dict)):
+                    # 分账编组（2026-11-21 动态文案审查批次）：动态文案分段
+                    # 不插队——队尾追加 seq 保序；其它消息按权重正常插到文案
+                    # 段之前（插队消费），段间让位由播放侧组原子门放行
+                    insert_position = len(self.message_queue)
+                    logger.debug(f"动态文案分段追加队尾（不插队）position={insert_position}")
                 else:
                     insert_position = 0  # 默认插入到列表开头
                     # 从列表的最后一个元素开始，向前遍历列表，直到第一个元素
@@ -662,14 +691,19 @@ class QueueMixin:
                 # 不可丢（丢 1 段=歌不完整，实测 5 段切片第 5 段被满载丢弃后
                 # 「四段后停」）；满载仍插入（队列超限消费后回落）。普通条目
                 # 维持 drop-only 既有语义。
+                # 2026-11-21 动态文案审查批次：动态文案分段同享豁免（编组
+                # 序列不可丢——长文案百段不允许因普通消息挤占被丢段）。
                 _is_song_slice = (isinstance(data_json, dict)
                                   and data_json.get("type") == "song"
                                   and data_json.get("song_segment"))
+                _is_trends_slice = (isinstance(data_json, dict)
+                                    and data_json.get("type") == "trends_copywriting"
+                                    and isinstance(data_json.get("split_group"), dict))
 
                 # 数据队列数据量超长判断：队满且插入位次在末尾（低优/未识别类型）→ 丢弃
                 if (_normal_queue_len(self.message_queue) >= max_len
                         and insert_position >= len(self.message_queue)
-                        and not _is_song_slice):
+                        and not _is_song_slice and not _is_trends_slice):
                     # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
                     logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
                     try:
@@ -682,7 +716,15 @@ class QueueMixin:
                 # 队满且插队位次有效（新数据优先级高于队内既有条目）→ 插队并驱逐队尾
                 evicted = None
                 if _normal_queue_len(self.message_queue) >= max_len and insert_position < len(self.message_queue):
-                    evicted = self.message_queue.pop()
+                    # 分账编组保护（2026-11-21 动态文案审查批次）：队尾驱逐
+                    # 跳过背景流切片（song 切片段/动态文案分段——序列不可丢；
+                    # 容量分账下普通条目必≥1，_evict_idx 恒可命中）
+                    _evict_idx = next((i for i in range(len(self.message_queue) - 1, -1, -1)
+                                       if not _is_bg_slice(self.message_queue[i])), None)
+                    evicted = (self.message_queue.pop(_evict_idx) if _evict_idx is not None
+                               else self.message_queue.pop())
+                    if _evict_idx is not None and insert_position > _evict_idx:
+                        insert_position -= 1  # 驱逐点在插入位之前 → 位次同步校正（对齐规则3 做法）
 
                 # 在计算出的位置插入新数据
                 self.message_queue.insert(insert_position, data_json)
@@ -780,6 +822,16 @@ class QueueMixin:
                         logger.debug(f"song 切片段追加队尾（不插队）position={insert_position}")
                         inserted = True
                         insert_msg = {"code": 200, "msg": "song 切片段追加队尾（不插队）"}
+                    elif (isinstance(data_json, dict)
+                          and data_json.get("type") == "trends_copywriting"
+                          and isinstance(data_json.get("split_group"), dict)):
+                        # 分账编组（2026-11-21 动态文案审查批次）：动态文案分段
+                        # 队尾追加 seq 保序，其它消息按权重插到文案段之前
+                        insert_position = len(queue)
+                        _insert_and_notify(insert_position, data_json)
+                        logger.debug(f"动态文案分段追加队尾（不插队）position={insert_position}")
+                        inserted = True
+                        insert_msg = {"code": 200, "msg": "动态文案分段追加队尾（不插队）"}
                     else:
                         # 规则1：未满 → 权重序插入（从尾向头找第一个 ≥ 新权重的条目，插其后=接组尾）
                         insert_position = 0
@@ -799,17 +851,26 @@ class QueueMixin:
                     # 挤掉连锁：伴奏不启动（backing_path 仅在 seq0）+锚不建立
                     # （窗口机制全瘫）+人声从歌曲中间开始唱）。满载仍插组尾
                     # （队列超限消费后回落）；普通条目维持 A1 权威语义。
+                    # 2026-11-21 动态文案审查批次：动态文案分段同享豁免。
                     _is_song_slice = (isinstance(data_json, dict)
                                       and data_json.get("type") == "song"
                                       and data_json.get("song_segment"))
-                    if _is_song_slice:
+                    _is_trends_slice = (isinstance(data_json, dict)
+                                        and data_json.get("type") == "trends_copywriting"
+                                        and isinstance(data_json.get("split_group"), dict))
+                    if _is_song_slice or _is_trends_slice:
                         insert_position = len(queue)
                         _insert_and_notify(insert_position, data_json)
                         inserted = True
-                        insert_msg = {"code": 200, "msg": "song 切片段满载豁免（接组尾，序列保真）"}
-                        logger.info(f"voice_tmp_path_queue 已满，song 切片段豁免接组尾（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                        insert_msg = {"code": 200, "msg": "背景流切片满载豁免（接组尾，序列保真）"}
+                        logger.info(f"voice_tmp_path_queue 已满，背景流切片豁免接组尾（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                     else:
-                        same_idx_list = [i for i, item in enumerate(queue) if _priority_of(item) == int(new_data_priority)]
+                        # 分账编组保护（2026-11-21 动态文案审查批次）：规则2/3
+                        # 的同权重/最低优候选排除背景流切片（song 切片段/动态
+                        # 文案分段——序列不可丢，驱逐只作用于普通条目）
+                        same_idx_list = [i for i, item in enumerate(queue)
+                                         if _priority_of(item) == int(new_data_priority)
+                                         and not _is_bg_slice(item)]
                         if same_idx_list:
                             # 规则2：取代同权重组组首（最老）条目，新条目接组尾（净长度不变，组内 FIFO）
                             front_idx = same_idx_list[0]
@@ -827,7 +888,9 @@ class QueueMixin:
                             inserted = True
                             insert_msg = {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
                         else:
-                            non_none_priorities = [p for p in (_priority_of(it) for it in queue) if p is not None]
+                            non_none_priorities = [_priority_of(it) for it in queue
+                                                   if _priority_of(it) is not None
+                                                   and not _is_bg_slice(it)]
                             min_priority = min(non_none_priorities) if non_none_priorities else None
                             if min_priority is not None and int(new_data_priority) > min_priority:
                                 # 规则3：插入后驱逐最低优组组首（最老）条目——主叙述 10old/10new 双存要求组首驱逐

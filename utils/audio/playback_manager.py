@@ -870,8 +870,10 @@ class PlaybackMixin:
                     _song_choreo.on_song_started(
                         str(data_json.get("content", ""))[:40], _remaining)
         # 在飞条目登记（2026-11-16 段间让位批次）：push 受理前登记当前消费
-        # 条目——闲时门（task_scheduler._is_playback_idle）按此判定「EDTalk
-        # 在飞」；push 返回后由 finally 统一清理。
+        # 条目——EDTalk 消费时序锚（组原子门/窗口机制依赖）；push 返回后由
+        # finally 统一清理。（2026-11-21 动态文案触发门改为只看待合成消息
+        # 队列——原 task_scheduler._is_playback_idle 三条件门退役，在飞登记
+        # 不再作为触发门判定依据。）
         self._edtalk_current_entry = data_json
         # T7/d3（2026-11-05）：song 切片跳过飞行等待——切片时序
         # 锚定伴奏（uc4b），人声起即停答谢=push 即 flush 替换

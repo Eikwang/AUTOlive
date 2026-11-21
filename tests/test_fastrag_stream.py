@@ -271,6 +271,129 @@ class TestFastragStreamRespSyncBridge:
             list(llm.stream_resp_sync({"content": "q"}))
 
 
+# ==================== 2026-11-20 整合对齐：多轮 history/references 契约 ====================
+
+
+class _FakeJsonResponse(_FakeResponse):
+    """get_resp 契约 fake：/query 响应体（status + await text()）。"""
+
+    def __init__(self, status, body_obj):
+        import json as _json
+        super().__init__(status, [])
+        self._body = _json.dumps(body_obj, ensure_ascii=False)
+        self.captured_json = None
+
+    async def text(self):
+        return self._body
+
+
+def _fake_query_module(response, captured):
+    """在流式 fake 之上捕获 post 载荷（url + json）。"""
+    mod = _fake_aiohttp_module(response)
+    _base = mod.ClientSession
+
+    class _CS(_base):
+        def post(self, url, json=None):
+            captured.append({"url": url, "json": json})
+            return self._response
+
+    mod.ClientSession = _CS
+    return mod
+
+
+class TestFastragHistory:
+    """消费侧多轮闭环（对齐上游 api_client.LiveStreamBot 契约）：
+
+    - 弹幕链路成功后记录 (question, answer, references[:1])，下一请求回传 history
+    - 动态文案链路（带 system_role）不参与弹幕历史（改写上下文隔离）
+    - 流式终帧 references 捕获；流失败不记录（防回退全文链后重复）
+    """
+
+    def _setup(self, body_obj):
+        import utils.gpt_model.fastrag_llm as fm
+        resp = _FakeJsonResponse(200, body_obj)
+        captured = []
+        fm._get_aiohttp = lambda: _fake_query_module(resp, captured)
+        return _make_llm(), captured
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_get_resp_records_and_next_payload_sends_history(self):
+        llm, captured = self._setup(
+            {"answer": "一桶二十公斤", "references": ["# 大桶 > 参数", "# 其它"]})
+        out = self._run(llm.get_resp({"content": "一桶多重"}))
+        assert out == "一桶二十公斤"
+        # 本轮入历史（refs[:1] 对齐 LiveStreamBot）
+        assert llm.history == [
+            {"role": "user", "content": "一桶多重"},
+            {"role": "assistant", "content": "一桶二十公斤",
+             "references": ["# 大桶 > 参数"]},
+        ]
+        # 下一请求（追问）载荷携带 history（快照=第二问发出时的历史，此时
+        # 第二问尚未记录——记录发生在响应成功后）
+        snapshot = list(llm.history)
+        self._run(llm.get_resp({"content": "多少钱"}))
+        assert len(captured) == 2
+        assert captured[1]["json"]["history"] == snapshot
+        assert "history" not in captured[0]["json"]
+
+    def test_dynamic_copy_isolated_from_history(self):
+        llm, captured = self._setup({"answer": "改写文案", "references": ["# x"]})
+        out = self._run(llm.get_resp(
+            {"content": "文案原文", "system_role": "人设B"}))
+        assert out == "改写文案"
+        assert llm.history == []  # 改写不入弹幕历史
+        assert "history" not in captured[0]["json"]  # 也不回传
+        assert captured[0]["json"]["system_role"] == "人设B"
+
+    def test_stream_done_refs_recorded(self):
+        import utils.gpt_model.fastrag_llm as fm
+        llm = _make_llm()
+        fm._get_aiohttp = lambda: _fake_aiohttp_module(_FakeResponse(200, [
+            b'data: {"delta": "\xe4\xba\x8c\xe5\x8d\x81\xe5\x85\xac\xe6\x96\xa4"}\n\n',
+            b'data: {"done": true, "references": ["# \xe5\xa4\xa7\xe6\xa1\xb6 > \xe5\x8f\x82\xe6\x95\xb0"]}\n\n',
+        ]))
+        # 直接消费 stream_resp
+        async def _collect():
+            return [d async for d in llm.stream_resp({"content": "一桶多重"})]
+        deltas = self._run(_collect())
+        assert deltas == ["二十公斤"]
+        assert llm.history == [
+            {"role": "user", "content": "一桶多重"},
+            {"role": "assistant", "content": "二十公斤",
+             "references": ["# 大桶 > 参数"]},
+        ]
+
+    def test_stream_failure_not_recorded(self):
+        import utils.gpt_model.fastrag_llm as fm
+        llm = _make_llm()
+        fm._get_aiohttp = lambda: _fake_aiohttp_module(_FakeResponse(200, [
+            b'data: {"delta": "\xe5\x89\x8d\xe7\xbc\x80"}\n\n',
+            b'data: {"error": "\xe7\x94\x9f\xe6\x88\x90\xe5\xa4\xb1\xe8\xb4\xa5"}\n\n',
+        ]))
+        async def _collect():
+            out = []
+            try:
+                async for d in llm.stream_resp({"content": "q"}):
+                    out.append(d)
+            except Exception:
+                pass
+            return out
+        self._run(_collect())
+        assert llm.history == []  # 流失败不记录（回退全文链由 get_resp 记录，防重复）
+
+    def test_history_trimmed_to_one_round(self):
+        llm, _ = self._setup({"answer": "答", "references": ["# x"]})
+        self._run(llm.get_resp({"content": "问1"}))
+        self._run(llm.get_resp({"content": "问2"}))
+        # 保留最近 1 轮（history_max_rounds=1，对齐上游 LiveStreamBot 默认）
+        assert llm.history == [
+            {"role": "user", "content": "问2"},
+            {"role": "assistant", "content": "答", "references": ["# x"]},
+        ]
+
+
 # ==================== T3④：stream_reply_gate fastrag 放行+负向矩阵 ====================
 
 
@@ -377,7 +500,9 @@ class TestStreamSafetySourceGuards:
         assert "StoppingCriteriaList" in qs, "断连收尾需 StoppingCriteria（Eng E1）"
         assert "stop_flag[0] = True" in qs, "finally 置停止信号（Eng E1）"
         assert "threading.Thread" in qs, "TextIteratorStreamer 需后台 generate 线程"
-        assert "max(16, min(LLM_MAX_NEW_TOKENS" in qs, "H1：截断转 max_new_tokens 收口"
+        assert "max(16, LLM_MAX_NEW_TOKENS if route_mode" in qs, \
+            "生成上限=路由模式 token 参数（2026-11-21 用户裁决：字符限为提示词软限制，不折算截断）"
+        assert qs.count("int(max_len * 1.5)") == 1, "max_len×1.5 折算仅改写分支保留（kb/chat 无回复截断）"
         assert "_stream_head_filter" in qs, "H1：头部泄漏前缀 buffer 甄别"
 
     def test_generate_answer_postprocess_unchanged(self):
@@ -421,7 +546,12 @@ class TestTemplateSaveChain:
         template = settings_module._FASTRAG_DEFAULTS["template"]
         assert set(template) == {"system_role", "answer_rules", "temperature",
                                  "top_p", "max_new_tokens", "max_answer_length"}
-        assert template["answer_rules"] == ""
+        # 2026-11-20 整合对齐批次：骨架默认回迁上游多行 8 规则块（每条一行，
+        # 含 {max_answer_length} 占位符）——不再为空串
+        rules = template["answer_rules"]
+        assert rules.strip(), "缺省回答规则不可为空（上游 8 规则块骨架）"
+        assert "1.你必须完全沉浸在你的人设中" in rules and "8.当问题涉及时间" in rules
+        assert "{max_answer_length}" in rules
         assert template["system_role"], "缺省人设不可为空（UI 首开应有参考值）"
 
     def test_template_inputs_autosave_bound(self):

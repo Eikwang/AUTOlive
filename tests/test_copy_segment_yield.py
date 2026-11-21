@@ -9,8 +9,9 @@
 - 段间让位（用户确认设计：播完当前段再插播）：动态文案切分段（权重 10）在队
   时，更高权重音频（comment=50）入队 → 队列排序高权重在前 → 消费循环先消费
   插播音频，剩余文案段自然续播（切回）——无需 999 特权机制
-- 闲时门（task_scheduler._is_playback_idle）：待合成队列空+待播放队列空+
-  无 EDTalk 在飞条目=空闲；动态文案生成前/入队前两查，忙则跳过本轮
+- 触发门（task_scheduler._is_synth_queue_idle，2026-11-21 用户裁决：只看待
+  合成消息队列）——message_queue 空即触发；已合成音频播报中不阻止新任务；
+  动态文案生成前/入队前两查，忙则跳过本轮
 
 风格对齐：宿主 stub 手工组装（test_audio_playback_review/test_t9_dynamic_copy
 同款模式）。
@@ -146,37 +147,37 @@ def _idle_gate_scheduler(mh_audio):
     return ts
 
 
-def test_is_playback_idle_matrix():
-    """闲时门判定矩阵：双队列空+无在飞=空闲；任一非空=忙；宿主缺音频组件=忙。"""
+def test_synth_queue_idle_matrix():
+    """触发门判定矩阵（2026-11-21 用户裁决：只看待合成消息队列）：
+    message_queue 空=空闲（待播放队列/在飞登记不阻止触发）；非空=忙；
+    宿主缺音频组件=忙（保守跳过）。"""
     from utils.task_scheduler import TaskScheduler
 
+    # 待播放队列非空 + 在飞登记非空：不阻止触发（旧三条件门已退役）
     ts = _idle_gate_scheduler(SimpleNamespace(
-        message_queue=[], voice_tmp_path_queue=[], _edtalk_current_entry=None))
-    assert ts._is_playback_idle() is True
+        message_queue=[], voice_tmp_path_queue=["待播放"],
+        _edtalk_current_entry={"type": "trends_copywriting"}))
+    assert ts._is_synth_queue_idle() is True
 
     busy_cases = [
         SimpleNamespace(message_queue=["待合成"], voice_tmp_path_queue=[],
                         _edtalk_current_entry=None),
-        SimpleNamespace(message_queue=[], voice_tmp_path_queue=["待播放"],
-                        _edtalk_current_entry=None),
-        SimpleNamespace(message_queue=[], voice_tmp_path_queue=[],
-                        _edtalk_current_entry={"type": "trends_copywriting"}),
     ]
     for audio in busy_cases:
         ts = _idle_gate_scheduler(audio)
-        assert ts._is_playback_idle() is False
+        assert ts._is_synth_queue_idle() is False
 
     ts = _idle_gate_scheduler(None)  # 宿主音频组件未就绪=忙（保守跳过）
-    assert ts._is_playback_idle() is False
+    assert ts._is_synth_queue_idle() is False
 
 
 def test_trends_copywriting_skips_round_when_busy(tmp_path):
-    """闲时门端到端：待播放队列非空 → run_trends_copywriting 一轮整体跳过
-    （文案未读取、LLM 未调、未入队），不告警不重试。"""
+    """触发门端到端（2026-11-21 用户裁决）：待合成队列非空 → run_trends_
+    copywriting 一轮整体跳过（文案未读取、LLM 未调、未入队），不告警不重试。"""
     from utils.task_scheduler import TaskScheduler
 
     ts = _idle_gate_scheduler(SimpleNamespace(
-        message_queue=[], voice_tmp_path_queue=["busy-entry"],
+        message_queue=["busy-entry"], voice_tmp_path_queue=[],
         _edtalk_current_entry=None))
 
     # 金丝雀：文案读取面/LLM 面被触碰即失败（忙=本轮应整体跳过）
@@ -201,4 +202,37 @@ def test_trends_copywriting_skips_round_when_busy(tmp_path):
     ts.start_trends_copywriting()
     ts.trends_copywriting_thread.join(timeout=6)
 
-    assert synthesis_calls == [], "系统忙时动态文案不应入队播放"
+    assert synthesis_calls == [], "待合成队列忙时动态文案不应入队播放"
+
+
+def test_trends_copywriting_triggers_despite_voice_queue_busy(tmp_path):
+    """触发门端到端（2026-11-21 用户裁决）：待播放队列非空不阻止触发——
+    待合成队列为空即触发并正常入链（旧三条件门会误判忙）。"""
+    from utils.task_scheduler import TaskScheduler
+
+    ts = _idle_gate_scheduler(SimpleNamespace(
+        message_queue=[], voice_tmp_path_queue=["busy-entry"],
+        _edtalk_current_entry=None))
+
+    ts.config.get = lambda *keys: {
+        ("trends_copywriting", "enable"): True,
+        ("trends_copywriting", "play_interval"): 1,
+        ("trends_copywriting", "copy"): ["测试词|今天的商品，不要999"],
+        ("trends_copywriting", "random_play"): False,
+        ("trends_copywriting", "prompt_change_enable"): False,
+    }.get(keys)
+
+    synthesis_calls = []
+    ts.my_handle.audio_synthesis_handle = lambda msg: synthesis_calls.append(msg)
+
+    def stopper():
+        time.sleep(1.6)
+        ts.is_running = False
+    threading.Thread(target=stopper, daemon=True).start()
+
+    ts.start_trends_copywriting()
+    ts.trends_copywriting_thread.join(timeout=6)
+
+    assert len(synthesis_calls) >= 1, "待播放队列忙不应阻止动态文案触发入链"
+    assert synthesis_calls[0]["type"] == "trends_copywriting"
+    assert synthesis_calls[0]["content"] == "今天的商品，不要999"
