@@ -21,6 +21,8 @@
   "play_audio": {
     "enable": true,
     "text_split_enable": true,
+    "synth_gate_depth": 4,
+    "synth_gate_budget_s": 15.0,
     "out_path": "out"
   },
   "audio_player": {
@@ -77,6 +79,7 @@
       "room_stats": 10
     },
     "message_queue_max_len": "20",
+    "message_queue_replace_same_priority": true,
     "voice_tmp_path_queue_max_len": 100,
     "voice_tmp_path_queue_min_start_play": 0,
     "song_segment_seconds": 45,

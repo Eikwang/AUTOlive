@@ -73,6 +73,12 @@ class SynthesisMixin:
                     # 门控等待：消费出队回执提前唤醒；超时轮询兜底重查
                     self.synth_gate_sleep(QueueMixin._SYNTH_GATE_POLL_S)
 
+                # S1 遗弃保护（2026-11-21 队列优化批次）：念白出队（弹幕问答
+                # 处理开始）即登记组活跃——LLM 回复分段稍后异步入队时即刻受
+                # 两队列满载豁免保护（完整处理并消费闭环，早于播放出口 pending）
+                if isinstance(message, dict) and message.get("reply_link"):
+                    self.mark_reply_group_active(message["reply_link"])
+
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处
                 #
@@ -574,12 +580,15 @@ class SynthesisMixin:
                 if message['type'] != "trends_copywriting":
                     try:
                         _mq_max = int(self.config.get("filter", "message_queue_max_len"))
-                        _mq_now = len(self.message_queue)
+                        # E3 口径对齐（2026-11-21 队列优化批次）：改用分账口径
+                        # （不含 song 切片段/动态文案分段）——与满载判定同源，
+                        # 消除点歌/文案在场时的虚报
+                        _mq_now = self.message_queue_normal_len()
                         if _total > max(0, _mq_max - _mq_now):
                             logger.warning(
-                                f"[长回复切分] {message['type']} 共 {_total} 段，消息队列余量 "
-                                f"{max(0, _mq_max - _mq_now)}——超容部分将被丢弃（"
-                                f"filter.message_queue_max_len={_mq_max}）；"
+                                f"[长回复切分] {message['type']} 共 {_total} 段，消息队列普通容量余量 "
+                                f"{max(0, _mq_max - _mq_now)}（分账口径，不含点歌/文案切片）——"
+                                f"超容部分将被顶替或丢弃（filter.message_queue_max_len={_mq_max}）；"
                                 f"fix=调大队列上限或关闭 play_audio.text_split_enable")
                     except Exception:
                         pass

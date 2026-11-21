@@ -17,6 +17,7 @@
 import asyncio
 import json
 import threading
+import time
 import types
 
 import pytest
@@ -906,21 +907,48 @@ class TestOverridePriority:
 
 
 class TestMessageQueueOverflowEvict:
-    """M1/M2（消费批次）：消息队列满载高优插入=插队+驱逐队尾（净长度不变）；
-    低优/未识别类型队满仍丢弃。扫描/判定/插入锁内化（M2 竞态根修）。"""
+    """M1/M2（消费批次）：消息队列满载高优插入=插队+驱逐队尾（净长度不变）。
+    F1（2026-11-21 队列优化批次）：队满同权重堆积 → 顶替同权重组组首最老条目
+    （对齐设计预期与待播放队列规则2，开关 filter.
+    message_queue_replace_same_priority 缺省开启）；无同权重组的低优/未识别
+    类型队满仍丢弃。扫描/判定/插入锁内化（M2 竞态根修）。"""
 
-    def _fixture(self, max_len=3):
+    def _fixture(self, max_len=3, replace_same=None):
         mapping = {"w90": 90, "w50": 50, "w10": 10}
+        extra = {("filter", "message_queue_max_len"): max_len}
+        if replace_same is not None:
+            extra[("filter", "message_queue_replace_same_priority")] = replace_same
         return _QueueFixture(config=_FakeConfig(
             priority_mapping=mapping, max_len=max_len, min_start_play=0,
-            extra={("filter", "message_queue_max_len"): max_len}))
+            extra=extra))
 
     def _msg(self, t, content):
         return {"type": t, "content": content}
 
-    def test_full_low_priority_dropped(self):
-        """队满+低优插入位次在末尾 → 丢弃（原语义保持）。"""
+    def test_full_same_weight_replaces_oldest(self):
+        """F1：队满+同权重堆积 → 顶替同权重组组首（最老）条目，新条目接组尾
+        （净长度不变，组内 FIFO 保序）。"""
         fx = self._fixture()
+        for i, w in enumerate(("w90", "w50", "w10")):
+            fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
+        r = fx.data_priority_insert("等待合成消息", self._msg("w10", "new"))
+        assert r["code"] == 200
+        assert len(fx.message_queue) == 3  # 净长度不变
+        # 被顶替的是 w10 组组首（old2，最老）；新条目接组尾
+        assert [d["content"] for d in fx.message_queue] == ["old0", "old1", "new"]
+
+    def test_full_lower_priority_still_dropped(self):
+        """F1：队满+新权重低于队内全部条目（无同权重组）→ 丢弃（规则4 对齐）。"""
+        fx = self._fixture()
+        for i, w in enumerate(("w90", "w50", "w50")):
+            fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
+        r = fx.data_priority_insert("等待合成消息", self._msg("w10", "new"))
+        assert r["code"] == 1
+        assert [d["content"] for d in fx.message_queue] == ["old0", "old1", "old2"]
+
+    def test_full_low_priority_dropped_when_replace_disabled(self):
+        """F1 开关关闭 → 回退 drop-only 旧语义：队满+同权重堆积 → 丢弃新条目。"""
+        fx = self._fixture(replace_same=False)
         for i, w in enumerate(("w90", "w50", "w10")):
             fx.data_priority_insert("等待合成消息", self._msg(w, f"old{i}"))
         r = fx.data_priority_insert("等待合成消息", self._msg("w10", "new"))
@@ -962,6 +990,101 @@ class TestMessageQueueOverflowEvict:
         assert [d["content"] for d in fx.message_queue] == ["b"]
         assert [d["voice_path"] for d in fx.voice_tmp_path_queue] == ["d.wav"]
         assert fx.cancel_choreo_audio("") == 0  # 空步防呆
+
+
+class TestReplyGroupAbandonProtection:
+    """S1（2026-11-21 队列优化批次）：弹幕问答编组遗弃保护——组进入消费流程
+    （念白出队 pending / 组活跃 TTL 内）后，其切分段在两队列满载时不丢不驱逐、
+    不参与同权重顶替候选；未进入消费流程的组维持可顶替/可丢语义（设计预期
+    前半段）。"""
+
+    def _fixture(self, max_len=3):
+        mapping = {"w90": 90, "w50": 50, "w10": 10, "comment": 50}
+        return _QueueFixture(config=_FakeConfig(
+            priority_mapping=mapping, max_len=max_len, min_start_play=0,
+            extra={("filter", "message_queue_max_len"): max_len,
+                   ("filter", "voice_tmp_path_queue_max_len"): max_len}))
+
+    def _seg(self, link, seq=0, content="reply"):
+        return {"type": "comment", "content": content, "reply_link": link,
+                "voice_path": f"seg-{seq}.wav",
+                "split_group": {"id": f"g-{link}", "seq": seq, "total": 4}}
+
+    def setup_method(self):
+        QueueMixin._reply_gate_active.clear()
+        QueueMixin._reply_gate_pending.clear()
+        QueueMixin._reply_gate_abandoned.clear()
+
+    def teardown_method(self):
+        QueueMixin._reply_gate_active.clear()
+        QueueMixin._reply_gate_pending.clear()
+        QueueMixin._reply_gate_abandoned.clear()
+
+    def test_mark_active_protects_and_abandon_clears(self):
+        """mark_reply_group_active 登记即保护；abandon_reply_link 解除保护。"""
+        fx = self._fixture()
+        fx.mark_reply_group_active("rc-D")
+        assert fx._reply_group_protected(self._seg("rc-D"))
+        fx.abandon_reply_link("rc-D")
+        assert not fx._reply_group_protected(self._seg("rc-D"))
+
+    def test_unprotected_group_segment_still_droppable(self):
+        """组未进入消费流程 → 分段维持普通条目语义：队满低优且无同权重组
+        （顶替无候选）→ 丢弃（F1 不豁免未激活组）。"""
+        fx = self._fixture()
+        for _ in range(3):
+            fx.data_priority_insert("等待合成消息", {"type": "w90", "content": "old"})
+        r = fx.data_priority_insert("等待合成消息", self._seg("rc-idle"))
+        assert r["code"] == 1
+        assert all(d.get("reply_link") != "rc-idle" for d in fx.message_queue)
+
+    def test_active_group_segment_exempt_from_message_queue_full(self):
+        """组活跃（念白出队）时回复分段满载豁免接队尾（不丢，队列暂时超限）。"""
+        fx = self._fixture()
+        for _ in range(3):  # 队满 3 条 w90（分段权重 50 更低 → 插入位次在末尾）
+            fx.data_priority_insert("等待合成消息", {"type": "w90", "content": "old"})
+        QueueMixin._reply_gate_active["rc-A"] = time.monotonic()
+        r = fx.data_priority_insert("等待合成消息", self._seg("rc-A"))
+        assert r["code"] == 200
+        assert len(fx.message_queue) == 4
+
+    def test_active_group_segment_not_evicted_in_message_queue(self):
+        """组活跃时队列内受保护分段不被驱逐：满载高优插队驱逐跳过它。"""
+        fx = self._fixture()
+        fx.data_priority_insert("等待合成消息", {"type": "w90", "content": "a"})
+        QueueMixin._reply_gate_active["rc-A"] = time.monotonic()
+        fx.data_priority_insert("等待合成消息", self._seg("rc-A", content="prot"))
+        fx.data_priority_insert("等待合成消息", {"type": "w10", "content": "tail"})
+        # 队满（w90/受保护 w50 段/w10）+ 新 w90 插队 → 驱逐最低优 w10，保护段保留
+        r = fx.data_priority_insert("等待合成消息", {"type": "w90", "content": "b"})
+        assert r["code"] == 200
+        assert [d["content"] for d in fx.message_queue] == ["a", "b", "prot"]
+
+    def test_active_group_segment_exempt_in_voice_queue(self):
+        """待播放队列：组活跃分段满载豁免接组尾（序列保真）。"""
+        fx = self._fixture()
+        fx.voice_tmp_path_queue_not_empty_flag = True
+        for i, w in enumerate(("w90", "w50", "w10")):
+            fx.data_priority_insert("待播放音频", {"type": w, "voice_path": f"{w}-{i}.wav"})
+        QueueMixin._reply_gate_active["rc-B"] = time.monotonic()
+        r = fx.data_priority_insert("待播放音频", self._seg("rc-B"))
+        assert r["code"] == 200
+        assert len(fx.voice_tmp_path_queue) == 4
+
+    def test_voice_queue_rule2_excludes_protected(self):
+        """待播放队列规则2：同权重候选排除受保护段 → 落规则3 驱逐最低优普通条目。"""
+        fx = self._fixture()
+        fx.voice_tmp_path_queue_not_empty_flag = True
+        fx.data_priority_insert("待播放音频", {"type": "w90", "voice_path": "a.wav"})
+        QueueMixin._reply_gate_active["rc-C"] = time.monotonic()
+        fx.data_priority_insert("待播放音频", self._seg("rc-C"))
+        fx.data_priority_insert("待播放音频", {"type": "w10", "voice_path": "c.wav"})
+        r = fx.data_priority_insert("待播放音频", {"type": "w50", "voice_path": "new.wav"})
+        assert r["code"] == 200
+        paths = [d["voice_path"] for d in fx.voice_tmp_path_queue]
+        assert len(paths) == 3
+        assert "c.wav" not in paths           # 最低优普通条目被驱逐
+        assert paths == ["a.wav", "seg-0.wav", "new.wav"]  # 受保护段保留、新条目接组尾
 
 
 class TestPlaybackConsumptionHooks:

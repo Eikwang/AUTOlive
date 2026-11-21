@@ -129,6 +129,45 @@ def test_gate_open_below_limit():
     assert q.synth_gate_wait_s({"type": "comment"}) == 0.0
 
 
+def test_budget_mode_blocks_at_budget():
+    """S3（2026-11-21 队列优化批次）：秒数预算模式——积压预估秒数 ≥ 预算
+    → 门控（budget>0 优先于条数门限）。文本无 voice_path 降级 4 字/秒估算。"""
+    q = _GateFixture(_CfgBudget(budget=10.0))
+    q.voice_tmp_path_queue = _normal(3)  # 每条 content 2 字 → 下限 1s ×3 = 3s
+    q.voice_tmp_path_queue[0]["content"] = "这是一条四十个字的测试内容用于估算时长假条目哦"  # 24 字 → 6s
+    q.voice_tmp_path_queue[1]["content"] = "这是一条四十个字的测试内容用于估算时长假条目哦"  # 6s
+    assert q.synth_gate_wait_s({"type": "comment"}) > 0  # 6+6+1 = 13s ≥ 10s
+
+
+def test_budget_mode_open_below_budget():
+    q = _GateFixture(_CfgBudget(budget=10.0))
+    q.voice_tmp_path_queue = _normal(2)  # 1+1 = 2s < 10s
+    assert q.synth_gate_wait_s({"type": "comment"}) == 0.0
+
+
+def test_budget_mode_excludes_song_segments():
+    """预算口径排除 song 切片段：背景流不占预算（间奏插播依赖预合成）。"""
+    q = _GateFixture(_CfgBudget(budget=2.0))
+    seg = {"type": "song", "song_segment": {"seq": 1}, "content": "x" * 400}
+    q.voice_tmp_path_queue = [seg, {"type": "comment", "content": "c"}]
+    assert q.synth_gate_wait_s({"type": "comment"}) == 0.0  # 仅 1s 普通 < 2s
+
+
+def test_budget_zero_falls_back_to_depth_mode():
+    """budget=0/缺省 → 回退条数门限模式（既有行为兼容）。"""
+    q = _GateFixture(_CfgBudget(budget=0))
+    q.voice_tmp_path_queue = _normal(3)  # 深度 3 ≥ 缺省门限 2
+    assert q.synth_gate_wait_s({"type": "comment"}) > 0
+
+
+class _CfgBudget(_Cfg):
+    """S3 预算模式 fake：play_audio 段带 synth_gate_budget_s（无 depth 键）。"""
+
+    def __init__(self, budget):
+        super().__init__(gate_depth=None)
+        self._m["play_audio"] = {"synth_gate_budget_s": budget}
+
+
 def test_gate_counts_normal_entries_only():
     """深度按普通条目计：song 段=背景流不占容量（与满载分账同口径）。"""
     q = _GateFixture(_Cfg(gate_depth=2))

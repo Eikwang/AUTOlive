@@ -829,6 +829,17 @@ class AUDIO_PLAY_CENTER:
         with self.list_lock:
             return len(self.audio_json_list)
 
+    def internal_normal_entries(self) -> list:
+        """内部队列普通条目快照（2026-11-21 队列优化批次 E2/S3）：排除 song
+        切片段（背景流不占合成背压门深度/秒数预算——间奏插播内容依赖预合成
+        不被门滞留，与 synth_gate_wait_s 待播放队列口径一致）。本地路径 play()
+        提前移交后播放器内部队列才是真实积压点——门控须叠加本队列。"""
+        with self.list_lock:
+            return [dict(e) if isinstance(e, dict) else e
+                    for e in self.audio_json_list
+                    if not (isinstance(e, dict) and e.get("type") == "song"
+                            and e.get("song_segment"))]
+
     def play(self, data):
         """入队（映射源 add_audio_json）；队列满载阻塞背压（S7，queue_max 可配）"""
         queue_max = int(self._hot_value("queue_max", 50) or 50)
