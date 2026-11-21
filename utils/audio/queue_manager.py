@@ -307,6 +307,68 @@ class QueueMixin:
         except Exception:
             return False
 
+    # ---------- P1 点歌期弹幕回复「顶替-保留最新」（2026-11-21 用户实测批次） ----------
+
+    @staticmethod
+    def _is_reply_entry(e) -> bool:
+        """弹幕问答回复组条目判定：带 reply_link 且非念白（念白 read_comment
+        本身属配对源不属回复组，唱歌期间念白照常间奏消费）。"""
+        return (isinstance(e, dict) and e.get("reply_link")
+                and not (e.get("type") == "read_comment"
+                         or e.get("producer_type") == "read_comment"))
+
+    def _song_state_active(self) -> bool:
+        """点歌窗口状态判定（无锁启发式——调用方可能已持队锁，本方法不再取
+        锁防自锁）：song 锚在位（唱歌/垃圾时间）或待播放队列存在 song 切片段
+        （点歌触发→前奏等待窗口，锚尚未建立）。"""
+        try:
+            anchor = getattr(self, "_song_anchor", None)
+            if anchor and anchor.get("t0") is not None:
+                return True
+            return any(_is_song_slice_entry(e) for e in self.voice_tmp_path_queue)
+        except Exception:
+            return False
+
+    def _discard_stale_replies_for_song(self, data_json):
+        """点歌窗口期弹幕回复「顶替-保留最新」（P1，2026-11-21 用户实测批次，
+        待播放队列层；内部自取 voice_tmp_path_queue_lock——锁外调用）。
+
+        用户设计预期：点歌触发后，前奏/间奏人声静音期只插播最新的高权重音频，
+        人声结束后也从最新的开始播报；唱歌期间产生的旧回复直接舍弃——不将
+        这期间所有 LLM 回复依次全量播报。实现：新的回复组段入队成功后，扫描
+        待播放队列舍弃其它更旧的回复组段（S1 受保护组豁免——消费中组原子性
+        优先）；被舍弃组经 abandon_reply_link 解除念白单飞门/活跃保护，防止
+        配对门空等 15s 超时阻塞后续念白。"""
+        if not self._is_reply_entry(data_json):
+            return
+        if not self._song_state_active():
+            return
+        new_link = str(data_json.get("reply_link"))
+        dropped_links = []
+        with self.voice_tmp_path_queue_lock:
+            kept = []
+            for e in self.voice_tmp_path_queue:
+                if (self._is_reply_entry(e)
+                        and str(e.get("reply_link")) != new_link
+                        and not self._reply_group_protected(e)):
+                    dropped_links.append(str(e.get("reply_link")))
+                    continue
+                kept.append(e)
+            if not dropped_links:
+                return
+            self.voice_tmp_path_queue[:] = kept
+        for lk in dict.fromkeys(dropped_links):
+            self.abandon_reply_link(lk)
+        try:
+            from utils.obs_stats import record_drop
+            record_drop("song_reply_replace", len(dropped_links))
+        except Exception:
+            pass
+        logger.info(
+            f"[song] 唱歌期回复顶替：舍弃旧回复组段 {len(dropped_links)} 条"
+            f"（links={sorted(set(dropped_links))}），保留最新"
+            f"【{str(data_json.get('content', ''))[:30]}】")
+
     # ---------- 合成背压门（2026-11-16 消费回传背压批次，用户高压实测） ----------
     # 问题：合成线程无背压持续产音频，待播放队列不断增长（高压下打满 max_len
     # 触发满载驱逐——驱逐发生在 TTS 之后=成本白付）。门控：待播放队列深度
@@ -917,6 +979,36 @@ class QueueMixin:
                 # 生产者通过notify()通知消费者列表中有新的消息
                 self.message_queue_not_empty.notify()
 
+                # P1（2026-11-21 用户实测批次）：点歌窗口期回复组「顶替-保留
+                # 最新」待合成层——新回复入队即舍弃更旧回复（合成成本前移节省，
+                # 唱歌结束后残留回复不再依次全量播报）；被舍弃组解除念白配对门
+                # （abandon_reply_link，gate 锁序与本锁内 _reply_group_protected
+                # 既有先例一致）。S1 受保护组豁免（消费中组原子性优先）。
+                if self._is_reply_entry(data_json) and self._song_state_active():
+                    _new_link = str(data_json.get("reply_link"))
+                    _song_dropped_links = []
+                    _kept = []
+                    for _e in self.message_queue:
+                        if (self._is_reply_entry(_e)
+                                and str(_e.get("reply_link")) != _new_link
+                                and not self._reply_group_protected(_e)):
+                            _song_dropped_links.append(str(_e.get("reply_link")))
+                            continue
+                        _kept.append(_e)
+                    if _song_dropped_links:
+                        self.message_queue[:] = _kept
+                        for _lk in dict.fromkeys(_song_dropped_links):
+                            self.abandon_reply_link(_lk)
+                        try:
+                            from utils.obs_stats import record_drop
+                            record_drop("song_reply_replace_mq", len(_song_dropped_links))
+                        except Exception:
+                            pass
+                        logger.info(
+                            f"[song] 唱歌期回复顶替（待合成层）：舍弃旧回复 "
+                            f"{len(_song_dropped_links)} 条，保留最新"
+                            f"【{str(data_json.get('content', ''))[:30]}】")
+
             if evicted is not None:
                 try:
                     from utils.obs_stats import record_drop
@@ -1123,4 +1215,7 @@ class QueueMixin:
             if inserted:
                 self._maybe_discard_pending_for_talk(data_json)
                 self._maybe_priority_yield_for(data_json)
+                # P1（2026-11-21 用户实测批次）：点歌窗口期回复组「顶替-保留
+                # 最新」——成功插入回复段后舍弃更旧回复组段（锁外自取锁）
+                self._discard_stale_replies_for_song(data_json)
             return insert_msg

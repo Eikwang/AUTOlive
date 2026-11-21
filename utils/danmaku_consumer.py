@@ -868,6 +868,12 @@ class DanmakuListenerService:
                     "fix_hint": "刷新平台配置页后重试", "docs_anchor": "docs/danmaku_module.md"}
         if self._bridge is not None and self._loop and not self._loop.is_closed():
             if enabled:
+                # 2026-11-21 开关切换修复：注册表缺口自愈——持久化文件丢失或
+                # 从未注入的 disabled 房间直接 start_room 会 RoomError 404
+                # （前端表现为「运行面切换失败｜服务仍在线——请重试」假失败）。
+                # config 为权威源（found 已确认房间存在），先补登记再启动。
+                self._submit_room_op(
+                    lambda: self._bridge.ensure_room_registered(platform, room_id))
                 result = self._submit_room_op(lambda: self._bridge.start_room(platform, room_id))
                 if result.get("status") == "login_required":
                     return {"success": True, "listening": False,
@@ -1108,6 +1114,13 @@ class DanmakuListenerService:
             if not p or not rid:
                 continue
             if not r.get("enabled"):
+                # 2026-11-21 开关切换修复：disabled 房间也注册（stopped，不
+                # 连接不登录）——运行面开关切换 start_room 不再依赖历史注册表
+                # 文件存活（ Eng A2 迁移/重跑 copy_danmaku 后文件缺失场景）
+                try:
+                    await self._bridge.ensure_room_registered(p, rid)
+                except Exception as e:
+                    logger.error(f"[danmaku_listener] 注册房间 {p}:{rid} 失败: {e}")
                 continue
             try:
                 res = await self._bridge.add_room(rid, p)

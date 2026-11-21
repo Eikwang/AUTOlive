@@ -39,6 +39,12 @@ FLIGHT_MARGIN = 1.05
 # FLIGHT_MARGIN 时间启发式承担）
 _POLL_INTERVAL = 0.2
 _POLL_DEADLINE = 1.0
+# 2026-11-21 截断修复：轮询上限改为 max(固定值, 上一句时长×本系数)。
+# 根因：推理慢于实时时帧锁定 pacing（'hold'）拉长真实播放时长，固定 1s
+# 轮询超时强制放行 → 下一条 push 触发服务端 flush 替换 → 上一句尾字被
+# 截断（用户实测「最后一个字没说完」）。正常路径 buffer 播完即回落、轮询
+# 提前 break，不产生额外白等；上限仅封顶病态场景（GPU 卡死/服务异常）。
+_POLL_DEADLINE_SCALE = 1.0
 # 2026-11-17 热切机制批次：连接基址解析 TTL 缓存（秒）——resolve_api_base 每
 # 次调用读运行时文件（磁盘 IO），push_full 属逐句音频路径，不做每请求 open；
 # 端口变更（服务重启自动换端口写运行时文件/配置 api_ip_port 修改）最迟 TTL 内生效
@@ -240,14 +246,30 @@ class EDTalkClient:
         if remaining > 0:
             await asyncio.sleep(remaining)
         sleep_s = time.monotonic() - t0
-        # 双条件：buffer_depth 回落（低于 preroll 视为上一句已被消费）
-        deadline = time.monotonic() + _POLL_DEADLINE
+        # 双条件：buffer_depth 回落（低于 preroll 视为上一句已被消费）。
+        # 轮询上限随上一句时长缩放（截断修复见 _POLL_DEADLINE_SCALE 注释）。
+        deadline = time.monotonic() + max(
+            _POLL_DEADLINE, duration_s * _POLL_DEADLINE_SCALE)
         buffer_depth = None
         timed_out = False
+        seg_done = False
         while True:
             status = await self._get_status(session)
             if not status:
                 break  # /status 不可用：不阻塞推送（降级为仅时间启发式）
+            # 精确完成判定（2026-11-21 撕裂修复，服务端 /status 新增三字段）：
+            # seg_chunk_total=T（push 受理时基线）、seg_chunk_produced（chunk
+            # 帧产出数）、seg_chunk_displayed（chunk 帧显示数）。三者齐备且
+            # 产出≥总数、显示≥产出 = 上一句音频帧全部产出且播放完毕。
+            # 替代深度启发式的主判定——生产滞后时 buffer 深度骤降会提前
+            # 放行 → 服务端 flush 遗弃未产出句尾 → 音频结尾撕裂/尾字丢失。
+            seg_total = status.get("seg_chunk_total")
+            if seg_total:
+                produced = status.get("seg_chunk_produced", 0)
+                displayed = status.get("seg_chunk_displayed", 0)
+                if produced >= seg_total and displayed >= produced:
+                    seg_done = True
+                    break
             buffer_depth = status.get("buffer_depth")
             if buffer_depth is None or buffer_depth <= status.get("preroll_frames", 8):
                 break
@@ -259,6 +281,7 @@ class EDTalkClient:
         logger.info(
             f"[edtalk-wait] 上句时长 {duration_s:.1f}s 飞行等待 {sleep_s:.2f}s "
             f"轮询 {poll_s:.2f}s buffer_depth={buffer_depth}"
+            + ("（句段完成判定）" if seg_done else "")
             + ("（轮询超时放行）" if timed_out else "")
         )
 

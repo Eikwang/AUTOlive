@@ -239,6 +239,24 @@ class AudioProcessor:
         """
         return get_mel_from_pcm(pcm)
 
+    def idle_pcm_window(self) -> np.ndarray:
+        """Fixed 200ms window (position 0) of the idle noise audio.
+
+        Deterministic counterpart of consume_idle_pcm(): the idle lip coeff
+        is cached per-process, and any RE-computation (transient first-call
+        failure) must yield the SAME closed-mouth coeff instead of rolling a
+        different noise slice — the near-silent mel is far out-of-distribution
+        for Audio2Lip, so different windows extrapolate to arbitrary mouth
+        shapes (2026-11-21 idle-open-mouth root cause).
+        """
+        if self._idle_pcm is None:
+            return np.zeros(_CHUNK_SAMPLES, dtype=np.float32)
+        total = len(self._idle_pcm)
+        if total < _CHUNK_SAMPLES:
+            repeats = (_CHUNK_SAMPLES // total) + 1
+            return np.tile(self._idle_pcm, repeats)[:_CHUNK_SAMPLES]
+        return self._idle_pcm[:_CHUNK_SAMPLES].copy()
+
     def consume_idle_pcm(self) -> np.ndarray:
         """Get a chunk of idle noise PCM for standby mode.
 

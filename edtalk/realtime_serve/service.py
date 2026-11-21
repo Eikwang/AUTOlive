@@ -454,6 +454,12 @@ class RealtimeService:
             status['output_fps'] = s.get('target_fps', 0)
             status['underruns'] = s.get('underruns', 0)
             status['preroll_state'] = s.get('preroll_state', 'unknown')
+            # 句段音频完成度（2026-11-21 撕裂修复：wait_flight 精确判定面）
+            status['seg_chunk_displayed'] = s.get('seg_displayed', 0)
+        if rl is not None:
+            # 句段 chunk 总数/已产出（render_loop push_full 受理时归零基线）
+            status['seg_chunk_total'] = getattr(rl, '_seg_chunk_total', 0)
+            status['seg_chunk_produced'] = getattr(rl, '_seg_chunk_produced', 0)
         status['fps'] = status['output_fps']
 
         gc = self.gaze_corrector

@@ -411,6 +411,9 @@ def setup_service(config: Config, no_unitycapture: bool = False,
         sender=sender_fn,
         preroll_frames=config.preroll_frames
     )
+    # P3 静音填充（2026-11-21 用户实测批次）：闭口帧供给接线——flush 后
+    # preroll 等待/underrun 期间 sink 不再冻结在上一句开口尾帧。
+    output_streamer.set_idle_frame_provider(render_loop.get_idle_frame)
 
     # 统一画布合成层（2026-10-27 画面输出分叉）：两出帧口统一改道
     canvas_compositor = None

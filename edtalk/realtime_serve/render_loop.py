@@ -202,6 +202,26 @@ class RenderLoop:
         self._idle_lip_cache: Optional[torch.Tensor] = None
         self._idle_lip_cache_valid: bool = False
 
+        # P3 静音填充（2026-11-21 用户实测批次）：最近产出的闭口 idle 帧
+        # 缓存（合成整帧引用，零拷贝）——供 OutputStreamer 在 preroll 等待/
+        # underrun 期间喂 sink，避免冻结在上一句开口尾帧。
+        self._last_idle_frame: Optional[np.ndarray] = None
+
+        # 句段音频完成度计数（2026-11-21 音频结尾撕裂修复）：push_full 受理时
+        # 归零基线，chunk 帧产出时递增 produced，OutputStreamer 显示 chunk 帧
+        # 时递增 displayed（经 stats 汇入 /status）。客户端 wait_flight 以
+        # produced>=total 且 displayed>=produced 精确判定上一句播放完毕——
+        # 替代「buffer 深度≤阈值」启发式（生产滞后时深度骤降会提前放行 →
+        # flush 遗弃未产出句尾 → 音频结尾撕裂/尾字丢失）。
+        self._seg_chunk_total = 0
+        self._seg_chunk_produced = 0
+
+        # 视线修正宽限窗口（2026-11-21 视线异常修复）：flush 清空帧缓冲后
+        # 深度从 0 重建，前 REPAIR_MIN_BUFFER 帧深度必然低于自适应阈值——
+        # 每段开头前几帧跳过视线修正（用户实测回归）。宽限窗口保证段首
+        # 连续修正；窗口内逐帧递减，耗尽后回归深度门控（GPU 余量保护）。
+        self._gaze_grace = 0
+
         self._debug_audio_chunks = 0
 
         # Frame timing histogram (last N samples)
@@ -290,6 +310,8 @@ class RenderLoop:
                     self._flush_buffer(keep_reserve=0)
                     if self.output_streamer is not None:
                         self.output_streamer.reset_preroll()
+                    # 段首视线修正宽限（深度从 0 重建，见 __init__ 注释）
+                    self._gaze_grace = self.REPAIR_MIN_BUFFER
                 if self.gaze_corrector is not None:
                     self.gaze_corrector.reset()
                 # Native-resolution passthrough: the consumer side is paused
@@ -491,12 +513,24 @@ class RenderLoop:
 
         with self._push_lock:
             self._debug_audio_chunks += 1
-            self._idle_lip_cache_valid = False
+            # 注意：这里绝不能作废 _idle_lip_cache（2026-11-21 空闲张嘴根因）。
+            # noice.wav 是 -48dB 近静音，其 mel 远离训练分布，Audio2Lip 对它
+            # 的输出是外推值——不同 200ms 窗口推出完全不同的口型系数（实测
+            # 窗口 0 闭嘴、后续窗口张嘴）。启动期首个 idle 帧算出的闭嘴系数
+            # 已缓存，进程内保持不变；push 后若重算=重新掷骰子，掷出张嘴
+            # 系数会被缓存整个空闲期。
 
             # Flush old frames and re-arm preroll for the new segment.
             self._flush_buffer()
+            # 段首视线修正宽限（深度从 0 重建，见 __init__ 注释）
+            self._gaze_grace = self.REPAIR_MIN_BUFFER
             if self.output_streamer is not None:
-                self.output_streamer.reset_preroll()
+                # 中流 re-arm 阈值降为 1（2026-11-21 卡顿修复）：flush 后生产者
+                # 立即持续产出闭口 idle 帧（原生 25fps 节奏、画面动画连续），
+                # 阈值 1 ≈ 历史行为（flush(5)+reset_preroll(4) 深度5≥4 瞬时通过
+                # 的静默无门控）；此前阈值 4 的真实门控制造 ~0.2-0.4s 冻结间隙
+                # ——张嘴/卡顿的共同根源。流启动首帧门控不受影响（构造值）。
+                self.output_streamer.reset_preroll(1)
 
             # 句尾静音填充（AUDIO_TAIL_SILENCE_S，原版机制还原）后再转 mel：
             # 末段帧的 mel 窗完全落入静音 → 收口系数闭合，hold 窗口不再持有
@@ -533,6 +567,9 @@ class RenderLoop:
                 self._lip_filled = 0
                 self._last_rendered_lip_idx = -1
                 self._audio_arm_start = True
+                # 句段完成度基线（wait_flight 精确判定，见 __init__ 注释）
+                self._seg_chunk_total = T
+                self._seg_chunk_produced = 0
 
             chunk = self.LIP_CHUNK_FRAMES
             if self.lip_mode != 'on':
@@ -632,7 +669,9 @@ class RenderLoop:
 
         if (self.audio_processor is not None
                 and self.model_manager is not None):
-            idle_pcm = self.audio_processor.consume_idle_pcm()
+            # 固定窗口（位置 0）而非推进式消费：重算必须确定性复现同一闭嘴
+            # 系数（见 process_full_audio 内注释，2026-11-21 空闲张嘴根因）。
+            idle_pcm = self.audio_processor.idle_pcm_window()
             mel_input, bs, mel_T = self.audio_processor.pcm_to_mel(idle_pcm)
 
             if mel_input is not None:
@@ -754,10 +793,18 @@ class RenderLoop:
             # Progressive inference behind this frame: closed mouth, no
             # chunk allocated — the audio waits for the lips.
             alpha_D_lip = self._get_idle_lip_coeff()
+            # 帧锁定音频保活（2026-11-21 撕裂修复）：hold 帧推进静音块喂
+            # DAC——此前 hold 期间零推送造成音频设备断流爆音（声音撕裂）。
+            # 静音块不计入句段完成度（非句子 chunk），时间线语义不变。
+            audio_meta = {'audio': np.zeros(16000 // self.target_fps,
+                                            dtype=np.float32),
+                          'audio_start': False}
         else:
             _, alpha_D_lip, _lip_idx, first, chunk = lip_result
             if chunk is not None:
-                audio_meta = {'audio': chunk, 'audio_start': bool(first)}
+                audio_meta = {'audio': chunk, 'audio_start': bool(first),
+                              'seg': True}
+                self._seg_chunk_produced += 1
 
         # Load frame data (never blocks on batch I/O)
         character_data.ensure_loaded(video_idx)
@@ -772,6 +819,8 @@ class RenderLoop:
                 or bool(np.isnan(facemark).any())):
             t_put_0 = time.perf_counter()
             out_frame = self._composite_out(orifra)
+            if lip_result is None:
+                self._last_idle_frame = out_frame  # P3 静音填充：闭口帧缓存
             if self.frame_buffer is not None:
                 self.frame_buffer.put(out_frame, meta=audio_meta)
             timings['put'] = (time.perf_counter() - t_put_0) * 1000.0
@@ -886,6 +935,8 @@ class RenderLoop:
 
         # Push into the output buffer (blocking when full — backpressure)
         composited = self._composite_out(composited)
+        if lip_result is None:
+            self._last_idle_frame = composited  # P3 静音填充：闭口帧缓存
         t_put_0 = time.perf_counter()
         if self.frame_buffer is not None:
             self.frame_buffer.put(composited, meta=frame_meta)
@@ -955,6 +1006,12 @@ class RenderLoop:
             return True
         if self.frame_buffer is None:
             return True
+        # 段首宽限窗口（2026-11-21 视线异常修复）：flush 后深度从 0 重建，
+        # 前 REPAIR_MIN_BUFFER 帧深度必然低于阈值——窗口内强制放行（逐帧
+        # 递减），保证视线修正全画面连续；耗尽后回归深度门控。
+        if self._gaze_grace > 0:
+            self._gaze_grace -= 1
+            return True
         return self.frame_buffer.depth >= self.REPAIR_MIN_BUFFER
 
     def _record_timings(self, timings: dict):
@@ -991,6 +1048,19 @@ class RenderLoop:
             dropped = self.frame_buffer.flush(keep_reserve=keep_reserve)
             if dropped > 0:
                 print(f"[RenderLoop] Flushed {dropped} buffered frames")
+
+    def get_idle_frame(self) -> Optional[np.ndarray]:
+        """P3 静音填充供给（OutputStreamer.set_idle_frame_provider 消费）。
+
+        无音频段在播（_lip_coeffs=None——flush 后空闲/句后 hold 期满）时
+        返回最近产出的闭口 idle 帧；音频段在播返回 None（streamer 维持
+        _last_sent 重发语义，口型连续）。异常自守不抛。"""
+        try:
+            if self._lip_coeffs is not None:
+                return None
+            return self._last_idle_frame
+        except Exception:
+            return None
 
     @property
     def frame_index(self) -> int:

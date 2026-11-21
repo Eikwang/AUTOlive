@@ -592,6 +592,27 @@ class DanmakuBridge:
             result["warnings"] = [PLATFORM_WARNINGS[spec.platform]]
         return result
 
+    async def ensure_room_registered(self, platform: str, room_id: str) -> dict:
+        """确保房间在注册表中有条目（config-first 自愈，2026-11-21 开关切换修复）。
+
+        背景：注册表 `_rooms` 来源仅两处——持久化文件恢复（文件丢失/损坏时回退
+        空注册表）与 `_inject_rooms` 对 enabled=true 房间的 add_room。disabled
+        房间若从未注入过（或持久化文件丢失），运行面开关切换直接 start_room 会
+        RoomError 404 → 前端「运行面切换失败｜服务仍在线——请重试」假失败。
+        config.rooms 为权威源（调用方已确认房间存在），此处按需补登记 stopped
+        条目（不连接、不登录），start_room 语义不变（仍对未知房间 404）。"""
+        room_key = f"{platform}:{room_id}"
+        if room_key not in self._rooms:
+            self._rooms[room_key] = {
+                "platform": platform,
+                "room_id": room_id,
+                "status": "stopped",
+                "engine_type": "",
+            }
+            self._save_rooms_registry()
+            logger.info(f"Room registered (config-first self-heal): {room_key}")
+        return {"success": True, "room": self._rooms[room_key]}
+
     async def start_room(self, platform: str, room_id: str) -> dict:
         """启动已保存房间的监听（注册表保留，2026-10-05 R3 按需启动）
 

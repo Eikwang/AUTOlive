@@ -250,6 +250,15 @@ class OutputStreamer:
         self._underruns = 0
         self._output_frames = 0
         self._last_sent: Optional[np.ndarray] = None
+        # 句段 chunk 帧显示计数（2026-11-21 音频结尾撕裂修复）：RenderLoop 在
+        # chunk 帧的 meta 打 seg 标，本循环显示时递增——经 stats 汇入 /status，
+        # 客户端 wait_flight 据此精确判定上一句播放完毕（见 render_loop
+        # __init__ 注释）。
+        self._seg_displayed = 0
+        # P3 静音填充（2026-11-21 用户实测批次）：闭口 idle 帧供给方
+        # （RenderLoop.get_idle_frame）——preroll 等待/underrun 期间以闭口帧
+        # 喂 sink，不再冻结/重发在上一句开口尾帧（「音频间隙张嘴」根因）。
+        self._idle_frame_provider: Optional[Callable[[], Optional[np.ndarray]]] = None
         self._preroll_ready = threading.Event()
         self._preroll_progress = (0, self.preroll_frames)
 
@@ -285,6 +294,33 @@ class OutputStreamer:
         """F-A/uc2b：任意点暂停/恢复（消费冻结门；线程安全——GIL 布尔读）。"""
         self._paused = bool(paused)
 
+    def set_idle_frame_provider(
+            self, provider: Optional[Callable[[], Optional[np.ndarray]]]) -> None:
+        """注册闭口 idle 帧供给方（P3 静音填充，2026-11-21 批次）。
+
+        provider() -> np.ndarray|None：无音频段在播时返回最近产出的闭口帧；
+        音频段在播（口型应连续）或尚无 idle 帧时返回 None——维持既有
+        _last_sent 重发语义。异常由调用方吞掉（供给方内部自守）。"""
+        self._idle_frame_provider = provider
+
+    def _send_idle_frame(self) -> None:
+        """闭口帧喂屏（P3）：preroll 等待/underrun 期间调用。无供给方/无帧
+        时不动作（维持既有语义）。"""
+        fn = self._idle_frame_provider
+        if fn is None or self.sender is None:
+            return
+        try:
+            idle = fn()
+        except Exception:
+            return
+        if idle is None:
+            return
+        try:
+            if self.sender(idle):
+                self._last_sent = idle
+        except Exception as e:
+            print(f"[OutputStreamer] Idle frame send error: {e}")
+
     def is_paused(self) -> bool:
         return self._paused
 
@@ -317,6 +353,11 @@ class OutputStreamer:
                 self._preroll_ready.set()
                 return True
             # Poll at 20Hz; FrameBuffer.put will not notify us directly.
+            # 2026-11-21 卡顿修复：等待期不再发送静态缓存 idle 帧——缓存帧
+            # 重复 + 20Hz 轮询节奏与 25fps 不齐造成画面静止/跳帧抽搐；间隙
+            # 连贯性由中流 re-arm 阈值 1（render_loop）保证——生产者的实时
+            # 闭口 idle 帧以原生节奏连续流出，本等待仅在流启动/极端滞后时
+            # 短暂生效（闭口帧供给仅保留在 underrun 兜底分支）。
             time.sleep(0.05)
         return self._running
 
@@ -396,13 +437,32 @@ class OutputStreamer:
                     # No sink: drop the frame but keep last_sent for underrun.
                     self._last_sent = frame
 
+                if meta and meta.get('seg'):
+                    self._seg_displayed += 1
                 with self._lock:
                     self._output_frames += 1
             else:
                 # Underrun: re-send previous frame to keep camera fed.
                 with self._lock:
                     self._underruns += 1
-                if self._last_sent is not None and self.sender is not None:
+                # P3 静音填充：RenderLoop 空闲段（无音频在播）优先闭口帧
+                # ——避免重发上一句开口尾帧；音频在播（供给方返回 None）
+                # 维持重发语义（口型连续）。
+                idle_sent = False
+                if self._idle_frame_provider is not None:
+                    idle = None
+                    try:
+                        idle = self._idle_frame_provider()
+                    except Exception:
+                        idle = None
+                    if idle is not None and self.sender is not None:
+                        try:
+                            if self.sender(idle):
+                                self._last_sent = idle
+                            idle_sent = True
+                        except Exception as e:
+                            print(f"[OutputStreamer] Resend error: {e}")
+                if not idle_sent and self._last_sent is not None and self.sender is not None:
                     try:
                         self.sender(self._last_sent)
                     except Exception as e:
@@ -419,4 +479,5 @@ class OutputStreamer:
                 'preroll_state': 'complete' if self._preroll_ready.is_set() else 'prerolling',
                 'preroll_ready': self._preroll_progress[0],
                 'preroll_needed': self._preroll_progress[1],
+                'seg_displayed': self._seg_displayed,
             }
