@@ -223,7 +223,8 @@ def test_edtalk_cmd_mapping_and_shell_false(tmp_path, monkeypatch):
     # tuber 角色库改造（2026-11-10）：--character-dir=角色包绝对路径
     # （tuber/{启用角色}），服务 CharacterDataPack 直接消费
     cd_idx = cmd.index("--character-dir")
-    assert str(cmd[cd_idx + 1]) == str(tmp_path / "tuber" / "wy"), cmd
+    # 2026-11-22 统一布局：角色库=注册中心 models/tuber/{角色}（原根级 tuber/）
+    assert str(cmd[cd_idx + 1]) == str(tmp_path / "models" / "tuber" / "wy"), cmd
     assert "--target-fps" in cmd and "25" in cmd
     assert "--face-repair" in cmd and "adaptive" in cmd
     assert "--segments" in cmd and "auto" in cmd

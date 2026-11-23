@@ -162,6 +162,12 @@ class AudioPlayer:
             return len(self._buffer) / self.sample_rate * 1000
 
     @property
+    def buffered_samples(self) -> int:
+        """Get current buffered audio sample count (pre-buffer top-up probe)."""
+        with self._lock:
+            return len(self._buffer)
+
+    @property
     def output_latency_s(self) -> float:
         """Smoothed output latency in seconds (callback -> DAC)."""
         return self._output_latency_s

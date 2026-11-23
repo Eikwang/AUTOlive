@@ -175,11 +175,12 @@ def test_push_full_rate_limit_blocks(monkeypatch):
 
     src = _make_wav(16000, 0.5)
     asyncio.run(client.push_full(src))
-    # 应有总时长 ≥ (5×1.2 - 0.5) 的背压等待（完成判定启发式生效）；
-    # 2026-11-16 段间让位批次：barge-in 退役，飞行等待恢复单次完整睡眠
-    # （当前段播完才放行，插播由队列权重排序在段间完成）——只守等待总时长
+    # 背压等待总时长 ≥ min_flight（last_duration × FLIGHT_MARGIN=0.6 → 5.0×0.6=3.0s）。
+    # 2026-11-23 pending 自动衔接：margin 从 1.0 降至 0.6——新服务端支持 pending
+    # 时下一句可提前推送（预推理缓冲，服务端等上句播完才激活，不丢尾）；本测试
+    # _get_status 返回空（降级/旧服务端），不走 pending 提前放行，仅靠 min_flight 背压。
     total_wait = sum(t for t in sleep_calls)
-    assert total_wait >= 5.0, f"期望背压等待总时长 ≥5.0s，实际 {sleep_calls}"
+    assert total_wait >= 3.0, f"期望背压等待总时长 ≥3.0s，实际 {sleep_calls}"
     os.remove(src)
 
 

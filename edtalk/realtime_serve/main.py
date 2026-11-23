@@ -34,7 +34,8 @@ from realtime_serve.compositor import MouthCompositor
 from realtime_serve.face_repair import FaceRepair
 from realtime_serve.audio_player import AudioPlayer
 from realtime_serve.gaze_correction import GazeCorrector
-from realtime_serve.output_buffer import FrameBuffer, OutputStreamer
+from realtime_serve.output_buffer import (
+    FrameBuffer, OutputStreamer, AudioPreBuffer)
 from realtime_serve.service import RealtimeService
 from realtime_serve.api.app import create_app as create_api_app
 
@@ -286,6 +287,9 @@ def setup_service(config: Config, no_unitycapture: bool = False,
     print(f"\n[Config] target_fps={config.target_fps} output pacing only")
     print(f"[Config] buffer_frames={config.buffer_frames} (~{memory_mb}MB)")
     print(f"[Config] preroll_frames={config.preroll_frames} (~{preroll_s:.2f}s startup delay)")
+    prebuf_s = config.audio_prebuf_frames / max(1, config.target_fps)
+    print(f"[Config] audio_prebuf_frames={config.audio_prebuf_frames} "
+          f"(~{prebuf_s*1000:.0f}ms player cushion, 0=disabled)")
     print(f"[Config] face_repair={config.face_repair_mode}  "
           f"gaze={config.gaze_mode} (convergence={config.gaze_convergence})")
 
@@ -363,6 +367,11 @@ def setup_service(config: Config, no_unitycapture: bool = False,
         capacity=config.buffer_frames,
         reserve=min(5, config.buffer_frames)
     )
+    # 2026-11-23 音节内拖音修复：音频预缓冲 FIFO。容量 = frame_buffer 容量 +
+    # 垫底帧数 + 余量，确保渲染产帧不会因 prebuffer 满而提前阻塞（与 frame_buffer
+    # 同步背压）。
+    audio_prebuffer = AudioPreBuffer(
+        capacity=config.buffer_frames + config.audio_prebuf_frames + 4)
 
     # 7. Initialize UnityCapture sender (optional)
     print("\n[7/7] Initializing UnityCapture sender...")
@@ -409,7 +418,10 @@ def setup_service(config: Config, no_unitycapture: bool = False,
         frame_buffer=frame_buffer,
         target_fps=config.target_fps,
         sender=sender_fn,
-        preroll_frames=config.preroll_frames
+        audio_player=audio_player,
+        preroll_frames=config.preroll_frames,
+        audio_prebuffer=audio_prebuffer,
+        audio_prebuf_frames=config.audio_prebuf_frames
     )
     # P3 静音填充（2026-11-21 用户实测批次）：闭口帧供给接线——flush 后
     # preroll 等待/underrun 期间 sink 不再冻结在上一句开口尾帧。
@@ -443,6 +455,9 @@ def setup_service(config: Config, no_unitycapture: bool = False,
     render_loop.gaze_corrector = gaze_corrector
     render_loop.gaze_mode = config.gaze_mode
     render_loop.audio_player = audio_player
+    # 2026-11-23 拖音修复：render_loop 产帧时把 audio_meta 同时入此 FIFO
+    # （OutputStreamer 每 tick 取未来帧垫底）；段切换时 render_loop 负责 flush。
+    render_loop.audio_prebuffer = audio_prebuffer
     # Native-resolution passthrough: on each segment switch the render loop
     # re-opens the camera at the new segment's native size (no scaling).
     if unity_capture is not None:

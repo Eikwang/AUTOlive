@@ -115,34 +115,16 @@ def resolve_api_base(config_data: dict = None) -> str:
 # ----------------------------------------------------------------------
 
 def resolve_interpreter(config_data: dict = None) -> str:
-    """EDTalk runtime312 解释器解析（配置面已收敛，详见模块 docstring）。
+    """EDTalk runtime312 解释器解析（2026-11-22 阶段 A3 收编：薄委托注册中心）。
+
+    候选链（utils/resource_paths.runtime_python）：旧配置键
+    edtalk_realtime.interpreter_path（存在才采纳）→ data/edtalk_runtime.json
+    记忆（上次实际使用）→ <home>/runtime312/python.exe → EDTalk 兄弟安装兜底。
 
     返回第一个真实存在的候选；全缺失返回空串（调用方三段式报错）。
     """
-    candidates = []
-    # 1) 旧配置键（存量兼容：已配置且存在才采纳，不再从默认表注入）
-    legacy = str(((config_data or {}).get("edtalk_realtime", {}) or {})
-                 .get("interpreter_path", "") or "").strip()
-    if legacy:
-        candidates.append(legacy)
-    # 2) 上次实际使用（记忆）
-    remembered = str(read_runtime().get("interpreter", "") or "").strip()
-    if remembered:
-        candidates.append(remembered)
-    # 3) 仓库根 runtime312（2026-11-06 物理迁移——项目内环境的唯一正式位置）
-    # 4) 兄弟安装（迁移前源位置，过渡期兜底）
-    try:
-        from frontend.config.paths import get_base_path
-        candidates.append(os.path.join(
-            str(get_base_path()), "runtime312", "python.exe"))
-    except Exception:
-        pass
-    candidates.append(_DEFAULT_INTERPRETER)
-
-    for cand in candidates:
-        if cand and os.path.isfile(cand):
-            return cand
-    return ""
+    from utils import resource_paths
+    return resource_paths.runtime_python(config_data)
 
 
 def parse_api_port(api_base: str) -> int:

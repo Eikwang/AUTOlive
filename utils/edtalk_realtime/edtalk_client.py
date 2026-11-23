@@ -31,13 +31,18 @@ from utils import alarm_notifier
 
 # 16kHz int16 单声道 = 每样本 2 字节
 TARGET_RATE = 16000
-# 单飞行句完成判定：最短飞行时间系数（2026-10-29 优化批次：1.2 过度保守——
-# 7.7s 句白等 ~1.5s/条；收紧至 1.05，截断防护由 buffer_depth 轮询兜底）
-FLIGHT_MARGIN = 1.05
-# buffer_depth 回落轮询（2026-10-29 优化批次：deadline 3.0→1.0——缓冲迟迟
-# 不回落时每条消息固定白等 3s；超时强制放行语义不变，实际防截断由
-# FLIGHT_MARGIN 时间启发式承担）
-_POLL_INTERVAL = 0.2
+# 单飞行句完成判定：最短飞行时间系数。
+# 2026-11-23 pending 自动衔接：降至 0.6——客户端在上段有效语音生成完
+# （produced>=total）后，仅需等上段 60% 时长即提前 push 下段为 pending，
+# 下段与上段显示并行预推理；服务端严格等上段 displayed>=total 才激活下段
+# （绝不提前丢有效语音尾，防截断由 seg 精确判定兜底，不依赖时间余量）。
+# 下段在上段播完时已推理就绪 → 激活零推理 → 段间零间隙。旧 1.0 让客户端
+# 等满上段时长才 push，此时上段已播完，pending 预推理失效（生产推理慢时
+# 下段首帧延迟 = 推理时间，gap 反弹）。margin 仅控制提前量，不影响安全。
+FLIGHT_MARGIN = 0.6
+# buffer_depth / seg 完成度轮询间隔（2026-11-23 拖音修复：0.2→0.05，
+# 让 displayed 达标后尽快放行，压缩段间空档；/status 极轻量，高频无害）。
+_POLL_INTERVAL = 0.05
 _POLL_DEADLINE = 1.0
 # 2026-11-21 截断修复：轮询上限改为 max(固定值, 上一句时长×本系数)。
 # 根因：推理慢于实时时帧锁定 pacing（'hold'）拉长真实播放时长，固定 1s
@@ -171,6 +176,13 @@ class EDTalkClient:
         self._flight_until = 0.0
         # 推送锁：串行化推送（多消息来源防护）
         self._push_lock = asyncio.Lock()
+        # pending 自动衔接（2026-11-23）：seg_id 跟踪串行。_last_seg_id 是最近
+        # 一次 /status 观察到的服务端段标识；_expected_seg_id 是「下一次 wait
+        # 要等其完成的段」的期望 seg_id（= 上次 push 时观察值 +1）。服务端支持
+        # pending 时，wait 在上段 produced>=total 即提前放行 push 下段（pending），
+        # 服务端严格等上段 displayed>=total 才激活 → 段间零间隙且不丢尾。
+        self._last_seg_id = 0
+        self._expected_seg_id = 0
 
     # ---------- 2026-11-17 热切机制批次：配置现读 ----------
     def _live_section(self) -> dict:
@@ -253,26 +265,50 @@ class EDTalkClient:
         buffer_depth = None
         timed_out = False
         seg_done = False
+        pending_early = False
+        target = self._expected_seg_id
         while True:
             status = await self._get_status(session)
             if not status:
                 break  # /status 不可用：不阻塞推送（降级为仅时间启发式）
-            # 精确完成判定（2026-11-21 撕裂修复，服务端 /status 新增三字段）：
-            # seg_chunk_total=T（push 受理时基线）、seg_chunk_produced（chunk
-            # 帧产出数）、seg_chunk_displayed（chunk 帧显示数）。三者齐备且
-            # 产出≥总数、显示≥产出 = 上一句音频帧全部产出且播放完毕。
-            # 替代深度启发式的主判定——生产滞后时 buffer 深度骤降会提前
-            # 放行 → 服务端 flush 遗弃未产出句尾 → 音频结尾撕裂/尾字丢失。
+            seg_id = int(status.get("seg_id", 0) or 0)
+            self._last_seg_id = seg_id
+            pending_supported = bool(status.get("pending_supported"))
+            # 精确完成判定（2026-11-21 撕裂修复）：seg_chunk_total/produced/
+            # displayed 三者齐备，产出≥总数、显示≥产出 = 该段全部产出且播放完。
             seg_total = status.get("seg_chunk_total")
-            if seg_total:
-                produced = status.get("seg_chunk_produced", 0)
-                displayed = status.get("seg_chunk_displayed", 0)
-                if produced >= seg_total and displayed >= produced:
+            if not seg_total:
+                # 无活跃语音段（空闲/首段前）：新服务端直接放行（无上段要等）。
+                if pending_supported:
                     seg_done = True
                     break
-            buffer_depth = status.get("buffer_depth")
-            if buffer_depth is None or buffer_depth <= status.get("preroll_frames", 8):
-                break
+            else:
+                produced = status.get("seg_chunk_produced", 0)
+                displayed = status.get("seg_chunk_displayed", 0)
+                if seg_id >= target:
+                    # 期望段（上次 push 的段）已激活：等它显示完成才放行下一段。
+                    # 2026-11-21 跳帧修复：只认精确完成判定，不用深度宽松放行，
+                    # 否则上段仍有已产出未显示帧时提前推下段 → flush 丢尾 → 跳帧。
+                    if produced >= seg_total and displayed >= produced:
+                        seg_done = True
+                        break
+                    if pending_supported and produced >= seg_total:
+                        # 2026-11-23 pending 自动衔接：上一段已激活且有效语音
+                        # 全部产出（仍在显示）→ 提前放行 push 下段为 pending。
+                        # 服务端严格等上段 displayed>=total 才激活下段（防丢尾），
+                        # 下段已预推理就绪 → 段间零间隙。
+                        # 必须 seg_id>=target（上一段已激活）才提前：若上一段
+                        # 仍是 pending 未激活（seg_id<target），此时 /status 反映
+                        # 的是更早段，提前 push 会覆盖 pending 缓冲 → 丢句/乱序。
+                        pending_early = True
+                        break
+                # seg_id < target：上一段尚未激活（仍在 pending 缓冲）→ 继续轮询
+                # 等待，绝不提前放行，避免覆盖 pending 导致丢句或乱序。
+            if not seg_total and not pending_supported:
+                # 旧服务端无精确字段：退化到深度启发式。
+                buffer_depth = status.get("buffer_depth")
+                if buffer_depth is None or buffer_depth <= status.get("preroll_frames", 8):
+                    break
             if time.monotonic() >= deadline:
                 timed_out = True  # 轮询超时强制放行（避免死锁）
                 break
@@ -280,8 +316,10 @@ class EDTalkClient:
         poll_s = time.monotonic() - t0 - sleep_s
         logger.info(
             f"[edtalk-wait] 上句时长 {duration_s:.1f}s 飞行等待 {sleep_s:.2f}s "
-            f"轮询 {poll_s:.2f}s buffer_depth={buffer_depth}"
+            f"轮询 {poll_s:.2f}s buffer_depth={buffer_depth} "
+            f"seg_id={self._last_seg_id} target={target}"
             + ("（句段完成判定）" if seg_done else "")
+            + ("（pending 提前放行）" if pending_early else "")
             + ("（轮询超时放行）" if timed_out else "")
         )
 
@@ -333,7 +371,8 @@ class EDTalkClient:
                         await self._wait_flight_complete(session, self.last_duration_s)
                     async with session.post(
                         f"{self._api_base()}/audio/push_full",
-                        json={"pcm_base64": payload},
+                        json={"pcm_base64": payload,
+                              "immediate": not wait_flight},
                         headers=self._auth_headers(),
                     ) as resp:
                         if resp.status == 200:
@@ -343,9 +382,15 @@ class EDTalkClient:
                             self.last_push_time = time.time()
                             self.last_duration_s = duration_s
                             self._flight_until = time.monotonic()
+                            # pending 串行锚点：下一次 wait 等「本次 push 的段」完成。
+                            # pending 模式下本次 push 可能尚未激活（服务端存缓冲），
+                            # seg_id 未变 → 用 push 前观察值 +1 作为期望，下次 wait
+                            # 轮询到 seg_id 达标即表示本段已激活。
+                            self._expected_seg_id = self._last_seg_id + 1
                             logger.info(
                                 f"EDTalk 推送成功：{content[:30]}… 时长 {duration_s:.1f}s "
-                                f"(源采样率 {src_rate}Hz, processing={data.get('processing')})"
+                                f"(源采样率 {src_rate}Hz, processing={data.get('processing')}) "
+                                f"expected_seg={self._expected_seg_id}"
                             )
                             return True
                         # EDTalk 错误体三段式透传（detail 内 {problem,cause,fix}）
@@ -419,7 +464,8 @@ class EDTalkClient:
             pcm = b"\x00\x00" * samples  # int16 单声道静音
             resp = requests.post(
                 f"{self._api_base()}/audio/push_full",
-                json={"pcm_base64": base64.b64encode(pcm).decode("ascii")},
+                json={"pcm_base64": base64.b64encode(pcm).decode("ascii"),
+                      "immediate": True},
                 headers=self._auth_headers(),
                 timeout=5,
             )
@@ -428,7 +474,19 @@ class EDTalkClient:
                 self.last_duration_s = float(duration_s)
                 self._flight_until = time.monotonic()
                 self.last_push_time = time.time()
-                logger.info(f"[EDTalk] 静音 flush 已推送（{duration_s:.1f}s，打断闭嘴）")
+                # pending 串行锚点同步：打断替换了服务端当前段（seg_id 前进、
+                # 可能覆盖未激活 pending），刷新观察值使下一次 wait 锚定静音段。
+                try:
+                    st = requests.get(f"{self._api_base()}/status",
+                                      headers=self._auth_headers(), timeout=3)
+                    if st.status_code == 200:
+                        j = st.json()
+                        self._last_seg_id = int(j.get("seg_id", 0) or 0)
+                        self._expected_seg_id = self._last_seg_id + 1
+                except Exception:
+                    pass
+                logger.info(f"[EDTalk] 静音 flush 已推送（{duration_s:.1f}s，打断闭嘴）"
+                            f" expected_seg={self._expected_seg_id}")
                 return {"ok": True}
             return {"ok": False, "status": resp.status_code}
         except Exception as e:

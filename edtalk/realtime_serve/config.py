@@ -28,6 +28,11 @@ class Config:
     api_token: Optional[str] = None  # 非空时 HTTP 面要求 Authorization: Bearer <token>
     buffer_frames: int = 16  # output frame buffer capacity (frames, ~11MB each)
     preroll_frames: int = 8  # frames required before output starts
+    # 2026-11-23 音节内拖音修复：AudioPlayer 音频预缓冲垫底帧数。每显示帧从
+    # AudioPreBuffer 取未来若干帧提前推给 player，使 player 恒持此深度缓冲，
+    # 吸收 OutputStreamer 软件时钟的 GIL/调度抖动（>20ms tick 延迟不再让 player
+    # 跑空补零 → "你……好"拖音）。0=禁用（退化旧的零垫底行为）。
+    audio_prebuf_frames: int = 3
     # Generator fp16 autocast: DISABLED by default. Measured negative on
     # RTX 4080 SUPER (gen p50 21-34ms fp32 -> constant 36ms fp16): with
     # TF32 enabled, Ada gets most of the fp16 throughput already, so
@@ -82,4 +87,12 @@ class Config:
             raise ValueError(
                 f"preroll_frames ({self.preroll_frames}) must be <= "
                 f"buffer_frames ({self.buffer_frames})"
+            )
+        if self.audio_prebuf_frames < 0:
+            raise ValueError(
+                f"audio_prebuf_frames must be >= 0, got {self.audio_prebuf_frames}"
+            )
+        if self.audio_prebuf_frames > 12:
+            raise ValueError(
+                f"audio_prebuf_frames must be <= 12, got {self.audio_prebuf_frames}"
             )

@@ -216,19 +216,68 @@ def _render_loop_cls():
 
 
 def test_gaze_grace_allows_segment_start():
-    """段首视线宽限窗口：flush 后深度从 0 重建（< REPAIR_MIN_BUFFER），宽限内
-    强制放行且逐帧递减；耗尽后回归深度门控（GPU 余量保护语义不丢）。"""
+    """段首视线宽限（批次五：宽限至深度重建）：armed 期间深度 0 也放行且
+    保持 armed（深度爬升期 ~1s 不退回未修正眼）；帧数兜底耗尽或深度达标
+    后退出，回归深度门控（GPU 余量保护语义不丢）。"""
     import numpy as np
     from realtime_serve.output_buffer import FrameBuffer
     RenderLoop = _render_loop_cls()
     rl = RenderLoop.__new__(RenderLoop)
     rl.gaze_mode = 'adaptive'
     rl.frame_buffer = FrameBuffer(capacity=16, reserve=5)  # 空（深度 0）
-    rl._gaze_grace = RenderLoop.REPAIR_MIN_BUFFER
-    for _ in range(RenderLoop.REPAIR_MIN_BUFFER):
+    rl._gaze_grace = 1
+    rl._gaze_grace_max = 150
+    for _ in range(20):
         assert rl._gaze_allowed() is True  # 宽限内放行（深度 0 也修正）
+    assert rl._gaze_grace == 1  # 深度未达标 → 宽限保持（原固定 6 帧已耗尽）
+    rl._gaze_grace_max = 1
+    assert rl._gaze_allowed() is True   # 兜底最后一帧仍放行
+    assert rl._gaze_grace == 0          # 兜底耗尽 → 退出宽限
+    assert rl._gaze_allowed() is False  # 回归深度门控（0 < 6 拒绝）
+    # 深度重建达标 → 宽限自然退出且门控通过
+    rl._gaze_grace = 1
+    rl._gaze_grace_max = 150
+    for _ in range(RenderLoop.REPAIR_MIN_BUFFER):
+        rl.frame_buffer.put(np.zeros((2, 2), dtype='uint8'))
+    assert rl._gaze_allowed() is True
     assert rl._gaze_grace == 0
-    assert rl._gaze_allowed() is False  # 耗尽 → 深度门控（0 < 6 拒绝）
+    assert rl._gaze_allowed() is True   # 深度门控通过
+
+
+def test_frame_buffer_flush_seg_keeps_hold_tail():
+    """flush_seg 仅丢弃 meta['seg'] 语音帧，hold/idle 尾帧按 FIFO 序保留
+    （顺序推送时画面/音频连续拼接，卡碟/跳帧修复）。"""
+    import numpy as np
+    from realtime_serve.output_buffer import FrameBuffer
+    fb = FrameBuffer(capacity=16, reserve=5)
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'seg': True, 'audio_start': False})
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'seg': True, 'audio_start': False})
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'audio_start': False})  # hold
+    fb.put(np.zeros((2, 2), dtype='uint8'), None)                    # idle
+    dropped = fb.flush_seg()
+    assert dropped == 2
+    assert fb.depth == 2
+    kept0 = fb.get(timeout=0.01)
+    kept1 = fb.get(timeout=0.01)
+    assert kept0[1] == {'audio_start': False}   # hold 帧（FIFO 序首位）
+    assert kept1[1] is None                     # idle 帧
+    assert fb.flush_seg() == 0                  # 无语音帧时零丢弃
+
+
+def test_flush_for_new_audio_clears_tail_and_counts_seg():
+    """flush_for_new_audio：丢弃语音尾（计数）并清空 hold/idle 尾——新句帧
+    不排队（拖音修复）；FIFO 缓冲排空到 0。"""
+    import numpy as np
+    from realtime_serve.output_buffer import FrameBuffer
+    fb = FrameBuffer(capacity=16, reserve=5)
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'seg': True, 'audio_start': False})
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'seg': True, 'audio_start': False})
+    fb.put(np.zeros((2, 2), dtype='uint8'), {'audio_start': False})  # hold
+    fb.put(np.zeros((2, 2), dtype='uint8'), None)                    # idle
+    dropped = fb.flush_for_new_audio()
+    assert dropped == 2          # 仅语音帧计数
+    assert fb.depth == 0         # 整个尾部排空（hold/idle 不保留）
+    assert fb.flush_for_new_audio() == 0
 
 
 def test_gaze_grace_default_off_and_deep_buffer_normal():
@@ -266,6 +315,75 @@ def test_streamer_seg_displayed_counting():
     assert st.stats()['seg_displayed'] == 1  # 仅 seg 帧计入
 
 
+def test_reset_seg_displayed_clears_counter():
+    """段切换基线：reset_seg_displayed 清零当前段显示计数。"""
+    from realtime_serve.output_buffer import FrameBuffer, OutputStreamer
+    fb = FrameBuffer(capacity=4)
+    st = OutputStreamer(frame_buffer=fb, target_fps=25, sender=lambda f: True,
+                        audio_player=None, preroll_frames=0)
+    st._seg_displayed = 11
+    st.reset_seg_displayed()
+    assert st.stats()['seg_displayed'] == 0
+
+
+def test_two_segments_reset_displayed_counter():
+    """段切换必须清零显示计数：第二段 stats.seg_displayed 只含本段，
+    不得累计第一段。否则 /status 三字段基线不一致 → 客户端 wait_flight
+    的 displayed>=produced 在第二段起恒成立 → 段刚产出完即放行 → 重叠
+    推送 → flush 丢未显示尾帧 → 跳帧/尾音截断（2026-11-21 修复批次）。"""
+    import time as _t
+    import numpy as np
+    from realtime_serve.output_buffer import FrameBuffer, OutputStreamer
+    fb = FrameBuffer(capacity=8)
+    sent = []
+    st = OutputStreamer(frame_buffer=fb, target_fps=25, sender=_bool_sender(sent),
+                        audio_player=None, preroll_frames=0)
+    st.start()
+    frame = np.zeros((2, 2), dtype='uint8')
+    for _ in range(3):  # 第一段 3 个 seg 帧
+        fb.put(frame, {'seg': True, 'audio_start': False})
+    _t.sleep(0.3)
+    assert st.stats()['seg_displayed'] == 3
+    # 模拟 push 第二段：process_full_audio 调 reset_seg_displayed
+    st.reset_seg_displayed()
+    assert st.stats()['seg_displayed'] == 0
+    for _ in range(2):  # 第二段 2 个 seg 帧
+        fb.put(frame, {'seg': True, 'audio_start': False})
+    _t.sleep(0.3)
+    st.stop()
+    # 只含第二段，不得累计为 3+2=5
+    assert st.stats()['seg_displayed'] == 2
+
+
+def test_streamer_underrun_pushes_silence_to_audio_player():
+    """buffer 欠载（推理抖动致 frame_buffer 短暂排空）时也喂一帧静音，
+    防 AudioPlayer 缓冲跑空 → WASAPI 补零 → 音节中插静音（拖音）。
+    生产环境 GPU 有争用，此路径比探针环境（缓冲满载）更易触发。"""
+    import time as _t
+    import numpy as np
+    from realtime_serve.output_buffer import FrameBuffer, OutputStreamer
+
+    class FakePlayer:
+        def __init__(self):
+            self.pushes = []
+        def push_pcm(self, chunk):
+            self.pushes.append(np.asarray(chunk).copy())
+        def reset(self):
+            pass
+
+    fb = FrameBuffer(capacity=2)   # 空缓冲 → 消费循环直接欠载
+    ap = FakePlayer()
+    st = OutputStreamer(frame_buffer=fb, target_fps=25, sender=lambda f: True,
+                        audio_player=ap, preroll_frames=0)
+    st.start()
+    _t.sleep(0.3)  # 25fps → ~7 个欠载 tick
+    st.stop()
+    assert len(ap.pushes) > 0, 'underrun 期间未向 player 喂静音'
+    for p in ap.pushes:
+        assert p.shape == (640,), p.shape          # 25fps → 640 采样/帧
+        assert not np.any(p)                       # 全零静音
+
+
 def test_hold_silent_block_and_seg_marker_structure():
     """hold 帧静音块喂 DAC（撕裂修复 b：hold 期零推送致 DAC 断流爆音）+
     chunk 帧 seg 标/produced 计数（撕裂修复 a：句段完成度计数）。_process_frame
@@ -276,22 +394,54 @@ def test_hold_silent_block_and_seg_marker_structure():
     # hold 分支：零音频块、不标 seg、不推进音频时间线
     assert "np.zeros(16000 // self.target_fps" in src
     assert "'audio_start': False" in src
-    # chunk 分支：seg 标 + produced 计数（wait_flight 精确判定基线）
-    assert "'seg': True" in src
+    # chunk 分支：seg 标（仅有效语音帧，tail 静音不打标——2026-11-23 拖音
+    # 修复）+ produced 计数（wait_flight 精确判定基线）
+    assert "'seg': is_voice" in src
+    assert "is_voice = _lip_idx < self._seg_chunk_total" in src
     assert "self._seg_chunk_produced += 1" in src
 
 
 def test_flush_paths_arm_grace_and_seg_baseline():
-    """flush 双路径（push_full / switch_segment）均重臂视线宽限；push_full
-    受理时归零 seg_chunk 基线（total=T / produced=0）。"""
+    """flush 双路径（_activate_segment / switch_segment）均重臂视线宽限（宽限
+    至深度重建语义）；激活时归零 seg_chunk 基线（total=T-tail / produced=0）
+    且新句拼接仅丢弃语音帧（flush_for_new_audio）。
+
+    2026-11-23 pending 自动衔接重构：process_full_audio 只做 pending 决策 +
+    调 _activate_segment；flush/arm_grace/seg 基线集中在 _activate_segment
+    （pending 预推理路径与直接激活路径共用）。
+
+    2026-11-23 显示序时钟重构：flush 改为帧头 staged 执行（_flush_buffer 置
+    位 → _process_frame 帧头 _do_frame_flush 执行 flush_for_new_audio 并把
+    last_flush_total 计入 _flushed_frames），消除 in-flight 帧 idx 竞态、保证
+    体态位置与实际显示严格一致。"""
     import inspect
     RenderLoop = _render_loop_cls()
     src_pf = inspect.getsource(RenderLoop.process_full_audio)
+    src_act = inspect.getsource(RenderLoop._activate_segment)
     src_ss = inspect.getsource(RenderLoop.switch_segment)
-    for src in (src_pf, src_ss):
-        assert "self._gaze_grace = self.REPAIR_MIN_BUFFER" in src
-    assert "self._seg_chunk_total = T" in src_pf
-    assert "self._seg_chunk_produced = 0" in src_pf
+    src_flush = inspect.getsource(RenderLoop._do_frame_flush)
+    for src in (src_act, src_ss):
+        assert "self._arm_gaze_grace()" in src
+    # 2026-11-23 拖音修复：total 只计有效语音（T - tail_frames），使客户端/
+    # 渲染线程精确判定在有效语音播完即放行，不必等 tail 静音显示完 → 段间零间隙。
+    assert "self._seg_chunk_total = max(0, T - tail_frames)" in src_act
+    assert "self._seg_chunk_produced = 0" in src_act
+    # 批次六：激活路径排空整个尾部（语音尾截断 + idle/hold 尾清空），
+    # 新句不排队 → 消除首音延迟拖音（详见 flush_for_new_audio 注释）。
+    # 显示序时钟：激活/切换路径经 staged 标志，帧头统一执行 flush。
+    assert "self._flush_buffer()" in src_act
+    assert "self._flush_buffer()" in src_ss
+    assert "flush_for_new_audio()" in src_flush
+    # 显示序记账：被丢弃帧永不显示 → 计入 _flushed_frames（体态零跳变）。
+    assert "last_flush_total" in src_flush
+    assert "self._flushed_frames +=" in src_flush
+    # 显示序时钟本体：位置 = 产出 − 丢弃 − 段基线（不再 wall-clock）。
+    src_vidx = inspect.getsource(RenderLoop._video_pos)
+    assert ("self._frame_index - self._flushed_frames - self._video_base"
+            in src_vidx)
+    # process_full_audio 必须委托推理与激活（pending 与直接路径都走 _activate_segment）
+    assert "_infer_segment" in src_pf
+    assert "_activate_segment" in src_pf
 
 
 def test_status_reports_seg_completion_fields():

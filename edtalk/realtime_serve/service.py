@@ -395,15 +395,19 @@ class RealtimeService:
         return {'ok': True,
                 'buffer_ms': round(self.audio_buffer.buffer_duration_ms())}
 
-    def push_full_audio(self, pcm_int16_bytes: bytes) -> dict:
+    def push_full_audio(self, pcm_int16_bytes: bytes,
+                        immediate: bool = False) -> dict:
         """Push a full TTS segment (16kHz mono int16 PCM); inference runs
-        asynchronously, playback starts at display time."""
+        asynchronously, playback starts at display time.
+
+        immediate=True（song 切片/打断，客户端 wait_flight=False）：立即激活
+        替换当前段，不走 pending 缓冲（避免连续切片覆盖丢句）。"""
         if self.render_loop is None:
             raise RuntimeError("render_loop 未初始化")
         pcm_float = np.frombuffer(pcm_int16_bytes,
                                   dtype=np.int16).astype(np.float32) / 32768.0
         worker = threading.Thread(target=self.render_loop.process_full_audio,
-                                  args=(pcm_float,), daemon=True)
+                                  args=(pcm_float, immediate), daemon=True)
         worker.start()
         return {'ok': True,
                 'duration_s': round(len(pcm_float) / 16000.0, 2),
@@ -460,6 +464,11 @@ class RealtimeService:
             # 句段 chunk 总数/已产出（render_loop push_full 受理时归零基线）
             status['seg_chunk_total'] = getattr(rl, '_seg_chunk_total', 0)
             status['seg_chunk_produced'] = getattr(rl, '_seg_chunk_produced', 0)
+            # pending 自动衔接（2026-11-23）：seg_id 每激活一段递增，客户端据此
+            # 串行（等期望 seg_id 完成才推下一段，避免覆盖 pending）；
+            # pending_supported 告知客户端可在上段 produced>=total 时提前 push。
+            status['seg_id'] = getattr(rl, '_seg_id', 0)
+            status['pending_supported'] = True
         status['fps'] = status['output_fps']
 
         gc = self.gaze_corrector

@@ -37,6 +37,7 @@ class AudioPushRequest(BaseModel):
 class AudioPushFullRequest(BaseModel):
     """Full TTS audio segment (16kHz mono int16, base64-encoded)."""
     pcm_base64: str
+    immediate: bool = False  # True=song切片/打断：立即激活替换，不走pending缓冲
 
 
 class SegmentSwitchRequest(BaseModel):
@@ -158,7 +159,7 @@ def create_app(service: RealtimeService,
         display time (gapless vs chunked push)."""
         pcm = _decode_pcm(request.pcm_base64)
         try:
-            return service.push_full_audio(pcm)
+            return service.push_full_audio(pcm, immediate=request.immediate)
         except Exception as e:
             _map_control_errors(e, "确认服务已 start() 且 render_loop 就绪")
 

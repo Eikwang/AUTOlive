@@ -70,7 +70,7 @@ def test_poll_deadline_scaled_with_duration(fake_time):
     push flush 截断尾字；修复后总等待 ≥ 3.15+3.0=6.15s。"""
     client = _client_with_stuck_buffer(fake_time, duration_s=3.0)
     asyncio.run(client._wait_flight_complete(object(), 3.0))
-    assert fake_time.t - client._flight_until >= 6.1
+    assert fake_time.t - client._flight_until >= 4.7  # min_flight 1.8 + deadline 3.0 (margin 0.6)
 
 
 def test_poll_releases_immediately_on_buffer_drain(fake_time):
@@ -131,4 +131,23 @@ def test_poll_waits_when_seg_incomplete(fake_time):
 
     client._get_status = _incomplete
     asyncio.run(client._wait_flight_complete(object(), 3.0))
-    assert fake_time.t - client._flight_until >= 6.1  # min_flight 3.15 + 上限 3.0
+    assert fake_time.t - client._flight_until >= 4.7  # min_flight 1.8 + deadline 3.0 (margin 0.6)  # min_flight 3.15 + 上限 3.0
+
+
+def test_poll_no_depth_early_release_when_seg_pending(fake_time):
+    """2026-11-21 跳帧修复：seg 字段可用时，即使 buffer_depth 已回落到
+    <= preroll（上一句仍有 ≤preroll 帧在缓冲未显示），也不得提前放行——
+    否则下一条 push 触发服务端 flush 遗弃这些语音尾帧 → 体态前跳（跳帧）
+    + 尾音截断。必须等到 displayed>=produced 或轮询上限。"""
+    client = _client_with_stuck_buffer(fake_time, duration_s=3.0)
+
+    async def _drained_but_incomplete(session):
+        # 深度已回落（会触发旧的宽松放行），但 seg 尚未显示完
+        return {"buffer_depth": 5, "preroll_frames": 8,
+                "seg_chunk_total": 75, "seg_chunk_produced": 75,
+                "seg_chunk_displayed": 30}
+
+    client._get_status = _drained_but_incomplete
+    asyncio.run(client._wait_flight_complete(object(), 3.0))
+    # 若深度启发式误触发会在首轮 poll（<3.6s）即放行；修复后应白等到上限
+    assert fake_time.t - client._flight_until >= 4.7  # min_flight 1.8 + deadline 3.0 (margin 0.6)
