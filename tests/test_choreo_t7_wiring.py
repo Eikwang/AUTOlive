@@ -77,6 +77,49 @@ def test_d4_facade_on_dynamic_text():
     assert ch.on_dynamic_text("随便什么内容都命中（match 可空）") is True
 
 
+# --------------------------------------- 契约修复（2026-11-23）：dynamic_text×keyword
+
+def test_dyn_text_event_hits_keyword_rule():
+    """动态文案关键词可命中 keyword 类型规则（UI 触发类型 tooltip 承诺口径：
+    keyword=弹幕或动态文案关键词子串；2026-11-23 契约修复）。"""
+    eng = _engine([{"rule_id": "kw1", "trigger_type": "keyword", "match": "测试一",
+                    "sequence": {"main": {"segment": "44", "switch_at": "immediate",
+                                          "duration_s": 3}}}])
+    r = eng.decide_trigger("dynamic_text", "测试一", {})
+    assert r["reason"] == "accepted"
+    assert r["rule"].rule_id == "kw1"
+
+
+def test_dyn_text_event_keyword_rule_miss():
+    """动态文案关键词未命中 keyword 规则=no_match（子串口径与 keyword 分支一致）。"""
+    eng = _engine([{"rule_id": "kw1", "trigger_type": "keyword", "match": "测试一",
+                    "sequence": {"main": {"segment": "44", "switch_at": "immediate",
+                                          "duration_s": 3}}}])
+    assert eng.decide_trigger("dynamic_text", "完全不同的词", {})["reason"] == "no_match"
+
+
+def test_dyn_text_event_first_hit_order_across_types():
+    """混合规则表首命中序不变：dynamic_text 规则在前先命中其内容；
+    keyword 规则在前则关键词事件命中 keyword 规则。"""
+    seq = {"main": {"segment": "44", "switch_at": "immediate", "duration_s": 3}}
+    eng = _engine([{"rule_id": "dt_a", "trigger_type": "dynamic_text", "match": "福利",
+                    "sequence": seq},
+                   {"rule_id": "kw_b", "trigger_type": "keyword", "match": "测试一",
+                    "sequence": seq}])
+    r = eng.decide_trigger("dynamic_text", "今晚有福利", {})
+    assert r["rule"].rule_id == "dt_a"
+    r = eng.decide_trigger("dynamic_text", "测试一", {})
+    assert r["rule"].rule_id == "kw_b"
+
+
+def test_keyword_event_path_unchanged():
+    """存量零回归：keyword 事件仍走 keyword 类型规则（弹幕链路行为不变）。"""
+    eng = _engine([{"rule_id": "kw1", "trigger_type": "keyword", "match": "测试一",
+                    "sequence": {"main": {"segment": "44", "switch_at": "immediate",
+                                          "duration_s": 3}}}])
+    assert eng.decide_trigger("keyword", "测试一", {})["reason"] == "accepted"
+
+
 # ------------------------------------------------- d3/e5 push_full wait_flight
 
 def test_d3_push_full_wait_flight_param():

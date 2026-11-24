@@ -292,7 +292,12 @@ class TestTriggerAndState:
         assert switch_cmd(cmds).segment == "A_入场"
 
     def test_condition3_interrupt_replaces_queue_and_resets_counter(self):
-        rules = [make_rule(),
+        # 2026-11-24 Gap A 批次：girl_A 主线改 immediate（无无缝保护）——
+        # segment_end 主线的延迟抢占语义归 test_choreo_t12_segment_end_preempt 专测
+        rules = [make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                    "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                             "duration_s": 30},
+                                    "exit": {"segment": "A_离场", "duration_s": 4}}),
                  make_rule(rule_id="girl_B", match="玫瑰",
                            sequence={"enter": {"segment": "B_入场", "duration_s": 4},
                                      "main": {"segment": "B_跳舞", "duration_s": 30},
@@ -332,8 +337,13 @@ class TestTriggerAndState:
 
     def test_hold_window_ignores_other_key(self):
         # R-ceo5/终门 uc2a 退役（2026-10-27 批次）：保护窗移除=他键触发立即打断
-        # （旧断言「hold 内忽略」随参数退役；R-dsg7 文案+模拟连打验收对冲）
-        rules = [make_rule(),
+        # （旧断言「hold 内忽略」随参数退役；R-dsg7 文案+模拟连打验收对冲）。
+        # 2026-11-24 Gap A 批次：girl_A 主线改 immediate——segment_end 主线的
+        # 延迟抢占语义归 test_choreo_t12_segment_end_preempt 专测
+        rules = [make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                    "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                             "duration_s": 30},
+                                    "exit": {"segment": "A_离场", "duration_s": 4}}),
                  make_rule(rule_id="girl_B", match="玫瑰",
                            sequence={"enter": {"segment": "B_入场", "duration_s": 4},
                                      "main": {"segment": "B_跳舞", "duration_s": 30},
@@ -899,12 +909,15 @@ class TestPriorityLinkage:
         # O3：低权 standard 触发不得打断高权序列（改排队）；同权保持抢占。
         # 权重按 d10 编排仲裁表（T3/d10）——活动序列 song(20)，低权 keyword(10)
         # 让位排队，同权 song(20) 保持抢占。
+        # 2026-11-24 Gap A 批次：主线均改 immediate（无无缝保护），本测专注 O3 权重语义
         act_s = make_rule(rule_id="act_s", match="歌一", trigger_type="song",
-                          sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+                          sequence={"main": {"segment": "B_跳舞", "switch_at": "immediate",
+                                             "duration_s": 5}})
         low_k = make_rule(rule_id="low_k", match="低权词", trigger_type="keyword",
                           sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
         eq_s = make_rule(rule_id="eq_s", match="歌二", trigger_type="song",
-                         sequence={"main": {"segment": "B_跳舞", "duration_s": 5}})
+                         sequence={"main": {"segment": "B_跳舞", "switch_at": "immediate",
+                                            "duration_s": 5}})
         h = EngineHarness(rules=[act_s, low_k, eq_s],
                           priority_mapping={"gift": 30, "song": 10, "comment": 20})
         d = h.engine.decide_trigger("song", "歌一", {})
@@ -983,7 +996,8 @@ class TestCompletionStepIdMatching:
         gift(10) 保持「keyword 打断 gift」场景（默认表下 gift 30>keyword 10 会改排队，
         打断方向语义见 test_standard_interrupt_weight_gate）。"""
         gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
-                                   "main": {"segment": "A_跳舞", "duration_s": 30,
+                                   "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                            "duration_s": 30,
                                             "audio": {"mode": "tts"}},
                                    "exit": {"segment": "A_离场", "duration_s": 3}})
         kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",
@@ -1005,7 +1019,8 @@ class TestCompletionStepIdMatching:
         为空）→ 无先行 CancelAudio；旧步骤音频入队回执迟到由 is_active_step
         门判定为孤儿（门面层撤销）。"""
         gift = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
-                                   "main": {"segment": "A_跳舞", "duration_s": 30,
+                                   "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                            "duration_s": 30,
                                             "audio": {"mode": "tts"}},
                                    "exit": {"segment": "A_离场", "duration_s": 3}})
         kw = make_rule(rule_id="girl_B", match="抢词", trigger_type="keyword",

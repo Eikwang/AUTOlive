@@ -123,9 +123,16 @@ class TestCounterNoDecay:
         assert h.engine.counters["girl_A"] == 2  # 窗口禁用=永续累计
 
     def test_counter_reset_by_other_rule_only(self):
-        """保留的清零路径：他键触发打断清零（D-4，条件3 打断）。"""
+        """保留的清零路径：他键触发打断清零（D-4，条件3 打断）。
+        2026-11-24 Gap A 批次：girl_A 主线改 immediate（无无缝保护）——
+        segment_end 主线的延迟抢占语义归 test_choreo_t12（主线播完执行
+        抢占时同样 D-4 清零）。"""
+        girl_a = make_rule(sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                     "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                              "duration_s": 30},
+                                     "exit": {"segment": "A_离场", "duration_s": 4}})
         other = make_rule(rule_id="girl_B", match="小花花")
-        h = _engine_harness(rules=[make_rule(), other])
+        h = _engine_harness(rules=[girl_a, other])
         h.trigger_gift()
         assert h.engine.counters["girl_A"] == 1
         h.trigger_gift("小花花")  # 他键打断：girl_A 计数清零（_interrupt_sequence D-4）
@@ -340,8 +347,17 @@ class TestSimulateTrigger:
         h2.engine.key_last["girl_A"] = h2.now - 5  # in_progress 的 decide 已刷新节流锚点，再回拨
         d_rq = h2.engine.decide_trigger("gift", "小心心", gift_data())
         reasons.add(d_rq["reason"])  # requeued
-        h3 = _engine_harness(rules=[make_rule(rule_id="g"), make_rule(
-            rule_id="b", trigger_type="gift", match="火箭")])
+        h3 = _engine_harness(rules=[# 2026-11-24 Gap A 批次：g/b 主线均改 immediate——
+                                    # segment_end 主线触发改走延迟抢占（preempt_pending）
+                                    make_rule(rule_id="g",
+                                              sequence={"enter": {"segment": "A_入场", "duration_s": 4},
+                                                        "main": {"segment": "A_跳舞", "switch_at": "immediate",
+                                                                 "duration_s": 30},
+                                                        "exit": {"segment": "A_离场", "duration_s": 4}}),
+                                    make_rule(rule_id="b", trigger_type="gift", match="火箭",
+                                              sequence={"main": {"segment": "B_跳舞",
+                                                                 "switch_at": "immediate",
+                                                                 "duration_s": 30}})])
         h3.trigger_gift()
         h3.advance(10)
         d_int = h3.engine.decide_trigger("gift", "火箭", gift_data(name="火箭"))

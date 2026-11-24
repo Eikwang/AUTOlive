@@ -656,18 +656,22 @@ def create_choreography_tab(
                         FormField.create_select(
                             label='触发类型',
                             options={'gift': '礼物打赏', 'keyword': '弹幕关键词', 'song': '点歌命中',
+                                     'dynamic_text': '动态文案命中',
                                      'entrance': '观众入场', 'follow': '观众关注'},
                             value=str(rule.get("trigger_type", "gift")),
                             on_change=lambda e, r=rule: r.__setitem__("trigger_type", e.value),
                             tooltip="song 触发=接管（歌曲音频走既有链路，主线保持至歌终）；"
                                     "gift/keyword 新语义=不接管（原生答谢照常）；"
-                                    "entrance/follow=入场/关注事件触发（T4：自动排队不打断，"
-                                    "10s 类型节流防风暴，权重恒最低档）；"
-                                    "动态文案「关键词|文案」的关键词也走本类型触发——"
-                                    "动态文案播出时自动判定（无独立触发类型）",
+                                    "keyword 类型规则同时响应弹幕关键词与动态文案"
+                                    "「关键词|文案」的关键词（子串匹配）；"
+                                    "dynamic_text=动态文案播出时直连判定"
+                                    "（match 可空=任意文案命中，非空=文案/关键词子串；"
+                                    "点歌期间具备挂起/切回 resident 语义）；"
+                                    "entrance/follow=入场/关注事件触发（自动排队不打断）",
                             style="width:100%;")
                         FormField.create_input(
-                            label='匹配值（gift=礼物名全等 / keyword=弹幕或动态文案关键词子串 / song·entrance·follow 可空=任意；非空=用户名等值）',
+                            label='匹配值（gift=礼物名全等 / keyword=弹幕或动态文案关键词子串 / '
+                                  'song·dynamic_text 可空=任意 / entrance·follow 可空=任意；非空=用户名等值）',
                             value=str(rule.get("match", "")),
                             on_change=lambda e, r=rule: r.__setitem__("match", e.value or ""),
                             style="width:100%;")
@@ -719,8 +723,9 @@ def create_choreography_tab(
                             on_change=lambda e: (seq.setdefault("main", {})
                                                  .__setitem__("switch_at", e.value)),
                         ).style("min-width:180px").tooltip(
-                            "无缝切换=等当前片段播放完成后再切换；"
-                            "立刻切换=触发新规则后立即切换")
+                            "无缝切换=等当前片段播放完成后再切换；且主线完整播放后才"
+                            "响应其它规则（主线播完→旧离场→新规则入场）；"
+                            "立刻切换=触发新规则后立即抢占主线（无需等主线播完）")
                         ui.select(
                             options=_seg_options(str((seq.get("exit") or {}).get("segment", "")), "exit"),
                             value=str((seq.get("exit") or {}).get("segment", "")) or None,
