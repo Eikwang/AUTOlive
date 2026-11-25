@@ -48,9 +48,23 @@ class SynthesisMixin:
         if Config.reload(str(self.config_path)):
             logger.info("[config] 检测到 config.json 变化，合成链已热重载")
     
+    # #4 双 worker 并行合成（2026-11-25 用户裁决）：GPT-SoVITS 串行 1.5-3s/条
+    # 是洪峰场景全链天花板，背压门只能延迟不能提速；song 切片预合成已证明
+    # 并行可行。GPU 信号量控制 TTS 并发上限=worker 数；类级 asyncio.Semaphore
+    # （Python 3.10+ 不绑事件循环，runtime312 安全）。在途合成计数落在
+    # QueueMixin（queue_manager 不能反向 import 本模块）。
+    _synth_gpu_sem = asyncio.Semaphore(2)
+
     async def message_queue_thread(self):
-        """音频合成消息队列线程"""
-        logger.info("创建音频合成消息队列线程")
+        """音频合成消息队列线程（2026-11-25 用户裁决#4：双 worker 并行合成
+        ——出队在 message_queue_lock 内互斥，合成经 _synth_gpu_sem 控并发，
+        门控/登记/flush 均幂等可重入）。"""
+        logger.info("创建音频合成消息队列线程（双 worker 并行合成）")
+        await asyncio.gather(*[asyncio.create_task(self._synth_worker(i))
+                               for i in range(2)])
+
+    async def _synth_worker(self, _worker_id=0):
+        """合成 worker 循环（原 message_queue_thread 主体，双实例并行运行）"""
         while True:  # 无限循环，直到队列为空时退出
             try:
                 # 获取线程锁，避免同时操作
@@ -66,8 +80,12 @@ class SynthesisMixin:
                         message = self.message_queue[0]  # peek：门控判定用
                     if self.synth_gate_wait_s(message) <= 0:
                         with self.message_queue_lock:
-                            if not self.message_queue:
-                                continue  # 等待窗口内被清空（停止/flush）→ 重查
+                            # #4 双 worker（2026-11-25）：锁外门控判定期间队首
+                            # 可能已被另一 worker 消费——pop 前复核身份，队首
+                            # 变动则重 peek 重判（防第二条目带着旧队首的豁免
+                            # 判定绕过背压门）
+                            if not self.message_queue or self.message_queue[0] is not message:
+                                continue
                             message = self.message_queue.pop(0)
                         break
                     # 门控等待：消费出队回执提前唤醒；超时轮询兜底重查
@@ -94,8 +112,13 @@ class SynthesisMixin:
                         "本次音频将走本地声音播放，无数字人画面与口型"
                     )
 
-                # 合成音频并插入待播放队列
-                await self.my_play_voice(message)
+                # 合成音频并插入待播放队列（#4 双 worker：在途计数供 E2
+                # flush「无在途合成」判定；单事件循环内自增自减无竞态）
+                QueueMixin._synth_inflight += 1
+                try:
+                    await self.my_play_voice(message)
+                finally:
+                    QueueMixin._synth_inflight -= 1
 
                 # E2 饥饿路径 flush：突发结束（待合成队列空且无在途合成）时，
                 # 若待播放队列积压未达首次播放阈值，立即放行——规则见
@@ -892,7 +915,11 @@ class SynthesisMixin:
 
 
         _tts_t0 = time.time()
-        resp_json = await self.tts_handle(message)
+        # #4（2026-11-25 用户裁决）：GPU 信号量控制 TTS 并发上限（双 worker
+        # 并行合成，洪峰吞吐提升；信号量类级共享，song 预合成等其它调用方
+        # 同受控——GPU 过载保护）
+        async with SynthesisMixin._synth_gpu_sem:
+            resp_json = await self.tts_handle(message)
         if resp_json["result"]["code"] == 200:
             voice_tmp_path = resp_json["result"]["audio_path"]
         else:

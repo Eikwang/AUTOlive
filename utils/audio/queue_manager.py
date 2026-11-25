@@ -134,37 +134,13 @@ class QueueMixin:
         except Exception:
             return False
 
-    def is_queue_less_or_greater_than(self, type: str="message_queue", less: int=None, greater: int=None):
-        """判断 等待合成消息队列|待播放音频队列 数是否小于或大于某个值，就返回True"""
-        if less:
-            if type == "voice_tmp_path_queue":
-                if len(self.voice_tmp_path_queue) < less:
-                    return True
-                return False
-            elif type == "message_queue":
-                if len(self.message_queue) < less:
-                    return True
-                return False
-        
-        if greater:
-            if type == "voice_tmp_path_queue":
-                if len(self.voice_tmp_path_queue) > greater:
-                    return True
-                return False
-            elif type == "message_queue":
-                if len(self.message_queue) > greater:
-                    return True
-                return False
-        
-        return False
-    
     def get_audio_info(self):
         """获取音频队列信息
 
         TODOS 2026-10-28 消费逻辑审查 #4：builtin 播放器的 play() 是提前移交
         （满载背压上限 queue_max 条进 audio_json_list），已移交条目脱离
         voice_tmp_path_queue——wait_play_audio_num 叠加其内部队列深度，防观测
-        面低估积压（仅统计语义，不影响 is_queue_less_or_greater_than 等门控）。
+        面低估积压（仅统计语义，不影响 synth_gate_wait_s 等门控）。
         """
         info = {
             "wait_play_audio_num": len(self.voice_tmp_path_queue),
@@ -326,6 +302,41 @@ class QueueMixin:
         except Exception:
             return False
 
+    def _evict_reply_pair_group_locked(self, queue, cand_idx):
+        """未激活回复配对组整组驱逐（2026-11-25 用户裁决#6，须持队列锁）。
+
+        背景：队满驱逐候选虽排除受保护回复组（_reply_group_protected），
+        但未激活念白（组未进入消费流程）不在保护范围——单条驱逐会把念白/
+        配对回复拆散，其组回复失去配对对象（靠 15s 超时兜底放行，产生 15s
+        延迟毛刺）。裁决：未激活念白可以驱逐，但须与配对 LLM 回复整组同逐。
+
+        语义：候选条目带 reply_link 且组未激活 → 驱逐该 link 全部在队条目
+        （未激活念白+配对回复分段），并 abandon_reply_link 解除配对门；
+        无 link 候选（普通条目）→ 维持单条驱逐。abandon 在队列锁内调用与
+        P1 顶替批次锁序先例一致（队列锁→gate 锁，无反向嵌套）。
+
+        Returns: 被驱逐条目列表（恒非空）。"""
+        cand = queue[cand_idx]
+        link = cand.get("reply_link") if isinstance(cand, dict) else None
+        if not link or self._reply_group_protected(cand):
+            return [queue.pop(cand_idx)]
+        link = str(link)
+        evicted = [e for e in queue
+                   if isinstance(e, dict) and str(e.get("reply_link")) == link]
+        queue[:] = [e for e in queue
+                    if not (isinstance(e, dict) and str(e.get("reply_link")) == link)]
+        self.abandon_reply_link(link)
+        try:
+            from utils.obs_stats import record_drop
+            record_drop("reply_pair_group_evict", len(evicted))
+        except Exception:
+            pass
+        logger.info(
+            f"未激活回复配对组整组驱逐 {len(evicted)} 条（link={link}，"
+            f"含念白与配对回复，abandon 已解除配对门）："
+            f"组首【{str(evicted[0].get('content', '') or evicted[0].get('voice_path', ''))[:30]}】")
+        return evicted
+
     # ---------- P1 点歌期弹幕回复「顶替-保留最新」（2026-11-21 用户实测批次） ----------
 
     @staticmethod
@@ -396,6 +407,9 @@ class QueueMixin:
     _synth_gate_cond = threading.Condition()  # 消费出队回执唤醒（超时轮询兜底）
     _SYNTH_GATE_BYPASS_PRIORITY = 500  # 高优豁免线（复读/编排 override=500）
     _SYNTH_GATE_POLL_S = 1.0  # 门控等待上限=轮询周期（覆盖漏通知路径）
+    # #4 双 worker 在途合成计数（2026-11-25 用户裁决；单事件循环内自增自减
+    # 无竞态）——flush_starved_playback_queue「无在途合成」判定依据
+    _synth_inflight = 0
 
     def _synth_gate_depth_limit(self):
         """门限读侧（play_audio.synth_gate_depth，缺省 2；≤0=门禁用）。与首播
@@ -574,8 +588,12 @@ class QueueMixin:
             bool: 是否执行了放行（置位标志+notify）
         """
         # 快路径无锁初筛：待合成队列非空（突发未结束）/待播放队列空/
-        # 标志已置位（阈值门已开，生产者自行 notify）均无需放行
-        if self.message_queue or not self.voice_tmp_path_queue or self.voice_tmp_path_queue_not_empty_flag:
+        # 标志已置位（阈值门已开，生产者自行 notify）均无需放行；
+        # #4 双 worker（2026-11-25）：在途合成>0 时待合成队列空≠突发结束，
+        # 提前 flush 会放行残缺突发（在途段随产随 notify，不饿死）
+        if (self.message_queue or not self.voice_tmp_path_queue
+                or self.voice_tmp_path_queue_not_empty_flag
+                or QueueMixin._synth_inflight > 0):
             return False
         with self.voice_tmp_path_queue_lock:
             # 锁内复核：标志与队列的写入方（data_priority_insert/本方法）
@@ -957,9 +975,20 @@ class QueueMixin:
                                          and not self._reply_group_protected(it)]
                         if same_idx_list:
                             front_idx = same_idx_list[0]
-                            last_idx = same_idx_list[-1]
-                            _replaced = self.message_queue.pop(front_idx)
-                            self.message_queue.insert(last_idx, data_json)
+                            # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐
+                            # （念白+配对回复不拆散）；无 link 候选维持单条驱逐
+                            _replaced_list = self._evict_reply_pair_group_locked(
+                                self.message_queue, front_idx)
+                            _replaced = _replaced_list[0]
+                            # 整组驱逐后重算插入位（组驱逐可能移除多条；
+                            # 新条目仍接同权重组尾，组内 FIFO 保序）
+                            insert_position = 0
+                            for i in range(len(self.message_queue) - 1, -1, -1):
+                                priority_level = _entry_priority(self.message_queue[i])
+                                if priority_level is not None and int(priority_level) >= int(new_data_priority):
+                                    insert_position = i + 1
+                                    break
+                            self.message_queue.insert(insert_position, data_json)
                             self.message_queue_not_empty.notify()
                             try:
                                 from utils.obs_stats import record_drop
@@ -989,9 +1018,16 @@ class QueueMixin:
                                        if not _is_bg_slice_entry(self.message_queue[i])
                                        and not self._reply_group_protected(self.message_queue[i])), None)
                     if _evict_idx is not None:
-                        evicted = self.message_queue.pop(_evict_idx)
-                        if insert_position > _evict_idx:
-                            insert_position -= 1  # 驱逐点在插入位之前 → 位次同步校正（对齐规则3 做法）
+                        # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐；
+                        # 驱逐后重算插入位（组驱逐可能移除多条，位次校正失效）
+                        evicted = self._evict_reply_pair_group_locked(
+                            self.message_queue, _evict_idx)
+                        insert_position = 0
+                        for i in range(len(self.message_queue) - 1, -1, -1):
+                            priority_level = _entry_priority(self.message_queue[i])
+                            if priority_level is not None and int(priority_level) >= int(new_data_priority):
+                                insert_position = i + 1
+                                break
                     elif not (_reply_protected or _is_song_slice or _is_trends_slice):
                         # 无驱逐候选（普通条目全为受保护编组段）且新条目不受
                         # 保护 → 丢弃新条目（受保护段不可驱逐）
@@ -1183,10 +1219,17 @@ class QueueMixin:
                                          and not self._reply_group_protected(item)]
                         if same_idx_list:
                             # 规则2：取代同权重组组首（最老）条目，新条目接组尾（净长度不变，组内 FIFO）
+                            # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐
+                            # （念白+配对回复不拆散），驱逐后重算插入位
                             front_idx = same_idx_list[0]
-                            last_idx = same_idx_list[-1]
-                            self.voice_tmp_path_queue.pop(front_idx)
-                            self.voice_tmp_path_queue.insert(last_idx, data_json)  # pop 后组尾左移1，插回原组尾位
+                            self._evict_reply_pair_group_locked(queue, front_idx)
+                            insert_position = 0
+                            for i in range(len(queue) - 1, -1, -1):
+                                p = _priority_of(queue[i])
+                                if p is not None and p >= int(new_data_priority):
+                                    insert_position = i + 1
+                                    break
+                            self.voice_tmp_path_queue.insert(insert_position, data_json)
                             if self.voice_tmp_path_queue_not_empty_flag:
                                 self.voice_tmp_path_queue_not_empty.notify()
                             try:
@@ -1205,26 +1248,26 @@ class QueueMixin:
                             min_priority = min(non_none_priorities) if non_none_priorities else None
                             if min_priority is not None and int(new_data_priority) > min_priority:
                                 # 规则3：插入后驱逐最低优组组首（最老）条目——主叙述 10old/10new 双存要求组首驱逐
+                                # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐
+                                # （念白+配对回复不拆散），驱逐后重算插入位
                                 evict_idx = next(i for i, it in enumerate(queue)
                                                  if _priority_of(it) == min_priority
                                                  and not _is_bg_slice_entry(it)
                                                  and not self._reply_group_protected(it))
+                                self._evict_reply_pair_group_locked(queue, evict_idx)
                                 insert_position = 0
                                 for i in range(len(queue) - 1, -1, -1):
                                     p = _priority_of(queue[i])
                                     if p is not None and p >= int(new_data_priority):
                                         insert_position = i + 1
                                         break
-                                self.voice_tmp_path_queue.pop(evict_idx)
-                                if insert_position > evict_idx:
-                                    insert_position -= 1
                                 _insert_and_notify(insert_position, data_json)
                                 try:
                                     from utils.obs_stats import record_drop
                                     record_drop("audio_same_tier_evict")
                                 except Exception:
                                     pass
-                                logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组最老条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
+                                logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
                                 inserted = True
                                 insert_msg = {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
                             else:

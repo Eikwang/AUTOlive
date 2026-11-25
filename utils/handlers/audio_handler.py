@@ -124,17 +124,3 @@ class AudioHandler:
             bool: 是否为空
         """
         return self.my_handle.audio.is_audio_queue_empty()
-    
-    def is_queue_less_or_greater_than(self, type: str = "message_queue", less: int = None, greater: int = None):
-        """
-        判断 等待合成消息队列|待播放音频队列 数是否小于或大于某个值
-        
-        Args:
-            type (str, optional): 队列类型. Defaults to "message_queue" | "voice_tmp_path_queue".
-            less (int, optional): 小于值. Defaults to None.
-            greater (int, optional): 大于值. Defaults to None.
-            
-        Returns:
-            bool: 是否小于或大于某个值
-        """
-        return self.my_handle.audio.is_queue_less_or_greater_than(type, less, greater)

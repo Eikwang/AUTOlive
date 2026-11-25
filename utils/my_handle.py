@@ -377,10 +377,7 @@ class My_handle(metaclass=SingletonMeta):
     
     def is_audio_queue_empty(self):
         return self.audio_handler.is_audio_queue_empty()
-    
-    def is_queue_less_or_greater_than(self, type: str = "message_queue", less: int = None, greater: int = None):
-        return self.audio_handler.is_queue_less_or_greater_than(type, less, greater)
-    
+
     # 聊天相关
     def get_chat_model(self, chat_type, config):
         return self.chat_handler.get_chat_model(chat_type, config)

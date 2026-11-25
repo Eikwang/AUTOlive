@@ -10,7 +10,7 @@ import traceback
 import os
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
-from .queue_manager import QueueMixin, _split_group_note
+from .queue_manager import QueueMixin, _split_group_note, normal_queue_len
 from utils.web_captions import get_captions_manager
 
 # 伴奏起播门等待上限（2026-11-04 人声对齐修复）：覆盖编排静默窗口上限
@@ -34,15 +34,12 @@ _SONG_PUSH_LEAD = 0.3
 # 场景由 e13 失步声明兜底（宁可截断尾巴不破坏对齐）。
 _SONG_PREROLL_S = 0.3
 
-# 答谢连续跳过上限（2026-11-10 R3/F4/D14）：song 序列内连续跳过（到期优先
-# pop(i)）计数达此值 → 下一到期段放行队首条目一条（答谢时效保障——人声落后
-# 时间轴时每段皆 due，无上限=答谢饿死至歌尾；放行人声延后有界 ≈ 一条答谢
-# TTS 2-5s，e13 失步声明方向内）。R4 起为兜底（预算预检在前端控量）。
-_OVERDUE_SKIP_LIMIT = 2
-
 # 间奏插播硬性条件（2026-11-10 R4，用户指定）：间奏窗口剩余<此值或窗口本身
 # <此值 → 不再起插播音频（避免说一半）。用户口径：「进入间奏开始计时，不足
 # 3 秒时无需消费音频，或间奏空间本身就不足 3 秒，也无需消费音频」。
+# 2026-11-25 用户裁决#7：本值作为基线，实际阈值经
+# _interlude_min_consume_s_locked 按队列积压自适应下调（软兜底——替代已
+# 移除的强制起播，预算预检始终保留）。
 _INTERLUDE_MIN_CONSUME_S = 3.0
 
 # 念白单飞门超时（2026-11-16 弹幕↔回复配对批次）：念白消费后其配对回复
@@ -335,13 +332,19 @@ class PlaybackMixin:
                     self._song_anchor = None
                     return queue.pop(0), 0.0, False
                 if not _has_new_song:
-                    return queue.pop(0), 0.0, False  # 垃圾时间自由消费
+                    # 垃圾时间=伴奏自由消费期（用户 2026-11-25 确认为刻意
+                    # 设计，与 ②b 收尾间隙分支语义统一）：全直通 pop(0)，
+                    # 动态文案等所有条目在此窗口无留队豁免
+                    return queue.pop(0), 0.0, False
                 anchor["wrapping"] = False  # 新歌到来：回到唱歌时间机制
                 logger.info("[song] 垃圾时间结束（新点歌触发），进入新唱歌时间")
             now = time.monotonic()
             last_end = anchor.get("last_end") or 0.0
-            skip_count = int(anchor.get("skip_count") or 0)
-            # ②a 到期 song 段：间奏结束立刻切回人声（延后插播条目）
+            # ②a 到期 song 段：间奏结束立刻切回人声（延后插播条目）。
+            # 2026-11-25 用户裁决：连续跳过强制起播机制（原 _OVERDUE_SKIP_LIMIT
+            # 放行队首）移除——歌曲常含多个 <3s 间奏/停顿，窗口不足时强制插播
+            # 会造成音频消费错乱；插播仅由 ②b/②c 窗口预算预检裁决，窗口不足时
+            # 条目留队至下一合规窗口或歌毕锚清除后消费（饿死至歌尾为接受取舍）。
             for i, entry in enumerate(queue):
                 if not isinstance(entry, dict) or entry.get("type") != "song":
                     continue
@@ -353,8 +356,6 @@ class PlaybackMixin:
                     due = last_end  # 播完保底地板（F8：防插播后下段抢跑）
                 if now < due:
                     continue
-                anchor["skip_count"] = 0 if i == 0 else min(
-                    skip_count + 1, _OVERDUE_SKIP_LIMIT)
                 return queue.pop(i), 0.0, False
             # ②b 队首=插播条目 → 窗口预检（预算语义+3s 硬性条件）
             # 2026-11-24 用户裁决：唱歌时间排除动态文案插播——文案分段在锚存续
@@ -375,14 +376,17 @@ class PlaybackMixin:
                     return queue.pop(0), 0.0, False
                 remaining = window_end - now
                 window_total = window_end - (last_end if last_end > 0 else now)
-                if remaining < _INTERLUDE_MIN_CONSUME_S \
-                        or window_total < _INTERLUDE_MIN_CONSUME_S:
-                    # 硬性条件：剩余<3s 或窗口本身<3s → 不起音频（避免说
-                    # 一半）——等到期推人声
+                min_consume = self._interlude_min_consume_s_locked()
+                if remaining < min_consume or window_total < min_consume:
+                    # 硬性条件：剩余/窗口不足最小余量 → 不起音频（避免说
+                    # 一半）——等到期推人声；队满则遗弃未插播普通条目
+                    # （2026-11-25 裁决#3，不积累到歌毕）
+                    self._abandon_song_overflow_locked()
                     return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
                 if self._entry_duration_s(head) > remaining:
                     # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
-                    # 不足 3s 时已由上面拦住）
+                    # 不足最小余量时已由上面拦住）；队满遗弃同上
+                    self._abandon_song_overflow_locked()
                     return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
                 return queue.pop(0), 0.0, True
             if _head_is_copy:
@@ -396,10 +400,11 @@ class PlaybackMixin:
                     _gated = True
                     window_total = window_end - (
                         last_end if last_end > 0 else now)
-                if not _gated or (remaining >= _INTERLUDE_MIN_CONSUME_S
+                _min_consume = self._interlude_min_consume_s_locked()
+                if not _gated or (remaining >= _min_consume
                                   and window_end - (
                                       last_end if last_end > 0 else now)
-                                  >= _INTERLUDE_MIN_CONSUME_S):
+                                  >= _min_consume):
                     for i, entry in enumerate(queue):
                         if not isinstance(entry, dict):
                             continue
@@ -413,7 +418,9 @@ class PlaybackMixin:
                                 > remaining):
                             continue  # 预算：播不完窗口 → 下一条
                         return queue.pop(i), 0.0, True
-                # 仅文案在队（或全部超窗）→ 等到期推人声，文案留队
+                # 仅文案在队（或全部超窗）→ 等到期推人声，文案留队；
+                # 队满则遗弃未插播普通条目（2026-11-25 裁决#3）
+                self._abandon_song_overflow_locked()
                 wait = (max(remaining, 0.0) if _gated else 0.0) or _SONG_PUSH_LEAD
                 return None, wait, False
         # ②c 无锚（fail-open）或队首=song 段：窗口门判定
@@ -440,9 +447,13 @@ class PlaybackMixin:
                     continue  # 唱歌时间不插播文案（2026-11-24 用户裁决：
                     # 锚存续期间文案一律留队，歌毕锚清后续消费）
                 dur = self._entry_duration_s(entry)
-                if dur > 0 and remaining - dur < _INTERLUDE_MIN_CONSUME_S:
-                    continue  # 超窗/不足 3s 余量 → 看下一条
+                min_consume = self._interlude_min_consume_s_locked()
+                if remaining - dur < min_consume:
+                    continue  # 超窗/不足最小余量 → 看下一条
                 return queue.pop(i), 0.0, True  # R5b：借位走 EDTalk 口型
+            # 全队列不可借 → 等窗口；队满则遗弃未插播普通条目（2026-11-25
+            # 裁决#3，不积累到歌毕）
+            self._abandon_song_overflow_locked()
             return None, gate_wait, False
         # 念白单飞门（2026-11-16 弹幕↔回复配对批次）：song 窗口判定之后、
         # 常规 pop 之前——无 pending 时零开销直通；有 pending（更早念白的
@@ -532,19 +543,75 @@ class PlaybackMixin:
             return max(due, last_end)
         return None
 
+    def _interlude_min_consume_s_locked(self):
+        """间奏插播最小余量自适应（2026-11-25 用户裁决#7，须锁内调用）：
+        队列普通条目（非 song 段/文案分段，normal_queue_len 口径）积压越多
+        → 阈值越低——答谢积压场景下固定 3s 硬性条件会让插播条目饿死整首歌
+        （打赏用户等 3-5 分钟才被答谢）。作为有预算约束的软兜底随积压放宽
+        （>2 条起每 +1 条 −0.5s，下限 1s）；预算预检（时长>剩余不放行）
+        不受影响，仍保证「避免说一半」。"""
+        n = normal_queue_len(self.voice_tmp_path_queue)
+        if n <= 2:
+            return _INTERLUDE_MIN_CONSUME_S
+        return max(1.0, _INTERLUDE_MIN_CONSUME_S - (n - 2) * 0.5)
+
+    def _abandon_song_overflow_locked(self):
+        """唱歌期间队满遗弃（2026-11-25 用户裁决#3，须锁内调用）：插播窗口
+        预检失败且待播放队列普通容量已满时，从队首向后找第一条可遗弃普通
+        条目直接遗弃（不积累到歌毕）——长歌+高频短停顿场景下积压可跨越整首
+        歌时长，歌毕一次性倾泻的是几分钟前的陈旧答谢；唱歌期间即遗弃。
+        跳过歌段（序列不可丢）、文案分段（锚存续期间留队，2026-11-24 裁决）、
+        受保护回复组段（S1 遗弃保护）；念白候选遗弃同步 abandon_reply_link
+        解除配对门。wrapping 垃圾时间为伴奏自由消费期（无窗口约束，不触发）。
+
+        Returns: True=已遗弃至少一条。"""
+        anchor = getattr(self, "_song_anchor", None)
+        if not anchor or anchor.get("t0") is None or anchor.get("wrapping"):
+            return False
+        max_len = int(self.config.get("filter", "voice_tmp_path_queue_max_len"))
+        queue = self.voice_tmp_path_queue
+        if normal_queue_len(queue) < max_len:
+            return False
+        for i, entry in enumerate(queue):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("type") == "song" and entry.get("song_segment"):
+                continue  # 歌段序列不可丢
+            if (entry.get("type") == "trends_copywriting"
+                    and isinstance(entry.get("split_group"), dict)):
+                continue  # 锚存续期间文案一律留队（2026-11-24 裁决）
+            if self._reply_group_protected(entry):
+                continue  # S1 遗弃保护：消费中回复组不丢
+            queue.pop(i)
+            link = entry.get("reply_link")
+            if link:
+                self.abandon_reply_link(link)
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("song_overflow_abandon")
+            except Exception:
+                pass
+            logger.warning(
+                f"[song] 唱歌期间队满遗弃未插播条目（不积累到歌毕）："
+                f"{entry.get('voice_path', '')}"
+                f"【{str(entry.get('content', '') or '')[:30]}】")
+            return True
+        return False
+
     def _entry_duration_s(self, entry):
-        """插播条目音频时长（pydub 读 voice_path，fail-soft：读取失败→0=
-        放行不阻塞——时长不可知时退化为不预检）。锁内调用豁免说明：本地小
-        音频 pydub 加载 <100ms（非重 IO/网络），持锁窗口可容忍；时长透传
-        优化列 TODOS。"""
+        """插播条目音频时长（pydub 读 voice_path，fail-soft）。2026-11-25
+        用户裁决：读取失败不再返回 0 放行——一条读不到时长的长音频会吃掉整个
+        间奏窗口并压到下一段人声；改用文本长度估算（中文≈4 字/秒，下限 1s）
+        参与窗口预检。锁内调用豁免说明：本地小音频 pydub 加载 <100ms（非重
+        IO/网络），持锁窗口可容忍。"""
+        path = entry.get("voice_path") or ""
         try:
-            from pydub import AudioSegment
-            path = entry.get("voice_path") or ""
-            if not path or not os.path.isfile(path):
-                return 0.0
-            return len(AudioSegment.from_file(path)) / 1000.0
+            if path and os.path.isfile(path):
+                from pydub import AudioSegment
+                return len(AudioSegment.from_file(path)) / 1000.0
         except Exception:
-            return 0.0
+            pass  # 时长读取失败 → 文本估算兜底（不放行长音频）
+        return max(1.0, len(str(entry.get("content", "") or "")) / 4.0)
 
     def _start_backing_player(self, backing_path: str, volume: float):
         """伴奏播放启动编排（2026-11-10 R2，须在主进程调用）。
@@ -1116,8 +1183,8 @@ class PlaybackMixin:
                     # 出队选择（2026-11-10 R3 到期优先+上批窗口门，见
                     # _pop_next_entry_locked）：①song 序列内到期段优先——
                     # 锁内扫描找第一个「seq>0∧锚存在∧due 已到」切片段，其前
-                    # 插播条目延后留队不丢；连续跳过达
-                    # _OVERDUE_SKIP_LIMIT 放行队首一条=答谢时效保障；②无到
+                    # 插播条目延后留队不丢（2026-11-25 起无强制放行上限）；
+                    # ②无到
                     # 期段→队首窗口门（due 未到锁外短睡重查，答谢可随时插队
                     # 队首被优先消费=间奏插播 uc4b）；③窗口到期推送即 flush
                     # 残余答谢（d3 人声起即停）。非 song/首段/无锚 fail-open。
