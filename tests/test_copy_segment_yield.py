@@ -236,3 +236,274 @@ def test_trends_copywriting_triggers_despite_voice_queue_busy(tmp_path):
     assert len(synthesis_calls) >= 1, "待播放队列忙不应阻止动态文案触发入链"
     assert synthesis_calls[0]["type"] == "trends_copywriting"
     assert synthesis_calls[0]["content"] == "今天的商品，不要999"
+
+
+class _MsgHost(QueueMixin):
+    """data_priority_insert 等待合成消息分支最小宿主。"""
+
+    class _Cfg:
+        def get(self, *keys):
+            return {
+                ("filter", "priority_mapping"): {
+                    "trends_copywriting": 10, "entrance": 30,
+                    "comment": 50, "song": 300,
+                },
+                ("filter", "message_queue_max_len"): 200,
+                ("filter", "message_queue_replace_same_priority"): False,
+            }.get(tuple(keys))
+
+    def __init__(self):
+        self.message_queue = []
+        self.message_queue_lock = threading.Lock()
+        self.message_queue_not_empty = threading.Condition(
+            lock=self.message_queue_lock)
+        self.config = _MsgHost._Cfg()
+
+
+def _msg_copy(text):
+    """待合成动态文案消息（生产者批量入队形态，权重 10）。"""
+    return {"type": "trends_copywriting", "content": text}
+
+
+def _msg_song_slice(seq, total=2):
+    """song 切片合成消息（song_segment 绑定，R5b 追加语义）。"""
+    return {"type": "song", "content": "vocal.wav",
+            "song_segment": {"seq": seq, "total": total, "start_s": seq * 45.0}}
+
+
+def test_msg_song_slices_jump_copy_messages():
+    """核心场景（log2.txt 铁证复现·第三层根修）：文案生产者一次性批量入队
+    31 条文案消息后触发点歌 → song 切片合成消息必须越过全部文案消息
+    （插入 position=0），否则合成线程逐条消费文案 ~2 分钟后才轮到切片，
+    伴奏/人声迟迟不产。"""
+    host = _MsgHost()
+    for i in range(31):
+        host.data_priority_insert(data_json=_msg_copy(f"文案第{i + 1}句"))
+    assert len(host.message_queue) == 31
+    host.data_priority_insert(data_json=_msg_song_slice(0))
+    assert host.message_queue[0]["song_segment"]["seq"] == 0
+    assert len(host.message_queue) == 32
+    host.data_priority_insert(data_json=_msg_song_slice(1))
+    # seq 保序：seq0 在 seq1 前，均在文案之前
+    assert host.message_queue[0]["song_segment"]["seq"] == 0
+    assert host.message_queue[1]["song_segment"]["seq"] == 1
+    assert host.message_queue[2]["type"] == "trends_copywriting"
+
+
+def test_msg_song_slice_stays_after_non_copy():
+    """song 切片保持背景流语义：不越过非文案消息（答谢/回复先于歌播），
+    只越过文案消息。"""
+    host = _MsgHost()
+    host.data_priority_insert(data_json=_msg_copy("文案A"))
+    host.data_priority_insert(data_json={"type": "entrance", "content": "入场词"})  # 30 > 10 → 插到文案前
+    assert host.message_queue[0]["type"] == "entrance"
+    host.data_priority_insert(data_json=_msg_song_slice(0))
+    assert host.message_queue[1]["song_segment"]["seq"] == 0
+    assert host.message_queue[2]["type"] == "trends_copywriting"
+
+
+def test_msg_song_slice_empty_queue_appends():
+    """空队列常规追加（无让位语义介入）。"""
+    host = _MsgHost()
+    host.data_priority_insert(data_json=_msg_song_slice(0))
+    assert len(host.message_queue) == 1
+    assert host.message_queue[0]["song_segment"]["seq"] == 0
+
+
+def test_msg_copy_batch_unaffected():
+    """文案消息彼此仍按权重/队尾 FIFO（10 同权不互相插队），生产顺序保持。"""
+    host = _MsgHost()
+    for i in range(5):
+        host.data_priority_insert(data_json=_msg_copy(f"文案第{i + 1}句"))
+    assert [m["content"] for m in host.message_queue] == \
+        [f"文案第{i + 1}句" for i in range(5)]
+
+
+# --------------------------------- 出队侧段边界让位（2026-11-24 用户口径）
+#
+# 用户实测（点歌期间文案阻塞起播）：文案分段与 song 切片同为队尾追加，出队
+# 选择按 FIFO 把剩余文案段全部消费完才轮到 song seq0——伴奏/人声迟迟不起，
+# 点歌画面 hold 超时回默认。用户口径：动态文案在队列中的底层逻辑是任何其它
+# 权重消息都能插队消费。守卫面：无锚态下队首文案段让位第一个非文案条目。
+
+class _PopHost(QueueMixin, PlaybackMixin):
+    """_pop_select_locked 最小宿主（无锚态；_entry_duration_s 走 fail-soft 0）。"""
+
+    def __init__(self):
+        self.voice_tmp_path_queue = []
+        self.voice_tmp_path_queue_lock = threading.Lock()
+        self.voice_tmp_path_queue_not_empty = threading.Condition(
+            lock=self.voice_tmp_path_queue_lock)
+        self.voice_tmp_path_queue_not_empty_flag = False
+        self.audio_player = None
+
+
+def _song_slice(seq, total=2):
+    """song 切片段条目（song_segment 组绑定，队尾追加语义）"""
+    return {"type": "song", "voice_path": f"seg_{seq}.mp3",
+            "content": "牧马城市",
+            "song_segment": {"seq": seq, "total": total,
+                             "start_s": seq * 45.0, "seg_dir": "d1"}}
+
+
+# ----------------------- 唱歌时间排除文案插播（2026-11-24 用户裁决） -----------------------
+
+class _SingHost(_PopHost):
+    """锚存续态宿主：t0=now−10s，间奏窗口由队内 song 段 start_s 决定。"""
+
+    def __init__(self):
+        super().__init__()
+        self._song_anchor = {"t0": time.monotonic() - 10.0, "last_end": 0.0,
+                             "skip_count": 0, "wrapping": False}
+
+
+def _thanks(kind="comment"):
+    """非文案插播条目（答谢/回复，时长未知 fail-soft=0 → 预算放行）。"""
+    return {"type": kind, "content": "谢谢关心", "voice_path": "th.mp3"}
+
+
+def test_singing_copy_head_skips_to_thanks():
+    """队首=文案分段：文案留队，首个非歌段非文案条目（答谢）按窗口插播。"""
+    host = _SingHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _thanks(),
+                                 _song_slice(1)]
+    entry, wait, borrowed = host._pop_select_locked()
+    assert entry["type"] == "comment" and borrowed is True
+    assert host.voice_tmp_path_queue[0]["type"] == "trends_copywriting"  # 文案留队
+    assert host.voice_tmp_path_queue[-1]["type"] == "song"  # 歌段留队
+
+
+def test_singing_copy_only_waits_until_song_end():
+    """队首=文案且仅剩文案+未到期歌段：不插播，等到期推人声（文案留队）。"""
+    host = _SingHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _copy_segment(1),
+                                 _song_slice(1)]
+    entry, wait, borrowed = host._pop_select_locked()
+    assert entry is None and wait > 0 and borrowed is False
+    assert sum(1 for e in host.voice_tmp_path_queue
+               if e["type"] == "trends_copywriting") == 2
+
+
+def test_singing_borrow_skips_copy_behind_song():
+    """②c 借位：队首=未到期歌段 → 文案分段跳过，答谢借位消费。"""
+    host = _SingHost()
+    host.voice_tmp_path_queue = [_song_slice(1), _copy_segment(0), _thanks()]
+    entry, wait, borrowed = host._pop_select_locked()
+    assert entry["type"] == "comment" and borrowed is True
+    assert host.voice_tmp_path_queue[0]["type"] == "song"  # 歌段留队
+    assert host.voice_tmp_path_queue[1]["type"] == "trends_copywriting"  # 文案留队
+
+
+def test_singing_tail_gap_copy_still_queued():
+    """收尾间隙（队内无 song 段）：文案仍留队等锚清除，答谢自由消费。"""
+    host = _SingHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _thanks()]
+    entry, _, borrowed = host._pop_select_locked()
+    assert entry["type"] == "comment" and borrowed is True
+    assert host.voice_tmp_path_queue[0]["type"] == "trends_copywriting"
+
+    host2 = _SingHost()
+    host2.voice_tmp_path_queue = [_copy_segment(0)]
+    entry2, wait2, _ = host2._pop_select_locked()
+    assert entry2 is None and wait2 > 0  # 仅文案 → 短轮询等待，文案留队
+    assert host2.voice_tmp_path_queue[0]["type"] == "trends_copywriting"
+
+
+def test_singing_copy_resumes_after_anchor_clears():
+    """歌毕锚清除（垃圾时间/无锚）→ 文案恢复自由消费（段边界让位续播）。"""
+    host = _SingHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _copy_segment(1)]
+    host._song_anchor = {"t0": time.monotonic() - 10.0, "last_end": 0.0,
+                         "skip_count": 0, "wrapping": True}  # 垃圾时间
+    entry, wait, borrowed = host._pop_select_locked()
+    assert entry is not None and entry["type"] == "trends_copywriting"
+
+
+def test_pop_copy_yields_to_song_slice():
+    """核心场景（用户实测复现）：文案 2 段在队 + 点歌切片 2 段队尾追加 →
+    第一次出队直接弹出 song seq0（点歌应答后立刻起播伴奏/人声），文案段
+    延后留队待间奏/空闲续消费。"""
+    host = _PopHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _copy_segment(1),
+                                 _song_slice(0), _song_slice(1)]
+    entry, gate, borrowed = host._pop_select_locked()
+    assert gate == 0.0 and borrowed is False
+    assert entry["type"] == "song" and entry["song_segment"]["seq"] == 0
+    assert [e["type"] for e in host.voice_tmp_path_queue] == \
+        ["trends_copywriting", "trends_copywriting", "song"]
+
+
+def test_pop_copy_yields_to_first_non_copy():
+    """文案段之间夹/后置任意其它条目 → 第一个非文案条目插队（任何消息都能
+    插队消费文案，非 song 专属）。"""
+    host = _PopHost()
+    host.voice_tmp_path_queue = [_copy_segment(0),
+                                 {"type": "entrance", "voice_path": "e.mp3"},
+                                 _copy_segment(1)]
+    entry, _, _ = host._pop_select_locked()
+    assert entry["type"] == "entrance"
+    assert [e["type"] for e in host.voice_tmp_path_queue] == \
+        ["trends_copywriting", "trends_copywriting"]
+
+
+def test_pop_song_seq_order_preserved_across_copy():
+    """song 切片组跨文案段保序：seq0 先出队，seq1 在文案段之后仍先于文案
+    出队（song seq 有序不被文案打断）。"""
+    host = _PopHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _song_slice(0),
+                                 _copy_segment(1), _song_slice(1)]
+    first, _, _ = host._pop_select_locked()
+    assert first["song_segment"]["seq"] == 0
+    second, _, _ = host._pop_select_locked()
+    assert second["song_segment"]["seq"] == 1
+    assert [e["type"] for e in host.voice_tmp_path_queue] == \
+        ["trends_copywriting", "trends_copywriting"]
+
+
+def test_pop_no_yield_when_head_not_copy():
+    """队首非文案条目 → 常规 FIFO pop（文案让位只在队首为文案段时介入，
+    不改变正常权重序语义）。"""
+    host = _PopHost()
+    head = {"type": "comment", "voice_path": "reply.mp3"}
+    host.voice_tmp_path_queue = [head, _copy_segment(0), _song_slice(0)]
+    entry, _, _ = host._pop_select_locked()
+    assert entry is head
+
+
+def test_pop_copy_only_queue_pops_head():
+    """队列只有文案段 → 常规消费队首（让位不空转、文案不被饿死）。"""
+    host = _PopHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _copy_segment(1)]
+    entry, _, _ = host._pop_select_locked()
+    assert entry["content"] == "文案第1段"
+
+
+def test_pop_copy_yield_via_group_atomic_gate():
+    """端到端（_pop_next_entry_locked）：song seq0 直接越过全部文案段出队
+    （组原子门对文案组例外放行 → 出队选择层完成插队）；song 切片段不带
+    split_group 不登记组上下文，随后文案段恢复常规消费。"""
+    host = _PopHost()
+    host.voice_tmp_path_queue = [_copy_segment(0), _copy_segment(1),
+                                 _song_slice(0)]
+    s0, _, _ = host._pop_next_entry_locked()
+    assert s0["type"] == "song" and s0["song_segment"]["seq"] == 0
+    c0, _, _ = host._pop_next_entry_locked()
+    assert c0["type"] == "trends_copywriting"
+    assert [e["type"] for e in host.voice_tmp_path_queue] == \
+        ["trends_copywriting"]
+
+
+def test_pop_pending_reply_gate_skips_copy_for_song():
+    """念白配对门在途 + 队首文案段 → 门控放行跳过文案段直取 song 切片
+    （文案让位任何消息，含门控期）。"""
+    host = _PopHost()
+    host.reply_gate_track_popped({"type": "read_comment",
+                                  "reply_link": "rc-1"})
+    host.voice_tmp_path_queue = [_copy_segment(0), _song_slice(0)]
+    entry, gate, _ = host._pop_select_locked()
+    assert gate == 0.0
+    assert entry["type"] == "song" and entry["song_segment"]["seq"] == 0
+    assert [e["type"] for e in host.voice_tmp_path_queue] == \
+        ["trends_copywriting"]
+    QueueMixin._reply_gate_pending.clear()
+    QueueMixin._reply_gate_abandoned.clear()

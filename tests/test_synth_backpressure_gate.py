@@ -179,6 +179,46 @@ def test_gate_counts_normal_entries_only():
     assert q.synth_gate_wait_s({"type": "comment"}) == 0.0  # 普通条目仅 1 条
 
 
+def _copy_seg(seq, total=6):
+    """动态文案分段条目（split_group 组绑定，队尾追加语义）。"""
+    return {"type": "trends_copywriting", "content": f"文案第{seq + 1}段",
+            "voice_path": f"copy_{seq}.mp3",
+            "split_group": {"id": "g1", "seq": seq, "total": total}}
+
+
+def test_gate_excludes_copy_segments_depth_mode():
+    """2026-11-24 用户实测根修（深度模式）：文案分段积压不占门控深度——
+    song 请求消息（权重 300 排队首）不被文案音频积压滞留在合成门。此前
+    门控按普通条目计文案段 → song 消息等到文案全部消费完才合成=实测
+    「文案播完歌才起」。文案让位任何消息在合成链路对齐出队层让位。"""
+    q = _GateFixture(_Cfg(gate_depth=2))
+    q.voice_tmp_path_queue = [_copy_seg(0), _copy_seg(1), _copy_seg(2),
+                              _copy_seg(3), _copy_seg(4), _copy_seg(5)]
+    assert q.synth_gate_wait_s({"type": "song", "content": "牧马城市"}) == 0.0
+    assert q.synth_gate_wait_s({"type": "comment"}) == 0.0
+
+
+def test_gate_excludes_copy_segments_budget_mode():
+    """2026-11-24 根修（预算模式）：文案段不占秒数预算——大段文案积压
+    不滞留其它消息合成。"""
+    q = _GateFixture(_CfgBudget(budget=2.0))
+    segs = []
+    for i in range(6):
+        s = _copy_seg(i)
+        s["content"] = "这是一条四十个字的测试内容用于估算时长假条目哦"  # 24 字 → 6s
+        segs.append(s)
+    q.voice_tmp_path_queue = segs
+    assert q.synth_gate_wait_s({"type": "song", "content": "牧马城市"}) == 0.0
+
+
+def test_gate_still_counts_normal_with_copy_present():
+    """文案段排除但普通条目仍计数：门控对普通积压的原语义保持。"""
+    q = _GateFixture(_Cfg(gate_depth=2))
+    q.voice_tmp_path_queue = [_copy_seg(0), {"type": "comment"},
+                              {"type": "comment"}]
+    assert q.synth_gate_wait_s({"type": "comment"}) > 0  # 普通条目 2 条达门限
+
+
 def test_gate_disabled_when_depth_zero():
     """synth_gate_depth ≤0 → 门禁用（直通旧行为）。"""
     q = _GateFixture(_Cfg(gate_depth=0))

@@ -105,10 +105,12 @@ def test_abandon_none_safe():
 # ------------------------------------------------- 念白单飞门（gate）
 
 def test_gate_pass_through_when_no_pending():
-    """常态：无 pending 零开销直通（返回 0.0，调用方常规 pop 队首念白）。"""
+    """常态：无 pending 零开销直通（返回 (None, 0.0, False)，调用方常规 pop
+    队首念白）。2026-11-24 契约统一：门恒返回三元组。"""
     q = _GateFixture()
     queue = [_rc("rc-1")]
-    assert q.read_reply_gate_locked(queue) == 0.0
+    entry, gate, borrowed = q.read_reply_gate_locked(queue)
+    assert (entry, gate, borrowed) == (None, 0.0, False)
 
 
 def test_gate_holds_read_comment_releases_reply():
@@ -125,12 +127,25 @@ def test_gate_holds_read_comment_releases_reply():
 
 
 def test_gate_holds_all_read_comments_polls():
-    """门控期队列全是念白 → 返回 0.5 轮询等待（回复尚未合成入队）。"""
+    """门控期队列全是念白 → 返回 (None, 0.5, False) 轮询等待（回复尚未合成
+    入队）。"""
     q = _GateFixture()
     q.reply_gate_track_popped(_rc("rc-A"))
     queue = [_rc("rc-B"), _rc("rc-C")]
-    assert q.read_reply_gate_locked(queue) == 0.5
+    entry, gate, borrowed = q.read_reply_gate_locked(queue)
+    assert (entry, gate, borrowed) == (None, 0.5, False)
     assert len(queue) == 2  # 念白全部留队
+
+
+def test_gate_holds_copy_segments_polls():
+    """门控期队列是念白+文案段（回复未入队）→ 同样轮询等待：文案段让位任何
+    消息（2026-11-24 用户口径），不得顶替门控放行位。"""
+    q = _GateFixture()
+    q.reply_gate_track_popped(_rc("rc-A"))
+    queue = [_copy_seg(0), _rc("rc-B")]
+    entry, gate, _ = q.read_reply_gate_locked(queue)
+    assert (entry, gate) == (None, 0.5)
+    assert len(queue) == 2  # 文案段与念白全部留队
 
 
 def test_gate_releases_after_reply_popped():
@@ -139,7 +154,8 @@ def test_gate_releases_after_reply_popped():
     q.reply_gate_track_popped(_rc("rc-A"))
     q.reply_gate_track_popped(_reply("rc-A"))
     queue = [_rc("rc-B")]
-    assert q.read_reply_gate_locked(queue) == 0.0
+    entry, gate, borrowed = q.read_reply_gate_locked(queue)
+    assert (entry, gate, borrowed) == (None, 0.0, False)
 
 
 def test_gate_non_dict_entry_passes():
@@ -158,7 +174,8 @@ def test_gate_no_link_entry_held_during_pending():
     q = _GateFixture()
     q.reply_gate_track_popped(_rc("rc-A"))
     queue = [{"type": "read_comment"}]  # 旧条目无 link
-    assert q.read_reply_gate_locked(queue) == 0.5
+    entry, gate, _ = q.read_reply_gate_locked(queue)
+    assert (entry, gate) == (None, 0.5)
     assert len(queue) == 1
 
 
@@ -172,12 +189,14 @@ def test_gate_timeout_forces_release():
     QueueMixin._reply_gate_pending["rc-A"] = (
         time.monotonic() - _READ_REPLY_GATE_TIMEOUT - 1.0)
     queue = [_rc("rc-B"), _reply("rc-A")]
-    assert q.read_reply_gate_locked(queue) == 0.0
+    entry, gate, _ = q.read_reply_gate_locked(queue)
+    assert (entry, gate) == (None, 0.0)
     assert "rc-A" not in QueueMixin._reply_gate_pending
     assert "rc-A" in QueueMixin._reply_gate_abandoned
     # 下一条念白直通（abandoned 豁免：其回复出队不误登记/不误解除）
     queue2 = [_rc("rc-B")]
-    assert q.read_reply_gate_locked(queue2) == 0.0
+    entry2, gate2, _ = q.read_reply_gate_locked(queue2)
+    assert (entry2, gate2) == (None, 0.0)
 
 
 def test_gate_within_timeout_still_holds():
@@ -187,7 +206,8 @@ def test_gate_within_timeout_still_holds():
     QueueMixin._reply_gate_pending["rc-A"] = (
         time.monotonic() - _READ_REPLY_GATE_TIMEOUT + 1.0)
     queue = [_rc("rc-B")]
-    assert q.read_reply_gate_locked(queue) == 0.5
+    entry, gate, _ = q.read_reply_gate_locked(queue)
+    assert (entry, gate) == (None, 0.5)
 
 
 # ------------------------------------------------- 生产端 abandon 语义
@@ -200,4 +220,26 @@ def test_abandon_releases_inflight_pending():
     q.abandon_reply_link("rc-A")
     assert "rc-A" not in QueueMixin._reply_gate_pending
     queue = [_rc("rc-B")]
-    assert q.read_reply_gate_locked(queue) == 0.0
+    entry, gate, borrowed = q.read_reply_gate_locked(queue)
+    assert (entry, gate, borrowed) == (None, 0.0, False)
+
+
+def test_gate_copy_segment_yielded_for_reply():
+    """门控期文案段挡在回复前 → 文案段让位，回复直接放行（2026-11-24 用户
+    口径：文案让位任何消息）。"""
+    q = _GateFixture()
+    q.reply_gate_track_popped(_rc("rc-A"))
+    queue = [_copy_seg(0), _copy_seg(1), _reply("rc-A")]
+    popped, gate, _ = q.read_reply_gate_locked(queue)
+    assert gate == 0.0
+    assert popped["reply_link"] == "rc-A"
+    assert len(queue) == 2  # 两段文案延后留队
+
+
+# ------------------------------------------------- 测试工具
+
+def _copy_seg(seq, total=2):
+    """动态文案分段条目（split_group 组绑定）"""
+    return {"type": "trends_copywriting", "voice_path": f"copy_{seq}.mp3",
+            "content": f"文案第{seq + 1}段",
+            "split_group": {"id": "g1", "seq": seq, "total": total}}

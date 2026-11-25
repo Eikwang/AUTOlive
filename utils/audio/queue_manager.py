@@ -284,6 +284,25 @@ class QueueMixin:
         except Exception:
             logger.debug(f"回复组活跃登记异常（忽略）：{traceback.format_exc()}")
 
+    @staticmethod
+    def _insert_pos_before_copy_locked(queue):
+        """文案让位插入位（2026-11-24 用户实测根修·第三层，须在队列锁持有内
+        调用）：从队尾向前扫描，跳过动态文案条目（type=trends_copywriting），
+        返回第一个非文案条目之后的位置——新条目越过所有待处理文案条目，但不
+        越过其它消息（非文案条目间保持 FIFO，song 切片 seq 顺序因此保序）。
+        队列全为文案 → 0（文案全部让位）。
+
+        背景（用户实测铁证 log2.txt）：song 切片合成消息绝对队尾追加（R5b
+        「不插队」），压在动态文案生产者一次性批量入队的 28 条文案消息（权重
+        10）之后 position=28/29——合成线程逐条消费文案 ~2 分钟后才轮到切片
+        合成，伴奏/人声迟迟不产（16:24:54 入队 → 16:26:55 才出音频）。
+        文案让位任何消息在此对齐出队层让位与合成门口径。"""
+        for i in range(len(queue) - 1, -1, -1):
+            e = queue[i]
+            if not (isinstance(e, dict) and e.get("type") == "trends_copywriting"):
+                return i + 1
+        return 0
+
     def _reply_group_protected(self, data_json) -> bool:
         """弹幕问答编组遗弃保护判定（S1，2026-11-21 队列优化批次）：reply_link
         命中且组已进入消费流程（念白已出队 pending / 组活跃 TTL 内）→ 组剩余段
@@ -429,11 +448,14 @@ class QueueMixin:
     def _gate_normal_entries(self):
         """门控口径条目快照（2026-11-21 队列优化批次 E2）：待播放队列普通条目
         + builtin 播放器内部队列普通条目——本地路径 play() 提前移交，播放器
-        内部队列才是真实积压点（旧口径只数待播放队列=门控盲区）。song 切片段
-        两处均排除：背景流不占门控深度，间奏插播内容依赖预合成不被门滞留。"""
+        内部队列才是真实积压点（旧口径只数待播放队列=门控盲区）。背景流切片
+        （song 切片段/动态文案分段，_is_bg_slice_entry 单源）两处均排除：
+        不占门控深度/秒数预算，其它消息的合成不被门滞留（2026-11-24 用户口径：
+        文案让位任何消息——此前 song 请求消息排在队首仍被文案音频积压卡在
+        合成门，实测文案全部消费完歌曲才起播；预合成/插队消费单源对齐
+        normal_queue_len 分账口径）。"""
         entries = [e for e in self.voice_tmp_path_queue
-                   if not (isinstance(e, dict) and e.get("type") == "song"
-                           and e.get("song_segment"))]
+                   if not _is_bg_slice_entry(e)]
         player = getattr(self, "audio_player", None)
         getter = (player.internal_normal_entries
                   if player is not None and hasattr(player, "internal_normal_entries")
@@ -862,8 +884,16 @@ class QueueMixin:
                     insert_position = len(self.message_queue)
                 elif (isinstance(data_json, dict) and data_json.get("type") == "song"
                       and data_json.get("song_segment")):
-                    insert_position = len(self.message_queue)
-                    logger.debug(f"song 切片段追加队尾（不插队）position={insert_position}")
+                    # 2026-11-24 用户实测根修（第三层）：song 切片合成消息保持
+                    # 不插队于其它消息（背景流语义，答谢/回复先于歌播），但必须
+                    # 越过待合成的动态文案消息（文案让位任何消息）——此前绝对
+                    # 队尾追加，实测 28 条文案消息压队时切片排 position=28/29，
+                    # 合成线程逐条消费文案 ~2 分钟后才轮到切片（伴奏/人声迟迟
+                    # 不产，点歌画面 hold 超时回默认）。
+                    insert_position = self._insert_pos_before_copy_locked(
+                        self.message_queue)
+                    logger.debug(
+                        f"song 切片合成消息越过文案消息插入 position={insert_position}")
                 elif (isinstance(data_json, dict)
                       and data_json.get("type") == "trends_copywriting"
                       and isinstance(data_json.get("split_group"), dict)):
