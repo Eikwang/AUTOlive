@@ -22,6 +22,13 @@ import numpy as np
 import torch
 
 
+def _pingpong_frame_idx(pos: int, total: int) -> int:
+    """帧级 pingpong 三角波映射——单源 [frame_index.pingpong_frame_idx]。
+    保留薄别名（render_loop 内部调用点与既有引用兼容）。"""
+    from .frame_index import pingpong_frame_idx as _map
+    return _map(pos, total)
+
+
 class SegmentScheduler:
     """Segment playback sequence state machine (pure; no threads, no clocks).
 
@@ -188,7 +195,13 @@ class RenderLoop:
         self._scheduler: Optional[SegmentScheduler] = None
         # Queued at=segment_end switch (M16): fires at the next loop/segment
         # boundary, BEFORE the scheduler guard — works in legacy mode too.
-        self._pending_switch: Optional[str] = None
+        # 2026-11-24 pingpong 批次：pending 元组携带 loop_mode（边界续接段
+        # 的循环模式随切换意图一起排队，触发时透传切换事务）。
+        self._pending_switch: Optional[tuple] = None
+        # 当前段循环模式（2026-11-24 pingpong 批次）：'loop'=锯齿折返
+        # （pos % total，尾帧跳回首帧=用户实测「A-B 循环」硬切）；'pingpong'=
+        # 三角波正放↔倒放往返（首尾边界零跳变）。随每次切换事务重置。
+        self._seg_loop_mode: str = 'loop'
         # Frame-boundary gaze param application slot (M2): API threads write,
         # the render thread applies at frame head — no cross-stream races
         # with CUDA graph replay.
@@ -288,7 +301,7 @@ class RenderLoop:
 
     def switch_segment(self, segment: str, source: str = 'manual',
                        seamless: bool = False,
-                       prefetched=None) -> bool:
+                       prefetched=None, loop_mode: str = 'loop') -> bool:
         """Switch to a different segment within the current character.
 
         Args:
@@ -305,6 +318,10 @@ class RenderLoop:
             prefetched: Optional ready PrefetchLoader result — published into
                     the preloader's slot 0 so the new segment serves frames
                     from cache with no cold-start disk-fallback window (M15).
+            loop_mode: 段循环模式（2026-11-24 pingpong 批次）：'loop'=锯齿
+                    折返（默认，尾帧跳回首帧）；'pingpong'=三角波正放↔倒放
+                    无缝往返（编排主线 hold 场景：唱歌/文案循环期画面零跳变，
+                    口型由音频帧锁定单独驱动不受倒放影响）。随切换事务重置。
 
         Returns:
             Snapshot dict {'segment', 'frame_count', 'resolution'} built
@@ -315,6 +332,10 @@ class RenderLoop:
                 raise ValueError("No character data loaded")
             # L3: any switch supersedes a queued segment_end switch.
             self._pending_switch = None
+            # 2026-11-24 pingpong 批次：循环模式随切换事务生效（非法值保守
+            # 退默认锯齿循环，编排/服务层已校验——此为最后防线）。
+            self._seg_loop_mode = loop_mode if loop_mode in (
+                'loop', 'pingpong') else 'loop'
             if prefetched is not None:
                 # M15 seamless path: publish the prefetched batch 0 (kwarg
                 # omitted otherwise — keeps the pack's base contract and
@@ -399,21 +420,27 @@ class RenderLoop:
     # Queued segment_end switch (M16)
     # ------------------------------------------------------------------
 
-    def queue_segment_switch(self, segment: str) -> None:
+    def queue_segment_switch(self, segment: str,
+                             loop_mode: str = 'loop') -> None:
         """Queue a switch that fires at the next segment boundary.
 
         The caller MUST validate the segment name at request time (M16) —
         this queue stores intent only. Last-write-wins; any immediate
-        switch clears it.
+        switch clears it. loop_mode（2026-11-24 pingpong 批次）随切换意图
+        一起排队，边界触发时透传切换事务（元素序向后兼容裸段名存量）。
         """
-        self._pending_switch = segment
+        self._pending_switch = (segment, loop_mode)
 
     def clear_pending_switch(self) -> None:
         self._pending_switch = None
 
     @property
     def pending_switch(self) -> Optional[str]:
-        return self._pending_switch
+        """Queued segment name（元组存量兼容读取；pingpong 批次改为元组）"""
+        pending = self._pending_switch
+        if isinstance(pending, tuple):
+            return pending[0]
+        return pending
 
     # ------------------------------------------------------------------
     # Frame-boundary gaze param application (M2)
@@ -964,12 +991,18 @@ class RenderLoop:
                 if self._video_pos() < total:
                     return
                 self._pending_switch = None
+                # 2026-11-24 pingpong 批次：pending 元组 (segment, loop_mode)
+                # ——边界续接段的循环模式随切换意图透传（裸段名存量退默认）。
+                _seg_name = nxt[0] if isinstance(nxt, tuple) else nxt
+                _loop_mode = nxt[1] if isinstance(nxt, tuple) and len(nxt) > 1 \
+                    else 'loop'
                 try:
-                    self.switch_segment(nxt, source='pending', seamless=True)
+                    self.switch_segment(_seg_name, source='pending',
+                                        seamless=True, loop_mode=_loop_mode)
                 except Exception as e:
                     # Same log-storm guard as the scheduler path: re-anchor.
                     self._video_base = self._frame_index - self._flushed_frames
-                    print(f"[Scheduler] pending switch to '{nxt}' failed "
+                    print(f"[Scheduler] pending switch to '{_seg_name}' failed "
                           f"({e}); restarting current segment")
                 return
 
@@ -1007,14 +1040,24 @@ class RenderLoop:
         return self._frame_index - self._flushed_frames - self._video_base
 
     def _video_idx(self, total_frames) -> int:
-        """Display-order position in the current segment (wraps at the end)."""
+        """Display-order position in the current segment (wraps at the end).
+
+        2026-11-24 pingpong 批次：段循环模式为 'pingpong' 时显示帧序改三角波
+        （正放 0→total-1 后倒放 total-2→1 无缝往返）——正放↔倒放交界处同帧
+        衔接、首尾边界零跳变；'loop'（默认）保持 pos % total 锯齿折返（尾帧
+        跳回首帧硬切）。显示序时钟（_video_pos 单调递增）不受影响——段边界
+        判定/pending 切换触发时刻语义不变，pingpong 只改「该显示哪一帧」。
+        """
         try:
             total = int(total_frames)
         except (TypeError, ValueError):
             return max(0, self._video_pos())
         if total <= 0:
             return 0
-        return self._video_pos() % total
+        pos = self._video_pos()
+        if getattr(self, '_seg_loop_mode', 'loop') == 'pingpong' and total > 2:
+            return _pingpong_frame_idx(pos, total)
+        return pos % total
 
     def _process_frame(self) -> None:
         """Render one frame and push it into the output buffer."""

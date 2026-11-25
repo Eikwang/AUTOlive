@@ -45,6 +45,10 @@ class SegmentSwitchRequest(BaseModel):
     at: str = Field(default="immediate",
                     pattern=r"^(immediate|segment_end)$",
                     description="immediate=硬切(≤0.3s)；segment_end=边界帧级无缝")
+    # 2026-11-24 pingpong 批次：段循环模式——loop=锯齿折返（默认）；
+    # pingpong=三角波正放↔倒放无缝往返（编排主线 hold 用）
+    loop_mode: str = Field(default="loop", pattern=r"^(loop|pingpong)$",
+                           description="loop=尾帧跳回首帧；pingpong=正放↔倒放往返")
 
 
 class SegmentScheduleRequest(BaseModel):
@@ -193,13 +197,16 @@ def create_app(service: RealtimeService,
     @app.post("/segment/switch")
     def switch_segment(request: SegmentSwitchRequest):
         """Switch segment now (immediate) or queue a seamless boundary
-        continuation (segment_end, last-write-wins)."""
+        continuation (segment_end, last-write-wins). loop_mode（2026-11-24
+        pingpong 批次）选段循环方式：loop（默认）| pingpong（正放↔倒放无缝
+        往返，编排主线 hold 用）。"""
         try:
-            return service.switch_segment(request.segment, at=request.at)
+            return service.switch_segment(request.segment, at=request.at,
+                                          loop_mode=request.loop_mode)
         except Exception as e:
             _map_control_errors(
                 e, "用 GET /status 的 available_segments 查看段名；"
-                   "at 取值 immediate|segment_end")
+                   "at 取值 immediate|segment_end；loop_mode 取值 loop|pingpong")
 
     @app.post("/segment/schedule")
     def set_schedule(request: SegmentScheduleRequest):

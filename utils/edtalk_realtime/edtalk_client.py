@@ -555,13 +555,19 @@ class EDTalkClient:
             logger.error(f"EDTalk 恢复输出失败（输出将保持冻结）：{e}")
             return {"ok": False, "error": str(e)}
 
-    def switch_segment(self, segment: str, at: str = "segment_end") -> dict:
-        """切换素材段（at=segment_end 边界无缝；immediate 硬切）。"""
+    def switch_segment(self, segment: str, at: str = "segment_end",
+                       loop_mode: str = "loop") -> dict:
+        """切换素材段（at=segment_end 边界无缝；immediate 硬切）。
+
+        loop_mode（2026-11-24 pingpong 批次）：段循环模式——loop=锯齿折返
+        （默认）；pingpong=三角波正放↔倒放无缝往返（编排主线 hold 场景，
+        口型由音频帧锁定单独驱动不受倒放影响）。旧服务端忽略未知字段时
+        仅退默认循环（向后兼容面）。"""
         try:
             import requests
             resp = requests.post(
                 f"{self._api_base()}/segment/switch",
-                json={"segment": segment, "at": at},
+                json={"segment": segment, "at": at, "loop_mode": loop_mode},
                 headers=self._auth_headers(),
                 timeout=5,
             )

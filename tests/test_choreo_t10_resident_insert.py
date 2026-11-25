@@ -321,7 +321,8 @@ def test_fb_song_started_refreshes_suspended_resident_deadline():
     _accept_current(eng)                       # 插播 exit 接受（song main 切换）
     NOW[0] = 1003.0
     cmds = eng.on_song_started("test_song", 180.0, NOW[0])
-    assert eng.song_suspended["deadline"] == 1183.0  # now+180（F-B 挂起分派刷新）
+    # 2026-11-24 歌毕闪帧根修：窗口=歌曲结束+歌后备窗（step_timeout_s=60）
+    assert eng.song_suspended["deadline"] == 1243.0  # now+180+60（F-B 刷新新口径）
     assert eng.seq["rule_id"] == "song_a"      # seq 未被扰动
     assert any("F-B" in c.msg for c in cmds if hasattr(c, "msg"))
 

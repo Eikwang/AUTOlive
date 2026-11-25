@@ -192,16 +192,24 @@ class RealtimeService:
         self.output_streamer.set_paused(False)
         return {"paused": False}
 
-    def switch_segment(self, segment: str, at: str = 'immediate') -> dict:
+    def switch_segment(self, segment: str, at: str = 'immediate',
+                       loop_mode: str = 'loop') -> dict:
         """Switch segments; at='segment_end' queues a boundary continuation.
 
         Semantics per EMBEDDING.md: immediate keeps the ≤~0.3s hard cut
         (E2 flush + preroll); segment_end is frame-level seamless (M8, no
         flush) and may be superseded by a later switch (last-write-wins).
+
+        loop_mode（2026-11-24 pingpong 批次）：段循环模式随切换意图透传——
+        'loop'=锯齿折返（默认）；'pingpong'=三角波正放↔倒放无缝往返（编排
+        主线 hold：唱歌/文案循环期画面零跳变，口型音频驱动不受影响）。
         """
         if at not in ('immediate', 'segment_end'):
             raise ValidationError(
                 f"at 必须为 'immediate' 或 'segment_end'，got '{at}'")
+        if loop_mode not in ('loop', 'pingpong'):
+            raise ValidationError(
+                f"loop_mode 必须为 'loop' 或 'pingpong'，got '{loop_mode}'")
         cd = self._require_character_data()
         if segment not in cd.segments:
             raise NotFoundError(
@@ -209,7 +217,7 @@ class RealtimeService:
 
         if at == 'segment_end':
             cd.prefetch_segment(segment)  # 尽力而为；就绪与否边界时再取（M15）
-            self.render_loop.queue_segment_switch(segment)
+            self.render_loop.queue_segment_switch(segment, loop_mode)
             return {'ok': True, 'at': 'segment_end',
                     'pending_segment': segment,
                     'current_segment': cd.current_segment}
@@ -218,7 +226,8 @@ class RealtimeService:
         # E3/E4: 响应快照来自切换事务内部（render_loop 在 _segment_lock 内
         # 构建），并发切换不会串台。
         snapshot = self.render_loop.switch_segment(
-            segment, source='manual', seamless=False, prefetched=prefetched)
+            segment, source='manual', seamless=False, prefetched=prefetched,
+            loop_mode=loop_mode)
         if snapshot is None:
             raise RuntimeError(f"切换 '{segment}' 失败（详见服务日志）")
         return {'ok': True, 'queued': False, **snapshot}

@@ -16,6 +16,8 @@
 from utils.orchestration.choreographer import ChoreoEngine, SwitchSegment
 from utils.orchestration.config_model import load_choreography_config
 
+import pytest
+
 NOW = [1000.0]
 
 COPY = "今天天气真好"
@@ -73,7 +75,8 @@ def _receipt(eng, content):
 # ------------------------------------------------- fresh 序列循环
 
 def test_resident_main_loops_until_copy_done():
-    """主线素材播完 → 循环重播（step_id 换代、不置 main_done）。"""
+    """主线素材播完 → 循环轮（2026-11-24 pingpong 批次：不重发切段、
+    step_id 不换代、deadline 延长——服务端 pingpong 无缝往返）。"""
     NOW[0] = 1000.0
     eng = _engine([_dt_rule()])
     d = _hit(eng, "dynamic_text", COPY)
@@ -85,12 +88,14 @@ def test_resident_main_loops_until_copy_done():
     NOW[0] = 1010.01
     cmds = eng.on_tick(NOW[0])              # 素材播完 → 循环分支
     step = eng.seq["steps"][eng.seq["idx"]]
-    assert step["step_id"].endswith("#loop1")
+    assert step["step_id"] == "dt:main#1"   # 不换代（无新切段）
     assert step["segment"] == "M_dt"
+    assert eng.seq["loop_i"] == 1
     assert eng.seq["main_done"] is False    # 不置 main_done（循环中同键忽略语义）
     assert eng.seq["idx"] == 0
-    assert any(isinstance(c, SwitchSegment) and c.segment == "M_dt" for c in cmds)
-    _accept_current(eng)
+    assert eng.seq["step_accepted"] is True  # 无新切段——无回执等待
+    assert eng.seq["current_deadline"] == pytest.approx(1020.01)  # deadline 延长
+    assert not any(isinstance(c, SwitchSegment) for c in cmds)   # 不重发切段
     # 回执命中（改写形态容差）→ copy_done → 推进 exit
     cmds = _receipt(eng, "今天天气真好，谢谢支持")
     assert eng.seq["copy_done"] is True
@@ -110,11 +115,12 @@ def test_non_matching_receipt_keeps_loop():
     cmds = _receipt(eng, "完全无关的内容")
     assert eng.seq.get("copy_done") is False
     assert eng.seq["steps"][eng.seq["idx"]]["name"] == "main"
-    _finish_current(eng)                    # 主线播完 → loop1
-    assert eng.seq["steps"][eng.seq["idx"]]["step_id"].endswith("#loop1")
-    _accept_current(eng)
+    _finish_current(eng)                    # 主线播完 → loop1（deadline 延长）
+    assert eng.seq["steps"][eng.seq["idx"]]["step_id"] == "dt:main#1"
+    assert eng.seq["loop_i"] == 1
     _finish_current(eng)                    # loop1 播完 → loop2
-    assert eng.seq["steps"][eng.seq["idx"]]["step_id"].endswith("#loop2")
+    assert eng.seq["steps"][eng.seq["idx"]]["step_id"] == "dt:main#1"
+    assert eng.seq["loop_i"] == 2
 
 
 def test_loop_fuse_expires_to_exit():
@@ -212,11 +218,13 @@ def test_recovery_hold_loops_until_copy_done():
     eng.on_tick(NOW[0])                     # → hold（main#resume）
     assert "#resume" in eng.seq["steps"][eng.seq["idx"]]["step_id"]
     _accept_current(eng)                    # hold 接受（素材时长 10s 兜底 deadline=1023.04）
-    # hold 素材播完（< 保险丝）→ Gap B 循环（不再依赖 re-recover 空转）
+    # hold 素材播完（< 保险丝）→ Gap B 循环（pingpong 批次：不重切段，
+    # deadline 延长，step_id 不换代）
     NOW[0] = 1023.05
     eng.on_tick(NOW[0])
-    assert eng.seq["steps"][eng.seq["idx"]]["step_id"].endswith("#loop1")
-    _accept_current(eng)
+    assert eng.seq["steps"][eng.seq["idx"]]["step_id"] == "dt:main#resume3"
+    assert eng.seq["loop_i"] == 1
+    assert eng.seq["step_accepted"] is True
     # 回执命中 → copy_done → 推进 → 超出序列 → 回默认
     cmds = _receipt(eng, COPY + "，谢谢")
     assert eng.state == "default"

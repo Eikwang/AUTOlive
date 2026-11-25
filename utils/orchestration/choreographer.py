@@ -86,6 +86,10 @@ class SwitchSegment:
     step_id: str
     segment: str
     at: str  # immediate | segment_end
+    # 段循环模式（2026-11-24 pingpong 批次）：'loop'=锯齿折返（默认）；
+    # 'pingpong'=三角波正放↔倒放无缝往返（服务端帧级映射，口型音频驱动
+    # 不受影响）——主线 hold 场景（唱歌/动态文案循环期）画面零跳变。
+    loop_mode: str = "loop"
 
 
 @dataclass
@@ -928,7 +932,14 @@ class ChoreoEngine:
         if step["name"] == "exit":
             self.seq["exit_started"] = True
         at = "immediate" if force_immediate else step["switch_at"]
-        commands.append(SwitchSegment(step["step_id"], step["segment"], at))
+        # 段循环模式（2026-11-24 pingpong 批次）：主线 hold 场景（song hold
+        # 主线/动态文案 resident 主线）切 pingpong——素材播完后服务端正放↔
+        # 倒放无缝往返（口型音频驱动不受影响）；enter/exit 与普通主线保持
+        # 默认锯齿循环（短段单次播放，模式无感）。
+        _pingpong = (step["name"] == "main"
+                     and bool(step.get("hold_for_song") or self.seq.get("resident")))
+        commands.append(SwitchSegment(step["step_id"], step["segment"], at,
+                                      loop_mode="pingpong" if _pingpong else "loop"))
         return commands
 
     def on_switch_result(self, step_id: str, ok: bool, now: float) -> List:
@@ -1065,11 +1076,72 @@ class ChoreoEngine:
             return commands
         susp = self.song_suspended
         if susp is not None:
-            susp["deadline"] = now + remaining
+            # 2026-11-24 歌毕闪帧根修：挂起窗口=歌曲结束估算+歌后备窗
+            # （step_timeout_s）——旧口径 deadline=锚点+剩余（+2s 余量），歌曲
+            # 恰好消费整个窗口：歌曲 exit 步播完（歌音频结束后 2~10s）时窗口
+            # 已耗尽，序列播完恢复挂起要么被 now<deadline 拒走默认，要么恢复
+            # 的 hold 保险丝几秒内到期（文案画面一闪回默认）。歌曲消费的是
+            # 插播时长，文案有效期应在歌毕重新起算（恢复后由 copy_done 回执
+            # 精确终结，本窗口仅兜底）。
+            _grace = float(getattr(self.cfg, "step_timeout_s", 60.0) or 60.0)
+            susp["deadline"] = now + remaining + _grace
             commands.append(LogCmd(
                 "info", f"[编排] 挂起歌曲切片起播（{song_name}）：挂起 deadline 刷新"
-                        f"（+{remaining:.1f}s，F-B 挂起期自校正）"))
+                        f"（歌曲结束+{remaining:.1f}s+歌后备{_grace:.0f}s，F-B 挂起期自校正）"))
+            # 2026-11-24 修复批次（RC1）：挂起分支此前直接 return——resident 让位
+            # 点歌场景 susp 在整个 song hold 期间恒非 None（仅序列收尾清空），
+            # song hold 主线 deadline 被饿死在 step_timeout 保险丝：歌曲时长>
+            # 保险丝必然 mid-song 提前走完序列（恢复文案画面→唱歌期间画面漂移；
+            # 或歌曲起播前走完→唱歌在默认画面开始）。并行延长当前 song hold
+            # 序列 deadline（susp kind=song 防御分支无 seq hold，保持仅刷新）。
+            if (self.state == "sequence" and self.seq is not None
+                    and self.seq.get("hold_for_song")):
+                _steps = self.seq["steps"]
+                _idx = self.seq["idx"]
+                if _idx < len(_steps) and _steps[_idx].get("hold_for_song"):
+                    self.seq["current_deadline"] = now + remaining
+                    commands.append(LogCmd(
+                        "info", f"[编排] song hold 主线 deadline 并行延长至歌曲"
+                                f"结束（锚点+{remaining:.1f}s，RC1 修复）"))
             return commands
+        # 2026-11-24 修复批次（RC2）：挂起已清空后歌曲才起播（动态文案播完回
+        # 默认/恢复文案 hold 在播）——此前直接 return 无任何画面动作，唱歌在
+        # 错误画面开始。歌曲起播命中启用中的 song 规则 → 画面恢复/切至 song
+        # hold（⑨-B 同源语义「歌起播画面跟随」）：default 态直接新建 hold 序列；
+        # resident 恢复 hold 在播 → 挂起文案（复用 d13/⑦-B 挂起恢复链路）后切
+        # song hold，歌毕收尾按既有挂起恢复切回。无命中 song 规则/其它序列
+        # （gift 等）在播/总开关 off = 保持幂等 return（零变化）。
+        if self._arbitration_active():
+            try:
+                _matched, _mreason = self._match_rule("song", song_name, {})
+            except Exception:
+                _matched = None
+            if _matched is not None:
+                if self.state != "sequence" or self.seq is None:
+                    commands.extend(self._switch_song_rule(
+                        _matched, now, remaining, song_name))
+                    return commands
+                if (self.seq.get("resident")
+                        and not self.seq.get("hold_for_song")):
+                    # 2026-11-24 歌毕闪帧根修：初始窗口与 F-B 刷新同口径
+                    # （歌曲结束估算+歌后备窗）——RC1 刷新覆盖前不裸用 60s
+                    # 保险丝（歌曲时长>保险丝时同样窗口耗尽闪帧）。
+                    _grace = float(getattr(self.cfg, "step_timeout_s", 60.0) or 60.0)
+                    self.song_suspended = {
+                        "rule_id": self.seq["rule_id"],
+                        "deadline": now + remaining + _grace,
+                        "entered_at": now,
+                        "kind": "resident",
+                        "copy": str(self.seq.get("resident_copy")
+                                    or self.seq.get("match_value") or ""),
+                        "copy_done": bool(self.seq.get("copy_done")),
+                    }
+                    commands.append(LogCmd(
+                        "info", f"[编排] 歌曲起播挂起播报序列（{self.seq['rule_id']}，"
+                                "RC2 修复——歌毕按挂起恢复切回文案画面）"))
+                    commands.extend(self._switch_song_rule(
+                        _matched, now, remaining, song_name))
+                    return commands
         if self.state != "sequence" or self.seq is None:
             return commands
         if not self.seq.get("hold_for_song"):
@@ -1145,13 +1217,16 @@ class ChoreoEngine:
             "hold_for_song": True,
             "resident": False,
         }
+        # 2026-11-24 修复批次（RC2）：支持 default 态进入（歌曲起播画面恢复）——
+        # 原方法仅由 on_song_started 的 sequence 态分支调用，未设 state。
+        self.state = "sequence"
         commands: List = [LogCmd(
             "info", f"[编排] 歌曲队列逐歌切换（{old_rule_id}→{rule.rule_id}，"
                     f"《{song_name}》命中规则，count={self.counters[rule.rule_id]}，"
                     f"mood={tier.mood if tier else 'base'}）：画面直切新规则主线 hold，"
                     f"保持至歌曲结束（锚点+{remaining:.1f}s，⑨-B）")]
         commands.append(SwitchSegment(hold_step["step_id"], hold_step["segment"],
-                                      "immediate"))
+                                      "immediate", loop_mode="pingpong"))
         return commands
 
     def on_audio_complete(self, qtype: str, content: str, now: float,
@@ -1279,17 +1354,21 @@ class ChoreoEngine:
                     and step.get("audio_mode") == "none"):
                 seq["loop_i"] = int(seq.get("loop_i") or 0) + 1
                 seq["inflight"] = None
-                seq["current_deadline"] = None
-                seq["step_accepted"] = False
-                # 每轮换 step_id 防过期切换结果/回执误配；switch_at 用步自身值
-                # （segment_end 同段自然边界无缝循环，immediate 硬切）
-                seq["steps"][seq["idx"]] = dict(
-                    step, step_id=f"{seq['rule_id']}:main#loop{seq['loop_i']}")
+                # 2026-11-24 pingpong 批次：循环轮不再重发切段指令——主线切段
+                # 已带 loop_mode=pingpong（服务端帧级正放↔倒放无缝往返），每轮
+                # 重切段会重置为正放首帧（硬切回归）。改为仅延长 deadline：
+                # 步骤完成谓词=audio_mode none 计时，延 deadline 即续存，服务端
+                # 原段无缝往返直至 copy_done/保险丝到期/exit 切段到达。
+                # step_accepted 保持 True（无新切段，无回执等待）。
+                _loop_dur = float(step.get("duration_s") or 0.0)
+                if _loop_dur <= 0:
+                    _loop_dur = float(getattr(self.cfg, "step_timeout_s", 30.0))
+                seq["current_deadline"] = now + _loop_dur
                 commands.append(LogCmd(
                     "info", f"[编排] resident 主线循环第 {seq['loop_i']} 轮"
-                            f"（{seq['rule_id']}，文案音频未消费完，主线重播直至"
-                            "消费完成/保险丝到期——Gap B 2026-11-24 批次）"))
-                commands.extend(self._start_current_step(now))
+                            f"（{seq['rule_id']}，文案音频未消费完，deadline 延长"
+                            f"+{_loop_dur:.1f}s——服务端 pingpong 无缝往返，"
+                            "Gap B 2026-11-24 pingpong 批次）"))
                 return commands
             seq["main_done"] = True
         seq["idx"] += 1
@@ -2203,7 +2282,8 @@ class ActionChoreographer:
                 if isinstance(cmd, LogCmd):
                     getattr(logger, cmd.level, logger.info)(cmd.msg)
                 elif isinstance(cmd, SwitchSegment):
-                    result = self.edtalk_client.switch_segment(cmd.segment, at=cmd.at)
+                    result = self.edtalk_client.switch_segment(
+                        cmd.segment, at=cmd.at, loop_mode=cmd.loop_mode)
                     ok = bool(result.get("ok", True)) if isinstance(result, dict) else False
                     self._events.put(("switch_result", cmd.step_id, ok))
                     # lip 联动（T6/R-ceo2③/R-eng5 性能层）：按当前步素材口型标志
