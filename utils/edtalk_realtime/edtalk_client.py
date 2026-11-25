@@ -671,6 +671,24 @@ class EDTalkClient:
         except Exception:
             return {}
 
+    async def wait_last_push_displayed(self) -> None:
+        """等待最近一次 push 的段在服务端完整显示（2026-11-25 回执精确对齐）。
+
+        背景（问题①根因）：push_full 返回=受理（pending 提前放行时可早于
+        本段开播整整一段），完成回执在受理点即发 → 编排据此推进切段/终结
+        循环，末段音频尾被截（实测末句 1-2 字缺失）。分段消费回执须以
+        「服务端显示完成」为准——复用 _wait_flight_complete 既有精确判定
+        （seg_id≥期望段 ∧ produced≥total ∧ displayed≥produced），其 target
+        锚正是刚 push 的段。轮询超时按上句时长缩放强制放行（与飞行等待
+        同款 fail-open，宁可轻微滞后不悬挂消费循环）。异常全捕获放行。"""
+        try:
+            timeout = aiohttp.ClientTimeout(total=max(
+                30, float(self.last_duration_s or 0.0) + 30))
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                await self._wait_flight_complete(session, self.last_duration_s)
+        except Exception as e:
+            logger.debug(f"[EDTalk] 显示完成等待异常（放行）：{e}")
+
     def health_snapshot(self) -> dict:
         """推送健康度快照（供 main.py /edtalk_status 端点返回）。"""
         return {

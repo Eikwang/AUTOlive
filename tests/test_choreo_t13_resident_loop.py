@@ -9,6 +9,7 @@
 - 回执命中（归一化双向包含）→ copy_done → 推进 exit → 回默认
 - 非匹配回执不终结循环
 - loop_deadline 保险丝：到期后主线播完正常 exit（防回执丢失永循环）
+- 保险丝续期（2026-11-25）：分段回执持续到达时逐条刷新 loop_deadline，长文案消费不早退；回执停止后照常到期
 - enter 期回执到达只置位不跳过 enter
 - 恢复序列（挂起切回）hold 继续循环至回执终结 → 跳过再恢复直回默认
 - 非 none（tts）主线不循环（防每轮重复入队音频）
@@ -133,6 +134,33 @@ def test_loop_fuse_expires_to_exit():
     eng.on_tick(NOW[0])                     # loop1（loop_deadline=1060 未到）
     _accept_current(eng)
     NOW[0] = 1061.0                         # 超过保险丝
+    eng.on_tick(NOW[0])
+    assert eng.seq["main_done"] is True
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"
+
+
+def test_receipt_refreshes_loop_fuse_long_copy():
+    """保险丝续期（2026-11-25 主线循环早退回归修复）：分段消费回执=消费链
+    存活证明，逐条刷新 loop_deadline——长文案消费跨过原 60s 保险丝主线不
+    早退（实测 10/10 剩 2-3 句回默认跳过离场的根因）；回执停止后自最后一次
+    续期 step_timeout 到期照常 exit（防永循环语义保持）。"""
+    NOW[0] = 1000.0
+    eng = _engine([_dt_rule()])
+    _hit(eng, "dynamic_text", COPY)
+    _accept_current(eng)
+    NOW[0] = 1010.01
+    eng.on_tick(NOW[0])                     # loop1（原保险丝 1060 内）
+    assert eng.seq["loop_i"] == 1
+    NOW[0] = 1061.0                         # 超过原保险丝
+    _receipt(eng, "分段一的回执内容")        # 消费链存活 → loop_deadline 续期
+    assert eng.seq["loop_deadline"] == pytest.approx(1121.0)
+    eng.on_tick(NOW[0])                     # 主线轮到期 → 续循环（不早退 exit）
+    assert eng.seq["main_done"] is False
+    assert eng.seq["loop_i"] == 2
+    NOW[0] = 1150.0
+    _receipt(eng, "分段二的回执内容")
+    assert eng.seq["loop_deadline"] == pytest.approx(1210.0)
+    NOW[0] = 1211.0                         # 回执停止：最后一次续期到期
     eng.on_tick(NOW[0])
     assert eng.seq["main_done"] is True
     assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"

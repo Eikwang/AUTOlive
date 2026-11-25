@@ -55,6 +55,11 @@ class SynthesisMixin:
     # QueueMixin（queue_manager 不能反向 import 本模块）。
     _synth_gpu_sem = asyncio.Semaphore(2)
 
+    # 空队列等待轮询步长（2026-11-25 双 worker 冻结回归修复）：worker 在事件
+    # 循环线程内不得同步阻塞等新消息（见 _synth_worker 空队列分支注释）——
+    # 50ms 轮询相对 1.5-3s 的合成耗时无感。
+    _SYNTH_IDLE_POLL_S = 0.05
+
     async def message_queue_thread(self):
         """音频合成消息队列线程（2026-11-25 用户裁决#4：双 worker 并行合成
         ——出队在 message_queue_lock 内互斥，合成经 _synth_gpu_sem 控并发，
@@ -74,10 +79,18 @@ class SynthesisMixin:
                 # 豁免条目——每轮重 peek 重判）
                 while True:
                     with self.message_queue_lock:
-                        while not self.message_queue:
-                            # 消费者在消费完一个消息后，如果列表为空，则调用wait()方法阻塞自己，直到有新消息到来
-                            self.message_queue_not_empty.wait()  # 阻塞直到列表非空
-                        message = self.message_queue[0]  # peek：门控判定用
+                        message = self.message_queue[0] if self.message_queue else None  # peek：门控判定用
+                    if message is None:
+                        # 空队列等待（2026-11-25 双 worker 冻结回归修复）：不得在
+                        # 事件循环线程内同步阻塞等待（threading Condition.wait()
+                        # 无超时冻结整个主循环——实测：队列收尾时空等 worker 冻结
+                        # 循环，另一 worker 在飞合成的 to_thread 完成回执被扣住，
+                        # 末段入库推迟至下一条消息 notify（log5 实测 17s），无后
+                        # 续触发则永不入库=文案末句不播）——改异步短轮询；
+                        # message_queue_not_empty.notify() 保留（对纯线程调用方
+                        # 仍有效），轮询兜底保证必然推进
+                        await asyncio.sleep(self._SYNTH_IDLE_POLL_S)
+                        continue
                     if self.synth_gate_wait_s(message) <= 0:
                         with self.message_queue_lock:
                             # #4 双 worker（2026-11-25）：锁外门控判定期间队首

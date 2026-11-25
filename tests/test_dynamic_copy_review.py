@@ -222,8 +222,10 @@ class TestTaskSchedulerRewrite:
         未命中回退整段文案（保留 d4 内容匹配兼容）。原实现传 resp_content
         （不含关键词）→ 按关键词配置的规则恒 no_match（10:22 实证日志）。"""
         src = self._src()
-        assert "_choreo.on_dynamic_text(t3_keyword)" in src
-        assert "_choreo.on_dynamic_text(resp_content)" in src
+        # 2026-11-25 画面同步批次：关键词路径传文案全文作 completion_text
+        # （resident_copy 完成对齐锚），回退路径同锚
+        assert "_choreo.on_dynamic_text(\n                                        t3_keyword,\n                                        completion_text=resp_content)" in src
+        assert "_choreo.on_dynamic_text(\n                                            resp_content,\n                                            completion_text=resp_content)" in src
         assert "动态文案已触发动作编排（关键词={t3_keyword}）" in src
 
 

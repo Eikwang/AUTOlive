@@ -155,14 +155,20 @@ def _copy_tail_matched(rc_key: str, cc_key: str) -> bool:
     - match_value=关键词：分段回执永不命中 → 文案消费完画面滞留至
       loop_deadline 保险丝/下次触发（滞留根因，由 completion_text 注入修复）。
     新语义：回执键须覆盖文案结尾——整段回执（单段文案）包含全文仍命中；
-    分段回执只有末段（rc 归一化结尾 8 字符为其后缀）命中；早段/上一轮同文章
-    残留段（文章前句）天然不命中。取 8 字符容忍末段尾部小幅裁剪。"""
+    分段回执只有末段命中；早段/上一轮同文章残留段（文章前句）天然不命中。
+    尾窗自适应（2026-11-25 滞留回归修复）：固定 8 字符尾窗在末段归一化
+    长度<8 时越过段边界（log8 实测：末段「让生活更加美好」7 字，8 字窗
+    覆盖到前段尾字，回执永不命中 → copy_done 不落位 → 主线空转至保险丝
+    38s+ 才回默认）——改取 min(8, len(rc), len(cc)) 重叠尾对尾比较；
+    1 字符重叠亦安全（调用点双条件：末段回执 + group_pending<=0 组空）。"""
     if not rc_key:
         return False
     if rc_key in cc_key:
         return True
-    tail = rc_key[-8:]
-    return bool(cc_key) and cc_key.endswith(tail)
+    n = min(8, len(rc_key), len(cc_key))
+    if n <= 0:
+        return False
+    return cc_key.endswith(rc_key[-n:])
 
 
 def select_tier(rule: RuleCfg, count: int) -> Optional[object]:
@@ -349,6 +355,12 @@ class ChoreoEngine:
         """
         now = self.clock()
         commands: List = []
+        # 完成锚刷新（2026-11-25 问题③根修，先于一切接受/拒绝分支）：文案
+        # 音频照常入播放链（no_match/被拒只影响画面）——凡携带 completion_text
+        # 的 dynamic_text 触发一律刷新完成对齐锚至最新文章，防尾段回执与
+        # 旧锚失配（详见 _patch_completion_anchor docstring）
+        if trigger_type == "dynamic_text":
+            self._patch_completion_anchor(completion_text)
         if not self.cfg.enable or not self.enabled_rules:
             return {"accepted": False, "takeover": False, "rule": None, "commands": commands,
                     "reason": "disabled", "retry_after_s": None}
@@ -516,6 +528,22 @@ class ChoreoEngine:
         _start_sequence 重放时无 completion_text（回退 match_value+保险丝）。"""
         if (completion_text and self.seq is not None
                 and self.seq.get("resident")):
+            self.seq["resident_copy"] = str(completion_text)
+
+    def _patch_completion_anchor(self, completion_text: str):
+        """完成锚刷新（2026-11-25 问题③根修）：动态文案任务多文章连发时，
+        后续文章的编排触发可被拒/忽略（song hold 拒绝、条件2 in_progress、
+        resident_updated 等），但**文案音频照常入播放链**（正交声明）——
+        尾段回执（最后一篇文章末段）与旧锚（首篇文章）永不命中，copy_done
+        只能靠 loop_deadline 保险丝（实测歌毕文案播完后画面滞留 60s+ 不回
+        默认）。凡携带 completion_text 的 dynamic_text 触发一律把锚刷新到
+        最新文章（活动 resident 序列与挂起态两处），保证尾段回执可命中。"""
+        if not completion_text:
+            return
+        susp = self.song_suspended
+        if susp is not None and susp.get("kind") == "resident":
+            susp["copy"] = str(completion_text)
+        if self.seq is not None and self.seq.get("resident"):
             self.seq["resident_copy"] = str(completion_text)
 
     def _match_rule(self, trigger_type: str, match_value: str, data: dict):
@@ -1307,6 +1335,17 @@ class ChoreoEngine:
         if (not inflight and self.seq.get("resident")
                 and self.seq.get("resident_copy")
                 and qtype == "trends_copywriting"):
+            # 保险丝续期（2026-11-25 主线循环早退回归修复）：分段消费回执=
+            # 消费链存活证明——每条回执刷新 loop_deadline。原实现 loop_deadline
+            # 序列启动时一次性固定（触发+step_timeout_s），循环轮只延长
+            # current_deadline——长文案（分段数×串行合成耗时）必超保险丝，
+            # 主线在消费中途被杀（实测 60s 保险丝 vs 26 段≈112s 消费，剩
+            # 2-3 句时即回默认跳过离场，10/10 复现）。回执持续推进则循环
+            # 不灭；回执停止（链路死亡）最后一次回执后 step_timeout 到期
+            # 照常走保险丝收尾，防永循环语义保持。
+            if not self.seq.get("copy_done"):
+                self.seq["loop_deadline"] = now + float(
+                    getattr(self.cfg, "step_timeout_s", 60.0) or 60.0)
             rc = _completion_key(self.seq["resident_copy"])
             cc = _completion_key(content)
             if (rc and cc and _copy_tail_matched(rc, cc)

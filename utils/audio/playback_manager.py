@@ -340,9 +340,19 @@ class PlaybackMixin:
                     return queue.pop(0), 0.0, False
                 if not _has_new_song:
                     # 垃圾时间=伴奏自由消费期（用户 2026-11-25 确认为刻意
-                    # 设计，与 ②b 收尾间隙分支语义统一）：全直通 pop(0)，
-                    # 动态文案等所有条目在此窗口无留队豁免
-                    return queue.pop(0), 0.0, False
+                    # 设计，与 ②b 收尾间隙分支语义统一）。2026-11-25 问题②
+                    # 口径补齐：其它消息优先于文案——队列存在非文案条目时
+                    # 先消费其它消息（段边界让位语义同无锚态），仅剩文案
+                    # 时 pop(0) 续播文案
+                    _pop_i = 0
+                    for _i, _e in enumerate(queue):
+                        if (isinstance(_e, dict)
+                                and not (_e.get("type") == "trends_copywriting"
+                                         and isinstance(
+                                             _e.get("split_group"), dict))):
+                            _pop_i = _i
+                            break
+                    return queue.pop(_pop_i), 0.0, False
                 anchor["wrapping"] = False  # 新歌到来：回到唱歌时间机制
                 logger.info("[song] 垃圾时间结束（新点歌触发），进入新唱歌时间")
             now = time.monotonic()
@@ -1025,10 +1035,18 @@ class PlaybackMixin:
                             break
                         _interlude_entry = None
                         with self.voice_tmp_path_queue_lock:
+                            # 2026-11-25 问题②修复：文案分段不进前奏借位（用户
+                            # 口径：唱歌时间文案一律留队，人声播完后的垃圾时间
+                            # 才续播）——此前仅 R5c 歌段排除，前奏空窗被在飞文案
+                            # 分段占据（log7 17:01:16~22 实测连播 4 段，人声
+                            # 延迟与伴奏失步）
                             for _i, _e in enumerate(self.voice_tmp_path_queue):
                                 if (isinstance(_e, dict)
                                         and not (_e.get("type") == "song"
-                                                 and _e.get("song_segment"))):
+                                                 and _e.get("song_segment"))
+                                        and not (_e.get("type") == "trends_copywriting"
+                                                 and isinstance(
+                                                     _e.get("split_group"), dict))):
                                     # 按遍历索引弹（R5c 修正：此前 pop(0) 与
                                     # 扫描条件错位——找到队尾答谢却弹了队首
                                     # 歌段，5 段被当插播连推互相 flush）
@@ -1095,7 +1113,7 @@ class PlaybackMixin:
         _wait_flight = not (data_json.get("type") == "song"
                             and data_json.get("song_segment"))
         try:
-            await self.edtalk_client.push_full(
+            _push_ok = await self.edtalk_client.push_full(
                 voice_tmp_path, content=data_json.get("content", ""),
                 wait_flight=_wait_flight,
             )
@@ -1159,6 +1177,17 @@ class PlaybackMixin:
         # G1（2026-10-28）：builtin 播放器的完成回传已由 audio_core 注册
         # 完成回调补齐（_fire_completion 携带条目 type/content）——两路
         # 互斥不双报（EDTalk 激活走本路径，未激活走 builtin 播放回调）。
+        # 2026-11-25 问题①修复：文案分段**末段**回执延迟至服务端显示完成
+        # ——push_full 返回=受理（pending 提前放行时可早于本段开播一段），
+        # 受理点即发回执使 copy_done 提前落位，exit 立切截掉末句尾字
+        # （实测 1-2 字缺失）。仅延迟末段（copy_done 依赖尾段回执；早段
+        # 回执只作保险丝续期，受理口径无副作用），推送失败不等待。
+        if (data_json.get("type") == "trends_copywriting"
+                and isinstance(data_json.get("split_group"), dict)
+                and int((data_json["split_group"] or {}).get("seq", 0))
+                == int((data_json["split_group"] or {}).get("total", 1)) - 1
+                and _push_ok):
+            await self.edtalk_client.wait_last_push_displayed()
         self._notify_choreo_complete(data_json)
         # G2（2026-10-28 消费回传批次）：Sort 侧显式消费回执
         # （消费完成点①——EDTalk push 路径；report_consumed 内部吞异常）

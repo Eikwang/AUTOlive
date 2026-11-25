@@ -243,7 +243,8 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("一号链接")  # 2026-11-21 语义修正：关键词优先直连
+        fake.on_dynamic_text.assert_called_once_with(
+            "一号链接", completion_text="给大家介绍洗洁精")  # 2026-11-21 关键词直连；2026-11-25 画面同步批次补 completion_text
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "给大家介绍洗洁精"
 
@@ -254,7 +255,8 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("关键词")  # 2026-11-21 语义修正：首个分隔符前的关键词直连
+        fake.on_dynamic_text.assert_called_once_with(
+            "关键词", completion_text="第一段|第二段")  # 2026-11-21 首个分隔符前关键词直连；2026-11-25 补 completion_text
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "第一段|第二段"
 
@@ -265,7 +267,8 @@ class TestKeywordCopySplit:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("1号链接")  # 2026-11-21 语义修正：规范化关键词直连
+        fake.on_dynamic_text.assert_called_once_with(
+            "1号链接", completion_text="文案内容")  # 2026-11-21 规范化关键词直连；2026-11-25 补 completion_text
 
     def test_empty_keyword_falls_back_to_full_chain(self, config_chain_scheduler):
         """关键词为空=向下兼容：整行原文走既有全链（hub 识别照旧）。"""
@@ -397,6 +400,7 @@ class TestKeywordCopyDegrade:
         fake = _fake_choreo(True)
         with _mock_patch("utils.orchestration.get_choreographer", return_value=fake):
             _run_one_cycle(ts)
-        fake.on_dynamic_text.assert_called_once_with("关键词")  # 2026-11-21 语义修正：关键词优先直连（LLM 改写不影响触发词）
+        fake.on_dynamic_text.assert_called_once_with(
+            "关键词", completion_text="改写后|含竖线|的输出")  # 2026-11-21 关键词优先直连（LLM 改写不影响触发词）；2026-11-25 补 completion_text
         sent = mh.audio_synthesis_handle.call_args[0][0]
         assert sent["content"] == "改写后|含竖线|的输出"
