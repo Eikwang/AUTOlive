@@ -792,9 +792,17 @@ class TaskScheduler:
                                 from utils.orchestration import get_choreographer
                                 _choreo = get_choreographer()
                                 if _choreo is not None:
-                                    _accepted = bool(_choreo.on_dynamic_text(t3_keyword))
+                                    # completion_text（2026-11-25 画面同步修复）：
+                                    # T3 关键词路径传文案全文作完成对齐锚
+                                    # （resident_copy），否则分段回执对关键词
+                                    # 永不命中——文案消费完画面滞留至保险丝
+                                    _accepted = bool(_choreo.on_dynamic_text(
+                                        t3_keyword,
+                                        completion_text=resp_content))
                                     if not _accepted:
-                                        _accepted = bool(_choreo.on_dynamic_text(resp_content))
+                                        _accepted = bool(_choreo.on_dynamic_text(
+                                            resp_content,
+                                            completion_text=resp_content))
                                     if _accepted:
                                         logger.info(f"动态文案已触发动作编排（关键词={t3_keyword}）")
                                     else:

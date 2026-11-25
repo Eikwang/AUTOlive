@@ -42,6 +42,13 @@ _SONG_PREROLL_S = 0.3
 # 移除的强制起播，预算预检始终保留）。
 _INTERLUDE_MIN_CONSUME_S = 3.0
 
+# 间奏借位高优豁免线（2026-11-25 问题2方案A，用户裁决）：≥此值的借位候选
+# （点歌应答/答谢等）豁免窗口预算门——实测前奏期间答谢被「应答时长>剩余
+# 窗口」预算门挤到间奏、而前奏空窗仍被在飞文案尾巴占据；高优音频改为立即
+# 借位播出，人声起点顺延由 EDTalk 帧锁定播放等待自动吸收（时间轴漂移由
+# e13 失步声明兜底，与既有「人声照唱」降级语义对称）。
+_INTERLUDE_PRIORITY_BYPASS = 80
+
 # 念白单飞门超时（2026-11-16 弹幕↔回复配对批次）：念白消费后其配对回复
 # 超此秒数仍未出队（LLM 失败/流式熔断/登记竞态遗漏）→ 强制放行后续念白，
 # 防配对等待卡死消费链。LLM+TTS 正常 3-8s，15s 覆盖慢速模型冗余。
@@ -377,17 +384,26 @@ class PlaybackMixin:
                 remaining = window_end - now
                 window_total = window_end - (last_end if last_end > 0 else now)
                 min_consume = self._interlude_min_consume_s_locked()
-                if remaining < min_consume or window_total < min_consume:
-                    # 硬性条件：剩余/窗口不足最小余量 → 不起音频（避免说
-                    # 一半）——等到期推人声；队满则遗弃未插播普通条目
-                    # （2026-11-25 裁决#3，不积累到歌毕）
-                    self._abandon_song_overflow_locked()
-                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
-                if self._entry_duration_s(head) > remaining:
-                    # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
-                    # 不足最小余量时已由上面拦住）；队满遗弃同上
-                    self._abandon_song_overflow_locked()
-                    return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                # 方案A（2026-11-25 问题2）：≥80 高优条目（点歌应答/答谢）借位
+                # 豁免窗口预算门——宁顺延人声起点（EDTalk 帧锁定等待+e13 兜底）
+                # 不把高优答谢积压到间奏
+                _p = self._entry_priority_of(head)
+                if not (_p is not None and _p >= _INTERLUDE_PRIORITY_BYPASS):
+                    if remaining < min_consume or window_total < min_consume:
+                        # 硬性条件：剩余/窗口不足最小余量 → 不起音频（避免说
+                        # 一半）——等到期推人声；队满则遗弃未插播普通条目
+                        # （2026-11-25 裁决#3，不积累到歌毕）
+                        self._abandon_song_overflow_locked()
+                        return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                    if self._entry_duration_s(head) > remaining:
+                        # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
+                        # 不足最小余量时已由上面拦住）；队满遗弃同上
+                        self._abandon_song_overflow_locked()
+                        return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                else:
+                    logger.info(
+                        f"[song] 高优条目（权重{_p}）豁免间奏预算门提前借位："
+                        f"{head.get('voice_path', '')}")
                 return queue.pop(0), 0.0, True
             if _head_is_copy:
                 # 队首=文案分段：向后扫描首个非歌段非文案条目按窗口插播
@@ -401,23 +417,30 @@ class PlaybackMixin:
                     window_total = window_end - (
                         last_end if last_end > 0 else now)
                 _min_consume = self._interlude_min_consume_s_locked()
-                if not _gated or (remaining >= _min_consume
-                                  and window_end - (
-                                      last_end if last_end > 0 else now)
-                                  >= _min_consume):
-                    for i, entry in enumerate(queue):
-                        if not isinstance(entry, dict):
-                            continue
-                        if (entry.get("type") == "song"
-                                and entry.get("song_segment")):
-                            continue  # 歌段留队（②a 到期/窗口门管）
-                        if (entry.get("type") == "trends_copywriting"
-                                and isinstance(entry.get("split_group"), dict)):
-                            continue  # 唱歌时间不插播文案（用户裁决）
-                        if (_gated and self._entry_duration_s(entry)
-                                > remaining):
+                for i, entry in enumerate(queue):
+                    if not isinstance(entry, dict):
+                        continue
+                    if (entry.get("type") == "song"
+                            and entry.get("song_segment")):
+                        continue  # 歌段留队（②a 到期/窗口门管）
+                    if (entry.get("type") == "trends_copywriting"
+                            and isinstance(entry.get("split_group"), dict)):
+                        continue  # 唱歌时间不插播文案（用户裁决）
+                    # 方案A（2026-11-25 问题2）：≥80 高优音频豁免窗口预算门
+                    # （前奏期间答谢不再被「时长>剩余」挤到间奏；人声顺延由
+                    # EDTalk 帧锁定等待+e13 失步声明兜底）
+                    _p = self._entry_priority_of(entry)
+                    _bypass = (_gated and _p is not None
+                               and _p >= _INTERLUDE_PRIORITY_BYPASS)
+                    if _gated and not _bypass:
+                        if (remaining < _min_consume
+                                or window_end - (
+                                    last_end if last_end > 0 else now)
+                                < _min_consume):
+                            continue  # 窗口不足最小余量 → 不起音频（避免说一半）
+                        if self._entry_duration_s(entry) > remaining:
                             continue  # 预算：播不完窗口 → 下一条
-                        return queue.pop(i), 0.0, True
+                    return queue.pop(i), 0.0, True
                 # 仅文案在队（或全部超窗）→ 等到期推人声，文案留队；
                 # 队满则遗弃未插播普通条目（2026-11-25 裁决#3）
                 self._abandon_song_overflow_locked()
@@ -448,8 +471,11 @@ class PlaybackMixin:
                     # 锚存续期间文案一律留队，歌毕锚清后续消费）
                 dur = self._entry_duration_s(entry)
                 min_consume = self._interlude_min_consume_s_locked()
-                if remaining - dur < min_consume:
-                    continue  # 超窗/不足最小余量 → 看下一条
+                # 方案A（2026-11-25 问题2）：≥80 高优借位豁免最小余量门
+                _p = self._entry_priority_of(entry)
+                if not (_p is not None and _p >= _INTERLUDE_PRIORITY_BYPASS):
+                    if remaining - dur < min_consume:
+                        continue  # 超窗/不足最小余量 → 看下一条
                 return queue.pop(i), 0.0, True  # R5b：借位走 EDTalk 口型
             # 全队列不可借 → 等窗口；队满则遗弃未插播普通条目（2026-11-25
             # 裁决#3，不积累到歌毕）
@@ -542,6 +568,17 @@ class PlaybackMixin:
             due = t0 + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
             return max(due, last_end)
         return None
+
+    def _entry_priority_of(self, item):
+        """条目有效权重数值化（O7 单源：priority_override 优先于类型映射表；
+        与 queue_manager._entry_priority 同经 audio_priority——其实现为闭包
+        绑映射不可复用，此处直连单一源）。异常保守 None=未识别。"""
+        try:
+            from utils.audio.audio_priority import entry_priority
+            p = entry_priority(item, self.config.get("filter", "priority_mapping"))
+            return int(p) if p is not None else None
+        except Exception:
+            return None
 
     def _interlude_min_consume_s_locked(self):
         """间奏插播最小余量自适应（2026-11-25 用户裁决#7，须锁内调用）：
@@ -1367,14 +1404,36 @@ class PlaybackMixin:
         """编排播完回调（M3 提取，2026-10-28 消费批次：EDTalk/builtin 两路共用）。
         O6：choreo_step_id 随条目透传——按实例序号精确匹配（同内容重复入队不误配），
         未透传路径编排侧退回 (type,content) 匹配。异常隔离（失败退编排 F1 超时
-        兜底，不影响播放循环）。"""
+        兜底，不影响播放循环）。
+
+        2026-11-25 画面同步修复：split_group 条目附 group_pending（该组在两队列
+        的剩余段数）——编排侧文案完成判定须「结尾锚定+组消费完成」双条件，早段
+        回执不再误登记 copy_done。两锁顺序取用（message→voice），与
+        cancel_choreo_audio 同序，不嵌套持有。"""
         try:
             from utils.orchestration import get_choreographer
             _choreo = get_choreographer()
             if _choreo is not None:
+                _group_pending = 0
+                sg = data_json.get("split_group")
+                if isinstance(sg, dict) and sg.get("id"):
+                    gid = sg.get("id")
+                    with self.message_queue_lock:
+                        _group_pending += sum(
+                            1 for d in self.message_queue
+                            if isinstance(d, dict)
+                            and isinstance(d.get("split_group"), dict)
+                            and d["split_group"].get("id") == gid)
+                    with self.voice_tmp_path_queue_lock:
+                        _group_pending += sum(
+                            1 for d in self.voice_tmp_path_queue
+                            if isinstance(d, dict)
+                            and isinstance(d.get("split_group"), dict)
+                            and d["split_group"].get("id") == gid)
                 _choreo.on_audio_complete(
                     data_json.get("type", ""), data_json.get("content", ""),
-                    data_json.get("choreo_step_id") or None)
+                    data_json.get("choreo_step_id") or None,
+                    group_pending=_group_pending)
         except Exception as e:
             logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{e}")
 

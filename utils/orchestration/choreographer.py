@@ -146,6 +146,25 @@ def _completion_key(text: str) -> str:
     return "".join(ch for ch in _normalize_text(text) if ch.isalnum())
 
 
+def _copy_tail_matched(rc_key: str, cc_key: str) -> bool:
+    """文案完成回执「结尾锚定」判定（2026-11-25 画面同步修复）。
+
+    旧语义（双向包含 rc∈cc or cc∈rc）与分段消费回执粒度不兼容（实测两面向）：
+    - match_value=全文：任意早段回执都是全文子串 → 第一段消费完即误判完成
+      （画面提前回默认根因）；
+    - match_value=关键词：分段回执永不命中 → 文案消费完画面滞留至
+      loop_deadline 保险丝/下次触发（滞留根因，由 completion_text 注入修复）。
+    新语义：回执键须覆盖文案结尾——整段回执（单段文案）包含全文仍命中；
+    分段回执只有末段（rc 归一化结尾 8 字符为其后缀）命中；早段/上一轮同文章
+    残留段（文章前句）天然不命中。取 8 字符容忍末段尾部小幅裁剪。"""
+    if not rc_key:
+        return False
+    if rc_key in cc_key:
+        return True
+    tail = rc_key[-8:]
+    return bool(cc_key) and cc_key.endswith(tail)
+
+
 def select_tier(rule: RuleCfg, count: int) -> Optional[object]:
     """触发档选择（2026-10-27 用户裁决：计次进档「从第 N 次起」下界语义）。
 
@@ -313,7 +332,8 @@ class ChoreoEngine:
 
     # ---------- 触发判定（同步纯内存，on_gift/on_keyword/on_song 路径） ----------
 
-    def decide_trigger(self, trigger_type: str, match_value: str, data: dict) -> dict:
+    def decide_trigger(self, trigger_type: str, match_value: str, data: dict,
+                       completion_text: str = "") -> dict:
         """触发判定。Returns: {accepted, takeover, rule, commands, reason, retry_after_s}
 
         reason 枚举（GAP-3/F2 义务；退役值见下）：拒绝值 =
@@ -370,6 +390,7 @@ class ChoreoEngine:
                 self.counters[rule.rule_id] = self.counters.get(rule.rule_id, 0) + 1
                 self._seq_counter += 1
                 seq["pending_requeue"] = build_steps(rule, self.counters[rule.rule_id], self._seq_counter)
+                self._patch_resident_copy(completion_text)
                 commands.append(LogCmd("info", f"[编排] 规则 {rule.rule_id} 同键重入（第 {self.counters[rule.rule_id]} 次），当前 exit 播完后重排"))
                 return {"accepted": True, "takeover": rule.has_tts_audio(), "rule": rule, "commands": commands,
                         "reason": "requeued", "retry_after_s": None}
@@ -473,6 +494,7 @@ class ChoreoEngine:
             # standard 抢占终止（总开关 off=现行语义 d22）。
             result = self._interrupt_sequence(rule, data, now, commands,
                                               match_value=match_value)
+            self._patch_resident_copy(completion_text)
             result["reason"] = "interrupted"
             result["retry_after_s"] = None
             return result
@@ -480,9 +502,21 @@ class ChoreoEngine:
         # DEFAULT 态：启动新序列（条件1 的正常入口）
         result = self._start_sequence(rule, data, now, commands,
                                       match_value=match_value)
+        self._patch_resident_copy(completion_text)
         result["reason"] = "accepted"
         result["retry_after_s"] = None
         return result
+
+    def _patch_resident_copy(self, completion_text: str):
+        """completion_text 注入（2026-11-25 画面同步修复）：T3「关键词|文案」
+        格式触发时 resident_copy 必须是文案全文而非关键词——文案完成回执
+        （分段文本）按归一化结尾锚定对齐 resident_copy，关键词永远无法命中
+        （实测表现：文案消费完画面滞留至 loop_deadline 保险丝/下次触发）。
+        仅 resident（dynamic_text）序列生效；queued 画面队列稍后经
+        _start_sequence 重放时无 completion_text（回退 match_value+保险丝）。"""
+        if (completion_text and self.seq is not None
+                and self.seq.get("resident")):
+            self.seq["resident_copy"] = str(completion_text)
 
     def _match_rule(self, trigger_type: str, match_value: str, data: dict):
         """规则匹配（义务 C3-3/WP-10：gift 全等+min_price / keyword 独立词表子串 / song 可空=任意）。
@@ -1230,8 +1264,13 @@ class ChoreoEngine:
         return commands
 
     def on_audio_complete(self, qtype: str, content: str, now: float,
-                          step_id: Optional[str] = None) -> List:
+                          step_id: Optional[str] = None,
+                          group_pending: int = 0) -> List:
         """播放完成回调关联（CL-2 + O6 实例序号，2026-10-28 消费批次）。
+
+        group_pending（2026-11-25 画面同步修复）：回执条目自身 split_group 组
+        在两队列的剩余段数（播放侧计算传入；无组条目=0）——文案完成判定须
+        组内全部消费完，早段回执不再误登记 copy_done。
 
         匹配规则：回调携带 step_id（choreo_step_id 全链透传，非空）时按实例
         序号精确匹配——同内容重复入队（同关键词重复触发/同模板答谢/同曲重点）
@@ -1244,27 +1283,34 @@ class ChoreoEngine:
         # ⑦-B（2026-11-17 动作编排审查批次）resident 文案消费精确对齐——两处：
         # ①挂起期间（打断者序列在播）：文案完成回执先行登记 susp["copy_done"]
         # （恢复时跳过 hold 直回默认，防闪帧）；
+        # 2026-11-25 画面同步修复：完成判定改「结尾锚定（_copy_tail_matched）
+        # + 组消费完成（group_pending<=0）」双条件——分段回执早段/异组残留段
+        # 不再误判完成，group_pending 由播放侧按回执条目自身 split_group 组
+        # 在两队列的剩余段数计算（无组条目恒 0=直通）。
         susp = self.song_suspended
         if (susp is not None and susp.get("kind") == "resident"
                 and susp.get("copy") and not susp.get("copy_done")
                 and qtype == "trends_copywriting"):
             rc = _completion_key(susp["copy"])
             cc = _completion_key(content)
-            if rc and cc and (rc in cc or cc in rc):
+            if (rc and cc and _copy_tail_matched(rc, cc)
+                    and int(group_pending or 0) <= 0):
                 susp["copy_done"] = True
                 logger.info("[编排] 挂起播报文案音频消费完成（插播期间登记，"
                             "恢复时跳过切回直回默认）")
                 return []
         # ②恢复 hold 期间：inflight 必空（hold 步纯画面/无步级音轨）——文案完成
-        # 回执归一化包含匹配命中=文案音频真实消费完，hold 精确提前结束回默认
-        # （不再只依赖 step_timeout 保险丝；qtype 过滤防他链路音频误配）
+        # 回执「结尾锚定+组消费完成」双条件命中=文案音频真实消费完，hold 精确
+        # 提前结束回默认（不再只依赖 step_timeout 保险丝；qtype 过滤防他链路
+        # 音频误配）
         inflight = self.seq.get("inflight")
         if (not inflight and self.seq.get("resident")
                 and self.seq.get("resident_copy")
                 and qtype == "trends_copywriting"):
             rc = _completion_key(self.seq["resident_copy"])
             cc = _completion_key(content)
-            if rc and cc and (rc in cc or cc in rc):
+            if (rc and cc and _copy_tail_matched(rc, cc)
+                    and int(group_pending or 0) <= 0):
                 # Gap B（2026-11-24 批次）：登记 copy_done 后仅当主线在播才推进
                 # （enter 期回执到达只置位——跳过 enter 会丢过渡段；exit 期置位
                 # 无副作用）。循环中的主线由此精确终结（不再只依赖保险丝）。
@@ -1729,15 +1775,19 @@ class ActionChoreographer:
             logger.error(f"[编排] on_keyword 异常（忽略）：problem=编排判定异常；cause={type(e).__name__}: {e}；fix=已降级忽略")
             return False
 
-    def on_dynamic_text(self, text: str) -> bool:
+    def on_dynamic_text(self, text: str, completion_text: str = "") -> bool:
         """d4（2026-11-05 编排优化批次）：动态文案源直连——动态文案内容整段作为
         match_value 触发 dynamic_text 规则（不走关键词匹配；match 可空=任意源
         事件命中，非空=content 子串过滤）。task_scheduler 格式化路径与
-        keyword_hub copywriting 源共用本入口。"""
+        keyword_hub copywriting 源共用本入口。
+
+        completion_text（2026-11-25 画面同步修复）：T3「关键词|文案」路径传
+        文案全文——触发匹配用关键词、完成对齐用全文（resident_copy 注入）。"""
         try:
             with self._lock:
                 decision = self.engine.decide_trigger(
-                    "dynamic_text", str(text or ""), {})
+                    "dynamic_text", str(text or ""), {},
+                    completion_text=str(completion_text or ""))
                 self._dispatch(decision["commands"])
             return bool(decision["accepted"])
         except Exception as e:
@@ -1787,16 +1837,19 @@ class ActionChoreographer:
             return False
 
     def on_audio_complete(self, qtype: str, content: str,
-                          step_id: Optional[str] = None) -> None:
+                          step_id: Optional[str] = None,
+                          group_pending: int = 0) -> None:
         """播放完成回调（playback_manager EDTalk push 路径每条目完成处，asyncio 线程）。
 
         O6（2026-10-28 消费批次）：回调携带 choreo_step_id（非空）时按实例序号
-        精确匹配，同内容重复入队不再误配。
+        精确匹配，同内容重复入队不再误配。group_pending（2026-11-25 画面同步
+        修复）：回执条目 split_group 组两队列剩余段数（文案完成判定用）。
         """
         try:
             with self._lock:
                 commands = self.engine.on_audio_complete(qtype, str(content or ""),
-                                                         self._clock(), step_id)
+                                                         self._clock(), step_id,
+                                                         group_pending)
             self._dispatch(commands)
         except Exception as e:
             logger.error(f"[编排] 完成回调异常：problem=完成关联异常；cause={type(e).__name__}: {e}；fix=依赖 F1 超时兜底推进")

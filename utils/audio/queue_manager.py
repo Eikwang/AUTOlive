@@ -1168,12 +1168,28 @@ class QueueMixin:
                           and data_json.get("type") == "trends_copywriting"
                           and isinstance(data_json.get("split_group"), dict)):
                         # 分账编组（2026-11-21 动态文案审查批次）：动态文案分段
-                        # 队尾追加 seq 保序，其它消息按权重插到文案段之前
+                        # 不插队于其它消息（其它消息按权重插到文案段之前）；
+                        # 2026-11-25 双 worker 乱序根修：组内按 seq 有序插入
+                        # （并发合成完成序≠队序，纯队尾追加会倒序播放——插到
+                        # 同组更大 seq 的首段之前，无更大 seq=追加队尾天然保序）
+                        _sg = data_json["split_group"]
                         insert_position = len(queue)
+                        for i, it in enumerate(queue):
+                            it_sg = (it.get("split_group")
+                                     if isinstance(it, dict) else None)
+                            if (isinstance(it_sg, dict)
+                                    and it_sg.get("id") == _sg.get("id")
+                                    and isinstance(it_sg.get("seq"), int)
+                                    and isinstance(_sg.get("seq"), int)
+                                    and it_sg["seq"] > _sg["seq"]):
+                                insert_position = i
+                                break
                         _insert_and_notify(insert_position, data_json)
-                        logger.debug(f"动态文案分段追加队尾（不插队）position={insert_position}")
+                        logger.debug(
+                            f"动态文案分段按 seq 有序插入 position={insert_position}")
                         inserted = True
-                        insert_msg = {"code": 200, "msg": "动态文案分段追加队尾（不插队）"}
+                        insert_msg = {"code": 200,
+                                      "msg": f"动态文案分段有序插入 position={insert_position}"}
                     else:
                         # 规则1：未满 → 权重序插入（从尾向头找第一个 ≥ 新权重的条目，插其后=接组尾）
                         insert_position = 0
