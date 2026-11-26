@@ -54,6 +54,13 @@ _INTERLUDE_PRIORITY_BYPASS = 80
 # 防配对等待卡死消费链。LLM+TTS 正常 3-8s，15s 覆盖慢速模型冗余。
 _READ_REPLY_GATE_TIMEOUT = 15.0
 
+# 配对门分级续等窗（2026-11-26 缺陷1 根修）：首次 15s 超时且组回复已在两队列
+# 可见（已入队、仍在合成/排队——满载洪峰下 LLM 生成+背压门+GPU 并发≤2 排队
+# 可能 >15s）→ 续等一轮此值再放弃（总上限 25s）；已续等过仍超时=真失败，
+# 放弃并计数。超时率告警口径：obs read_reply_gate_timeout 持续增长=阈值失效
+# 信号；read_reply_gate_extend=分级续等触发率（应远低于超时率）。
+_READ_REPLY_GATE_EXTEND_S = 10.0
+
 # 伴奏闪避（2026-11-12 伴奏闪避批次，用户需求）：前奏/间奏窗口借位消费其它
 # 音频（播报/答谢等非歌曲音频）时伴奏压低系数——保证播报可辨；歌曲人声不
 # 触发（严格 borrowed 口径）。固定 0.5（用户决定不加配置面）。恢复=播报
@@ -275,10 +282,25 @@ class PlaybackMixin:
             return None  # 动态文案组：维持段边界插队现状（2026-11-16 批次设计）
         queue = self.voice_tmp_path_queue
         gid = ctx.get("id")
-        idx = next((i for i, e in enumerate(queue)
-                    if isinstance(e, dict)
+        # 2026-11-26 双 worker 乱序根修（7b）：组内按最小 seq 定位下一段——
+        # 双 worker 合成完成序≠seq 序，段可能乱序入库；此前按「第一个同组段」
+        # 推进会把后入库的小 seq 段排到前面（倒序播出）。缺 seq 防御：不参与
+        # 定位比较的段按队序兜底（无 seq 段仅在全部缺失时取第一个）。
+        _best_idx = None
+        _best_seq = None
+        _first_idx = None
+        for i, e in enumerate(queue):
+            if not (isinstance(e, dict)
                     and isinstance(e.get("split_group"), dict)
-                    and e["split_group"].get("id") == gid), None)
+                    and e["split_group"].get("id") == gid):
+                continue
+            if _first_idx is None:
+                _first_idx = i
+            _sq = e["split_group"].get("seq")
+            if (isinstance(_sq, int)
+                    and (_best_seq is None or _sq < _best_seq)):
+                _best_idx, _best_seq = i, _sq
+        idx = _best_idx if _best_idx is not None else _first_idx
         if idx is None:
             self._atomic_group_ctx = None  # 组完成（无同组剩余段）→ 正常权重 pop
             return None
@@ -538,13 +560,37 @@ class PlaybackMixin:
           entry None 且 wait_s>0=门控等待秒数（0.5=轮询节奏，调用方锁外
           sleep 后重查）；entry None 且 wait_s=0=无 pending（调用方常规 pop）。"""
         now = time.monotonic()
+        try:
+            from utils.obs_stats import record_drop
+        except Exception:
+            record_drop = None
         with QueueMixin._reply_gate_lock:
             pending = QueueMixin._reply_gate_pending
-            # pending 超时兜底：回复迟迟未出队（LLM 失败/竞态遗漏）→ 放弃
+            # pending 超时兜底（2026-11-26 分级超时根修，缺陷1）：此前直接放弃
+            # =念白/回复错位（内容错配级，比丢消息更隐蔽）——满载洪峰下回复
+            # 合成排队（LLM 生成+背压门+GPU 并发≤2）可能 >15s。改两级判定：
+            # ① 首次超时且组回复已在两队列可见（已入队、仍在合成/排队）→
+            #   续等一轮 EXTEND_S（pending 时刻回拨使新超时点=now+EXTEND_S）；
+            # ② 已续等过 或 不可见（大概率 LLM 失败/生产端放弃路径漏登记）→
+            #   放弃 + 超时计数（阈值失效告警口径）。
             for lk in [lk for lk, ts in pending.items()
-                       if now - ts >= _READ_REPLY_GATE_TIMEOUT]:
+                       if now - ts >= self._reply_gate_timeout_s()]:
+                _visible = self._reply_group_visible_locked(lk, queue)
+                if (_visible
+                        and lk not in QueueMixin._reply_gate_extended):
+                    QueueMixin._reply_gate_extended[lk] = now
+                    pending[lk] = (now - self._reply_gate_timeout_s()
+                                   + self._reply_gate_extend_s())
+                    if record_drop:
+                        record_drop("read_reply_gate_extend")
+                    continue
                 del pending[lk]
                 QueueMixin._reply_gate_abandoned[lk] = now
+                QueueMixin._reply_gate_extended.pop(lk, None)
+                if record_drop:
+                    record_drop("read_reply_gate_timeout")
+                    # B4 越界告警（阈值失效信号，60s 冷却）
+                    self._alarm_reply_gate_timeout()
             if not pending:
                 return None, 0.0, False
         # 有在途等待：允许弹出第一个非念白条目（等待中的回复或插播音频），
@@ -563,6 +609,72 @@ class PlaybackMixin:
             return queue.pop(i), 0.0, False
         # 队列全是念白/文案段 → 等待回复合成入队（调用方按 wait_s 轮询重查）
         return None, 0.5, False
+
+    def _reply_gate_timeout_s(self):
+        """配对门超时读侧（B1 阈值配置化 2026-11-26）：config 键
+        play_audio.reply_gate_timeout_s，缺省/非法=15.0（原常量值）。
+        定标依据：LLM P95 + TTS P95×回复段数 + 排队余量，见
+        utils/threshold_calibration.py。"""
+        try:
+            v = float(self.config.get("play_audio", "reply_gate_timeout_s"))
+        except (TypeError, ValueError, AttributeError):
+            return _READ_REPLY_GATE_TIMEOUT
+        return v if v > 0 else _READ_REPLY_GATE_TIMEOUT
+
+    def _reply_gate_extend_s(self):
+        """配对门分级续等窗读侧（B1）：config 键 play_audio.reply_gate_extend_s，
+        缺省/非法=10.0。"""
+        try:
+            v = float(self.config.get("play_audio", "reply_gate_extend_s"))
+        except (TypeError, ValueError, AttributeError):
+            return _READ_REPLY_GATE_EXTEND_S
+        return v if v > 0 else _READ_REPLY_GATE_EXTEND_S
+
+    _gate_timeout_alarm_last = 0.0
+
+    def _alarm_reply_gate_timeout(self):
+        """B4 越界告警（2026-11-26 二期）：配对门超时放弃=基础窗+续等窗仍装
+        不下回复链路延迟（LLM+背压排队+TTS）——阈值失效信号。60s 冷却防逐句
+        刷屏，附观测比率（extend/timeout 计数）。"""
+        try:
+            now = time.monotonic()
+            if now - PlaybackMixin._gate_timeout_alarm_last < 60.0:
+                return
+            PlaybackMixin._gate_timeout_alarm_last = now
+            drops = {}
+            try:
+                from utils.obs_stats import snapshot as _obs_snapshot
+                drops = (_obs_snapshot() or {}).get("drops", {})
+            except Exception:
+                pass
+            t = drops.get("read_reply_gate_timeout", 0)
+            x = drops.get("read_reply_gate_extend", 0)
+            logger.warning(
+                f"problem=念白配对门超时放弃（基础窗 {self._reply_gate_timeout_s():.0f}s"
+                f"+续等窗 {self._reply_gate_extend_s():.0f}s 内回复未出队，念白/回复"
+                f"可能错位）；cause=LLM+合成排队延迟超过阈值；"
+                f"fix=按 utils/threshold_calibration.py 定标建议调大 "
+                f"play_audio.reply_gate_timeout_s（累计超时 {t} 次/续等 {x} 次）")
+        except Exception:
+            pass
+
+    def _reply_group_visible_locked(self, link, voice_queue):
+        """配对组两队列可见性（分级超时判定用，2026-11-26 缺陷1 根修；须持
+        voice_tmp_path_queue_lock）：同 reply_link 组的任一条目已在待播放队列
+        （锁内扫描）或 message_queue（锁外快照——[:] 原地替换保对象身份惯例，
+        锁外读者安全）。误读漏读只影响是否多等一轮（保守判定），不破坏放弃
+        语义——回复完全不可见时按原 15s 口径及时放行，不因误判饿死消费链。"""
+        link = str(link)
+        for e in voice_queue:
+            if isinstance(e, dict) and str(e.get("reply_link") or "") == link:
+                return True
+        try:
+            for e in list(self.message_queue):
+                if isinstance(e, dict) and str(e.get("reply_link") or "") == link:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _next_song_due_locked(self, anchor):
         """队列中下一个 song 切片段的窗口结束时刻（due=t0+start−预补偿，含
@@ -627,8 +739,8 @@ class PlaybackMixin:
             if (entry.get("type") == "trends_copywriting"
                     and isinstance(entry.get("split_group"), dict)):
                 continue  # 锚存续期间文案一律留队（2026-11-24 裁决）
-            if self._reply_group_protected(entry):
-                continue  # S1 遗弃保护：消费中回复组不丢
+            if self._candidate_reply_protected(entry):
+                continue  # S1 遗弃保护：消费中回复组不丢（快照化：读条目冻结快照）
             queue.pop(i)
             link = entry.get("reply_link")
             if link:

@@ -109,6 +109,13 @@ class SynthesisMixin:
                 # 两队列满载豁免保护（完整处理并消费闭环，早于播放出口 pending）
                 if isinstance(message, dict) and message.get("reply_link"):
                     self.mark_reply_group_active(message["reply_link"])
+                # S2 组完整性保护（2026-11-26）：切分组任一段出队（合成开始）
+                # 即登记组活跃——组剩余段在两队列满载路径不丢不驱逐、同组段
+                # 永不互逐（不依赖 reply_link，聊天源长回复切分组同覆盖；
+                # log9 实证：点歌 hold 期间 7 段回复第 6/7 段自相蚕食逐出第 2/3 段）
+                _sg_msg = message.get("split_group") if isinstance(message, dict) else None
+                if isinstance(_sg_msg, dict) and _sg_msg.get("id"):
+                    self._mark_split_group_active(_sg_msg["id"])
 
                 # 此处的message数据，是等待合成音频的数据，此数据经过了优先级排队在此线程中被取出，即将进行音频合成。
                 # 由于有些对接的项目自带音频播放功能，所以为保留相关机制的情况下做对接，此类型的对接源码应写于此处
@@ -489,6 +496,12 @@ class SynthesisMixin:
                     segments = (self._split_audio_segments(voice_path, _seg_seconds)
                                 if _seg_seconds > 0 else None)
                 if segments:
+                    # B2 段数峰值观测（2026-11-26 二期）：S2 TTL 定标数据源
+                    try:
+                        from utils.obs_stats import record_split_total
+                        record_split_total(len(segments))
+                    except Exception:
+                        pass
                     for s in segments:
                         data_json = {
                             "type": "song",
@@ -611,6 +624,12 @@ class SynthesisMixin:
                 # 丢弃风险（log warning，不打断切分——防丢优先于防提示）。
                 _group_id = f"{message['type']}_{time.time_ns()}"
                 _total = len(sentences)
+                # B2 段数峰值观测（2026-11-26 二期）：S2 TTL 定标数据源
+                try:
+                    from utils.obs_stats import record_split_total
+                    record_split_total(_total)
+                except Exception:
+                    pass
                 # 2026-11-21 动态文案审查批次：动态文案分段=分账编组（queue_manager
                 # 满载豁免+容量分账），无丢弃面——容量预检告警不适用
                 if message['type'] != "trends_copywriting":

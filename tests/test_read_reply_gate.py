@@ -34,9 +34,17 @@ class _GateFixture(QueueMixin):
         self.voice_tmp_path_queue_not_empty = threading.Condition(
             lock=self.voice_tmp_path_queue_lock)
         self.voice_tmp_path_queue_not_empty_flag = False
+        # 阈值配置化（2026-11-26 二期）：门超时读侧依赖 config——最小宿主
+        # 无 config 时走缺省常量（与生产缺省一致）
+        self.config = None
 
     # 绑定 PlaybackMixin 的门方法（宿主 Audio 同型：QueueMixin+PlaybackMixin）
     read_reply_gate_locked = PlaybackMixin._read_reply_gate_locked
+    # 阈值配置化读侧 + 分级超时可见性判定（2026-11-26 二期新增依赖，同源绑定）
+    _reply_gate_timeout_s = PlaybackMixin._reply_gate_timeout_s
+    _reply_gate_extend_s = PlaybackMixin._reply_gate_extend_s
+    _reply_group_visible_locked = PlaybackMixin._reply_group_visible_locked
+    _alarm_reply_gate_timeout = PlaybackMixin._alarm_reply_gate_timeout
 
 
 @pytest.fixture(autouse=True)
@@ -182,21 +190,28 @@ def test_gate_no_link_entry_held_during_pending():
 # ------------------------------------------------- 超时兜底
 
 def test_gate_timeout_forces_release():
-    """回复迟迟未出队（LLM 失败/竞态遗漏）超 15s → pending 转 abandoned
-    强制放行，后续念白不被永久卡死。"""
+    """回复迟迟未出队超 15s → 分级超时（2026-11-26 二期缺陷1 根修）：
+    回复已在队列可见（已入队、仍在排队）→ 续等一轮（不放弃），且门控扫描
+    直接弹出回复 A（旧契约超时放弃后返回 (None,0.0) 交常规权重 pop——念白 B
+    (60) 会先于回复 A (50) 出队=错位；新契约由门弹出回复消除该错位面）。"""
     q = _GateFixture()
     q.reply_gate_track_popped(_rc("rc-A"))
     QueueMixin._reply_gate_pending["rc-A"] = (
         time.monotonic() - _READ_REPLY_GATE_TIMEOUT - 1.0)
     queue = [_rc("rc-B"), _reply("rc-A")]
     entry, gate, _ = q.read_reply_gate_locked(queue)
-    assert (entry, gate) == (None, 0.0)
+    # 门弹出回复 A（配对落地，念白/回复不错位）
+    assert entry is not None and entry["reply_link"] == "rc-A"
+    assert gate == 0.0
+    assert "rc-A" in QueueMixin._reply_gate_pending  # 续等登记（未放弃）
+    assert "rc-A" in QueueMixin._reply_gate_extended
+    # 回复出队 → pending 解除，下一条念白直通
+    q.reply_gate_track_popped(entry)
     assert "rc-A" not in QueueMixin._reply_gate_pending
-    assert "rc-A" in QueueMixin._reply_gate_abandoned
-    # 下一条念白直通（abandoned 豁免：其回复出队不误登记/不误解除）
     queue2 = [_rc("rc-B")]
     entry2, gate2, _ = q.read_reply_gate_locked(queue2)
     assert (entry2, gate2) == (None, 0.0)
+    assert queue2 == [_rc("rc-B")]  # 念白 B 留待常规 pop
 
 
 def test_gate_within_timeout_still_holds():

@@ -30,6 +30,10 @@ _TTS_WINDOW_MAX = 200          # 合成耗时环形窗（条）
 _lock = threading.Lock()
 _drop_counts = {}              # bucket -> int
 _drop_total = 0
+_lock_wait_stats = {}          # bucket -> {"n", "sum_s", "max_s"}（锁等待观测）
+_queue_depth_stats = {}        # bucket -> {"real_max","normal_max","last_*"}（深度峰值）
+_llm_samples = deque(maxlen=_LATENCY_WINDOW_MAX)       # LLM 请求耗时环形窗（秒）
+_split_total_max = 0           # 切分段数峰值（split_group.total）
 _latency_samples = deque(maxlen=_LATENCY_WINDOW_MAX)   # 秒（float）
 _tts_samples = deque(maxlen=_TTS_WINDOW_MAX)           # {"s": 耗时秒, "ok": bool}
 _choreo_mute_events = deque(maxlen=50)                 # {"waited_s": ...}（超 60s 打点事件）
@@ -66,6 +70,44 @@ def record_tts(seconds: float, ok: bool):
         pass
 
 
+def record_llm(seconds: float, ok: bool):
+    """LLM 请求耗时样本（2026-11-26 二期 B2：配对门/背压门阈值定标数据源
+    ——完整回复生成延迟；成败分计）。观测失败不外抛。"""
+    try:
+        with _lock:
+            _llm_samples.append({"s": round(float(seconds), 3), "ok": bool(ok)})
+    except Exception:
+        pass
+
+
+def record_split_total(total: int):
+    """切分段数峰值（2026-11-26 二期 B2：S2 TTL 定标数据源——组最大段数
+    ×段间合成间隔≈组最长消费周期）。观测失败不外抛。"""
+    global _split_total_max
+    try:
+        with _lock:
+            _split_total_max = max(_split_total_max, int(total))
+    except Exception:
+        pass
+
+
+def record_queue_depth(bucket: str, real: int, normal: int):
+    """队列深度峰值（2026-11-26 二期 B4 越界观测）：真实列表长度 vs 分账口径
+    长度——背景流切片（song 切片段/文案分段）不占分账容量但占真实列表长度，
+    差值=O(n) 扫描放大器可视化面（缺陷4）。观测失败不外抛。"""
+    try:
+        with _lock:
+            st = _queue_depth_stats.setdefault(
+                bucket, {"real_max": 0, "normal_max": 0,
+                         "last_real": 0, "last_normal": 0})
+            st["real_max"] = max(st["real_max"], int(real))
+            st["normal_max"] = max(st["normal_max"], int(normal))
+            st["last_real"] = int(real)
+            st["last_normal"] = int(normal)
+    except Exception:
+        pass
+
+
 def record_lip_switch(mode: str, since_last_s: float):
     """X4（2026-11-05 编排优化批次）：song 序列 lip_mode 人声段/间奏段切换
     观测（切换次数+距上次切换耗时）。观测失败不外抛。"""
@@ -90,6 +132,22 @@ def record_choreo_mute(waited_s: float):
         pass
 
 
+def record_lock_wait(bucket: str, seconds: float):
+    """锁等待样本（2026-11-26 队列审查批次缺陷4：获取耗时=等待+调度开销，
+    分桶累计 n/sum/max——P99 语义由 max+sum/n 近似，供「是否成吞吐瓶颈」
+    判据；写入点在锁内首行，本函数成本必须远小于锁 hold，仅 dict 更新）。
+    观测失败不外抛。"""
+    try:
+        with _lock:
+            st = _lock_wait_stats.setdefault(
+                bucket, {"n": 0, "sum_s": 0.0, "max_s": 0.0})
+            st["n"] += 1
+            st["sum_s"] = round(st["sum_s"] + float(seconds), 6)
+            st["max_s"] = round(max(st["max_s"], float(seconds)), 6)
+    except Exception:
+        pass
+
+
 def _pctl(samples, q: float):
     """环形窗样本分位数（样本不足返回 None）。"""
     if not samples:
@@ -107,7 +165,11 @@ def snapshot(include_gpu: bool = False) -> dict:
             drops = dict(_drop_counts)
             lat = list(_latency_samples)
             tts = list(_tts_samples)
+            llm = list(_llm_samples)
             mute = list(_choreo_mute_events)
+            lock_wait = {b: dict(v) for b, v in _lock_wait_stats.items()}
+            queue_depth = {b: dict(v) for b, v in _queue_depth_stats.items()}
+            split_total_max = _split_total_max
         info = {
             "drops": drops,
             "drop_total": sum(drops.values()),
@@ -123,8 +185,17 @@ def snapshot(include_gpu: bool = False) -> dict:
                 "p50_s": _pctl([x.get("s", 0) for x in tts], 0.50),
                 "p95_s": _pctl([x.get("s", 0) for x in tts], 0.95),
             },
+            "llm_synth": {
+                "n": len(llm),
+                "ok_n": sum(1 for x in llm if x.get("ok")),
+                "p50_s": _pctl([x.get("s", 0) for x in llm], 0.50),
+                "p95_s": _pctl([x.get("s", 0) for x in llm], 0.95),
+            },
+            "split_total_max": split_total_max,
+            "queue_depth": queue_depth,
             "choreo_mute_over_60s": len(mute),
             "choreo_mute_last": (mute[-1] if mute else None),
+            "lock_wait": lock_wait,
             "uptime_s": round(time.time() - _started_at, 1),
         }
         if include_gpu:

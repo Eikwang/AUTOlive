@@ -314,6 +314,13 @@ class TaskScheduler:
                 # 调度循环异常不再杀死线程（2026-10-31 审查批次：原实现 while
                 # 无保护——job 内未捕获异常即静默停摆全部定时任务）
                 logger.error(f"定时任务调度循环异常（已恢复）：{traceback.format_exc()}")
+            # B3 阈值定标（2026-11-26 二期）：周期定标报告（600s 节流+启动延迟，
+            # 内部全兜底不影响调度主链）
+            try:
+                from utils.threshold_calibration import maybe_run_calibration
+                maybe_run_calibration(self.config)
+            except Exception:
+                pass
             time.sleep(1)  # 控制每次循环的间隔时间
 
     def start_schedule_thread(self):
@@ -573,6 +580,55 @@ class TaskScheduler:
         except Exception:
             return False  # 访问面异常=忙（保守跳过，不阻塞任务线程）
 
+    # 动态文案消费完成门（2026-11-26 log9 实证修复）：入队时刻的记录值与
+    # 保险丝阈值。log9 实证场景：文案 25 段 ~135s 全部合成完毕（待合成队列
+    # 空=旧门放行），但点歌 hold 冻结消费仍有 ~9 段未播——新文案又触发生成
+    # 入队，两份文案音频在待播放队列背靠背堆积。守卫语义自本批起恢复为
+    # 「上一文案消费完成才触发新文案」（2026-11-21 裁决门只看合成队列的
+    # 收窄语义退役），但采用精确判定而非恢复旧三条件闲时门：其它消息
+    # （回复/答谢）积压不误判忙，只在文案本体未播完时拦截。
+    _TRENDS_COPY_CONSUME_FUSE_S = 600.0  # 保险丝：入队后超时无末段回执强制放行（flush/撤销等无回执路径防永久卡死）
+
+    def _trends_last_enqueue_mono(self):
+        return getattr(self, "_trends_copy_enqueue_mono", 0.0)
+
+    def _trends_copy_consumed(self) -> bool:
+        """上一轮动态文案消费完成判定（三重信号）：
+        ① 待合成/待播放两队列无 trends_copywriting 残留（未合成完/已合成待播）；
+        ② 上一轮入队时刻之后存在 trends_copywriting 消费回执（G2 分类型单调
+           时刻；EDTalk 末段回执点=displayed 完成、builtin=完成回调——覆盖
+           两队列已空但末段仍在数字人/播放器里在播的窗口）；
+        ③ 保险丝：入队后超 _TRENDS_COPY_CONSUME_FUSE_S 无回执强制放行
+           （flush/编排撤销/丢弃等无回执异常路径防动态文案永久停摆）。
+        音频组件未就绪/本轮前从未入队=无上一轮残留，放行。"""
+        audio = getattr(self.my_handle, "audio", None)
+        if audio is None:
+            return True
+        # ① 两队列文案残留检查
+        for qname in ("message_queue", "voice_tmp_path_queue"):
+            q = getattr(audio, qname, None) or []
+            if any(isinstance(e, dict) and e.get("type") == "trends_copywriting"
+                   for e in q):
+                return False
+        # ② 上一轮入队时刻之后的文案消费回执
+        enq = self._trends_last_enqueue_mono()
+        if enq <= 0.0:
+            return True
+        try:
+            from utils.audio.queue_manager import QueueMixin
+            consumed = QueueMixin._consumed_mono_by_type.get("trends_copywriting", 0.0)
+        except Exception:
+            consumed = 0.0
+        if consumed >= enq:
+            return True
+        # ③ 保险丝兜底
+        if time.monotonic() - enq > self._TRENDS_COPY_CONSUME_FUSE_S:
+            logger.warning(
+                f"动态文案消费完成判定触发保险丝（入队后超 "
+                f"{self._TRENDS_COPY_CONSUME_FUSE_S:.0f}s 无末段消费回执），本轮放行防停摆")
+            return True
+        return False
+
     def start_trends_copywriting(self):
         """启动动态文案任务（T9 实装：本地文案→可选 LLM 改写→TTS 播放）"""
         if not self.config.get("trends_copywriting", "enable"):
@@ -640,7 +696,14 @@ class TaskScheduler:
 
             try:
                 while self.is_running:
-                    # 触发门第一查（2026-11-21 用户裁决：触发机制只看待合成消
+                    # 触发门第一查之①（2026-11-26 log9 实证修复）：上一文案
+                    # 消费未完成 → 跳过本轮（设计约束：一个动态文案任务没有
+                    # 完成消费前，绝对不再触发新的动态文案任务）
+                    if not self._trends_copy_consumed():
+                        logger.info("动态文案本轮跳过：上一文案未消费完成")
+                        _sleep_play_interval()
+                        continue
+                    # 触发门第一查之②（2026-11-21 用户裁决：触发机制只看待合成消
                     # 息队列——队列为空即触发；已合成音频播报中不阻止新任务，
                     # 段间让位由分账编组保证）。开始生成本轮文案前忙 → 跳过本
                     # 轮（不告警不重试，等下个 play_interval 周期再查）
@@ -769,11 +832,12 @@ class TaskScheduler:
                         "username": "动态文案",
                         "content": resp_content,
                     }
-                    # 触发门第二查（2026-11-21 用户裁决：同第一查，只看待合成
-                    # 消息队列）：生成（含 LLM 改写）期间队列转忙 → 丢弃本轮
-                    # （不告警不重试；宁可少播一条文案，不挤占待合成队列）
-                    if not self._is_synth_queue_idle():
-                        logger.info("动态文案本轮跳过：系统忙")
+                    # 触发门第二查（2026-11-26）：生成（含 LLM 改写）期间状态
+                    # 复核——①上一文案仍未消费完成或 ②待合成队列转忙 → 丢弃
+                    # 本轮（不告警不重试；宁可少播一条文案，不与上一文案堆积）
+                    if not (self._trends_copy_consumed()
+                            and self._is_synth_queue_idle()):
+                        logger.info("动态文案本轮跳过：生成期间上一文案未消费完成或系统转忙")
                         _sleep_play_interval()
                         continue
                     if self.my_handle is not None:
@@ -821,6 +885,10 @@ class TaskScheduler:
                             except Exception as _kw_err:
                                 logger.debug(f"动态文案中枢识别异常（忽略）：{_kw_err}")
                         self.my_handle.audio_synthesis_handle(message)
+                        # 消费完成门（2026-11-26）：记录入队单调时刻——触发门
+                        # 以「此时刻之后的 trends_copywriting 消费回执」判定
+                        # 上一文案（本轮）消费完成，未完成前不再触发新文案
+                        self._trends_copy_enqueue_mono = time.monotonic()
                         logger.info(f"动态文案已入播放链：{source_path}")
                     else:
                         logger.warning("动态文案：my_handle 未就绪，本轮跳过播放")

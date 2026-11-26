@@ -39,6 +39,17 @@ def _is_bg_slice_entry(e):
                      and isinstance(e.get("split_group"), dict))))
 
 
+def _split_group_id_of(e):
+    """条目 split_group.id 提取单源（S2 组完整性保护 2026-11-26）：无组=None。
+    用于满载驱逐候选的「同组不互逐」过滤——同 split_group 的切分段互为组内
+    序列，任一段被逐=回复/文案截断（log9 实证：7 段回复第 6/7 段入队时经
+    同权重取代逐出第 2/3 段）。"""
+    sg = e.get("split_group") if isinstance(e, dict) else None
+    if isinstance(sg, dict) and sg.get("id"):
+        return str(sg["id"])
+    return None
+
+
 def normal_queue_len(q):
     """容量分账口径单源（2026-11-21 队列优化批次 E3）：song 切片段=背景流
     不占普通音频队列容量、动态文案分段同入分账编组——两队列满载判定与长回复
@@ -169,6 +180,7 @@ class QueueMixin:
     _consumed_receipts = []       # 环形窗（最近 _CONSUMED_RECEIPT_MAX 条回执）
     _consumed_total = 0           # 累计消费回执数
     _consumed_by_type = {}        # 累计分类型计数
+    _consumed_mono_by_type = {}   # 分类型最近回执单调时刻（动态文案消费完成门 2026-11-26）
     _consumed_lock = threading.Lock()
 
     # F-ENG-3（T6-批 2026-11-06 协作机制流程审查）：编排撤销登记表——
@@ -191,6 +203,17 @@ class QueueMixin:
     # S1 遗弃保护（2026-11-21 队列优化批次）：reply_link -> monotonic（回复组
     # 消费中——念白出队即登记、回复分段出队续期，TTL 兜底清理）
     _reply_gate_active = {}
+    # S2 组完整性保护（2026-11-26 log9 实证修复）：split_group.id -> monotonic
+    # （长回复切分组任一分段出队——合成侧/消费侧——即登记活跃，TTL 兜底清理）。
+    # 实证场景：点歌 hold 期间 7 段回复的第 6/7 段经「同权重取代」逐出第 2/3 段
+    # =组内自相蚕食（聊天源无 reply_link，S1 保护不覆盖）——活跃组段满载不丢
+    # 不驱逐，且同组段永不互相驱逐。
+    _split_group_active = {}
+    # 配对门分级续等登记（2026-11-26 缺陷1 根修）：reply_link -> monotonic
+    # （首次 15s 超时且组回复已在两队列可见 → 续等一轮 _READ_REPLY_GATE_EXTEND_S
+    # 再放弃；已续等过仍超时=真失败）。登记随放弃/回复出队/生产端放弃三路清理，
+    # 无独立 TTL 需求（pending 生命周期覆盖 extended）。
+    _reply_gate_extended = {}
     _reply_gate_lock = threading.Lock()
     _REPLY_GATE_TTL_S = 120.0   # abandoned/pending 惰性清理上限
     _REPLY_GATE_ACTIVE_TTL_S = 300.0  # active 惰性清理上限（覆盖最长组消费周期）
@@ -211,6 +234,8 @@ class QueueMixin:
                 gates[str(link)] = now
                 # 念白若已被消费（pending 在途），放弃=立即解除等待
                 QueueMixin._reply_gate_pending.pop(str(link), None)
+                # 分级续等登记同步解除（组已放弃，不再续等）
+                QueueMixin._reply_gate_extended.pop(str(link), None)
                 # S1：无回复路径同时解除组活跃保护（组已不存在遗弃面）
                 QueueMixin._reply_gate_active.pop(str(link), None)
         except Exception:
@@ -222,6 +247,29 @@ class QueueMixin:
         try:
             if not isinstance(data_json, dict):
                 return
+            now = time.monotonic()
+            # S2 组完整性保护（2026-11-26）：切分组任一段出队=组进入消费
+            # ——登记组活跃（不依赖 reply_link，聊天源长回复切分组同样
+            # 受保护；组剩余段在两队列满载时不丢不驱逐，TTL 兜底）
+            _sg = data_json.get("split_group")
+            if isinstance(_sg, dict) and _sg.get("id"):
+                with QueueMixin._reply_gate_lock:
+                    gates = QueueMixin._split_group_active
+                    ttl = self._group_active_ttl_s()
+                    # B4 越界观测：TTL 保险丝失效计数（口径同 _mark_split_group_active）
+                    ts = gates.get(str(_sg["id"]))
+                    if ts is not None and (now - ts) > ttl:
+                        try:
+                            from utils.obs_stats import record_drop
+                            record_drop("group_active_ttl_lapsed")
+                        except Exception:
+                            pass
+                    for k in [k for k, ts in gates.items()
+                              if now - ts > ttl]:
+                        del gates[k]
+                    gates[str(_sg["id"])] = now
+                # 快照化（2026-11-26 二期）：组激活回填两队列同组条目
+                self._stamp_queues_by_gid(_sg["id"], True)
             link = data_json.get("reply_link")
             if not link:
                 return
@@ -236,10 +284,17 @@ class QueueMixin:
                     QueueMixin._reply_gate_pending[link] = now
                 else:
                     QueueMixin._reply_gate_pending.pop(link, None)
+                    # 分级续等登记同步解除（回复已出队，配对落地）
+                    QueueMixin._reply_gate_extended.pop(link, None)
                     # S1（2026-11-21 队列优化批次）：回复分段出队=组进入连续消费
                     # ——登记/续期组活跃（TTL 兜底），组剩余段在两队列满载时
                     # 不丢不驱逐（完整处理并消费闭环）
                     QueueMixin._reply_gate_active[link] = now
+                # 快照化（2026-11-26 二期）：S1 组活跃回填（consumer 出队路径
+                # 锁外调用——调用方 playback 在 voice 锁释放后调用，无重入面）
+                _link_effective = str(link)
+            if not is_rc:
+                self._stamp_queues_by_link(_link_effective, True)
         except Exception:
             logger.debug(f"念白配对出队回执异常（忽略）：{traceback.format_exc()}")
 
@@ -254,11 +309,84 @@ class QueueMixin:
             with QueueMixin._reply_gate_lock:
                 gates = QueueMixin._reply_gate_active
                 for k in [k for k, ts in gates.items()
-                          if now - ts > QueueMixin._REPLY_GATE_ACTIVE_TTL_S]:
+                          if now - ts > self._group_active_ttl_s()]:
                     del gates[k]
                 gates[str(link)] = now
+                # 快照化（2026-11-26 二期）：放弃链接不授予保护（与活查询
+                # abandoned 优先语义一致）
+                effective = str(link) not in QueueMixin._reply_gate_abandoned
+            # 回填两队列同 link 条目快照（gate 锁外——组提前激活，先期入队
+            # 的分段快照由此刷新；锁外调用点=_synth_worker pop 后，无锁重入面）
+            self._stamp_queues_by_link(link, effective)
         except Exception:
             logger.debug(f"回复组活跃登记异常（忽略）：{traceback.format_exc()}")
+
+    def _group_active_ttl_s(self):
+        """S1/S2 组活跃 TTL 读侧（B1 阈值配置化 2026-11-26）：config 键
+        filter.reply_group_active_ttl_s，缺省/非法=300（原类常量值）。
+        定标依据见 utils/threshold_calibration.py。"""
+        try:
+            v = float(self.config.get("filter", "reply_group_active_ttl_s"))
+        except (TypeError, ValueError, AttributeError):
+            return 300.0
+        return v if v > 0 else 300.0
+
+    def _mark_split_group_active(self, group_id):
+        """S2 组完整性保护登记（2026-11-26）：切分组任一分段出队（合成侧
+        最早信号）即登记活跃——组剩余段在两队列满载路径不丢不驱逐，且同组
+        段永不互相驱逐（不依赖 reply_link，聊天源切分组同覆盖）。异常吞掉。"""
+        if not group_id:
+            return
+        try:
+            now = time.monotonic()
+            with QueueMixin._reply_gate_lock:
+                gates = QueueMixin._split_group_active
+                ttl = self._group_active_ttl_s()
+                # B4 越界观测：TTL 保险丝失效计数（组停顿超 TTL 后恢复登记
+                # ——此窗口内该组段曾失去快照保护，观测面可见）
+                ts = gates.get(str(group_id))
+                if ts is not None and (now - ts) > ttl:
+                    try:
+                        from utils.obs_stats import record_drop
+                        record_drop("group_active_ttl_lapsed")
+                    except Exception:
+                        pass
+                for k in [k for k, ts in gates.items()
+                          if now - ts > ttl]:
+                    del gates[k]
+                gates[str(group_id)] = now
+            # 回填两队列同组条目快照（先期入队段由此获得保护；锁外调用点
+            # 同 mark_reply_group_active）
+            self._stamp_queues_by_gid(group_id, True)
+        except Exception:
+            logger.debug(f"切分组活跃登记异常（忽略）：{traceback.format_exc()}")
+
+    def _split_group_protected(self, data_json, exclude_song_active=False):
+        """S2 组完整性保护判定（2026-11-26）：data_json 带 split_group 且组
+        活跃（登记 TTL 内）→ 该段满载不丢不驱逐、同组段互不驱逐。
+
+        exclude_song_active=True（驱逐候选过滤场景）时点歌 hold 期间不保护
+        ——唱歌期回复组遵循「顶替-保留最新」最新优先语义，旧组让位新组；
+        同组不互逐与入队豁免不受该开关影响（组完整性恒成立）。异常吞掉。"""
+        if not isinstance(data_json, dict):
+            return False
+        sg = data_json.get("split_group")
+        if not isinstance(sg, dict) or not sg.get("id"):
+            return False
+        gid = str(sg["id"])
+        now = time.monotonic()
+        try:
+            with QueueMixin._reply_gate_lock:
+                ts = QueueMixin._split_group_active.get(gid)
+                active = (ts is not None
+                          and (now - ts) <= self._group_active_ttl_s())
+            if not active:
+                return False
+            if exclude_song_active and self._song_state_active():
+                return False
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _insert_pos_before_copy_locked(queue):
@@ -279,6 +407,37 @@ class QueueMixin:
                 return i + 1
         return 0
 
+    @staticmethod
+    def _split_group_seq_insert_pos_locked(queue, data_json):
+        """切分段 seq 有序插入位单源（2026-11-26 双 worker 乱序根修泛化，须持
+        队列锁）：任意带 split_group{id,seq} 条目（动态文案分段/弹幕/聊天源
+        长回复切分段）在待播放队列按组内 seq 有序插入——插到同组更大 seq 的
+        首段之前，无更大 seq=追加队尾天然保序。
+
+        泛化背景：2026-11-25 双 worker 乱序根修只覆盖动态文案分段，
+        reply/comment 长回复切分段漏网——双 worker 合成完成序≠seq 序，
+        消费侧组原子门按「第一个同组段」推进，乱序入库即按完成序倒序播出。
+
+        权重排序不变式不受影响：同组段同权重，seq 有序插入落在同权重区段内
+        （权重排序队列中更高权重条目必在同组段之前，插入点不越过它们）。
+        song 切片段走 song_segment 字段（无 split_group）返回队尾；缺 seq
+        防御性返回队尾。"""
+        _sg = (data_json.get("split_group")
+               if isinstance(data_json, dict) else None)
+        _seq = (_sg.get("seq") if isinstance(_sg, dict) else None)
+        if not (isinstance(_sg, dict) and _sg.get("id")
+                and isinstance(_seq, int)):
+            return len(queue)
+        for i, it in enumerate(queue):
+            it_sg = (it.get("split_group")
+                     if isinstance(it, dict) else None)
+            if (isinstance(it_sg, dict)
+                    and it_sg.get("id") == _sg.get("id")
+                    and isinstance(it_sg.get("seq"), int)
+                    and it_sg["seq"] > _seq):
+                return i
+        return len(queue)
+
     def _reply_group_protected(self, data_json) -> bool:
         """弹幕问答编组遗弃保护判定（S1，2026-11-21 队列优化批次）：reply_link
         命中且组已进入消费流程（念白已出队 pending / 组活跃 TTL 内）→ 组剩余段
@@ -298,9 +457,77 @@ class QueueMixin:
                 if link in QueueMixin._reply_gate_pending:
                     return True
                 ts = QueueMixin._reply_gate_active.get(link)
-                return ts is not None and (now - ts) <= QueueMixin._REPLY_GATE_ACTIVE_TTL_S
+                return ts is not None and (now - ts) <= self._group_active_ttl_s()
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    # 保护判定快照化（2026-11-26 队列审查缺陷2 根治）：条目入队时把 S1/S2
+    # 保护判定结果冻结进条目自身字段（_guard_link_active/_guard_sg_active），
+    # 驱逐/顶替候选过滤只读字段——判定与动作使用同一份状态（TOCTOU 根治），
+    # 且满载扫描不再对每个候选嵌套获取 gate 锁（锁内开销下降）。
+    # 快照同步：① 入队时活查询 stamp（决策时刻即冻结）；② 组激活/解除时
+    # 回填刷新两队列同组条目（保持与活查询语义一致）。TTL 过期后快照可能
+    # 偏保守（多保护少驱逐）——TTL 本身是保险丝，方向安全可接受。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _stamp_guard_new(data_json, reply_protected, sg_protected):
+        """新条目入队 stamp（调用方已算出活查询结果，零额外查询）。"""
+        if isinstance(data_json, dict):
+            data_json["_guard_link_active"] = bool(reply_protected)
+            data_json["_guard_sg_active"] = bool(sg_protected)
+
+    def _stamp_queues_by_link(self, link, active):
+        """S1 快照回填（gate 锁外调用）：刷新两队列中同 reply_link 条目的
+        _guard_link_active。逐队列独立取锁（不嵌套），不破坏队列锁→登记锁序。"""
+        if not link:
+            return
+        link = str(link)
+        for qname in ("message_queue", "voice_tmp_path_queue"):
+            try:
+                q = getattr(self, qname)
+                lk = getattr(self, qname + "_lock")
+                with lk:
+                    for e in q:
+                        if (isinstance(e, dict)
+                                and str(e.get("reply_link") or "") == link):
+                            e["_guard_link_active"] = bool(active)
+            except Exception:
+                pass  # 回填失败退超时兜底语义（观测不阻塞主链）
+
+    def _stamp_queues_by_gid(self, gid, active):
+        """S2 快照回填（gate 锁外调用）：刷新两队列中同 split_group.id 条目
+        的 _guard_sg_active。锁序同上。"""
+        if not gid:
+            return
+        gid = str(gid)
+        for qname in ("message_queue", "voice_tmp_path_queue"):
+            try:
+                q = getattr(self, qname)
+                lk = getattr(self, qname + "_lock")
+                with lk:
+                    for e in q:
+                        sg = e.get("split_group") if isinstance(e, dict) else None
+                        if (isinstance(sg, dict)
+                                and str(sg.get("id") or "") == gid):
+                            e["_guard_sg_active"] = bool(active)
+            except Exception:
+                pass
+
+    def _candidate_reply_protected(self, entry) -> bool:
+        """驱逐候选 S1 保护判定（快照单源）。"""
+        return bool(entry.get("_guard_link_active")) if isinstance(entry, dict) else False
+
+    def _candidate_sg_protected(self, entry, exclude_song_active=False) -> bool:
+        """驱逐候选 S2 保护判定（快照单源；exclude_song_active 语义与
+        _split_group_protected 一致——唱歌期活跃组不再作为不可驱逐候选，
+        唱歌期「顶替-保留最新」依赖此语义）。"""
+        if not isinstance(entry, dict) or not entry.get("_guard_sg_active"):
+            return False
+        if exclude_song_active and self._song_state_active():
+            return False
+        return True
 
     def _evict_reply_pair_group_locked(self, queue, cand_idx):
         """未激活回复配对组整组驱逐（2026-11-25 用户裁决#6，须持队列锁）。
@@ -318,7 +545,8 @@ class QueueMixin:
         Returns: 被驱逐条目列表（恒非空）。"""
         cand = queue[cand_idx]
         link = cand.get("reply_link") if isinstance(cand, dict) else None
-        if not link or self._reply_group_protected(cand):
+        # 快照化（2026-11-26 二期）：候选保护判定读条目冻结快照
+        if not link or self._candidate_reply_protected(cand):
             return [queue.pop(cand_idx)]
         link = str(link)
         evicted = [e for e in queue
@@ -380,7 +608,7 @@ class QueueMixin:
             for e in self.voice_tmp_path_queue:
                 if (self._is_reply_entry(e)
                         and str(e.get("reply_link")) != new_link
-                        and not self._reply_group_protected(e)):
+                        and not self._candidate_reply_protected(e)):
                     dropped_links.append(str(e.get("reply_link")))
                     continue
                 kept.append(e)
@@ -551,6 +779,11 @@ class QueueMixin:
                 QueueMixin._consumed_total += 1
                 t = receipt["type"]
                 QueueMixin._consumed_by_type[t] = QueueMixin._consumed_by_type.get(t, 0) + 1
+                # 分类型最近回执单调时刻（G2 扩展 2026-11-26）：动态文案触发门
+                # 以「上一轮文案入队时刻之后的 trends_copywriting 消费回执」判定
+                # 上一文案消费完成——EDTalk 末段回执点=wait_last_push_displayed
+                # （displayed 完成），builtin=完成回调，均为真实播完口径
+                QueueMixin._consumed_mono_by_type[t] = time.monotonic()
                 QueueMixin._consumed_receipts.append(receipt)
                 if len(QueueMixin._consumed_receipts) > _CONSUMED_RECEIPT_MAX:
                     QueueMixin._consumed_receipts.pop(0)
@@ -880,7 +1113,17 @@ class QueueMixin:
             # 消除"锁外算位、锁内插入"的多生产者竞态超长窗口；满载时高优先级
             # 插入改为"插队+驱逐队尾"（净长度不变，队尾=最低优组 FIFO 尾），
             # 根治满载高优插入无界超长
+            # 锁等待观测（2026-11-26 队列审查批次缺陷4）：获取锁耗时埋点——
+            # 双 worker+多生产者竞争同一把锁，等待 P99 持续 >1ms 才考虑分锁优化
+            # （当前锁内无 IO，O(n) 扫描微秒级，先观测后优化）
+            _lw_t0 = time.perf_counter()
             with self.message_queue_lock:
+                try:
+                    from utils.obs_stats import record_lock_wait
+                    record_lock_wait("message_queue_lock",
+                                     time.perf_counter() - _lw_t0)
+                except Exception:
+                    pass
                 # F-ENG-3（T6-批）：编排撤销登记拦截（消息面同音频面——撤旧扫描后
                 # 迟到入队的已撤销 step_id 条目按已撤销语义丢弃）
                 _sid_msg = data_json.get("choreo_step_id") if isinstance(data_json, dict) else None
@@ -954,6 +1197,14 @@ class QueueMixin:
                 # （reply_link 命中且组已进入消费流程）满载不丢不驱逐——
                 # 「处理到之后必须完整处理并消费」闭环
                 _reply_protected = self._reply_group_protected(data_json)
+                # S2 组完整性保护（2026-11-26）：切分组活跃（任一段已出队合成/
+                # 消费，TTL 内）→ 该段满载不丢不驱逐（不依赖 reply_link，聊天
+                # 源长回复切分组同覆盖）
+                _sg_protected_in = self._split_group_protected(data_json)
+                # 快照化（2026-11-26 二期）：新条目保护状态冻结入条目——候选
+                # 过滤读快照，判定与动作同一份状态（TOCTOU 根治）
+                self._stamp_guard_new(data_json, _reply_protected, _sg_protected_in)
+                _in_gid = _split_group_id_of(data_json)
 
                 _mq_full = normal_queue_len(self.message_queue) >= max_len
 
@@ -962,17 +1213,20 @@ class QueueMixin:
                 # 或丢弃
                 if (_mq_full and insert_position >= len(self.message_queue)
                         and not _is_song_slice and not _is_trends_slice
-                        and not _reply_protected):
+                        and not _reply_protected and not _sg_protected_in):
                     # F1（2026-11-21 队列优化批次）：同权重顶替——对齐设计预期
                     # 「新入队的消息顶替最旧的同权重消息」与待播放队列规则2：
                     # 顶替同权重组组首（最老）条目、新条目接组尾（净长度不变，
-                    # 组内 FIFO 保序）。候选排除背景流切片与受保护回复组段。
+                    # 组内 FIFO 保序）。候选排除背景流切片、受保护回复组段、
+                    # 活跃切分组段与新条目自身同组段（S2 组完整性保护）。
                     if (self._mq_replace_same_priority()
                             and new_data_priority is not None):
                         same_idx_list = [i for i, it in enumerate(self.message_queue)
                                          if _priority_of(it) == int(new_data_priority)
                                          and not _is_bg_slice_entry(it)
-                                         and not self._reply_group_protected(it)]
+                                         and not self._candidate_reply_protected(it)
+                                         and not (_in_gid and _split_group_id_of(it) == _in_gid)
+                                         and not self._candidate_sg_protected(it, exclude_song_active=True)]
                         if same_idx_list:
                             front_idx = same_idx_list[0]
                             # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐
@@ -1000,6 +1254,25 @@ class QueueMixin:
                                 f"被顶替【{_replaced.get('content', '')}】{_split_group_note(_replaced)}，"
                                 f"新数据【{data_json['content']}】{_split_group_note(data_json)}")
                             return {"code": 200, "msg": f"同权重顶替组首条目（原位置 {front_idx}）"}
+                    # S2 例外（2026-11-26）：新条目为切分组段且队内存在同组段
+                    # → 同组保序接组尾（超限豁免，序列保真，消费后回落）——
+                    # 同组段被顶替候选排除后无候选，直接丢弃=截断回复组尾
+                    if _in_gid and any(_split_group_id_of(it) == _in_gid
+                                       for it in self.message_queue):
+                        insert_position = len(self.message_queue)
+                        _in_seq = data_json["split_group"].get("seq")
+                        for i, it in enumerate(self.message_queue):
+                            if _split_group_id_of(it) != _in_gid:
+                                continue
+                            it_seq = it.get("split_group", {}).get("seq")
+                            if (isinstance(it_seq, int) and isinstance(_in_seq, int)
+                                    and it_seq > _in_seq):
+                                insert_position = i
+                                break
+                        self.message_queue.insert(insert_position, data_json)
+                        self.message_queue_not_empty.notify()
+                        logger.info(f"message_queue 已满，切分段同组保序接组尾（超限豁免，序列保真）：【{data_json['content']}】{_split_group_note(data_json)}")
+                        return {"code": 200, "msg": "切分段同组保序接组尾（超限豁免）"}
                     # 任务 12 根修：切分段丢弃升级 warning+组上下文（_split_group_note）
                     logger.warning(f"message_queue 已满，数据丢弃：【{data_json['content']}】{_split_group_note(data_json)}")
                     try:
@@ -1012,11 +1285,14 @@ class QueueMixin:
                 # 队满且插队位次有效（新数据优先级高于队内既有条目）→ 插队并驱逐队尾
                 evicted = None
                 if _mq_full and insert_position < len(self.message_queue):
-                    # 分账编组保护（2026-11-21 动态文案审查批次）+ S1 遗弃保护：
-                    # 队尾驱逐跳过背景流切片与受保护回复组段（序列不可丢）
+                    # 分账编组保护（2026-11-21 动态文案审查批次）+ S1 遗弃保护
+                    # + S2 组完整性保护：队尾驱逐跳过背景流切片、受保护回复组
+                    # 段、活跃切分组段与新条目自身同组段（序列不可丢）
                     _evict_idx = next((i for i in range(len(self.message_queue) - 1, -1, -1)
                                        if not _is_bg_slice_entry(self.message_queue[i])
-                                       and not self._reply_group_protected(self.message_queue[i])), None)
+                                       and not self._candidate_reply_protected(self.message_queue[i])
+                                       and not (_in_gid and _split_group_id_of(self.message_queue[i]) == _in_gid)
+                                       and not self._candidate_sg_protected(self.message_queue[i], exclude_song_active=True)), None)
                     if _evict_idx is not None:
                         # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐；
                         # 驱逐后重算插入位（组驱逐可能移除多条，位次校正失效）
@@ -1028,9 +1304,14 @@ class QueueMixin:
                             if priority_level is not None and int(priority_level) >= int(new_data_priority):
                                 insert_position = i + 1
                                 break
-                    elif not (_reply_protected or _is_song_slice or _is_trends_slice):
+                    elif not (_reply_protected or _sg_protected_in or _is_song_slice
+                              or _is_trends_slice
+                              or (_in_gid and any(_split_group_id_of(it) == _in_gid
+                                                  for it in self.message_queue))):
                         # 无驱逐候选（普通条目全为受保护编组段）且新条目不受
-                        # 保护 → 丢弃新条目（受保护段不可驱逐）
+                        # 保护、亦非带同组在队段的切分组 → 丢弃新条目（受保护
+                        # 段不可驱逐）；S2：切分组段同组在队 → 满载豁免直插
+                        # （队列暂时超限，消费回落）防组尾截断
                         logger.warning(f"message_queue 已满且无可驱逐候选（受保护编组段占满），数据丢弃：【{data_json['content']}】")
                         try:
                             from utils.obs_stats import record_drop
@@ -1042,6 +1323,14 @@ class QueueMixin:
 
                 # 在计算出的位置插入新数据
                 self.message_queue.insert(insert_position, data_json)
+                # B4 深度峰值观测（2026-11-26 二期）：真实长度 vs 分账口径
+                try:
+                    from utils.obs_stats import record_queue_depth
+                    record_queue_depth("message_queue",
+                                       len(self.message_queue),
+                                       normal_queue_len(self.message_queue))
+                except Exception:
+                    pass
                 # 生产者通过notify()通知消费者列表中有新的消息
                 self.message_queue_not_empty.notify()
 
@@ -1057,7 +1346,7 @@ class QueueMixin:
                     for _e in self.message_queue:
                         if (self._is_reply_entry(_e)
                                 and str(_e.get("reply_link")) != _new_link
-                                and not self._reply_group_protected(_e)):
+                                and not self._candidate_reply_protected(_e)):
                             _song_dropped_links.append(str(_e.get("reply_link")))
                             continue
                         _kept.append(_e)
@@ -1081,10 +1370,13 @@ class QueueMixin:
                     record_drop("message_queue_evict")
                 except Exception:
                     pass
+                # #6（2026-11-25）整组驱逐返回列表——取组首条目记录，整组时附条数
+                _ev0 = evicted[0]
                 logger.warning(
                     f"message_queue 已满，高优数据插队并驱逐队尾（最低优）："
-                    f"被驱逐【{evicted.get('content', '')}】{_split_group_note(evicted)}，"
-                    f"新数据【{data_json['content']}】{_split_group_note(data_json)}")
+                    f"被驱逐【{_ev0.get('content', '')}】{_split_group_note(_ev0)}"
+                    + (f"（整组 {len(evicted)} 条）" if len(evicted) > 1 else "")
+                    + f"，新数据【{data_json['content']}】{_split_group_note(data_json)}")
             return {"code": 200, "msg": f"数据已插入到位置 {insert_position}"}
         else:
             logger.info(f"{type} 优先级: {new_data_priority} 音频={data_json['voice_path']}")
@@ -1115,6 +1407,14 @@ class QueueMixin:
             def _insert_and_notify(pos, item):
                 """锁内插入并执行首次播放阈值/唤醒逻辑（原语义保真；调用方须持锁）"""
                 self.voice_tmp_path_queue.insert(pos, item)
+                # B4 深度峰值观测（2026-11-26 二期）：真实长度 vs 分账口径
+                try:
+                    from utils.obs_stats import record_queue_depth
+                    record_queue_depth("voice_tmp_path_queue",
+                                       len(self.voice_tmp_path_queue),
+                                       normal_queue_len(self.voice_tmp_path_queue))
+                except Exception:
+                    pass
                 # 待播放音频数量大于首次播放阈值 且 处于首次播放情况下：
                 if len(self.voice_tmp_path_queue) >= int(self.config.get("filter", "voice_tmp_path_queue_min_start_play")) and self.voice_tmp_path_queue_not_empty_flag is False:
                     self.voice_tmp_path_queue_not_empty_flag = True
@@ -1127,7 +1427,15 @@ class QueueMixin:
 
             inserted = False
             insert_msg = None
+            # 锁等待观测（2026-11-26 队列审查批次缺陷4，口径同 message_queue_lock）
+            _lw_t0 = time.perf_counter()
             with self.voice_tmp_path_queue_lock:
+                try:
+                    from utils.obs_stats import record_lock_wait
+                    record_lock_wait("voice_tmp_path_queue_lock",
+                                     time.perf_counter() - _lw_t0)
+                except Exception:
+                    pass
                 # F-ENG-3（T6-批）：编排撤销登记拦截——合成完成晚于撤旧扫描的
                 # 迟到音轨（竞态窗口孤儿）按已撤销语义丢弃（先于全部插入规则）
                 _sid = data_json.get("choreo_step_id") if isinstance(data_json, dict) else None
@@ -1139,6 +1447,13 @@ class QueueMixin:
                     except Exception:
                         pass
                     return {"code": 1, "msg": f"编排已撤销音轨，丢弃迟到条目（step_id={_sid}）"}
+
+                # 快照化（2026-11-26 二期）：保护判定前置到未满/满载派发前——
+                # 未满路径提前 return 也必须冻结快照（候选过滤读条目字段）
+                _reply_protected = self._reply_group_protected(data_json)
+                _sg_protected_in = self._split_group_protected(data_json)
+                self._stamp_guard_new(data_json, _reply_protected,
+                                      _sg_protected_in)
 
                 # 未识别类型：维持既有语义——插队尾，满则丢弃
                 if new_data_priority is None:
@@ -1165,28 +1480,18 @@ class QueueMixin:
                         inserted = True
                         insert_msg = {"code": 200, "msg": "song 切片段追加队尾（不插队）"}
                     elif (isinstance(data_json, dict)
-                          and data_json.get("type") == "trends_copywriting"
                           and isinstance(data_json.get("split_group"), dict)):
-                        # 分账编组（2026-11-21 动态文案审查批次）：动态文案分段
-                        # 不插队于其它消息（其它消息按权重插到文案段之前）；
-                        # 2026-11-25 双 worker 乱序根修：组内按 seq 有序插入
-                        # （并发合成完成序≠队序，纯队尾追加会倒序播放——插到
-                        # 同组更大 seq 的首段之前，无更大 seq=追加队尾天然保序）
-                        _sg = data_json["split_group"]
-                        insert_position = len(queue)
-                        for i, it in enumerate(queue):
-                            it_sg = (it.get("split_group")
-                                     if isinstance(it, dict) else None)
-                            if (isinstance(it_sg, dict)
-                                    and it_sg.get("id") == _sg.get("id")
-                                    and isinstance(it_sg.get("seq"), int)
-                                    and isinstance(_sg.get("seq"), int)
-                                    and it_sg["seq"] > _sg["seq"]):
-                                insert_position = i
-                                break
+                        # 分账编组（2026-11-21 动态文案审查批次）：切分段
+                        # 不插队于其它消息（其它消息按权重插到切分段之前）；
+                        # 2026-11-25 双 worker 乱序根修 + 2026-11-26 泛化：
+                        # 组内按 seq 有序插入（并发合成完成序≠seq 序，纯队尾
+                        # 追加会倒序播放）——原修复只覆盖动态文案分段，
+                        # reply/comment 长回复切分段漏网，统一走单源
+                        insert_position = self._split_group_seq_insert_pos_locked(
+                            queue, data_json)
                         _insert_and_notify(insert_position, data_json)
                         logger.debug(
-                            f"动态文案分段按 seq 有序插入 position={insert_position}")
+                            f"切分段按 seq 有序插入 position={insert_position}")
                         inserted = True
                         insert_msg = {"code": 200,
                                       "msg": f"动态文案分段有序插入 position={insert_position}"}
@@ -1213,38 +1518,60 @@ class QueueMixin:
                     _is_song_slice = (isinstance(data_json, dict)
                                       and data_json.get("type") == "song"
                                       and data_json.get("song_segment"))
+                    # 2026-11-26 泛化（双 worker 乱序根修）：seq 有序插入位
+                    # 单源适用于任意 split_group 条目（reply/comment 长回复
+                    # 切分段）；满载豁免语义保持原状（trends 分段/S1/S2 活跃
+                    # 组）——唱歌期「顶替-保留最新」依赖旧回复组段可被驱逐
+                    # （exclude_song_active=True），不可 blanket 豁免
                     _is_trends_slice = (isinstance(data_json, dict)
                                         and data_json.get("type") == "trends_copywriting"
                                         and isinstance(data_json.get("split_group"), dict))
+                    _is_split_slice = (isinstance(data_json, dict)
+                                       and isinstance(data_json.get("split_group"), dict))
                     # S1 遗弃保护（2026-11-21 队列优化批次）：弹幕问答编组切分段
-                    # （reply_link 命中且组已进入消费流程）满载不丢不驱逐
-                    _reply_protected = self._reply_group_protected(data_json)
-                    if _is_song_slice or _is_trends_slice or _reply_protected:
-                        insert_position = len(queue)
+                    # （reply_link 命中且组已进入消费流程）满载不丢不驱逐；
+                    # S2 同理——判定已前置到派发前并 stamp（快照化二期）
+                    if (_is_song_slice or _is_trends_slice or _reply_protected
+                            or _sg_protected_in):
+                        # 2026-11-26 泛化：豁免插入位改按 seq 有序单源（原接队尾
+                        # 在乱序完成序下破坏组序）；song 切片段/缺组条目=队尾
+                        insert_position = self._split_group_seq_insert_pos_locked(
+                            queue, data_json)
                         _insert_and_notify(insert_position, data_json)
                         inserted = True
-                        insert_msg = {"code": 200, "msg": "编组切片满载豁免（接组尾，序列保真）"}
-                        logger.info(f"voice_tmp_path_queue 已满，编组切片豁免接组尾（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                        insert_msg = {"code": 200, "msg": "编组切片满载豁免（seq 有序插入，序列保真）"}
+                        logger.info(f"voice_tmp_path_queue 已满，编组切片豁免 seq 有序插入（序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                     else:
                         # 分账编组保护（2026-11-21 动态文案审查批次）+ S1 遗弃
-                        # 保护：规则2/3 的同权重/最低优候选排除背景流切片与受
-                        # 保护回复组段（序列不可丢，驱逐只作用于普通条目）
+                        # 保护 + S2 组完整性保护：规则2/3 的同权重/最低优候选排
+                        # 除背景流切片、受保护回复组段、活跃切分组段，以及新条
+                        # 目自身同组段（组内序列不可丢——log9 实证 7 段回复第
+                        # 6/7 段经同权重取代自相蚕食逐出第 2/3 段）
+                        _in_gid = _split_group_id_of(data_json)
                         same_idx_list = [i for i, item in enumerate(queue)
                                          if _priority_of(item) == int(new_data_priority)
                                          and not _is_bg_slice_entry(item)
-                                         and not self._reply_group_protected(item)]
+                                         and not self._candidate_reply_protected(item)
+                                         and not (_in_gid and _split_group_id_of(item) == _in_gid)
+                                         and not self._candidate_sg_protected(item, exclude_song_active=True)]
                         if same_idx_list:
                             # 规则2：取代同权重组组首（最老）条目，新条目接组尾（净长度不变，组内 FIFO）
                             # #6（2026-11-25）：候选为未激活配对组 → 整组驱逐
                             # （念白+配对回复不拆散），驱逐后重算插入位
                             front_idx = same_idx_list[0]
-                            self._evict_reply_pair_group_locked(queue, front_idx)
+                            _evicted_rule2 = self._evict_reply_pair_group_locked(queue, front_idx)
                             insert_position = 0
                             for i in range(len(queue) - 1, -1, -1):
                                 p = _priority_of(queue[i])
                                 if p is not None and p >= int(new_data_priority):
                                     insert_position = i + 1
                                     break
+                            # 2026-11-26 泛化：切分段（唱歌期经规则2入场的非活跃
+                            # 组段等）插入位改按组内 seq 有序——权重序不变式由
+                            # 同权重区段天然保持
+                            if _is_split_slice:
+                                insert_position = self._split_group_seq_insert_pos_locked(
+                                    queue, data_json)
                             self.voice_tmp_path_queue.insert(insert_position, data_json)
                             if self.voice_tmp_path_queue_not_empty_flag:
                                 self.voice_tmp_path_queue_not_empty.notify()
@@ -1253,14 +1580,19 @@ class QueueMixin:
                                 record_drop("audio_same_tier_evict")
                             except Exception:
                                 pass
-                            logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
+                            _evict_note = "".join(
+                                f"；被逐【{e.get('voice_path', '')}】{_split_group_note(e)}"
+                                for e in _evicted_rule2[:3])
+                            logger.info(f"voice_tmp_path_queue 已满，同权重取代组首最老条目（原位置 {front_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}{_evict_note}")
                             inserted = True
                             insert_msg = {"code": 200, "msg": f"同权重取代组首条目（原位置 {front_idx}）"}
                         else:
                             non_none_priorities = [_priority_of(it) for it in queue
                                                    if _priority_of(it) is not None
                                                    and not _is_bg_slice_entry(it)
-                                                   and not self._reply_group_protected(it)]
+                                                   and not self._candidate_reply_protected(it)
+                                                   and not (_in_gid and _split_group_id_of(it) == _in_gid)
+                                                   and not self._candidate_sg_protected(it, exclude_song_active=True)]
                             min_priority = min(non_none_priorities) if non_none_priorities else None
                             if min_priority is not None and int(new_data_priority) > min_priority:
                                 # 规则3：插入后驱逐最低优组组首（最老）条目——主叙述 10old/10new 双存要求组首驱逐
@@ -1269,23 +1601,53 @@ class QueueMixin:
                                 evict_idx = next(i for i, it in enumerate(queue)
                                                  if _priority_of(it) == min_priority
                                                  and not _is_bg_slice_entry(it)
-                                                 and not self._reply_group_protected(it))
-                                self._evict_reply_pair_group_locked(queue, evict_idx)
+                                                 and not self._candidate_reply_protected(it)
+                                                 and not (_in_gid and _split_group_id_of(it) == _in_gid)
+                                                 and not self._candidate_sg_protected(it, exclude_song_active=True))
+                                _evicted_rule3 = self._evict_reply_pair_group_locked(queue, evict_idx)
                                 insert_position = 0
                                 for i in range(len(queue) - 1, -1, -1):
                                     p = _priority_of(queue[i])
                                     if p is not None and p >= int(new_data_priority):
                                         insert_position = i + 1
                                         break
+                                # 2026-11-26 泛化：切分段插入位 seq 有序（口径同规则2）
+                                if _is_split_slice:
+                                    insert_position = self._split_group_seq_insert_pos_locked(
+                                        queue, data_json)
                                 _insert_and_notify(insert_position, data_json)
                                 try:
                                     from utils.obs_stats import record_drop
                                     record_drop("audio_same_tier_evict")
                                 except Exception:
                                     pass
-                                logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组条目（原位置 {evict_idx}）：【{data_json['voice_path']}】")
+                                _evict_note = "".join(
+                                    f"；被逐【{e.get('voice_path', '')}】{_split_group_note(e)}"
+                                    for e in _evicted_rule3[:3])
+                                logger.info(f"voice_tmp_path_queue 已满，新权重 {new_data_priority} 插入并驱逐最低优组条目（原位置 {evict_idx}）：【{data_json['voice_path']}】{_split_group_note(data_json)}{_evict_note}")
                                 inserted = True
                                 insert_msg = {"code": 200, "msg": f"插入位置 {insert_position}，驱逐最低优组条目（原位置 {evict_idx}）"}
+                            elif (_in_gid and any(_split_group_id_of(it) == _in_gid
+                                                  for it in queue)):
+                                # 规则4 S2 例外（2026-11-26）：新条目为切分组段且
+                                # 队内存在同组段 → 同组保序接组尾（超限豁免，序列
+                                # 保真，消费后回落）——同组段被规则2/3候选排除后
+                                # 无驱逐候选，直接丢弃=截断回复组尾（log9 实证：
+                                # 段 6/7 入队时段 2/3 被逐）
+                                insert_position = len(queue)
+                                _in_seq = data_json["split_group"].get("seq")
+                                for i, it in enumerate(queue):
+                                    if _split_group_id_of(it) != _in_gid:
+                                        continue
+                                    it_seq = it.get("split_group", {}).get("seq")
+                                    if (isinstance(it_seq, int) and isinstance(_in_seq, int)
+                                            and it_seq > _in_seq):
+                                        insert_position = i
+                                        break
+                                _insert_and_notify(insert_position, data_json)
+                                inserted = True
+                                insert_msg = {"code": 200, "msg": "切分段满载同组保序接组尾（超限豁免）"}
+                                logger.info(f"voice_tmp_path_queue 已满，切分段同组保序接组尾（超限豁免，序列保真）：【{data_json['voice_path']}】{_split_group_note(data_json)}")
                             else:
                                 # 规则4：满且新权重更低 → 舍弃
                                 logger.warning(f"voice_tmp_path_queue 已满，音频丢弃：【{data_json['voice_path']}】{_split_group_note(data_json)}")

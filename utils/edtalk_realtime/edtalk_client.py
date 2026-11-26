@@ -314,6 +314,22 @@ class EDTalkClient:
                 break
             await asyncio.sleep(_POLL_INTERVAL)
         poll_s = time.monotonic() - t0 - sleep_s
+        # 观测（2026-11-26 队列审查批次缺陷6）：飞行等待总时长分桶——渲染慢于
+        # 音频时消费循环在此阻塞（阻塞式反压），代价转嫁为待播放队列积压、
+        # 低优内容被满载规则逐出；等待持续偏大（>2×句时长）=服务端推理跟
+        # 不上，需告警可见而非仅从「答谢被替换」间接推断。轮询超时=病态白等
+        # （GPU 卡死/服务异常）。计数口径沿 song_gap_wait 先例（整秒计数）。
+        _flight_total_s = sleep_s + poll_s
+        try:
+            from utils.obs_stats import record_drop
+            record_drop("edtalk_flight_wait", max(1, int(round(_flight_total_s))))
+        except Exception:
+            pass
+        if timed_out or _flight_total_s > max(2.0, duration_s * 2.0):
+            logger.warning(
+                f"[edtalk] 飞行等待异常：总等待 {_flight_total_s:.2f}s"
+                f"（上句时长 {duration_s:.1f}s）"
+                + ("，轮询超时强制放行（查服务端推理/GPU）" if timed_out else ""))
         logger.info(
             f"[edtalk-wait] 上句时长 {duration_s:.1f}s 飞行等待 {sleep_s:.2f}s "
             f"轮询 {poll_s:.2f}s buffer_depth={buffer_depth} "

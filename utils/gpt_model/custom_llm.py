@@ -12,6 +12,7 @@ import json
 import queue
 import re
 import threading
+import time
 import traceback
 
 from utils.my_log import logger
@@ -278,7 +279,15 @@ class Custom_LLM:
             body = self._build_body(prompt, system_prompt_override=system_prompt_override)
             logger.debug(f"custom_llm 请求: url={url} model={body['model']}")
 
+            # B2 LLM 延迟观测（2026-11-26 二期）：请求耗时=配对门/背压门阈值
+            # 定标数据源（成败分计，status==200≈ok；解析失败占比极小忽略）
+            _llm_t0 = time.monotonic()
             status, text = await self.send_request(url=url, headers=headers, body=body, timeout=60)
+            try:
+                from utils.obs_stats import record_llm
+                record_llm(time.monotonic() - _llm_t0, status == 200)
+            except Exception:
+                pass
             snippet = str(text or "")[:200]
 
             if status == 401:
@@ -362,6 +371,8 @@ class Custom_LLM:
             str: 文本增量（可能为空串，调用方跳过）
         """
         aiohttp = _get_aiohttp()
+        _llm_t0 = time.monotonic()
+        _llm_got = False
         try:
             prompt = self._build_prompt(data)
             # 请求级人设替换（对齐 get_resp：data.system_prompt 非空时替换配置人设）
@@ -400,6 +411,7 @@ class Custom_LLM:
                         delta = (choices[0].get("delta") or {}).get("content")
                         if delta:
                             buffer += delta
+                            _llm_got = True
                             yield delta
                     # 非流式降级响应（部分兼容服务忽略 stream 标志整块返回）：
                     # delta.content 恒空时回读一次 message.content
@@ -409,6 +421,7 @@ class Custom_LLM:
                             content = (resp.get("choices") or [{}])[0].get(
                                 "message", {}).get("content")
                             if content:
+                                _llm_got = True
                                 yield str(content)
                         except Exception:
                             pass
@@ -420,6 +433,14 @@ class Custom_LLM:
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error(f"problem=LLM 流式请求失败；cause={e}；回退全文链路")
+        finally:
+            # B2 LLM 延迟观测（2026-11-26 二期）：流式全程耗时（生成器耗尽=
+            # 回复完整生成完成，配对门定标口径）
+            try:
+                from utils.obs_stats import record_llm
+                record_llm(time.monotonic() - _llm_t0, _llm_got)
+            except Exception:
+                pass
 
     def stream_resp_sync(self, data):
         """stream_resp 的同步生成器桥（线程内独立事件循环 + 队列转交）。
