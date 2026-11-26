@@ -849,8 +849,18 @@ class ChoreoEngine:
             "kind": kind,
             # ⑦-B（2026-11-17 动作编排审查批次）：resident 挂起时登记其文案
             # 匹配值——trends_copywriting 完成回执挂起期间先行登记 copy_done
-            # （恢复时文案已消费完则跳过 hold 直回默认轮播）
-            "copy": (str(seq.get("match_value") or "") if kind == "resident" else ""),
+            # （恢复时文案已消费完则跳过 hold 直回默认轮播）。
+            # 2026-11-26 回归修复：读 resident_copy（完成对齐锚=文案全文，
+            # 2026-11-25 画面同步修复引入）优先、match_value（T3 关键词）
+            # 回退——与 RC2 挂起站点（on_song_started L1215）口径一致。原
+            # 实现恒读 match_value：T3「关键词|文案」路径 match_value=关键词，
+            # 挂起锚退化为关键词，恢复后分段回执结尾锚定永不命中 → copy_done
+            # 不落位 → resident 主线空转滞留（log7 实测：点歌打断后文案消费
+            # 完画面不回默认，直至下次触发刷锚）。旧验证被挂起期触发刷锚
+            # 兜底路径掩盖（消费门拦截触发后兜底失效，缺陷裸露）。
+            "copy": (str(seq.get("resident_copy")
+                         or seq.get("match_value") or "")
+                     if kind == "resident" else ""),
             "copy_done": False,
         }
         self._seq_counter += 1

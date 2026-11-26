@@ -258,3 +258,93 @@ def test_recovery_hold_loops_until_copy_done():
     assert eng.state == "default"
     from utils.orchestration.choreographer import RestoreDefault
     assert any(isinstance(c, RestoreDefault) for c in cmds)
+
+
+# ------------------------------------- T3 关键词触发 × 点歌打断锚回归守卫
+# （2026-11-26 log7 回归根因：_suspend_hold_for 挂起锚恒读 match_value——
+# T3「关键词|文案」路径 match_value=关键词，恢复后完成锚从文案全文退化
+# 为关键词，分段回执结尾锚定永不命中 → copy_done 不落位 → 文案消费完
+# 画面滞留 resident 主线不回默认。修复：挂起锚读 resident_copy 优先、
+# match_value 回退，与 RC2 挂起站点口径一致。）
+
+SONG_COPY = ("第一段的内容是关于洗洁精的功能介绍，"
+             "希望这能帮助您更好地理解。")
+SONG_TAIL = "希望这能帮助您更好地理解。"    # 分段末段回执（结尾锚定命中窗）
+
+
+def _song_rule(rid="sg", main_dur=5, **over):
+    r = {"rule_id": rid, "trigger_type": "song", "match": "",
+         "interrupt": "standard",
+         "sequence": {"main": {"segment": "S_" + rid, "duration_s": main_dur}}}
+    r.update(over)
+    return r
+
+
+def _song_interrupt(eng):
+    """T3 关键词触发 dynamic_text → song 打断 → resident 让位挂起。"""
+    d = eng.decide_trigger("dynamic_text", "测试四", {},
+                           completion_text=SONG_COPY)
+    assert d["accepted"] is True
+    assert eng.seq["resident_copy"] == SONG_COPY     # 完成锚=文案全文
+    assert eng.seq["match_value"] == "测试四"         # 触发面=关键词
+    _accept_current(eng)                             # main 接受
+    d = eng.decide_trigger("song", "牧马城市", {"song_name": "牧马城市"})
+    assert d["accepted"] is True
+    susp = eng.song_suspended
+    assert susp is not None and susp["kind"] == "resident"
+    assert susp["copy"] == SONG_COPY                 # 回归点：挂起锚=文案全文
+    return susp
+
+
+def _consume_song_interruptor(eng, t_exit_end, t_main_end):
+    """消费打断者：旧 exit → song main → 步尽触发恢复判定。"""
+    _accept_current(eng)                             # 旧 exit#interrupted
+    NOW[0] = t_exit_end
+    eng.on_tick(NOW[0])                              # → song main
+    assert eng.seq["rule_id"] == "sg"
+    _accept_current(eng)                             # song main 接受
+    NOW[0] = t_main_end
+    eng.on_tick(NOW[0])                              # 步尽 → 挂起恢复判定
+
+
+def test_song_interrupt_preserves_completion_anchor():
+    """song 打断挂起必须保留文案全文锚：恢复序列 resident_copy=SONG_COPY
+    （原实现退化为关键词「测试四」），末段分段回执结尾锚定命中 → copy_done
+    → resident 主线终结回默认（log7 滞留回归守卫）。"""
+    NOW[0] = 1000.0
+    eng = _engine([_dt_rule(), _song_rule()])
+    _song_interrupt(eng)
+    _consume_song_interruptor(eng, 1002.01, 1007.52)  # <挂起 deadline 1060.5
+    assert eng.seq["rule_id"] == "dt"                # 恢复序列
+    assert eng.seq["resident_copy"] == SONG_COPY     # 原实现此处=「测试四」
+    _accept_current(eng)                             # main#resume 接受
+    NOW[0] = eng.seq["current_deadline"] + 0.01      # hold 播完 → 循环轮
+    eng.on_tick(NOW[0])
+    assert eng.seq["loop_i"] == 1
+    # 末段分段回执（结尾锚定）→ copy_done → 回默认
+    from utils.orchestration.choreographer import RestoreDefault
+    cmds = _receipt(eng, SONG_TAIL)
+    assert eng.state == "default"
+    assert any(isinstance(c, RestoreDefault) for c in cmds)
+
+
+def test_song_interrupt_anchor_matches_receipt_during_suspend():
+    """挂起期间文案末段回执（结尾锚定+组空）→ susp["copy_done"] 先行登记 →
+    打断者播完恢复判定跳过切回直回默认（⑦-B；原实现锚=关键词永不命中，
+    滞留至恢复 hold 循环空转）。"""
+    NOW[0] = 1000.0
+    eng = _engine([_dt_rule(), _song_rule()], step_timeout_s=20)
+    _song_interrupt(eng)
+    assert eng.song_suspended["copy_done"] is False
+    assert _receipt(eng, SONG_TAIL) == []            # 挂起期登记（不推进画面）
+    assert eng.song_suspended["copy_done"] is True
+    _accept_current(eng)                             # 旧 exit
+    NOW[0] = 1002.01
+    eng.on_tick(NOW[0])                     # → song main
+    _accept_current(eng)
+    NOW[0] = 1007.02
+    cmds = eng.on_tick(NOW[0])              # 步尽 → copy_done 已登记 → 直回默认
+    assert eng.state == "default"
+    from utils.orchestration.choreographer import RestoreDefault
+    assert any(isinstance(c, RestoreDefault) for c in cmds)
+
