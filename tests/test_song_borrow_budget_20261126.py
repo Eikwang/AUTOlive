@@ -7,7 +7,7 @@ due——超预算借位尾部越过 due，人声顺延（实测 ≤3s）与伴�
 2026-11-27 B 校准：借位受理被在飞消息剩余播放时间阻塞（push_full 飞行
 等待）——预算式升级为 在飞剩余+preroll+est ≤ remain−余量（实测前奏插播
 场景旧口径人声顺延 1-2s 的根因补齐）；测试宿主无在飞（delay=0）时
-边界=est+preroll(0.3) ≤ remain−余量(0.5)。
+边界=est+preroll(0.5) ≤ remain−余量(0.5)。
 
 覆盖：
 - 超预算条目留队（不 pop、队列原序）
@@ -47,11 +47,11 @@ def test_overbudget_entry_stays_queued():
 
 
 def test_fitting_entry_borrowed_at_boundary():
-    """est+preroll = remain−余量 边界放行（est=2.0，remain=2.8，preroll 0.3，余量 0.5）。"""
+    """est+preroll = remain−余量 边界放行（est=2.0，remain=3.0，preroll 0.5，余量 0.5）。"""
     pb = _pb()
     e = _comment_entry(chars=8)           # est=2.0s
     pb.voice_tmp_path_queue.append(e)
-    assert pb._pick_intro_borrow_locked(2.8) is e
+    assert pb._pick_intro_borrow_locked(3.0) is e
     assert pb.voice_tmp_path_queue == []
 
 
@@ -60,7 +60,7 @@ def test_just_over_boundary_not_borrowed():
     pb = _pb()
     e = _comment_entry(chars=8)           # est=2.0s
     pb.voice_tmp_path_queue.append(e)
-    assert pb._pick_intro_borrow_locked(2.7) is None   # 2.0+0.3 > 2.7−0.5
+    assert pb._pick_intro_borrow_locked(2.9) is None   # 2.0+0.5 > 2.9−0.5
     assert pb.voice_tmp_path_queue == [e]
 
 

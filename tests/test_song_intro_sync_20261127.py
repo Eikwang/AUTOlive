@@ -69,8 +69,8 @@ def test_no_inflight_borrow_boundary_regression():
     pb = _pb()
     e = _comment_entry(chars=8)                     # est=2.0s
     pb.voice_tmp_path_queue.append(e)
-    # est 2.0 + preroll 0.3 = 2.3 ≤ 2.8 − 余量 0.5 → 放行
-    assert pb._pick_intro_borrow_locked(2.8) is e
+    # est 2.0 + preroll 0.5 = 2.5 ≤ 3.0 − 余量 0.5 → 放行
+    assert pb._pick_intro_borrow_locked(3.0) is e
     assert pb.voice_tmp_path_queue == []
 
 
@@ -97,15 +97,16 @@ def test_due_hard_cut_cancels_pending_borrow():
 
     async def scenario():
         t0 = time.monotonic()
-        # due = t0 + 3.1 − push_lead 0.3 = t0+2.8
-        await pb._run_intro_borrow_window(t0, 3.1)
+        # due = t0 + 3.6 − push_lead 0.5 = t0+3.1（初始 remain 3.1 ≥ 借位预算
+        # preroll 0.5+est 2.0+余量 0.5 → 可借）
+        await pb._run_intro_borrow_window(t0, 3.6)
         return time.monotonic() - t0
 
     elapsed = asyncio.run(scenario())
     assert state["started"] is True                 # 借位任务已启动（受理中）
     assert state["finished"] is False               # 未受理即被硬切取消
     assert e not in pb.voice_tmp_path_queue         # 已 pick 弹出（弃推）
-    assert elapsed < 4.5                            # due≈2.8s 返回，未等 5s 消费
+    assert elapsed < 4.5                            # due≈3.1s 返回，未等 5s 消费
 
 
 def test_borrow_accepted_before_due_consumes_normally():
@@ -118,7 +119,7 @@ def test_borrow_accepted_before_due_consumes_normally():
 
     async def scenario():
         t0 = time.monotonic()
-        await pb._run_intro_borrow_window(t0, 3.1)
+        await pb._run_intro_borrow_window(t0, 3.6)
 
     asyncio.run(scenario())
     assert state["finished"] is True
