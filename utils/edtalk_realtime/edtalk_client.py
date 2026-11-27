@@ -31,6 +31,9 @@ from utils import alarm_notifier
 
 # 16kHz int16 单声道 = 每样本 2 字节
 TARGET_RATE = 16000
+# 推送载荷预编码缓存容量（2026-11-27 人声对齐根修）：最近 N 条待推载荷
+# （RIFF+16k PCM+base64 编码产物）。song 切片 74-107s ≈ 3-5MB/条，4 条 ≈ 20MB。
+_PUSH_PAYLOAD_CACHE_MAX = 4
 # 单飞行句完成判定：最短飞行时间系数。
 # 2026-11-23 pending 自动衔接：降至 0.6——客户端在上段有效语音生成完
 # （produced>=total）后，仅需等上段 60% 时长即提前 push 下段为 pending，
@@ -183,6 +186,16 @@ class EDTalkClient:
         # 服务端严格等上段 displayed>=total 才激活 → 段间零间隙且不丢尾。
         self._last_seg_id = 0
         self._expected_seg_id = 0
+        # 推送载荷预编码缓存（2026-11-27 人声对齐根修）：path → {"payload",
+        # "duration_s"}；_payload_cache_order 为 LRU 淘汰序。push_full 命中
+        # 缓存跳过同步重活（RIFF 归一+解码重采样+base64），due 关键路径只剩
+        # HTTP POST——根因：song 切片大文件同步编码空闲 ~0.3s、并发 TTS 合成
+        # 抢占 CPU/GIL 时 2s+（log11 实测同人声 seq0 首遍 0.3s/二遍 2.0s），
+        # 人声受理晚于歌曲时间轴应到时刻。
+        self._payload_cache = {}
+        self._payload_cache_order = []
+        self._payload_cache_lock = threading.Lock()
+        self._payload_prep_inflight = set()
 
     # ---------- 2026-11-17 热切机制批次：配置现读 ----------
     def _live_section(self) -> dict:
@@ -341,6 +354,58 @@ class EDTalkClient:
 
     # ---------- 推送 ----------
 
+    def prepare(self, pcm_path) -> None:
+        """推送载荷预编码（2026-11-27 人声对齐根修）：后台线程提前完成 RIFF
+        归一+16k PCM 解码重采样+base64 编码并缓存——push_full 在 due 关键路径
+        只做 HTTP POST。挂点=song 切片进入待播放队列时（synthesis_manager
+        my_play_voice none 分支），切片起播前有整段唱歌/间奏时间裕量。
+
+        幂等：已缓存/在编跳过；异常静默降级（push_full 缓存未命中回退内联
+        编码=既有语义）。任意线程可调（预编码读文件持 GIL 段短，base64 3MB
+        ≈50ms，不影响事件循环时序）。"""
+        try:
+            if not pcm_path:
+                return
+            key = str(pcm_path)
+            with self._payload_cache_lock:
+                if key in self._payload_cache or key in self._payload_prep_inflight:
+                    return
+                self._payload_prep_inflight.add(key)
+            threading.Thread(target=self._prepare_payload, args=(key,),
+                             name="edtalk-payload-prep", daemon=True).start()
+        except Exception:
+            pass  # 预编码调度失败不阻塞主链（push_full 缓存未命中=内联回退）
+
+    def _prepare_payload(self, pcm_path: str) -> None:
+        """后台预编码任务体（prepare 专用线程）：成功写缓存并 LRU 淘汰。"""
+        try:
+            wav_path, tmp_created = _ensure_wav_riff(pcm_path)
+            try:
+                pcm, _src_rate = load_wav_as_16k_pcm(wav_path)
+                if not pcm:
+                    return
+                payload = base64.b64encode(pcm).decode("ascii")
+                duration_s = len(pcm) / 2.0 / TARGET_RATE
+            finally:
+                if tmp_created:
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass
+            with self._payload_cache_lock:
+                if pcm_path not in self._payload_cache:
+                    self._payload_cache[pcm_path] = {
+                        "payload": payload, "duration_s": duration_s}
+                    self._payload_cache_order.append(pcm_path)
+                    while len(self._payload_cache_order) > _PUSH_PAYLOAD_CACHE_MAX:
+                        _old = self._payload_cache_order.pop(0)
+                        self._payload_cache.pop(_old, None)
+        except Exception:
+            logger.debug(f"[edtalk] 载荷预编码失败（push_full 内联回退）：{pcm_path}")
+        finally:
+            with self._payload_cache_lock:
+                self._payload_prep_inflight.discard(pcm_path)
+
     async def push_full(self, pcm_path: str, content: str = "",
                         wait_flight: bool = True) -> bool:
         """推送整句音频给 EDTalk（异步；供 playback 播放循环 await）。
@@ -372,14 +437,25 @@ class EDTalkClient:
                 return False
             wav_path, tmp_created = pcm_path, False
             try:
-                # RIFF 归一（2026-10-25 实测修复）：edge_tts 产物是 mp3（无 RIFF 头），
-                # wave.open 直读必抛 "file does not start with RIFF id"——先转临时 wav 再加载
-                wav_path, tmp_created = _ensure_wav_riff(pcm_path)
-                pcm, src_rate = load_wav_as_16k_pcm(wav_path)
-                if not pcm:
-                    raise ValueError("音频内容为空")
-                duration_s = len(pcm) / 2.0 / TARGET_RATE
-                payload = base64.b64encode(pcm).decode("ascii")
+                # 载荷预编码缓存命中（2026-11-27 人声对齐根修）：prepare() 已在
+                # 后台线程完成 RIFF+16k PCM+base64 → due 关键路径只剩 HTTP POST；
+                # 未命中回退内联编码（既有语义，兼容未挂钩来源）。
+                _cached = None
+                with self._payload_cache_lock:
+                    _cached = self._payload_cache.get(str(pcm_path))
+                if _cached is not None:
+                    payload = _cached["payload"]
+                    duration_s = _cached["duration_s"]
+                    src_rate = TARGET_RATE
+                else:
+                    # RIFF 归一（2026-10-25 实测修复）：edge_tts 产物是 mp3（无 RIFF 头），
+                    # wave.open 直读必抛 "file does not start with RIFF id"——先转临时 wav 再加载
+                    wav_path, tmp_created = _ensure_wav_riff(pcm_path)
+                    pcm, src_rate = load_wav_as_16k_pcm(wav_path)
+                    if not pcm:
+                        raise ValueError("音频内容为空")
+                    duration_s = len(pcm) / 2.0 / TARGET_RATE
+                    payload = base64.b64encode(pcm).decode("ascii")
 
                 timeout = aiohttp.ClientTimeout(total=max(30, duration_s + 30))
                 async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -398,6 +474,9 @@ class EDTalkClient:
                             self.last_push_time = time.time()
                             self.last_duration_s = duration_s
                             self._flight_until = time.monotonic()
+                            # 推送成功即出缓存（释放内存；失败保留供重试）
+                            with self._payload_cache_lock:
+                                self._payload_cache.pop(str(pcm_path), None)
                             # pending 串行锚点：下一次 wait 等「本次 push 的段」完成。
                             # pending 模式下本次 push 可能尚未激活（服务端存缓冲），
                             # seg_id 未变 → 用 push 前观察值 +1 作为期望，下次 wait

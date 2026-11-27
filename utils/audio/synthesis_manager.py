@@ -907,6 +907,17 @@ class SynthesisMixin:
         try:
             # 如果是tts类型为none，暂时这类为直接播放音频，所以就丢给路径队列
             if message["tts_type"] == "none":
+                # 载荷预编码挂钩（2026-11-27 人声对齐根修）：song 切片入待播放
+                # 队列即后台预编码 push_full 载荷（RIFF+16k PCM+base64）——
+                # due 关键路径只剩 HTTP POST。根因：切片大文件同步编码在并发
+                # TTS 合成（插播消息触发）抢占 CPU/GIL 时 2s+，人声受理晚于
+                # 歌曲时间轴（log11 实测 seq0 受理迟 2.0s）。
+                if (message.get("type") == "song"
+                        and getattr(self, "edtalk_client", None) is not None):
+                    try:
+                        self.edtalk_client.prepare(message.get("voice_path") or "")
+                    except Exception:
+                        pass  # 预编码失败不阻塞入队（push_full 内联回退）
                 self.data_priority_insert("待播放音频列表", message)
                 return
         except Exception as e:
