@@ -1,13 +1,17 @@
-"""前奏借位预算校验守卫（2026-11-26 人声对齐根修）。
+"""前奏借位预算校验守卫（2026-11-26 人声对齐根修；2026-11-27 B 校准升级）。
 
 根因：R5c 前奏借位 await 全程阻塞播完才返回，循环只在两次借位之间检查
 due——超预算借位尾部越过 due，人声顺延（实测 ≤3s）与伴奏真实时间轴失步。
 修复：_pick_intro_borrow_locked 借位前预算校验（est ≤ remain−余量 才 pop，
 超限留队待间奏窗口/歌毕消费），t0 永不回退 → 人声与伴奏绝对对齐。
+2026-11-27 B 校准：借位受理被在飞消息剩余播放时间阻塞（push_full 飞行
+等待）——预算式升级为 在飞剩余+preroll+est ≤ remain−余量（实测前奏插播
+场景旧口径人声顺延 1-2s 的根因补齐）；测试宿主无在飞（delay=0）时
+边界=est+preroll(0.3) ≤ remain−余量(0.5)。
 
 覆盖：
 - 超预算条目留队（不 pop、队列原序）
-- 预算内条目正常借位（边界：est=remain−余量 放行；略超不放行）
+- 预算内条目正常借位（边界：est=remain−余量−preroll 放行；略超不放行）
 - 候选条件：song 切片段/动态文案分段跳过，普通条目命中
 - 首候选超预算=整轮不借位（不改排出队顺序，R5c 修正口径）
 """
@@ -43,20 +47,20 @@ def test_overbudget_entry_stays_queued():
 
 
 def test_fitting_entry_borrowed_at_boundary():
-    """est = remain−余量 边界放行（est=2.0，remain=2.5，余量 0.5）。"""
+    """est+preroll = remain−余量 边界放行（est=2.0，remain=2.8，preroll 0.3，余量 0.5）。"""
     pb = _pb()
     e = _comment_entry(chars=8)           # est=2.0s
     pb.voice_tmp_path_queue.append(e)
-    assert pb._pick_intro_borrow_locked(2.5) is e
+    assert pb._pick_intro_borrow_locked(2.8) is e
     assert pb.voice_tmp_path_queue == []
 
 
 def test_just_over_boundary_not_borrowed():
-    """est 略超 remain−余量：不放行（余量吸收出声延迟/估时残差）。"""
+    """est+preroll 略超 remain−余量：不放行（余量吸收估时残差；preroll=出声延迟）。"""
     pb = _pb()
     e = _comment_entry(chars=8)           # est=2.0s
     pb.voice_tmp_path_queue.append(e)
-    assert pb._pick_intro_borrow_locked(2.4) is None   # 2.0 > 2.4−0.5
+    assert pb._pick_intro_borrow_locked(2.7) is None   # 2.0+0.3 > 2.7−0.5
     assert pb.voice_tmp_path_queue == [e]
 
 

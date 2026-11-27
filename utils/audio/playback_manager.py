@@ -480,6 +480,11 @@ class PlaybackMixin:
                 remaining = window_end - now
                 window_total = window_end - (last_end if last_end > 0 else now)
                 min_consume = self._interlude_min_consume_s_locked()
+                # B 校准（2026-11-27 人声绝对对齐）：插播受理被在飞消息剩余播放
+                # 时间阻塞（飞行等待），预算判定须计入该时滞+preroll——否则插播
+                # 尾部越过窗口，下一段人声顺延（与前奏借位同根因）
+                _inflight_delay = (self._inflight_remaining_s()
+                                   + self._song_timing("song_preroll_s"))
                 # 方案A（2026-11-25 问题2）：≥80 高优条目（点歌应答/答谢）借位
                 # 豁免窗口预算门——宁顺延人声起点（EDTalk 帧锁定等待+e13 兜底）
                 # 不把高优答谢积压到间奏
@@ -491,9 +496,8 @@ class PlaybackMixin:
                         # （2026-11-25 裁决#3，不积累到歌毕）
                         self._abandon_song_overflow_locked()
                         return None, max(remaining, 0.0) or self._song_timing("song_push_lead_s"), False
-                    if self._entry_duration_s(head) > remaining:
-                        # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
-                        # 不足最小余量时已由上面拦住）；队满遗弃同上
+                    if _inflight_delay + self._entry_duration_s(head) > remaining:
+                        # 预算语义：该音频播不完窗口（含在飞受理时滞）→ 不起下一条
                         self._abandon_song_overflow_locked()
                         return None, max(remaining, 0.0) or self._song_timing("song_push_lead_s"), False
                 else:
@@ -513,6 +517,9 @@ class PlaybackMixin:
                     window_total = window_end - (
                         last_end if last_end > 0 else now)
                 _min_consume = self._interlude_min_consume_s_locked()
+                # B 校准（2026-11-27）：插播受理含在飞剩余播放时滞+preroll
+                _inflight_delay = (self._inflight_remaining_s()
+                                   + self._song_timing("song_preroll_s"))
                 for i, entry in enumerate(queue):
                     if not isinstance(entry, dict):
                         continue
@@ -534,8 +541,9 @@ class PlaybackMixin:
                                     last_end if last_end > 0 else now)
                                 < _min_consume):
                             continue  # 窗口不足最小余量 → 不起音频（避免说一半）
-                        if self._entry_duration_s(entry) > remaining:
-                            continue  # 预算：播不完窗口 → 下一条
+                        if (_inflight_delay
+                                + self._entry_duration_s(entry) > remaining):
+                            continue  # 预算：含在飞受理时滞仍播不完窗口 → 下一条
                     return queue.pop(i), 0.0, True
                 # 仅文案在队（或全部超窗）→ 等到期推人声，文案留队；
                 # 队满则遗弃未插播普通条目（2026-11-25 裁决#3）
@@ -571,7 +579,10 @@ class PlaybackMixin:
                 # 方案A（2026-11-25 问题2）：≥80 高优借位豁免最小余量门
                 _p = self._entry_priority_of(entry)
                 if not (_p is not None and _p >= _INTERLUDE_PRIORITY_BYPASS):
-                    if remaining - dur < min_consume:
+                    # B 校准（2026-11-27）：借位受理含在飞剩余播放时滞+preroll
+                    _inflight_delay = (self._inflight_remaining_s()
+                                       + self._song_timing("song_preroll_s"))
+                    if remaining - _inflight_delay - dur < min_consume:
                         continue  # 超窗/不足最小余量 → 看下一条
                 return queue.pop(i), 0.0, True  # R5b：借位走 EDTalk 口型
             # 全队列不可借 → 等窗口；队满则遗弃未插播普通条目（2026-11-25
@@ -877,15 +888,38 @@ class PlaybackMixin:
             pass  # 时长读取失败 → 文本估算兜底（不放行长音频）
         return max(1.0, len(str(entry.get("content", "") or "")) / 4.0)
 
+    def _inflight_remaining_s(self) -> float:
+        """当前在飞消息预计剩余播放秒数（B 预算校准，2026-11-27 人声绝对对齐）：
+        借位/插播条目的受理被 EDTalk 单飞行句阻塞——push_full(wait_flight=True)
+        须等在飞消息显示完成（displayed>=produced）才受理，故条目实际出声区间
+        =[在飞消息播完, 在飞播完+preroll+时长]。预估在飞播完时刻=
+        edtalk_client._flight_until（受理时刻）+last_duration_s（上句时长）
+        +preroll（帧锁定出声口径，与 last_end 同源）；已播完/无在飞信息=0。
+
+        锁说明：只读客户端标量属性（GIL 原子），任意锁上下文可调。
+        """
+        client = getattr(self, "edtalk_client", None)
+        if client is None:
+            return 0.0
+        accept = float(getattr(client, "_flight_until", 0.0) or 0.0)
+        dur = float(getattr(client, "last_duration_s", 0.0) or 0.0)
+        if accept <= 0 or dur <= 0:
+            return 0.0
+        end = accept + self._song_timing("song_preroll_s") + dur
+        return max(0.0, end - time.monotonic())
+
     def _pick_intro_borrow_locked(self, remain: float):
         """前奏窗口借位候选选择（2026-11-11 R5c 提取；须持
         voice_tmp_path_queue_lock——遍历中按索引 pop）。
 
-        借位预算校验（2026-11-26 人声对齐根修）：借位 await 全程阻塞播完才
-        返回，R5c 循环只在两次借位之间检查 due——超预算借位的尾部会越过 due，
-        人声顺延（实测 ≤3s）与伴奏真实时间轴失步（用户裁决：绝对对齐）。
-        估时 ≤ remain−_SONG_BORROW_BUDGET_MARGIN_S 才放行；超限条目**留队**
-        （不 pop 不改序），待间奏窗口/歌毕消费；t0 永不回退。
+        借位预算校验（2026-11-26 人声对齐根修；2026-11-27 B 校准升级）：
+        借位 await 全程阻塞播完才返回，R5c 循环只在两次借位之间检查 due——
+        超预算借位的尾部会越过 due，人声顺延与伴奏真实时间轴失步（用户裁决：
+        绝对对齐）。2026-11-27 根因补齐：借位条目受理被在飞消息剩余播放时间
+        阻塞（push_full 飞行等待），旧校验只看候选自身时长，漏掉该时滞——
+        实测前奏插播场景人声顺延 1-2s。现预算式：
+          在飞剩余 + preroll + 估时 ≤ remain − 余量 才放行；
+        超限条目**留队**（不 pop 不改序），待间奏窗口/歌毕消费；t0 永不回退。
         候选条件（2026-11-25 问题②修复口径）：非 song 切片段、非动态文案
         分段（trends_copywriting+split_group）。估时与间奏窗口预检/闪避恢复
         同源（_entry_duration_s——锁内容忍本地小音频 pydub 加载）。
@@ -897,6 +931,7 @@ class PlaybackMixin:
             dict | None: 借位条目（已从队列弹出）；无候选/首候选超预算返回 None
             （首候选语义=不改排出队顺序，R5c 修正口径）。
         """
+        _delay = self._inflight_remaining_s() + self._song_timing("song_preroll_s")
         for _i, _e in enumerate(self.voice_tmp_path_queue):
             if (isinstance(_e, dict)
                     and not (_e.get("type") == "song"
@@ -904,14 +939,100 @@ class PlaybackMixin:
                     and not (_e.get("type") == "trends_copywriting"
                              and isinstance(_e.get("split_group"), dict))):
                 _est = self._entry_duration_s(_e)
-                if _est > remain - self._song_timing("song_borrow_budget_margin_s"):
+                if _delay + _est > remain - self._song_timing("song_borrow_budget_margin_s"):
                     logger.debug(
                         f"[song] 前奏插播预算不足，留队待间奏窗口："
-                        f"估时 {_est:.1f}s > 剩余 {remain:.1f}s："
+                        f"在飞剩余{_delay:.1f}s+估时 {_est:.1f}s > 剩余 {remain:.1f}s："
                         f"{_e.get('content', '')[:20]}")
                     return None
                 return self.voice_tmp_path_queue.pop(_i)
         return None
+
+    async def _run_intro_borrow_window(self, _t0: float, _start_s: float):
+        """前奏窗口借位调度（R5c，2026-11-11 用户模型；2026-11-27 A 硬切重构，
+        自 _consume_edtalk_entry seq0 前奏分支原样提取）：等待期间**借位消费**
+        队列其它音频（推数字人口型——静音期插播），歌段留队等窗口结束。此前
+        await sleep 整段阻塞=前奏 31s 零消费（消费循环被 seq0 消费占用，出队
+        侧借位跑不了）。
+
+        A 硬切（2026-11-27 人声绝对对齐，用户裁决）：借位消费改后台任务与
+        due 竞速——旧实现 await 借位全程阻塞，受理被在飞消息飞行等待拖过
+        due 时人声顺延（实测 1-2s）。现 due 一到立即返回推人声（调用方
+        push wait_flight=False flush 中断在飞借位=d3 既有语义）；B 预算校准
+        使借位尽量自然播完，硬切仅兜底估计漂移。"""
+        _due = _t0 + _start_s - self._song_timing("song_push_lead_s")
+        _borrow_task = None
+        _borrow_entry = None
+        while True:
+            _remain = _due - time.monotonic()
+            if _remain <= 0:
+                break
+            if _borrow_task is not None:
+                if not _borrow_task.done():
+                    # 借位受理中（push 飞行等待）：等受理完成或 due，先到者走
+                    # （done=借位已出声可续借；超时=硬切）
+                    await asyncio.wait({_borrow_task}, timeout=_remain)
+                    continue  # 重查 remain（done→取下一条；超时→break）
+                _borrow_task = None
+                _borrow_entry = None
+                continue
+            _interlude_entry = None
+            with self.voice_tmp_path_queue_lock:
+                # 2026-11-25 问题②修复：文案分段不进前奏借位（用户口径：唱歌
+                # 时间文案一律留队，人声播完后的垃圾时间才续播）——此前仅
+                # R5c 歌段排除，前奏空窗被在飞文案分段占据（log7 17:01:16~22
+                # 实测连播 4 段，人声延迟与伴奏失步）
+                # 2026-11-26 借位预算校验内聚 _pick_intro_borrow_locked
+                # （2026-11-27 B 校准：预算含在飞受理时滞）
+                _interlude_entry = self._pick_intro_borrow_locked(_remain)
+            if _interlude_entry is not None:
+                logger.info(
+                    f"[song] 前奏窗口插播（推数字人口型）："
+                    f"{_interlude_entry.get('content', '')[:30]}")
+                _borrow_entry = _interlude_entry
+                _borrow_task = asyncio.create_task(
+                    self._intro_borrow_consume(_interlude_entry))
+                continue
+            await asyncio.sleep(min(_remain, 0.5))
+        # A 硬切兜底（2026-11-27）：due 到而借位仍未受理（push 未返回=未出声，
+        # 仅 B 预算估计漂移时发生）→ 取消弃推（不回队——与在飞 POST 的竞态
+        # 无法判定受理，回队有重复播出风险；丢弃计数可见）。已受理在飞 →
+        # 调用方人声 push flush 中断（d3）。
+        if _borrow_task is not None and not _borrow_task.done():
+            logger.warning(
+                "[song] 前奏结束硬切：借位条目未受理（预算估计漂移），"
+                f"弃推：{str(_borrow_entry.get('content', '') or '')[:30]}")
+            _borrow_task.cancel()
+            try:
+                await _borrow_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            try:
+                from utils.obs_stats import record_drop
+                record_drop("song_intro_borrow_cancel")
+            except Exception:
+                pass
+
+    async def _intro_borrow_consume(self, entry):
+        """前奏借位消费任务体（2026-11-27 A 硬切重构）：后台执行完整消费链
+        ——push 飞行等待受理、字幕/编排回执/消费回执由 _consume_edtalk_entry
+        内置承担（T3 单一源守卫，勿重复调用）。受理（出声）时压伴奏+时长
+        估计恢复（AC-001/002/006）；压低不放出队点（song6.log 修正：飞行
+        等待期不抢当前音频——前奏场景当条=点歌应答，同理）。
+        异常吞掉记日志（不阻塞 due 竞速）；due 硬切取消发生在受理前=未出声
+        不压伴奏，无残留（CancelledError 原样上抛交取消方）。"""
+        try:
+            await self._consume_edtalk_entry(entry, entry.get("voice_path", ""))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error("[song] 前奏借位消费异常（忽略）", exc_info=True)
+            self._backing_duck_release_now()
+            return
+        self._backing_duck_hold()
+        self._backing_duck_release_later(entry)
 
     def _start_backing_player(self, backing_path: str, volume: float):
         """伴奏播放启动编排（2026-11-10 R2，须在主进程调用）。
@@ -1356,49 +1477,9 @@ class PlaybackMixin:
                         record_drop("song_gap_wait", round(_remain, 1))
                     except Exception:
                         pass
-                    # 前奏窗口调度循环（R5c，2026-11-11 用户模型）：等待期间
-                    # **借位消费**队列其它音频（推数字人口型——静音期插播），
-                    # 歌段留队等窗口结束。此前 await sleep 整段阻塞=前奏 31s
-                    # 零消费（消费循环被 seq0 消费占用，出队侧借位跑不了）。
-                    while True:
-                        _remain = _t0 + _start_s - self._song_timing("song_push_lead_s") - time.monotonic()
-                        if _remain <= 0:
-                            break
-                        _interlude_entry = None
-                        with self.voice_tmp_path_queue_lock:
-                            # 2026-11-25 问题②修复：文案分段不进前奏借位（用户
-                            # 口径：唱歌时间文案一律留队，人声播完后的垃圾时间
-                            # 才续播）——此前仅 R5c 歌段排除，前奏空窗被在飞文案
-                            # 分段占据（log7 17:01:16~22 实测连播 4 段，人声
-                            # 延迟与伴奏失步）
-                            # 2026-11-26 借位预算校验内聚 _pick_intro_borrow_locked
-                            _interlude_entry = self._pick_intro_borrow_locked(_remain)
-                        if _interlude_entry is not None:
-                            logger.info(
-                                f"[song] 前奏窗口插播（推数字人口型）："
-                                f"{_interlude_entry.get('content', '')[:30]}")
-                            # 伴奏闪避（2026-11-12 伴奏闪避批次）：前奏窗口借位
-                            # 与消费循环同口径——**受理（出声）**时压伴奏，受理+
-                            # 时长估计恢复；异常=未出声不压（AC-001/002/006）。
-                            # 压低不放出队点（song6.log 修正：飞行等待期不抢
-                            # 当前音频——前奏场景当条=点歌应答，同理）。
-                            _borrow_consumed = False
-                            try:
-                                await self._consume_edtalk_entry(
-                                    _interlude_entry,
-                                    _interlude_entry.get("voice_path", ""))
-                                _borrow_consumed = True
-                            finally:
-                                if _borrow_consumed:
-                                    self._backing_duck_hold()
-                                    self._backing_duck_release_later(
-                                        _interlude_entry)
-                                else:
-                                    self._backing_duck_release_now()
-                            # 字幕/编排回执/消费回执由 _consume_edtalk_entry
-                            # 内置承担（勿重复调用——T3 单一源守卫）
-                        else:
-                            await asyncio.sleep(min(_remain, 0.5))
+                    # 前奏窗口借位调度（R5c 循环+A 硬切，2026-11-27 提取为
+                    # _run_intro_borrow_window——语义不变，可独立守卫测试）
+                    await self._run_intro_borrow_window(_t0, _start_s)
                 self._song_anchor = {"t0": _t0, "last_end": 0.0,
                                      "name": str(data_json.get("content") or ""),
                                      "dir": str(_seg_meta.get("seg_dir") or "")}
