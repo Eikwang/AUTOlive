@@ -42,10 +42,16 @@ def _base_path() -> str:
 
 
 def tuber_root(tuber_root: str = None) -> str:
-    """角色库根：仓库根 tuber/——每角色一个子目录（服务/编排/管理全链消费）。"""
+    """角色库根：models/tuber/（2026-11-22 统一布局，原根级 tuber/）——
+    每角色一个子目录（服务/编排/管理全链消费）。显式参数优先，
+    缺省委托注册中心 utils/resource_paths（config paths.tuber_root 可覆盖）。"""
     if tuber_root:
         return tuber_root
-    return os.path.join(_base_path(), "tuber")
+    try:
+        from utils import resource_paths
+        return str(resource_paths.tuber_root())
+    except Exception:
+        return os.path.join(_base_path(), "tuber")
 
 
 def _character_dir_name(config) -> str:

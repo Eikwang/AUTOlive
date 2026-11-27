@@ -141,10 +141,14 @@ def test_asr_route_mapping():
         assert "float16" in ASR_ROUTE[lang][1]
 
 
-def test_check_assets_reports_missing():
+def test_check_assets_reports_missing(monkeypatch):
     """T-4 预检：缺失项有清单且 s1v3 在 REQUIRED_ASSETS（实际配置路径校验）。"""
     assert any("s1v3.ckpt" in rel for rel, _ in REQUIRED_ASSETS)
     assert not any("bernard" in rel for rel, _ in REQUIRED_ASSETS)
+    # 2026-11-22 统一布局：底模经注册中心 models/gpt_sovits/ 解析——
+    # 把 home 一并指向不存在根，强制全缺
+    monkeypatch.setattr("frontend.config.paths.get_base_path",
+                        lambda: "nonexistent-root")
     p = _make_pipeline()
     p.params = {"asr_lang": "zh"}
     p.gsv_root = os.path.join("nonexistent-root")  # 强制全缺

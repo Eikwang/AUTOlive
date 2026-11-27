@@ -327,9 +327,12 @@ class TestFilterMasterGate:
         assert h.prohibitions_handle("包含违禁词的内容") == "包含违禁词的内容"
 
     def test_wiring(self):
-        """接线守卫：两处消费门读 _filter_master_enabled，不再裸读 enable。"""
+        """接线守卫：消费门读 _filter_master_enabled，不再裸读 enable。
+
+        三处=①prohibitions_handle（username/content 共用）②lang_filter_pass
+        ③preheat_badwords 启动预热（2026-11-26 两段式加载批次新增）。"""
         src = _src("utils/handlers/comment_handler.py")
-        assert src.count("self._filter_master_enabled(filter_config)") == 2
+        assert src.count("self._filter_master_enabled(filter_config)") == 3
         assert 'filter_config.get("enable")' not in src
 
 

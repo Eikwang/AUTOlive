@@ -84,6 +84,7 @@ from frontend.styles.themes import init_theme_manager, get_theme_manager
 # 导入日志模块
 from utils.my_log import logger
 from utils.autolive_paths import ensure_config_backup
+from utils import resource_paths
 
 import asyncio
 
@@ -527,8 +528,16 @@ class AutoliveApp:
             return False, f"主系统入口不存在: {main_py}", "请检查安装完整性（main.py 缺失）"
         logger.info(f"运行程序: main 主系统 位于: {os.path.dirname(main_py)}")
         try:
+            # 发行改造阶段 C3（2026-11-22）：frozen 下 sys.executable 是
+            # AUTOlive.exe 本身——主系统必须经注册中心 runtime312 解释器拉起
+            # （源码模式解析结果同为 runtime312\python.exe，行为对齐 bat 链）
+            interpreter = resource_paths.runtime_python()
+            if not interpreter:
+                logger.error("runtime312 解释器缺失（problem=解释器链全候选缺失；"
+                             "fix=检查发行包 runtime312/ 完整性）")
+                return False, "runtime312 解释器缺失", "请检查安装完整性（runtime312/ 缺失）"
             process = subprocess.Popen(
-                [sys.executable, main_py],
+                [interpreter, main_py],
                 cwd=str(os.path.dirname(main_py)), shell=False)
             self.my_subprocesses["main"] = process
             return True, "", ""
@@ -620,7 +629,7 @@ class AutoliveApp:
         # 与 audio2lip.pt（口型权重）在位，缺失给可行动指引（重新部署）。
         # 2026-11-10 tuber 角色库改造：数据包=仓库根 tuber/{启用角色}。
         character_name = str(ed_cfg.get("character_dir") or "wy")
-        pkg_ckpt = os.path.join(str(get_base_path()), "tuber", character_name, "checkpoint")
+        pkg_ckpt = os.path.join(str(resource_paths.tuber_root(character_name)), "checkpoint")
         # 仅角色包目录已存在时查完整性（目录整体缺失=数据包未部署，保持原行为
         # 由服务端报错；测试假环境同理跳过）
         if os.path.isdir(pkg_ckpt):
@@ -683,8 +692,8 @@ class AutoliveApp:
         # character_dir 语义升级（2026-11-10 tuber 角色库改造）：键值=当前启用
         # 角色名，服务加载绝对路径 tuber/{角色}（每角色一个数据包，画面设置
         # 切换=写此键+服务重启加载对应包）。
-        cmd += ["--character-dir", os.path.join(str(get_base_path()), "tuber",
-                                                str(ed_cfg.get("character_dir", "wy")))]
+        cmd += ["--character-dir", str(resource_paths.tuber_root(
+            str(ed_cfg.get("character_dir", "wy"))))]
         cmd += ["--target-fps", str(_int_cfg("target_fps", 25))]
         cmd += ["--buffer-frames", str(buffer_frames)]
         cmd += ["--preroll-frames", str(preroll_frames)]
@@ -827,8 +836,10 @@ class AutoliveApp:
         # 端口经环境变量注入（tomllib 只读，零 Config.toml 手术——native H2 延续；
         # python 路线由 config.py 补丁 P4 读 FASTRAG__SERVER__PORT）
         env["FASTRAG__SERVER__PORT"] = str(port)
-        # 量化三键 env 注入（config.py P7 域校验 fail-fast；前端值域外回退默认并告警）
+        # 量化三键 + 对话模型 env 注入（config.py P7/P8 域校验 fail-fast；前端值域外回退默认并告警）
         for _key, _default, _domain in (
+                ("llm_model", "Qwen2.5-0.5B-Instruct",
+                 ("Qwen2.5-0.5B-Instruct", "Qwen2.5-1.5B-Instruct")),
                 ("llm_quant_bits", 16, (4, 8, 16)),
                 ("reranker_quant_bits", 16, (4, 8, 16)),
                 ("embedder_device", "cuda-fp16", ("cpu", "cuda-fp16", "cuda"))):
@@ -1225,7 +1236,10 @@ class AutoliveApp:
             ui.notify(position="top", type="info", message="已切换到日间模式")
     
     def restart_application(self, type="webui"):
-        """重启应用程序（与原文件 webui-bak.py L415-427 一致）"""
+        """重启应用程序（发行改造阶段 C3，2026-11-22）。
+
+        frozen（Nuitka exe）：DETACHED 新进程拉起 AUTOlive.exe 后优雅退出
+        （exe 无法被 os.execl 替换映像）；源码模式保留 execl 原语义。"""
         try:
             # 先停止运行
             self.stop_external_program(type)
@@ -1233,6 +1247,13 @@ class AutoliveApp:
             logger.info(f"重启webui")
             if type == "webui":
                 ui.notify(position="top", type="ongoing", message=f"重启中...")
+            if "__compiled__" in globals() or getattr(sys, "frozen", False):
+                flags = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+                subprocess.Popen([sys.executable] + sys.argv,
+                                 cwd=str(get_base_path()),
+                                 creationflags=flags, shell=False)
+                ui.timer(1.0, lambda: os._exit(0))
+                return {"code": 0, "msg": "重启中..."}
             python = sys.executable
             os.execl(python, python, *sys.argv)  # Start a new instance of the application
         except Exception as e:
@@ -1822,9 +1843,14 @@ class AutoliveApp:
         try:
             from frontend.ui import tabs as _tabs_pkg
             pkg_dir = os.path.dirname(_tabs_pkg.__file__)
+            # frozen 下 tab 模块已编译且磁盘无 .py（目录不存在），预热无对象可扫
+            if not os.path.isdir(pkg_dir):
+                return
             mods = [f"frontend.ui.tabs.{fn[:-3]}"
                     for fn in sorted(os.listdir(pkg_dir))
                     if fn.endswith(".py") and not fn.startswith("_")]
+            if not mods:
+                return
             t0 = _time.perf_counter()
             loaded = 0
             for m in mods:

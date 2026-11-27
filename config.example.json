@@ -23,7 +23,15 @@
     "text_split_enable": true,
     "synth_gate_depth": 4,
     "synth_gate_budget_s": 15.0,
-    "out_path": "out"
+    "out_path": "out",
+    "reply_gate_timeout_s": 15.0,
+    "reply_gate_extend_s": 10.0,
+    "song_push_lead_s": 0.3,
+    "song_preroll_s": 0.3,
+    "song_borrow_budget_margin_s": 0.5,
+    "backing_duck_factor": 0.5,
+    "backing_duck_release_margin_s": 0.5,
+    "interlude_min_consume_s": 3.0
   },
   "audio_player": {
     "device_index": -1,
@@ -1465,7 +1473,15 @@
     "gpt_sovits_python": "D:\\AI\\runtime312-clone\\python.exe",
     "rvc_root": "D:\\AI\\AUTOlive\\apps\\rvc",
     "rvc_python": "",
-    "aicovergen_root": "D:\\AI\\AUTOlive\\apps\\aicovergen"
+    "aicovergen_root": "D:\\AI\\AUTOlive\\apps\\aicovergen",
+    "models_root": "",
+    "asr_models": "",
+    "uvr5_models": "",
+    "rvc_models": "",
+    "gpt_sovits_models": "",
+    "edtalk_ckpts": "",
+    "tuber_root": "",
+    "song_root": ""
   },
   "audio_integration": {
     "policies": {
@@ -1607,6 +1623,5 @@
   "edge_tts": {
     "voice": "zh-HK-HiuMaanNeural",
     "rate": "100%"
-  },
-  "schedule_groups": []
+  }
 }

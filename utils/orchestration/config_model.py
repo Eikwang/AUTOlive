@@ -56,6 +56,9 @@ class TierCfg:
     min_count: int
     mood: str = ""
     segment_overrides: dict = field(default_factory=dict)  # {enter|main|exit: segment}
+    # 覆盖段素材属性（apply 二段从覆盖段自身 sidecar 解析，同 StepCfg.lip_flag
+    # 模式；缺口修复：换段后 lip_flag/duration_s 不得再取基础段属性）
+    override_props: dict = field(default_factory=dict)  # {enter|main|exit: {lip_flag, duration_s}}
 
 
 @dataclass

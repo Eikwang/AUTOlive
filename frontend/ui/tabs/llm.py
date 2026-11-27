@@ -426,13 +426,24 @@ def _create_fastrag_card(
 
         _refresh_kb_list()
 
-        # ---------- 推理配置（量化——2026-10-29 用户裁决显式暴露；改后需重启系统生效） ----------
-        with ui.expansion("推理配置（量化——改后需重启系统生效）").style("width:100%"):
+        # ---------- 推理配置（对话模型/量化——2026-10-29 用户裁决显式暴露；改后需重启系统生效） ----------
+        with ui.expansion("推理配置（对话模型/量化——改后需重启系统生效）").style("width:100%"):
             ui.label(
-                "模型/路径与检索参数由系统内置默认管理（无需配置）；以下量化项经启动 env 注入服务"
-                "（config.py 补丁 P7 域校验，非法值拒绝启动）。显存参考：INT4 约 -1.0GB/项。"
+                "对话模型与量化项经启动 env 注入服务（config.py 补丁 P7/P8 域校验，非法值拒绝启动），"
+                "改后需重启系统生效。显存参考：INT4 约 -1.0GB/项；"
+                "1.5B 模型效果更好，但显存占用与推理耗时更高（首次启动冷加载更慢）。"
             ).style("color: var(--text-hint); font-size: var(--font-size-assist, 12px)")
             with ui.grid(columns=3):
+                ui.select(
+                    options={"Qwen2.5-0.5B-Instruct": "千问2.5-0.5B（默认，性能开销低）",
+                             "Qwen2.5-1.5B-Instruct": "千问2.5-1.5B（效果更好，开销更高）"},
+                    value=str(get_nested_value(config, "fastrag", "llm_model",
+                                               default="Qwen2.5-0.5B-Instruct")),
+                    on_change=lambda e: set_config_callback("fastrag", "llm_model", value=e.value),
+                    label="对话模型",
+                ).props("outlined").style("width:100%;").tooltip(
+                    "知识库问答/闲聊/动态文案共用的对话 LLM，模型位于 "
+                    "edtalk/fastrag/chekpoint/（相对路径随仓库部署便携）")
                 ui.select(
                     options={4: "INT4（省约 1.0GB）", 8: "INT8（省约 0.5GB）", 16: "BF16（默认，无量化）"},
                     value=get_nested_value(config, "fastrag", "llm_quant_bits", default=16),

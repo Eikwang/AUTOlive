@@ -161,6 +161,14 @@ class GptSovitsInproc:
             p = os.path.join(self._gsv_root, p)
         return os.path.abspath(p)
 
+    @staticmethod
+    def _default_pretrained(rel: str) -> str:
+        """底模缺省路径：注册中心 models/gpt_sovits/（2026-11-22 统一布局，
+        原相对 gsv_root 的 GPT_SoVITS/pretrained_models ——junction 仍兼容，
+        绝对路径使预检在任意 cwd 下成立）。"""
+        from utils import resource_paths
+        return os.path.join(str(resource_paths.gsv_pretrained_dir()), rel)
+
     def _build_tts_config(self, gpt_model: str = "", sovits_model: str = "") -> tuple:
         """构造 TTS_Config 输入 dict + 输出 yaml 路径（回写禁令见模块头 #2）。
 
@@ -172,8 +180,8 @@ class GptSovitsInproc:
 
         t2s = gpt_model or params.get("gpt_model_path") or ""
         vits = sovits_model or params.get("sovits_model_path") or ""
-        bert = params.get("bert_base_path") or "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
-        hubert = params.get("cnhuhbert_base_path") or "GPT_SoVITS/pretrained_models/chinese-hubert-base"
+        bert = params.get("bert_base_path") or self._default_pretrained("chinese-roberta-wwm-ext-large")
+        hubert = params.get("cnhuhbert_base_path") or self._default_pretrained("chinese-hubert-base")
 
         t2s = self._resolve_weight(t2s, "gpt")
         vits = self._resolve_weight(vits, "sovits")
@@ -267,7 +275,7 @@ class GptSovitsInproc:
         try:
             bert_abs = self._resolve_weight(
                 (self.config.get("gpt_sovits") or {}).get("params", {}).get("bert_base_path")
-                or "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large", "bert")
+                or self._default_pretrained("chinese-roberta-wwm-ext-large"), "bert")
             if os.path.isdir(bert_abs):
                 os.environ["bert_path"] = bert_abs
                 logger.info(f"[gsv-inproc] bert_path env 已注入: {bert_abs}")

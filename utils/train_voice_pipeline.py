@@ -57,7 +57,8 @@ from utils.train_process_utils import (  # noqa: F401,E402
     wait_vram_release as _tpu_wait_vram_release,
 )
 
-# T-4 资产预检清单：相对 gsv_root；covers=训练配置实际引用 + ASR 模型 + MDX
+# T-4 资产预检清单：pretrained 前缀项经注册中心 models/gpt_sovits/ 解析
+# （2026-11-22 统一布局；gsv_root junction 兼容）；其余相对 gsv_root
 REQUIRED_ASSETS = [
     ("GPT_SoVITS/pretrained_models/s1v3.ckpt", "GPT 底模 s1v3.ckpt"),
     ("GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth", "SoVITS-G 底模"),
@@ -67,6 +68,15 @@ REQUIRED_ASSETS = [
     ("GPT_SoVITS/pretrained_models/chinese-hubert-base", "HuBERT"),
     ("GPT_SoVITS/text/G2PWModel", "G2PW 音素模型"),
 ]
+
+_GSV_PRETRAINED_PREFIX = "GPT_SoVITS/pretrained_models/"
+
+
+def _pretrained_full(rel: str) -> str:
+    """底模绝对路径：注册中心 models/gpt_sovits/ + 剥离旧前缀。"""
+    from utils import resource_paths
+    sub = rel[len(_GSV_PRETRAINED_PREFIX):] if rel.startswith(_GSV_PRETRAINED_PREFIX) else rel
+    return os.path.join(str(resource_paths.gsv_pretrained_dir()), sub)
 
 # ASR 双模型路由（T-2）：zh|yue→达摩；en|ja|ko|auto→Faster Whisper
 ASR_ROUTE = {
@@ -176,9 +186,10 @@ class TrainVoicePipeline:
         """
         issues = []
         for rel, note in REQUIRED_ASSETS:
-            full = os.path.join(self.gsv_root, rel)
+            full = _pretrained_full(rel) if rel.startswith(_GSV_PRETRAINED_PREFIX) \
+                else os.path.join(self.gsv_root, rel)
             if not os.path.exists(full):
-                hint = "从 GPT-SoVITS 官方发布包放置，或配置 paths.gpt_sovits_root 指向含底模的副本"
+                hint = "从 GPT-SoVITS 官方发布包放置（models/gpt_sovits/ 或 GPT_SoVITS/pretrained_models）"
                 issues.append((rel, note, hint))
         for stage in MDX_STAGES:
             full = os.path.join(self.autolive_home if hasattr(self, "autolive_home") else ".",
@@ -433,12 +444,12 @@ class TrainVoicePipeline:
             "i_part": "0", "all_parts": "1",
             "_CUDA_VISIBLE_DEVICES": "0",
             "opt_dir": opt_dir,
-            "bert_pretrained_dir": "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large",
+            "bert_pretrained_dir": _pretrained_full("GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"),
             # env 键名对齐上游 webui open1b：cnhubert_base_dir（非 _path）+ Pro 系 sv_path
-            "cnhubert_base_dir": "GPT_SoVITS/pretrained_models/chinese-hubert-base",
-            "sv_path": "GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt",
+            "cnhubert_base_dir": _pretrained_full("GPT_SoVITS/pretrained_models/chinese-hubert-base"),
+            "sv_path": _pretrained_full("GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt"),
             # 3-get-semantic 的 env（上游 open1c）：语义提取用底模+对应版本 config
-            "pretrained_s2G": "GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth",
+            "pretrained_s2G": _pretrained_full("GPT_SoVITS/pretrained_models/v2Pro/s2Gv2ProPlus.pth"),
             "s2config_path": "GPT_SoVITS/configs/s2v2ProPlus.json",
             "is_half": "True", "version": "v2ProPlus",
         }
@@ -479,7 +490,8 @@ class TrainVoicePipeline:
         logger.info(f"[train-voice] 分片合并 {merged_name}（{i} 片，{len(lines)} 行）")
 
     def _pretrained(self, name: str) -> str:
-        return os.path.join("GPT_SoVITS", "pretrained_models", name)
+        """训练配置写入的底模绝对路径（注册中心 models/gpt_sovits/）。"""
+        return _pretrained_full(f"GPT_SoVITS/pretrained_models/{name}")
 
     def _assert_new_product(self, weight_dir: str, t0: float, label: str) -> bool:
         """训练步产物断言（2026-11-08 实报根修）：rc=0 不代表有产出——续训旧

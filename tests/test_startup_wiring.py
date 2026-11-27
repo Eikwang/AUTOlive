@@ -374,6 +374,7 @@ def test_fastrag_python_cmd_and_env(tmp_path, monkeypatch):
     assert not any("server.exe" in part for part in cmd), "启动物不得再是 rust exe"
     assert captured["cwd"] == str(tmp_path / "edtalk" / "fastrag" / "fastrag-python")
     assert captured["env"]["FASTRAG__SERVER__PORT"] == "11420"
+    assert captured["env"]["FASTRAG__LLM_MODEL"] == "Qwen2.5-0.5B-Instruct"  # 2026-11-25 模型选择
     assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
     assert captured["env"]["FASTRAG__RERANKER_QUANT_BITS"] == "16"
     assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cuda-fp16"  # 2026-11-20 对齐上游
@@ -386,10 +387,12 @@ def test_fastrag_invalid_quant_falls_back(tmp_path, monkeypatch):
     app, captured, cfg = _fastrag_env(tmp_path, monkeypatch)
     cfg["fastrag"]["llm_quant_bits"] = 7
     cfg["fastrag"]["embedder_device"] = "tpu"
+    cfg["fastrag"]["llm_model"] = "GPT-4"  # 白名单域外（P8 同款 fail-soft）
     ok, reason, fix = app._start_fastrag(cfg)
     assert ok is True
     assert captured["env"]["FASTRAG__LLM_QUANT_BITS"] == "16"
     assert captured["env"]["FASTRAG__EMBEDDER_DEVICE"] == "cuda-fp16"  # 2026-11-20 对齐上游
+    assert captured["env"]["FASTRAG__LLM_MODEL"] == "Qwen2.5-0.5B-Instruct"  # 回退默认
 
 
 def test_fastrag_preflight_index_missing(tmp_path, monkeypatch):

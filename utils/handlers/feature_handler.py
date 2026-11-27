@@ -767,11 +767,25 @@ class FeatureHandler:
         命中即调 choreo.on_song（decide_trigger("song", song_name)），命中
         规则=画面序列接管（主线 hold 至歌终，由 on_song_started/playback
         受理点承接）；未命中/编排未启用=原路播放零变化（on_song 内部全兜底）。"""
+        # B 预武装（2026-11-26 画面来回跳根修）：接管前先探测成品时长——
+        # 人声轨时长=歌曲时间轴全长（含前奏/间奏，与切片 start_s 坐标同源），
+        # 供编排把 hold 保险丝下限抬升到「接管锚+歌曲总时长」（首个切片 push
+        # 受理被消费积压/前奏推迟超保险丝时序列不再提前走完）。探测失败=None
+        # （保险丝原语义+收尾防线兜底）。
+        hit = self._song_covers_hit(song_name)
+        _song_total_s = None
+        if hit is not None:
+            _probe = hit[1] or hit[0]
+            try:
+                import soundfile as _sf
+                _song_total_s = float(_sf.info(_probe).duration)
+            except Exception:
+                _song_total_s = None
         try:
             from utils.orchestration import get_choreographer
             _choreo = get_choreographer()
             if _choreo is not None:
-                _accepted = bool(_choreo.on_song(song_name))
+                _accepted = bool(_choreo.on_song(song_name, total_s=_song_total_s))
                 if _accepted:
                     logger.info(f"[点歌] song 编排规则接管：{song_name}（画面序列+主线保持至歌终）")
         except Exception as _song_err:
@@ -781,7 +795,6 @@ class FeatureHandler:
             user=username, content=song_name, gift=gift_name or "")
         self.my_handle.webui_show_chat_log_callback("点歌", {"username": username}, copy_text)
         self.my_handle.audio_synthesis_handle(self._song_copy_message(username, copy_text))
-        hit = self._song_covers_hit(song_name)
         if hit is not None:
             cover_full, vocal, inst = hit
             # R6 主方案：分轨齐全→人声轨驱动+伴奏外放（+整轨随消息透传供本地
@@ -916,10 +929,18 @@ class FeatureHandler:
         2026-11-04 erro3 批次 T2（R2）：翻唱命中点同挂 song 编排触发（R2②
         「翻唱命中点」——异步翻唱完成时 song 规则接管判定，未命中零变化）。"""
         try:
+            # B 预武装（2026-11-26）：翻唱成品时长探测（整轨=歌曲时间轴全长）
+            _cover_total_s = None
+            try:
+                import soundfile as _sf
+                _cover_total_s = float(_sf.info(job.get("cover_path")).duration)
+            except Exception:
+                _cover_total_s = None
             try:
                 from utils.orchestration import get_choreographer
                 _choreo = get_choreographer()
-                if _choreo is not None and bool(_choreo.on_song(str(job.get("song") or ""))):
+                if _choreo is not None and bool(_choreo.on_song(
+                        str(job.get("song") or ""), total_s=_cover_total_s)):
                     logger.info(f"[翻唱] song 编排规则接管：{job.get('song')}")
             except Exception as _choreo_err:
                 logger.debug(f"[翻唱] 编排 on_song 调用异常（忽略，插播照常）：{_choreo_err}")

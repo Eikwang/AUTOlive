@@ -84,13 +84,17 @@ class TestApplyConfig:
         ch.apply_config(_cfg_node())
         assert "ghost_rule" not in ch.engine.counters
 
-    def test_sequence_active_rejected_409(self):
+    def test_sequence_active_staged_202(self):
+        """C5 暂存换装（2026-11-27）：序列执行中不再 409 拒绝——接受写入暂存
+        （staged=True），下个回默认点自动应用。"""
         ch, _ = _facade()
         ch.engine.on_edtalk_ready(AVAILABLE)
         ch.on_gift(gift_data())  # state=sequence
         result = ch.apply_config(_cfg_node())
-        assert result["applied"] is False and result["status"] == 409
-        assert "执行中" in result["message"]
+        assert result["applied"] is False and result["status"] == 202
+        assert result.get("staged") is True
+        assert "暂存" in result["message"]
+        assert ch._pending_cfg_node is not None  # 暂存位已装载
 
     def test_edtalk_unreachable_503(self):
         ch, client = _facade()
@@ -188,16 +192,23 @@ class TestRoutes:
         saved = json.loads(cfg_file.read_text(encoding="utf-8"))
         assert saved["choreography"]["enable"] is True
 
-    def test_rules_409_when_sequence_active(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(choreo_api, "_config_path", lambda: str(tmp_path / "c.json"))
+    def test_rules_staged_when_sequence_active(self, tmp_path, monkeypatch):
+        """C5 暂存换装：序列执行中 → staged=202，照常持久化（配置稍后必然
+        生效——暂存换装语义取代旧 409 不落盘）。"""
+        cfg_file = tmp_path / "c.json"
+        cfg_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(choreo_api, "_config_path", lambda: str(cfg_file))
         ch, _ = _facade()
         ch.engine.on_edtalk_ready(AVAILABLE)
         ch.on_gift(gift_data())  # sequence
         client = self._app(ch, _cfg_node())
         with patch("utils.orchestration.api._choreographer", return_value=ch):
             r = client.post("/choreography/rules", json=_cfg_node())
-        assert r.status_code == 200  # HTTP 层 200，body.status_code=409（页面按 body 分支）
-        assert r.json()["applied"] is False and r.json()["status"] == 409
+        assert r.status_code == 200
+        body = r.json()
+        assert body["applied"] is False and body["status"] == 202
+        assert body.get("staged") is True
+        assert body["persisted"] is True  # C5：暂存=配置必然生效，照常落盘
 
     def test_rules_persist_on_edtalk_unreachable(self, tmp_path, monkeypatch):
         """C5-1 语义落盘（2026-11-04 erro 批次根修）：EDTalk 不可达=已保存、
@@ -220,8 +231,9 @@ class TestRoutes:
         assert saved["choreography"]["default_segments"] == ["s1"]
         assert saved["choreography"]["default_single_segment"] == "s1"
 
-    def test_rules_409_not_persisted(self, tmp_path, monkeypatch):
-        """409（序列执行中）不落盘：防写回未生效状态（与 C5-1 不可达持久化相区分）。"""
+    def test_rules_staged_persisted_to_disk(self, tmp_path, monkeypatch):
+        """C5 暂存换装落盘：staged=202 → 持久化写盘（下个回默认点自动应用，
+        重启后配置亦在）。"""
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(choreo_api, "_config_path", lambda: str(cfg_file))
@@ -231,9 +243,9 @@ class TestRoutes:
         client = self._app(ch, _cfg_node())
         with patch("utils.orchestration.api._choreographer", return_value=ch):
             r = client.post("/choreography/rules", json=_cfg_node(default_segments=["s9"]))
-        assert r.json()["persisted"] is False
+        assert r.json()["persisted"] is True
         saved = json.loads(cfg_file.read_text(encoding="utf-8"))
-        assert "choreography" not in saved
+        assert saved["choreography"]["default_segments"] == ["s9"]
 
     def test_rules_422_non_object(self):
         client = self._app(None, _cfg_node())

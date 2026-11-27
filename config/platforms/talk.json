@@ -47,8 +47,8 @@
     "beam_size": 5
   },
   "sensevoice": {
-    "asr_model_path": "./models/iic/SenseVoiceSmall",
-    "vad_model_path": "./models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "asr_model_path": "./models/asr/SenseVoiceSmall",
+    "vad_model_path": "./models/asr/speech_fsmn_vad_zh-cn-16k-common-pytorch",
     "vad_max_single_segment_time": 30000,
     "device": "cuda:0",
     "language": "zh",

@@ -126,6 +126,39 @@ class TestFastragConfigQuant:
             os.environ.pop("FASTRAG__EMBEDDER_DEVICE", None)
 
 
+# ==================== P8：config.py 对话模型 env 注入域校验（2026-11-25 模型选择） ====================
+
+
+class TestFastragConfigModel:
+    def test_model_env_switches_path(self):
+        """1.5B 选择 → LLM_MODEL_PATH 由 MODEL_DIR 相对派生（无硬编码绝对路径，
+        随仓库目录布局便携）。"""
+        os.environ["FASTRAG__LLM_MODEL"] = "Qwen2.5-1.5B-Instruct"
+        try:
+            mod = _load_fastrag_config(None)
+            assert mod.LLM_MODEL_PATH.parent == mod.MODEL_DIR
+            assert mod.LLM_MODEL_PATH.name == "Qwen2.5-1.5B-Instruct"
+        finally:
+            os.environ.pop("FASTRAG__LLM_MODEL", None)
+
+    def test_model_unset_keeps_default(self):
+        """未注入=0.5B 默认（存量部署零行为变化）。"""
+        os.environ.pop("FASTRAG__LLM_MODEL", None)
+        mod = _load_fastrag_config(None)
+        assert mod.LLM_MODEL_PATH == mod.MODEL_DIR / "Qwen2.5-0.5B-Instruct"
+
+    def test_model_invalid_fails_fast(self):
+        """白名单域外拒绝启动（防路径拼接注入/目录名漂移静默 404）。"""
+        os.environ["FASTRAG__LLM_MODEL"] = "..\\evil"
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                _load_fastrag_config(None)
+            msg = str(exc_info.value)
+            assert "FASTRAG__LLM_MODEL" in msg and "evil" in msg
+        finally:
+            os.environ.pop("FASTRAG__LLM_MODEL", None)
+
+
 # ==================== T3③：fastrag_llm.stream_resp SSE 客户端契约 ====================
 
 

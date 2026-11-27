@@ -384,6 +384,8 @@ class DrawerLayout:
         """注入全局 CSS 样式 - 设计令牌 + 统一基础元素样式"""
         # 设计令牌（CSS 变量：颜色/字体/间距/圆角/阴影，含深色模式覆盖）
         from frontend.styles.design_tokens import inject_design_tokens
+        # 全局组件层（阶段 B：按钮/输入框/下拉/开关/表格等统一质感，令牌驱动）
+        from frontend.styles.components import inject_component_styles
         css = f"""
         {inject_design_tokens()}
 
@@ -569,6 +571,9 @@ class DrawerLayout:
                 font-size: 13px;
             }}
         }}
+
+        /* ============ 全局组件层（阶段 B，追加于基础规则之后） ============ */
+        {inject_component_styles()}
         """
         ui.add_head_html(f"<style>{css}</style>")
 

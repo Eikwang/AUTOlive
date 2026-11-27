@@ -402,3 +402,28 @@ data/interpreter_memory.json
 
 # 角色库（tuber/）：每角色数据包（checkpoint 权重部署副本+推理帧 junction+编排片段），数据不入库
 tuber/
+
+# === 模型二进制布局迁移（2026-11-27 Scripts/migrate_models_layout.py）：大文件不入库 ===
+# 用 `**` 而非目录级 `models/<名>/`——目录级排除会使文件级白名单失效
+# （git 不重含被排除父目录内的文件）。models/uvr5/model_data.json 是
+# UVR5 分离的运行时硬依赖（utils/train_process_utils.py 直接读取），强制入库。
+models/asr/**
+models/edtalk/**
+models/gpt_sovits/**
+models/uvr5/**
+!models/uvr5/model_data.json
+
+# Nuitka 构建产物（不入库）
+build_nuitka/
+
+# 工具与报告产物（不入库）
+.trae/
+.trae-html-share-packages/
+choreo-report/
+queue-mechanism-flowchart/
+
+# 根目录音频抓取样张（不入库）
+/dac_*.wav
+
+# 历史配置备份（不入库）
+config.json.bak_*

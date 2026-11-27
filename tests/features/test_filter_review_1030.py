@@ -264,6 +264,9 @@ class TestBadwordsWiring:
                          "bad_pinyin_path": str(pinyin_file), "replace": "*"}}}
         h = _make_handler(cfg_discard)
         # 同音变体「砂凋」：原文精确匹配不命中，拼音命中→丢弃
+        # （2026-11-26 两段式加载：拼音转换移后台线程——显式预热后再断言，
+        # 未预热窗口 fail-open 放行为预期语义）
+        h._warm_pinyin(str(pinyin_file))
         assert h.prohibitions_handle("你就是个砂凋") is None
 
         cfg_replace = {"filter": {
@@ -272,7 +275,71 @@ class TestBadwordsWiring:
                          "path": str(word_file),
                          "bad_pinyin_path": str(pinyin_file), "replace": "*"}}}
         h2 = _make_handler(cfg_replace)
+        h2._warm_pinyin(str(pinyin_file))
         assert h2.prohibitions_handle("你就是个砂凋") == "你就是个砂凋"
+
+
+class TestTwoPhaseBadwordsLoad:
+    """两段式加载守卫（2026-11-26 log10 空白根修）：词表文本同步读（首条消息
+    过滤即生效）；7 万词拼音转换后台化——原同步实现阻塞 comment 串行分发链
+    12.3s（点歌意图延迟根因），且与进程内 GSV 推理线程 GIL 互抢互拖慢。"""
+
+    def test_word_replace_immediate_and_pinyin_fail_open(self, tmp_path, monkeypatch):
+        submitted = []
+        monkeypatch.setattr("utils.background_tasks.submit",
+                            lambda fn, *a: submitted.append((fn,) + a))
+        word_file = _word_file(tmp_path, "客户\n和谐\n")
+        pinyin_file = tmp_path / "bad_pinyin.txt"
+        pinyin_file.write_text("沙雕\n", encoding="utf-8")
+        cfg = {"filter": {"enable": True, "badwords": {
+            "enable": True, "discard": False, "path": word_file,
+            "bad_pinyin_path": str(pinyin_file), "replace": "*"}}}
+        h = _make_handler(cfg)
+        # ① 词替换同步生效——首条消息即过滤，不等后台
+        assert h.prohibitions_handle("你是客户吗") == "你是*吗"
+        # ② 两份词表的拼音转换均投后台（fail-open 窗口）：同音变体「砂凋」放行
+        assert {s[1] for s in submitted} == {word_file, str(pinyin_file)}
+        assert h.prohibitions_handle("你就是个砂凋") == "你就是个砂凋"
+        # ③ 后台预热完成后拼音命中（替换模式不丢弃），缓存命中不再重复提交
+        h._warm_pinyin(str(pinyin_file))
+        assert h.prohibitions_handle("你就是个砂凋") == "你就是个砂凋"
+        assert len(submitted) == 2
+
+    def test_discard_mode_pinyin_fail_open_then_warm(self, tmp_path, monkeypatch):
+        submitted = []
+        monkeypatch.setattr("utils.background_tasks.submit",
+                            lambda fn, *a: submitted.append((fn,) + a))
+        pinyin_file = tmp_path / "bad_pinyin.txt"
+        pinyin_file.write_text("沙雕\n", encoding="utf-8")
+        cfg = {"filter": {"enable": True, "badwords": {
+            "enable": True, "discard": True, "path": _word_file(tmp_path, "无关词\n"),
+            "bad_pinyin_path": str(pinyin_file), "replace": "*"}}}
+        h = _make_handler(cfg)
+        # 未预热窗口：拼音匹配临时跳过（fail-open 放行）
+        assert h.prohibitions_handle("你就是个砂凋") == "你就是个砂凋"
+        # 预热后：同音变体拼音命中 → 丢弃
+        h._warm_pinyin(str(pinyin_file))
+        assert h.prohibitions_handle("你就是个砂凋") is None
+
+    def test_preheat_warms_configured_tables(self, tmp_path, monkeypatch):
+        submitted = []
+        monkeypatch.setattr("utils.background_tasks.submit",
+                            lambda fn, *a: submitted.append((fn,) + a))
+        word_file = _word_file(tmp_path, "客户\n")
+        pinyin_file = tmp_path / "bad_pinyin.txt"
+        pinyin_file.write_text("沙雕\n", encoding="utf-8")
+        cfg = {"filter": {"enable": True, "badwords": {
+            "enable": True, "discard": True, "path": word_file,
+            "bad_pinyin_path": str(pinyin_file), "replace": "*"}}}
+        h = _make_handler(cfg)
+        h.preheat_badwords()
+        # 预热两份词表 → 消息链零冷加载（首条弹幕即全量过滤生效）
+        assert {s[1] for s in submitted} == {word_file, str(pinyin_file)}
+        h._warm_pinyin(word_file)
+        h._warm_pinyin(str(pinyin_file))
+        # 首条弹幕即全量过滤生效：词命中整条丢弃（discard=True）、同音变体丢弃
+        assert h.prohibitions_handle("你是客户吗") is None
+        assert h.prohibitions_handle("你就是个砂凋") is None
 
     def test_double_gating(self, tmp_path):
         """双门控：filter.enable 总开关关闭 或 badwords.enable 关闭 → 原样透传。"""

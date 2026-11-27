@@ -191,7 +191,8 @@ def test_low_weight_trigger_queues_without_plug():
 
 def test_recovery_replays_enter_then_hold_not_default():
     """插播规则完成 → 重播 resident enter 再进 main/hold 主画面（不直接回
-    默认轮播）；恢复序列 deadline 续挂起锚；保险丝走完回默认。"""
+    默认轮播）；恢复序列 deadline 续挂起锚；终结经补齐的 exit 离场回默认
+    （2026-11-26 离场步补齐：恢复序列=enter+main+exit，与正常首播对齐）。"""
     NOW[0] = 1000.0
     eng = _engine([_dt_rule(), _gift_rule()])
     _suspend_resident(eng, "dt")
@@ -201,11 +202,13 @@ def test_recovery_replays_enter_then_hold_not_default():
     assert eng.song_suspended is None
     assert not [c for c in cmds if type(c).__name__ == "RestoreDefault"]
     steps = eng.seq["steps"]
-    assert [s["name"] for s in steps] == ["enter", "main"]      # 重播 enter + hold
+    assert [s["name"] for s in steps] == ["enter", "main", "exit"]  # 重播 enter + hold + 离场
     assert steps[0]["step_id"].startswith("dt:enter#resume")
     assert steps[0]["segment"] == "E_dt"                        # 基础档 enter
     assert steps[1]["step_id"].startswith("dt:main#resume")
     assert steps[1]["hold_for_song"] is False
+    assert steps[2]["step_id"].startswith("dt:exit#resume")     # 离场步补齐
+    assert steps[2]["segment"] == "X_dt"
     assert eng.seq.get("resident") is True
     assert eng.counters["dt"] == 0                              # e9 基础档
     assert eng.seq["current_deadline"] == 1062.0                # deadline 续挂起锚
@@ -214,9 +217,15 @@ def test_recovery_replays_enter_then_hold_not_default():
     NOW[0] = 1012.03
     eng.on_tick(NOW[0])
     assert eng.seq["steps"][eng.seq["idx"]]["step_id"].startswith("dt:main#resume")
-    # hold 播完（时长到点）→ 既有条件1 回默认轮播（文案画面自然结束）
+    # hold 播完（时长到点）→ 补播 exit 离场 → 既有条件1 回默认轮播
     _accept_current(eng)
     NOW[0] = 1100.0
+    cmds = eng.on_tick(NOW[0])
+    assert eng.state == "sequence"
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"   # 离场过渡
+    assert eng.seq["exit_started"] is True
+    _accept_current(eng)
+    NOW[0] = 1102.01
     cmds = eng.on_tick(NOW[0])
     assert eng.state == "default"
     assert [c for c in cmds if type(c).__name__ == "RestoreDefault"]

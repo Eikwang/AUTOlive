@@ -19,7 +19,10 @@ class CommentHandler:
     # 违禁词/拼音词表缓存：path -> (mtime, words, pinyin_words)。
     # 词表每弹幕现读+逐词转拼音开销不可接受（拼音表数百词 × pypinyin 每条弹幕
     # 重算 = 秒级卡顿），按文件 mtime 惰性缓存，文件变更自动重载。
+    # pinyin_words=None=拼音转换后台在途（两段式加载，2026-11-26 log10 空白根修）
     _BADWORDS_CACHE: dict = {}
+    # 拼音转换后台在途路径去重（防同路径重复提交后台任务）
+    _PINYIN_PENDING: set = set()
 
     @staticmethod
     def _filter_master_enabled(filter_config):
@@ -51,16 +54,25 @@ class CommentHandler:
         self.my_handle = my_handle
 
     def _load_badwords(self, path):
-        """读取违禁词表（mtime 缓存）。
+        """读取违禁词表（mtime 缓存，两段式加载）。
+
+        两段式（2026-11-26 log10 空白根修）：
+        - 词表文本：同步读取（1.27MB/7 万行 ≈ 0.2s，仅首次冷加载一次性成本）
+          ——违禁词替换过滤自首条消息即生效；
+        - 拼音转换：7 万词 × 逐字 text2pinyin（基准 ~1.2s）移后台线程执行——
+          原实现同步执行曾阻塞 comment 串行分发链 12.3s（log10 14:03:05.4→
+          17.7 点歌意图延迟根因），且与进程内 GSV 推理线程 GIL 互抢互拖慢
+          （gsv 首块 3.5s→15.6s，vits 0.3s→8.97s）。转换完成前拼音匹配
+          临时跳过（warn 一次性告警可见）；转换失败按 mtime 缓存空表防每条
+          弹幕重复重试（原语义保留）。
 
         Args:
             path: 词表文件路径（badwords.path / badwords.bad_pinyin_path）
 
         Returns:
-            tuple[list, list]: (原词列表, 各词对应拼音列表)；路径为空/文件缺失/
-            解码失败返回 ([], [])——解码失败时 read_sensitive_word_file 已显式
-            ERROR 告警（E4：静默空表=过滤失效），此处按 mtime 缓存失败态防每条
-            弹幕重复刷日志。
+            tuple[list, list]: (原词列表, 各词对应拼音列表)；路径为空/文件缺失
+            返回 ([], [])——解码失败时 read_sensitive_word_file 已显式 ERROR
+            告警（E4：静默空表=过滤失效）。
         """
         if not path:
             return [], []
@@ -71,21 +83,79 @@ class CommentHandler:
             return [], []
         cached = CommentHandler._BADWORDS_CACHE.get(path)
         if cached and cached[0] == mtime:
-            return cached[1], cached[2]
-        try:
-            words = [w for w in self.my_handle.common.read_sensitive_word_file(path) if w]
-        except Exception as e:
-            logger.error(f"违禁词表加载失败，违禁词过滤失效：{path}：{e}")
-            words = []
-        pinyin_words = []
-        if words:
+            words, pinyin_words = cached[1], cached[2]
+            if pinyin_words is not None:
+                return words, pinyin_words
+        else:
+            # 词表文本同步读（快路径）；拼音转换挂起态入缓存
             try:
-                pinyin_words = [self.my_handle.common.text2pinyin(w) for w in words]
+                words = [w for w in self.my_handle.common.read_sensitive_word_file(path) if w]
             except Exception as e:
-                logger.error(f"违禁词表拼音转换失败：{path}：{e}")
-                pinyin_words = []
-        CommentHandler._BADWORDS_CACHE[path] = (mtime, words, pinyin_words)
-        return words, pinyin_words
+                logger.error(f"违禁词表加载失败，违禁词过滤失效：{path}：{e}")
+                words = []
+            CommentHandler._BADWORDS_CACHE[path] = (mtime, words, None)
+        if path not in CommentHandler._PINYIN_PENDING:
+            CommentHandler._PINYIN_PENDING.add(path)
+            logger.warning(
+                f"[违禁词] 拼音转换后台加载中，完成前拼音匹配临时跳过：{path}")
+            from ..background_tasks import submit as _bg_submit
+            _bg_submit(self._warm_pinyin, path)
+        return words, []
+
+    def _warm_pinyin(self, path):
+        """后台转换违禁词拼音并落缓存（_load_badwords 异步段 + 启动预热共用）。
+
+        转换期间消息链对同路径只提交一次（_PINYIN_PENDING 去重）；无论成败
+        均落缓存/清挂起标记——失败态（空表）按 mtime 缓存，防每条弹幕重试。
+        """
+        try:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                CommentHandler._BADWORDS_CACHE.pop(path, None)
+                return
+            cached = CommentHandler._BADWORDS_CACHE.get(path)
+            words = list(cached[1]) if (cached and cached[0] == mtime and cached[1]) else []
+            if not words:
+                try:
+                    words = [w for w in self.my_handle.common.read_sensitive_word_file(path) if w]
+                except Exception as e:
+                    logger.error(f"违禁词表加载失败，违禁词过滤失效：{path}：{e}")
+                    words = []
+            pinyin_words = []
+            if words:
+                try:
+                    pinyin_words = [self.my_handle.common.text2pinyin(w) for w in words]
+                except Exception as e:
+                    logger.error(f"违禁词表拼音转换失败：{path}：{e}")
+                    pinyin_words = []
+            CommentHandler._BADWORDS_CACHE[path] = (mtime, words, pinyin_words)
+        finally:
+            CommentHandler._PINYIN_PENDING.discard(path)
+
+    def preheat_badwords(self):
+        """启动预热：按当前配置把违禁词/拼音词表两文件的加载+拼音转换投后台
+        线程（2026-11-26 log10 根修配套）——首条弹幕到达前缓存即就绪，消息链
+        零冷加载。词表文件缺失/开关关闭时静默跳过（与消费侧 fail-open 口径
+        一致，不刷告警）。"""
+        try:
+            filter_config = self.my_handle.config.get("filter") or {}
+            if not self._filter_master_enabled(filter_config):
+                return
+            badwords = filter_config.get("badwords") or {}
+            if not badwords.get("enable"):
+                return
+            from ..background_tasks import submit as _bg_submit
+            for key in ("path", "bad_pinyin_path"):
+                p = badwords.get(key)
+                if p:
+                    p = str(p)
+                    # 预热占挂起位——预热窗口内首条消息的 _load_badwords 不再
+                    # 重复提交同路径转换（pending 去重口径统一）
+                    CommentHandler._PINYIN_PENDING.add(p)
+                    _bg_submit(self._warm_pinyin, p)
+        except Exception:
+            logger.error(f"违禁词表启动预热失败（不影响消息链）：{traceback.format_exc()}")
 
     def comment_check_and_replace(self, content):
         """

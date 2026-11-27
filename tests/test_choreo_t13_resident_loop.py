@@ -240,7 +240,7 @@ def test_recovery_hold_loops_until_copy_done():
     assert eng.seq["rule_id"] == "dt"       # 恢复序列
     assert eng.seq["loop_deadline"] == fuse
     names = [s["name"] for s in eng.seq["steps"]]
-    assert names == ["enter", "main"]       # 重播 enter + hold
+    assert names == ["enter", "main", "exit"]  # 重播 enter + hold + 离场（2026-11-26 补齐）
     _accept_current(eng)                    # enter 接受（deadline=1013.03）
     NOW[0] = 1013.04
     eng.on_tick(NOW[0])                     # → hold（main#resume）
@@ -253,8 +253,14 @@ def test_recovery_hold_loops_until_copy_done():
     assert eng.seq["steps"][eng.seq["idx"]]["step_id"] == "dt:main#resume3"
     assert eng.seq["loop_i"] == 1
     assert eng.seq["step_accepted"] is True
-    # 回执命中 → copy_done → 推进 → 超出序列 → 回默认
+    # 回执命中 → copy_done → 推进 exit 离场 → 播完 → 回默认
     cmds = _receipt(eng, COPY + "，谢谢")
+    assert eng.state == "sequence"
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"
+    _accept_current(eng)                    # exit 接受（segment_end 仅排队，边界等待）
+    eng.on_switch_executed(eng.seq["steps"][eng.seq["idx"]]["step_id"], NOW[0])
+    NOW[0] = 1025.06
+    cmds = eng.on_tick(NOW[0])
     assert eng.state == "default"
     from utils.orchestration.choreographer import RestoreDefault
     assert any(isinstance(c, RestoreDefault) for c in cmds)
@@ -321,9 +327,14 @@ def test_song_interrupt_preserves_completion_anchor():
     NOW[0] = eng.seq["current_deadline"] + 0.01      # hold 播完 → 循环轮
     eng.on_tick(NOW[0])
     assert eng.seq["loop_i"] == 1
-    # 末段分段回执（结尾锚定）→ copy_done → 回默认
+    # 末段分段回执（结尾锚定）→ copy_done → 推进 exit 离场 → 播完回默认
     from utils.orchestration.choreographer import RestoreDefault
     cmds = _receipt(eng, SONG_TAIL)
+    assert eng.state == "sequence"
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"
+    _accept_current(eng)                             # exit 接受
+    NOW[0] = eng.seq["current_deadline"] + 0.01
+    cmds = eng.on_tick(NOW[0])
     assert eng.state == "default"
     assert any(isinstance(c, RestoreDefault) for c in cmds)
 

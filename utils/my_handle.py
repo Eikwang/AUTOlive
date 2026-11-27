@@ -138,6 +138,11 @@ class My_handle(metaclass=SingletonMeta):
             # 配置加载
             self.config_load()
 
+            # 违禁词表启动预热（2026-11-26 log10 空白根修）：加载+拼音转换投
+            # 后台线程——首条弹幕到达前缓存即就绪，消息链零冷加载（原实现冷
+            # 加载同步阻塞 comment 串行分发链 12.3s）
+            self.comment_handler.preheat_badwords()
+
             # 动作编排器（/autoplan 2026-10-21 批次 T1）：全部依赖就绪后装配
             # （config/event_handler/audio.edtalk_client 均已在位）。enable=false
             # 或 EDTalk 客户端缺失时 worker 不启动，订阅点短路直通——

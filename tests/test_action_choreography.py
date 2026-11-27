@@ -21,6 +21,7 @@ import pytest
 from utils.orchestration.choreographer import (ActionChoreographer,
                                                ChoreoEngine, CancelAudio, EnqueueFile,
                                                LogCmd, RestoreDefault,
+                                               CHOREO_AUDIO_PRIORITY,
                                                SwitchSegment, TtsThanks,
                                                _DottedNode, _normalize_text,
                                                build_steps, select_tier)
@@ -121,6 +122,9 @@ class EngineHarness:
         cmds = self.engine.on_tick(self.now)
         exit_cmd = cmds[0]
         cmds = self.engine.on_switch_result(exit_cmd.step_id, True, self.now)
+        # 2026-11-27 边界等待：segment_end 离场受理≠执行，回填边界执行事件
+        # （离场计时锚定实际显示起点）后再推进计时
+        self.engine.on_switch_executed(exit_cmd.step_id, self.now)
         self.advance(3.99)
         assert self.engine.on_tick(self.now) == []
         self.advance(0.02)
@@ -287,6 +291,7 @@ class TestTriggerAndState:
         assert [s["name"] for s in h.engine.seq["pending_requeue"]] == ["enter", "main", "exit"]
         # 当前 exit 播完 → 重排 enter（不重复 exit）
         cmds = h.engine.on_switch_result(h.engine.seq["steps"][h.engine.seq["idx"]]["step_id"], True, h.now)
+        h.engine.on_switch_executed(h.engine.seq["steps"][h.engine.seq["idx"]]["step_id"], h.now)
         h.advance(4.01)
         cmds = h.engine.on_tick(self_now(h))
         assert switch_cmd(cmds).segment == "A_入场"
@@ -496,20 +501,22 @@ class TestCompletionPredicate:
         h = EngineHarness(rules=[make_rule(emotion_tiers=tiers)])
         h.trigger_gift()
         assert h.engine.seq["steps"][0]["segment"] == "A_入场"  # 第1次：未达档一（3）→ 基础素材
-        # 跨档触发：置计数 5 → 本次第 6 次 → angry 档（从第 6 次起）
-        # （key_last 为退役节流/衰减的历史锚点，引擎零消费——直接置计数即可，
-        #   计次不衰减行为由 tests/test_choreography_completion.py::TestCounterNoDecay 专测）
+        # 跨档触发：置频次栈 5 个窗口内事件 → 本次第 6 次 → angry 档（从第 6 次
+        # 起）。A1（2026-11-27 档位与打断解耦）：档位改吃 tier_events 滑动窗口
+        # 频次——counters 仅剩画面上下文语义（D-4 清零），不再驱动档位。
         h.engine.state = "default"
         h.engine.seq = None
         h.engine.key_last["girl_A"] = h.now - 10
         h.engine.counters["girl_A"] = 5
+        h.engine.tier_events["girl_A"] = [h.now - i for i in range(5, 0, -1)]
         h.engine.decide_trigger("gift", "小心心", gift_data())
         assert h.engine.seq["steps"][0]["segment"] == "A_生气入场"
-        # 超档（count=99 → 第 100 次）：末档兜底（从第 9 次起恒档三）
+        # 超档（频次 100 → 第 100 次）：末档兜底（从第 9 次起恒档三）
         h.engine.state = "default"
         h.engine.seq = None
         h.engine.key_last["girl_A"] = h.now - 10
         h.engine.counters["girl_A"] = 99
+        h.engine.tier_events["girl_A"] = [h.now - 1.0] * 100
         h.engine.decide_trigger("gift", "小心心", gift_data())
         assert h.engine.seq["steps"][1]["segment"] == "A_崩溃跳舞"
         assert h.engine.seq["tier_mood"] == "breakdown"
@@ -772,7 +779,8 @@ class TestChoreographerFacade:
         self.tick_to(ch, 4.01)  # enter 完成 → main 切段 + file 入队
         ch._audio_enqueue.assert_called_once_with(
             {"type": "song", "content": "music/a.mp3",
-             "choreo_step_id": "girl_A:main#1", "priority_override": 500})
+             "choreo_step_id": "girl_A:main#1",
+             "priority_override": CHOREO_AUDIO_PRIORITY})
         assert client.switch_segment.call_count == 2  # main 等待完成回调，不推进
         # 完成回调（playback 路径）→ main 完成 → exit 切换
         ch.on_audio_complete("song", "music/a.mp3")

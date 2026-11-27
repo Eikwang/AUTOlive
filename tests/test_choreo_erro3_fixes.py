@@ -98,7 +98,8 @@ class TestSongChoreoWiring:
         import utils.orchestration as orch
 
         class _FakeChoreo:
-            def on_song(self, name):
+            def on_song(self, name, total_s=None):
+                # 2026-11-26 B 预武装：点歌/翻唱两站点均携带成品探测时长
                 calls.append(("on_song", name))
                 return accepted
         monkeypatch.setattr(orch, "get_choreographer", lambda: _FakeChoreo())
@@ -299,3 +300,97 @@ class TestErro3Scenario:
 def make_cfg_node():
     return {"enable": True, "default_mode": "rotate", "default_segments": [],
             "rules": [make_rule()]}
+
+
+# ---------------------------------------------------------------------------
+# 覆盖段素材属性解析守卫（2026-11-25 缺口修复）：情绪档 segment_overrides
+# 换段后 lip_flag/duration_s 曾恒取基础段 sidecar——覆盖段开关不同则口型
+# 门控按错误素材标志下发（反向=可见缺陷不张嘴）。修复=apply 二段解析覆盖段
+# 自身 sidecar 到 tier.override_props，物化点（build_steps/恢复/切歌）经
+# _step_material_props 消费。
+# ---------------------------------------------------------------------------
+
+class TestOverrideSegmentProps:
+    def _harness(self):
+        client = MagicMock()
+        client.switch_segment.return_value = {"ok": True}
+        client.schedule.return_value = {"ok": True}
+        client.get_status.return_value = {"available_segments": sorted(AVAILABLE)}
+        from utils.orchestration.choreographer import ActionChoreographer
+        now = {"t": 1000.0}
+        ch = ActionChoreographer(
+            DottedConfig({"choreography": make_cfg_node()}), client,
+            audio_enqueue=MagicMock(), thanks_generate=MagicMock(return_value=None),
+            clock=lambda: now["t"])
+        ch._worker = None
+        ch._ensure_worker = lambda enable=None: True
+        ch.engine.on_edtalk_ready(AVAILABLE)
+        ch._clock_box = now
+        return ch
+
+    def _apply(self, ch, node, meta_by_seg):
+        import unittest.mock
+        import utils.edtalk_realtime.materials as m_mod
+        node["rules"][0]["pred_version"] = "new"  # 物化仅处理 new 语义规则
+        with unittest.mock.patch.object(
+                m_mod, "get_material_meta",
+                side_effect=lambda seg: meta_by_seg.get(seg, {})):
+            return ch.apply_config(node)
+
+    def _tier_node(self, overrides, step_name="main"):
+        node = make_cfg_node()
+        node["rules"][0]["emotion_tiers"] = [
+            {"min_count": 1, "mood": "angry", "segment_overrides": overrides}]
+        return node
+
+    def test_override_props_resolved_and_consumed(self):
+        """档位覆盖段 lip_flag=False/duration=7.5 → 物化步携带覆盖段自身属性
+        （基础段 A_跳舞 仍 on/30s 不串扰）。"""
+        ch = self._harness()
+        node = self._tier_node({"main": "A_崩溃跳舞"})
+        meta = {"A_跳舞": {"lip_flag": True, "duration_s": 30.0},
+                "A_崩溃跳舞": {"lip_flag": False, "duration_s": 7.5}}
+        assert self._apply(ch, node, meta)["applied"] is True
+        tier = ch.cfg.rules[0].tiers[0]
+        assert tier.override_props["main"] == {"lip_flag": False, "duration_s": 7.5}
+        # 触发（min_count=1 首触发即进档）→ build_steps 消费覆盖段属性
+        ch.on_gift({"gift_name": "小心心", "num": 1, "price": 1})
+        assert ch.engine.state == "sequence"
+        main = next(s for s in ch.engine.seq["steps"] if s["name"] == "main")
+        assert main["segment"] == "A_崩溃跳舞"
+        assert main["lip_flag"] is False
+        assert main["duration_s"] == 7.5
+        # mute 谓词同步：覆盖 off 段在播即纯画面窗口（音频延迟推送）。
+        # 推进方式沿 test_choreo_lip_sync：enter 受理 → deadline tick 步进 main。
+        enter = ch.engine.seq["steps"][0]
+        ch.engine.on_switch_result(enter["step_id"], True, ch._clock_box["t"])
+        ch._clock_box["t"] += 4.01
+        ch.engine.on_tick(ch._clock_box["t"])
+        assert ch.engine.seq["steps"][ch.engine.seq["idx"]]["name"] == "main"
+        assert ch.engine.mute_window() is True
+
+    def test_override_duration_missing_falls_back_to_base(self):
+        """覆盖段 sidecar 缺有效时长 → 回退基础段显式时长（有界推进保底）；
+        lip_flag 仍取覆盖段（sidecar 缺省 on 语义不越权）。"""
+        ch = self._harness()
+        node = self._tier_node({"exit": "B_离场"})
+        meta = {"A_离场": {"lip_flag": True, "duration_s": 4.0},
+                "B_离场": {"lip_flag": False, "duration_s": None}}
+        assert self._apply(ch, node, meta)["applied"] is True
+        ch.on_gift({"gift_name": "小心心", "num": 1, "price": 1})
+        exit_step = next(s for s in ch.engine.seq["steps"] if s["name"] == "exit")
+        assert exit_step["segment"] == "B_离场"
+        assert exit_step["duration_s"] == 4.0
+        assert exit_step["lip_flag"] is False
+
+    def test_no_override_keeps_base_props(self):
+        """无覆盖段=基础段属性直通（既有行为零回归）。"""
+        ch = self._harness()
+        node = make_cfg_node()
+        meta = {"A_入场": {"lip_flag": False, "duration_s": 4.0}}
+        assert self._apply(ch, node, meta)["applied"] is True
+        ch.on_gift({"gift_name": "小心心", "num": 1, "price": 1})
+        steps = ch.engine.seq["steps"]
+        assert steps[0]["segment"] == "A_入场"
+        assert steps[0]["lip_flag"] is False
+        assert steps[0]["duration_s"] == 4.0

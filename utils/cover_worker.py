@@ -105,25 +105,18 @@ class CoverQueue:
         return os.path.join(self._aicovergen_root(), "src")
 
     def _rt_python(self) -> str:
-        """翻唱子进程解释器（2026-11-07 迁移收尾修复）：统一项目内环境——
-
-        取值序：rvc_vc.runtime_python 显式覆盖（指向真实文件才采纳）→
-        候选链 paths.rvc_python（config 覆盖→记忆→仓库根 runtime312→外部
-        兜底）。**历史**：原实现回退硬编码 py39 外部嵌入式环境
-        （py39 外部嵌入式环境，S-2 时代钉子），统一项目内候选链。
-        **2026-11-07 二次修复**：paths 构造参数两个调用点均传 None
-        （cover_endpoints.py:92 / feature_handler.py:691）——上一版
-        getattr(self.paths,...) 返回空 cmd[0] → Popen WinError 87（用户
-        实测）。修复=paths 为 None 时内部自建 AutolivePaths（进程级缓存）。"""
+        """翻唱子进程解释器（2026-11-22 阶段 A3 收编）：rvc_vc.runtime_python
+        显式覆盖（指向真实文件才采纳）→ 注册中心候选链（config paths.rvc_python
+        → 记忆 → 仓库根 runtime312 → 外部兜底，utils/resource_paths.rvc_python）。
+        **历史**：原实现回退硬编码 py39 外部嵌入式环境（S-2 时代钉子），
+        2026-11-07 统一项目内候选链；paths=None 进程级缓存兜底由
+        AutolivePaths 兼容壳承接，此版本直接委托注册中心。"""
         v = self.config.get("rvc_vc", "runtime_python")
         if v and str(v).strip() and os.path.isfile(str(v).strip()):
             return str(v).strip()
         try:
-            paths = self.paths
-            if paths is None:
-                from utils.autolive_paths import AutolivePaths
-                paths = CoverQueue._cached_paths()
-            return getattr(paths, "rvc_python", None) or ""
+            from utils import resource_paths
+            return resource_paths.rvc_python(self.config)
         except Exception as e:
             logger.error(f"[cover] 解释器候选链解析失败: {e}")
             return ""
@@ -609,11 +602,14 @@ class CoverQueue:
         pth = prof.get("rvc_model") or ""
         index = prof.get("rvc_index") or ""
         if not pth or not os.path.isfile(pth):
-            # 回退：取 models/rvc/ 第一个 .pth（单模型场景）
-            models_dir = os.path.join(
-                self.config.get("paths", "autolive_home")
-                or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "models", "rvc")
+            # 回退：取 models/rvc/ 第一个 .pth（单模型场景；2026-11-22 A3 收编：
+            # 注册中心 rvc_models_dir()，config autolive_home 覆盖优先保持测试语义）
+            from utils import resource_paths
+            alt_home = self.config.get("paths", "autolive_home")
+            if alt_home and str(alt_home).strip():
+                models_dir = os.path.join(str(alt_home).strip(), "models", "rvc")
+            else:
+                models_dir = str(resource_paths.rvc_models_dir())
             pths = sorted(f for f in os.listdir(models_dir) if f.endswith(".pth")) \
                 if os.path.isdir(models_dir) else []
             if not pths:

@@ -139,7 +139,11 @@ def test_song_end_after_rc1_extension_restores_resident():
     NOW[0] = 1290.01 + 10.01
     eng.on_tick(NOW[0])                         # 恢复 hold 素材播完 → Gap B 循环
     assert eng.seq["steps"][eng.seq["idx"]]["name"] == "main"
-    NOW[0] = 1350.01                            # 兜底窗（歌后备）到期 → 默认
+    NOW[0] = 1350.01                            # 兜底窗（歌后备）到期 → 推进 exit
+    eng.on_tick(NOW[0])
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"  # 离场步补齐
+    _accept_current(eng)
+    NOW[0] = 1350.01 + 2.01
     eng.on_tick(NOW[0])
     assert eng.state == "default"
     assert eng.seq is None
@@ -196,7 +200,11 @@ def test_song_started_recovers_resident_hold_to_song_hold():
     assert eng.seq.get("resident") is True
     assert eng.song_suspended is None
     _accept_current(eng)
-    NOW[0] = 1020.0 + 220.0 + 60.0 + 0.01       # 歌后备窗到期
+    NOW[0] = 1020.0 + 220.0 + 60.0 + 0.01       # 歌后备窗到期 → 推进 exit
+    eng.on_tick(NOW[0])
+    assert eng.seq["steps"][eng.seq["idx"]]["name"] == "exit"  # 离场步补齐
+    _accept_current(eng)
+    NOW[0] = 1020.0 + 220.0 + 60.0 + 2.01
     eng.on_tick(NOW[0])
     assert eng.state == "default"
 

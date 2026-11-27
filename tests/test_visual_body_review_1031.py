@@ -151,4 +151,5 @@ def test_startup_chain_character_dir_retired_key_registered():
     tuber/{角色} 数据包）。"""
     src = _FRONTEND_MAIN.read_text(encoding="utf-8")
     assert '(("edtalk_realtime", "character_dir")' in src
-    assert '"--character-dir", os.path.join(str(get_base_path()), "tuber",' in src
+    # 2026-11-22 阶段 A3：角色库路径委托注册中心（models/tuber/{角色}）
+    assert '"--character-dir", str(resource_paths.tuber_root(' in src

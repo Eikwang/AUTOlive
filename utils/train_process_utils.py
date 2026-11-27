@@ -10,7 +10,7 @@ RVC（train_rvc_pipeline）两管线共用——GPU 残留显存教训（WDDM �
 - cleanup_after_step：步间 taskkill /F /T 进程树终结 + 显存回落确认
 - gpu_gate：后台任务准入（gpu_policy 单一模块委托）
 - run_mdx_dry_vocals：MDXNet 三阶段干声分离（T-1，进程内直调
-  apps/aicovergen/src/mdx.py + models/mdxnet 资产，GSV/RVC 训练共用）
+  apps/aicovergen/src/mdx.py + models/uvr5 资产（原 models/mdxnet），GSV/RVC 训练共用）
 """
 import json
 import os
@@ -20,7 +20,7 @@ from typing import Callable, List, Optional
 
 from utils.my_log import logger
 
-MDXNET_DIR = os.path.join("models", "mdxnet")
+MDXNET_DIR = os.path.join("models", "uvr5")  # 2026-11-22 统一布局（原 models/mdxnet）
 
 # 三阶段链（pick 语义对齐 AICoverGen main.py 解包：stage2/3 主唱在反相轨）
 # kwargs 以 train_voice_pipeline.py E2E 实跑验证版为准（2026-10-14 提取时核对）

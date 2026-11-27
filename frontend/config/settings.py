@@ -323,6 +323,9 @@ _FASTRAG_DEFAULTS: Dict[str, Any] = {
     "llm_quant_bits": 16,        # LLM 量化：4=INT4 / 8=INT8 / 16=BF16（启动 env 注入）
     "reranker_quant_bits": 16,   # Reranker 量化：4/8/16（同上）
     "embedder_device": "cuda-fp16",    # Embedder 设备：cpu / cuda-fp16 / cuda（同上；2026-11-20 对齐上游默认）
+    # 对话模型（2026-11-25 用户裁决：推理配置暴露模型选择）——值=chekpoint/
+    # 下模型目录名（服务端相对路径拼装）；白名单域校验（P8 env 注入）
+    "llm_model": "Qwen2.5-0.5B-Instruct",
     # 对话人设与生成参数（2026-10-30 修复回答规则重启丢失：UI『应用并重启』
     # 时写回此节作为回显真源；服务端运行态真源仍为 fastrag-python
     # config_override.py——P2 补丁优先级 override > 本默认，语义不变）

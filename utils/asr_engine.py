@@ -80,7 +80,18 @@ def _funasr_model_paths(language: str) -> dict:
     def _prefer_local(hf_id: str) -> str:
         name = hf_id.split("/")[-1]
         local = os.path.join(_APP_ASR_MODELS, name)
-        return local if os.path.isdir(local) else hf_id
+        if os.path.isdir(local):
+            return local
+        # 次级探测：models/asr/（2026-11-22 统一布局，原 models/iic——
+        # SenseVoice/VAD 资产新家；发行包内同样收于 models/ 根）
+        try:
+            from utils import resource_paths
+            alt = resource_paths.asr_models_dir() / name
+            if alt.is_dir():
+                return str(alt)
+        except Exception:
+            pass
+        return hf_id
 
     if language == "zh":
         return {

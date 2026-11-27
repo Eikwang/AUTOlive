@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import os
+from typing import Optional
 from ..my_log import logger
 from ..edtalk_realtime import is_edtalk_active
 from .queue_manager import QueueMixin, _split_group_note, normal_queue_len
@@ -26,6 +27,12 @@ _BACKING_PRELUDE_MAX_WAIT = 10.0
 # 间奏窗口门推送预补偿（2026-11-09 失步根修）：due 提前量=pop→push HTTP
 # 受理开销≈0.3s，使「受理+preroll 出声」落在歌曲时间轴应到时刻附近。
 _SONG_PUSH_LEAD = 0.3
+
+# 前奏借位预算安全余量（2026-11-26 人声对齐根修）：R5c 借位 await 全程阻塞
+# 播完才返回，估时（pydub 实测/文本估算兜底）存在读数与出声延迟残差——
+# 借位须满足 est ≤ remain−余量 才放行，余量吸收尾部过冲，保证循环跳出时
+# remain ≤ 0 即刻推人声（伴奏真实时间轴不被顺延）。值与闪避恢复余量同量级。
+_SONG_BORROW_BUDGET_MARGIN_S = 0.5
 
 # 段播完估计的出声延迟（2026-11-11 R4f 实测校准）：帧锁定出声=受理+preroll
 # （首块推理就绪 ~0.3s），播完=受理+preroll+段时长——last_end 用加法精确化
@@ -221,7 +228,7 @@ class PlaybackMixin:
         anchor = getattr(self, "_song_anchor", None)
         if not anchor or anchor.get("t0") is None:
             return 0.0
-        due = anchor["t0"] + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+        due = anchor["t0"] + float(seg.get("start_s") or 0.0) - self._song_timing("song_push_lead_s")
         last_end = anchor.get("last_end") or 0.0
         if last_end > due:
             due = last_end
@@ -233,19 +240,76 @@ class PlaybackMixin:
         （_group_atomic_pop_locked——同消息切分段组开始消费后连续消费完成，
         其他优先级信息不得插入组中间；唯一例外动态文案 trends_copywriting
         维持 2026-11-16 段间让位批次的段边界插队现状），未命中再走既有
-        出队选择逻辑 _pop_select_locked（2026-11-10 R4 窗口预算模型）。"""
-        forced = self._group_atomic_pop_locked()
-        if forced is not None:
-            return forced
-        data_json, gate_wait, borrowed = self._pop_select_locked()
-        # 组上下文登记（2026-11-17 组原子消费批次）：切分段出队即登记组绑定
-        # （id+type）；非切分段不清 ctx——组完成判定由组原子门扫描驱动
-        # （队列无同组剩余段=组完成，门内清除），song 锚/借位等旁路出队不
-        # 丢组上下文（歌毕恢复组原子续消费）。
-        sg = data_json.get("split_group") if isinstance(data_json, dict) else None
-        if isinstance(sg, dict) and sg.get("id"):
-            self._atomic_group_ctx = {"id": sg["id"], "type": data_json.get("type", "")}
-        return data_json, gate_wait, borrowed
+        出队选择逻辑 _pop_select_locked（2026-11-10 R4 窗口预算模型）。
+
+        B2 第二批出队因果门（2026-11-27，C3 用户裁决「音频随画面取消」）：
+        编排条目（choreo_step_id 非空）出队时校验 step 活跃性——非活跃=孤儿
+        音轨（序列已被打断/覆盖/收尾，画面永不到来）静默丢弃并计数（P1-7
+        「有声音无画面」错配的最后防线；上游 CancelAudio/is_active_step
+        入队门覆盖不了的残留窗口在此收口）。查询异常 fail-open（音频照播）。"""
+        dropped = 0
+        while True:
+            forced = self._group_atomic_pop_locked()
+            if forced is not None:
+                data_json, gate_wait, borrowed = forced
+            else:
+                data_json, gate_wait, borrowed = self._pop_select_locked()
+            orphan_reason = None
+            if isinstance(data_json, dict):
+                sid = data_json.get("choreo_step_id")
+                tok = data_json.get("choreo_preempt_token")
+                if sid and self._choreo_step_orphan(str(sid)):
+                    orphan_reason = f"step={sid} 非活跃（序列已替换/收尾）"
+                elif tok and not self._choreo_token_alive(str(tok)):
+                    orphan_reason = f"token={tok} 已死亡（请求被覆盖/执行/失效）"
+            if orphan_reason:
+                dropped += 1
+                logger.warning(
+                    f"[choreo-gate] 孤儿编排音轨出队丢弃（{orphan_reason}，"
+                    f"累计 {getattr(self, '_choreo_orphan_dropped', 0) + dropped}）："
+                    "problem=编排序列已被替换但音轨滞留队列；"
+                    "cause=打断/覆盖/收尾时该音轨已越过撤销窗口；"
+                    "fix=音频随画面取消（C3 裁决 2026-11-27），静默丢弃不错配")
+                continue
+            if dropped:
+                self._choreo_orphan_dropped = getattr(self, "_choreo_orphan_dropped", 0) + dropped
+            # 组上下文登记（2026-11-17 组原子消费批次）：切分段出队即登记组绑定
+            # （id+type）；非切分段不清 ctx——组完成判定由组原子门扫描驱动
+            # （队列无同组剩余段=组完成，门内清除），song 锚/借位等旁路出队不
+            # 丢组上下文（歌毕恢复组原子续消费）。
+            sg = data_json.get("split_group") if isinstance(data_json, dict) else None
+            if isinstance(sg, dict) and sg.get("id"):
+                self._atomic_group_ctx = {"id": sg["id"], "type": data_json.get("type", "")}
+            return data_json, gate_wait, borrowed
+
+    def _choreo_step_orphan(self, step_id: str) -> bool:
+        """B2 第二批因果门查询：编排 step 是否已非活跃（孤儿）。编排器未注册
+        /查询异常一律 fail-open（False=照播，不吞音频）。"""
+        try:
+            from utils.orchestration.choreographer import get_choreographer
+            ch = get_choreographer()
+        except Exception:
+            return False
+        if ch is None:
+            return False
+        try:
+            return not ch.is_active_step(step_id)
+        except Exception:
+            return False
+
+    def _choreo_token_alive(self, token: str) -> bool:
+        """C3 因果门查询：preempt 令牌是否仍活跃。fail-open=True（照播）。"""
+        try:
+            from utils.orchestration.choreographer import get_choreographer
+            ch = get_choreographer()
+        except Exception:
+            return True
+        if ch is None:
+            return True
+        try:
+            return bool(ch.choreo_token_alive(token))
+        except Exception:
+            return True
 
     def _group_atomic_pop_locked(self):
         """组原子门（2026-11-17 组原子消费批次，须在 voice_tmp_path_queue_lock
@@ -390,7 +454,7 @@ class PlaybackMixin:
                 seg = entry.get("song_segment") or {}
                 if not seg or int(seg.get("seq", 0)) == 0:
                     continue
-                due = anchor["t0"] + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+                due = anchor["t0"] + float(seg.get("start_s") or 0.0) - self._song_timing("song_push_lead_s")
                 if last_end > due:
                     due = last_end  # 播完保底地板（F8：防插播后下段抢跑）
                 if now < due:
@@ -426,12 +490,12 @@ class PlaybackMixin:
                         # 一半）——等到期推人声；队满则遗弃未插播普通条目
                         # （2026-11-25 裁决#3，不积累到歌毕）
                         self._abandon_song_overflow_locked()
-                        return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                        return None, max(remaining, 0.0) or self._song_timing("song_push_lead_s"), False
                     if self._entry_duration_s(head) > remaining:
                         # 预算语义：该音频播不完窗口 → 不起下一条（消费完剩余
                         # 不足最小余量时已由上面拦住）；队满遗弃同上
                         self._abandon_song_overflow_locked()
-                        return None, max(remaining, 0.0) or _SONG_PUSH_LEAD, False
+                        return None, max(remaining, 0.0) or self._song_timing("song_push_lead_s"), False
                 else:
                     logger.info(
                         f"[song] 高优条目（权重{_p}）豁免间奏预算门提前借位："
@@ -441,7 +505,7 @@ class PlaybackMixin:
                 # 队首=文案分段：向后扫描首个非歌段非文案条目按窗口插播
                 window_end = self._next_song_due_locked(anchor)
                 if window_end is None:
-                    remaining = _SONG_PUSH_LEAD  # 收尾间隙：无门，自由消费
+                    remaining = self._song_timing("song_push_lead_s")  # 收尾间隙：无门，自由消费
                     _gated = False
                 else:
                     remaining = window_end - now
@@ -476,7 +540,8 @@ class PlaybackMixin:
                 # 仅文案在队（或全部超窗）→ 等到期推人声，文案留队；
                 # 队满则遗弃未插播普通条目（2026-11-25 裁决#3）
                 self._abandon_song_overflow_locked()
-                wait = (max(remaining, 0.0) if _gated else 0.0) or _SONG_PUSH_LEAD
+                wait = ((max(remaining, 0.0) if _gated else 0.0)
+                        or self._song_timing("song_push_lead_s"))
                 return None, wait, False
         # ②c 无锚（fail-open）或队首=song 段：窗口门判定
         gate_wait = self._song_gate_wait_s(queue[0])
@@ -630,6 +695,46 @@ class PlaybackMixin:
             return _READ_REPLY_GATE_EXTEND_S
         return v if v > 0 else _READ_REPLY_GATE_EXTEND_S
 
+    # C4 硬件相关常量定标表（2026-11-27）：名称 → (默认值, 下界, 上界)。
+    # 定标依据：推送预补偿=pop→push HTTP 受理开销（0.3s 实测）；preroll=首块
+    # 推理出声延迟（0.3s 实测 R4f）；借位余量/闪避恢复=闪避收敛量级（0.5s）；
+    # 闪避系数=用户裁决 0.5；间奏基线=用户裁决 3s。配置面=play_audio.<名称>，
+    # 现场按硬件差异（GPU 推理延迟/声卡延迟/HTTP 开销）调定，不改源码。
+    _SONG_TIMING_SPECS = {
+        "song_push_lead_s": (_SONG_PUSH_LEAD, 0.0, 2.0),
+        "song_preroll_s": (_SONG_PREROLL_S, 0.0, 2.0),
+        "song_borrow_budget_margin_s": (_SONG_BORROW_BUDGET_MARGIN_S, 0.0, 3.0),
+        "backing_duck_factor": (_BACKING_DUCK_FACTOR, 0.05, 1.0),
+        "backing_duck_release_margin_s": (_BACKING_DUCK_RELEASE_MARGIN_S, 0.0, 3.0),
+        "interlude_min_consume_s": (_INTERLUDE_MIN_CONSUME_S, 1.0, 15.0),
+    }
+
+    _song_timing_alarm_last: dict = {}
+
+    def _song_timing(self, name: str) -> float:
+        """C4 定标读侧（2026-11-27）：config 键 play_audio.<name>，缺省/非法
+        类型=模块常量默认（静默）；数值越界=告警（60s 冷却）+回退默认——
+        越界值会系统性破坏对齐模型（推人声过晚/借位溢出），宁可回退不采信。"""
+        spec = self._SONG_TIMING_SPECS.get(name)
+        if not spec:
+            return 0.0
+        default, lo, hi = spec
+        try:
+            v = float(self.config.get("play_audio", name))
+        except (TypeError, ValueError, AttributeError):
+            return default
+        if v < lo or v > hi:
+            now = time.monotonic()
+            if now - PlaybackMixin._song_timing_alarm_last.get(name, 0.0) > 60.0:
+                PlaybackMixin._song_timing_alarm_last[name] = now
+                logger.warning(
+                    f"[song-timing] 配置 play_audio.{name}={v} 超出定标范围 "
+                    f"[{lo}, {hi}]（硬件对齐模型参数），回退默认 {default}："
+                    "problem=越界值将系统性破坏人声对齐/借位预算；"
+                    "fix=改回范围内或删去该键用默认")
+            return default
+        return v
+
     _gate_timeout_alarm_last = 0.0
 
     def _alarm_reply_gate_timeout(self):
@@ -687,7 +792,7 @@ class PlaybackMixin:
             seg = entry.get("song_segment") or {}
             if not seg or int(seg.get("seq", 0)) == 0:
                 continue
-            due = t0 + float(seg.get("start_s") or 0.0) - _SONG_PUSH_LEAD
+            due = t0 + float(seg.get("start_s") or 0.0) - self._song_timing("song_push_lead_s")
             return max(due, last_end)
         return None
 
@@ -711,8 +816,8 @@ class PlaybackMixin:
         不受影响，仍保证「避免说一半」。"""
         n = normal_queue_len(self.voice_tmp_path_queue)
         if n <= 2:
-            return _INTERLUDE_MIN_CONSUME_S
-        return max(1.0, _INTERLUDE_MIN_CONSUME_S - (n - 2) * 0.5)
+            return self._song_timing("interlude_min_consume_s")
+        return max(1.0, self._song_timing("interlude_min_consume_s") - (n - 2) * 0.5)
 
     def _abandon_song_overflow_locked(self):
         """唱歌期间队满遗弃（2026-11-25 用户裁决#3，须锁内调用）：插播窗口
@@ -771,6 +876,42 @@ class PlaybackMixin:
         except Exception:
             pass  # 时长读取失败 → 文本估算兜底（不放行长音频）
         return max(1.0, len(str(entry.get("content", "") or "")) / 4.0)
+
+    def _pick_intro_borrow_locked(self, remain: float):
+        """前奏窗口借位候选选择（2026-11-11 R5c 提取；须持
+        voice_tmp_path_queue_lock——遍历中按索引 pop）。
+
+        借位预算校验（2026-11-26 人声对齐根修）：借位 await 全程阻塞播完才
+        返回，R5c 循环只在两次借位之间检查 due——超预算借位的尾部会越过 due，
+        人声顺延（实测 ≤3s）与伴奏真实时间轴失步（用户裁决：绝对对齐）。
+        估时 ≤ remain−_SONG_BORROW_BUDGET_MARGIN_S 才放行；超限条目**留队**
+        （不 pop 不改序），待间奏窗口/歌毕消费；t0 永不回退。
+        候选条件（2026-11-25 问题②修复口径）：非 song 切片段、非动态文案
+        分段（trends_copywriting+split_group）。估时与间奏窗口预检/闪避恢复
+        同源（_entry_duration_s——锁内容忍本地小音频 pydub 加载）。
+
+        Args:
+            remain: 前奏窗口剩余秒（=t0+start_s−推送预补偿−now）
+
+        Returns:
+            dict | None: 借位条目（已从队列弹出）；无候选/首候选超预算返回 None
+            （首候选语义=不改排出队顺序，R5c 修正口径）。
+        """
+        for _i, _e in enumerate(self.voice_tmp_path_queue):
+            if (isinstance(_e, dict)
+                    and not (_e.get("type") == "song"
+                             and _e.get("song_segment"))
+                    and not (_e.get("type") == "trends_copywriting"
+                             and isinstance(_e.get("split_group"), dict))):
+                _est = self._entry_duration_s(_e)
+                if _est > remain - self._song_timing("song_borrow_budget_margin_s"):
+                    logger.debug(
+                        f"[song] 前奏插播预算不足，留队待间奏窗口："
+                        f"估时 {_est:.1f}s > 剩余 {remain:.1f}s："
+                        f"{_e.get('content', '')[:20]}")
+                    return None
+                return self.voice_tmp_path_queue.pop(_i)
+        return None
 
     def _start_backing_player(self, backing_path: str, volume: float):
         """伴奏播放启动编排（2026-11-10 R2，须在主进程调用）。
@@ -937,7 +1078,7 @@ class PlaybackMixin:
         前）。连续借位=重复 hold——定时器被取消即全程保持压低（AC-003），
         写 0.5 幂等。"""
         self._backing_duck_cancel_restore()
-        self._set_backing_duck(_BACKING_DUCK_FACTOR)
+        self._set_backing_duck(self._song_timing("backing_duck_factor"))
 
     def _backing_duck_release_later(self, entry):
         """闪避恢复调度（播报播完≈受理+时长+余量）：push_full 返回=播报起播
@@ -963,6 +1104,76 @@ class PlaybackMixin:
         停止路径/定时器回调共用出口（AC-002/006/007）。"""
         self._backing_duck_cancel_restore()
         self._set_backing_duck(1.0)
+
+    def song_hold_alive(self) -> Optional[dict]:
+        """音频侧歌曲活跃快照（A 收尾防线，2026-11-26 画面来回跳根修）：
+        编排序列播完（条件1）时询问「歌是否还在唱/还有切片待播」——活跃=
+        保险丝或挂起锚先于歌终到期的证据，编排据此直切 song hold 而非回默认
+        （log1.txt 16:55:01 接管→16:56:07 回默认→16:56:32 切回实测）。
+
+        活跃判定（与画面 hold 语义对齐）：
+          ① 队列仍有 song 切片待播（未起播/间奏后段/新歌排队）→ 活跃；
+          ② 锚活跃（t0 已建立且非 wrapping=前奏/人声/间奏进行中）→ 活跃；
+        wrapping（垃圾时间，R4 口径=非唱歌时间）且无待播切片 → 不活跃。
+        remaining 口径：同歌末片 start_s+真实时长 − 当前歌曲时间位置（+2s
+        出声余量，与 _song_choreo_remaining_s 同源）；无锚=未起播（位置 0）。
+        Returns: {"song_name": str, "remaining_s": float} 或 None。"""
+        # 锁序守卫：本方法会在编排 facade _lock 内被调用（_audio_song_alive），
+        # 禁止再取 voice_tmp_path_queue_lock（否则与出队门持 voice 锁→取 facade
+        # 锁构成 ABBA 环）。list() 单次 C 级调用对元素引用是 GIL 原子的，
+        # 快照足够（歌切片条目只追加/移除，不原地修改）。
+        _segs = [e for e in list(self.voice_tmp_path_queue)
+                 if isinstance(e, dict) and e.get("type") == "song"
+                 and isinstance(e.get("song_segment"), dict)]
+        anchor = getattr(self, "_song_anchor", None)
+        _singing = bool(anchor) and anchor.get("t0") is not None \
+            and not anchor.get("wrapping")
+        if not _segs and not _singing:
+            return None
+        _cur_dir = ""
+        _name = ""
+        _pos = 0.0
+        if _singing:
+            # 唱歌中=锚所属歌（目录圈定同歌——连点新歌切片由其自身起播接管）
+            _cur_dir = str(anchor.get("dir") or "")
+            _name = str(anchor.get("name") or "")
+            _pos = max(0.0, time.monotonic() - float(anchor["t0"]))
+        if (not _singing or not _cur_dir or not _name) and _segs:
+            # 锚信息缺失（旧格式锚/防御路径）→ 回退队首待播切片归属
+            if not _cur_dir:
+                _cur_dir = str((_segs[0].get("song_segment") or {}).get("seg_dir") or "")
+            if not _name:
+                _name = str(_segs[0].get("content") or "")
+            if not _singing:
+                _pos = 0.0
+        if not _name:
+            return None
+        # 同歌末片定总长（目录圈定同歌——_song_choreo_remaining_s 同口径）
+        _total = None
+        _same = [e for e in _segs
+                 if not (_cur_dir
+                         and (e.get("song_segment") or {}).get("seg_dir")
+                         and e["song_segment"].get("seg_dir") != _cur_dir)]
+        if _same:
+            _last = max(_same, key=lambda e: float(
+                e["song_segment"].get("start_s") or 0.0))
+            try:
+                import soundfile as _sf
+                _total = (float(_last["song_segment"].get("start_s") or 0.0)
+                          + float(_sf.info(_last.get("voice_path")).duration))
+            except Exception:
+                _total = None
+        if _total is None and _singing:
+            _t0 = float(anchor.get("t0") or 0.0)
+            _le = float(anchor.get("last_end") or 0.0)
+            if _le > _t0:
+                _total = _le - _t0
+        if _total is None:
+            return None
+        _rem = _total - _pos
+        if _rem <= 0:
+            return None  # 歌曲时间轴已走完（防御——正常由 wrapping/清锚覆盖）
+        return {"song_name": _name, "remaining_s": _rem + 2.0}
 
     def _song_choreo_remaining_s(self, data_json, voice_tmp_path):
         """歌曲起播剩余时长（2026-11-24 画面漂移根修，供编排 hold deadline）。
@@ -1072,6 +1283,14 @@ class PlaybackMixin:
             _choreo_guard = get_choreographer()
         except Exception:
             _choreo_guard = None
+        if _choreo_guard is not None:
+            # A 收尾防线（2026-11-26 画面来回跳根修）：注册音频侧歌曲活跃查询
+            # provider——编排序列播完时询问「歌是否还在唱」，活跃=直切 song
+            # hold 不回默认。幂等覆盖（choreographer 重建随下一次消费自愈）。
+            try:
+                _choreo_guard.set_song_alive_provider(self.song_hold_alive)
+            except Exception:
+                pass
         if _choreo_guard is not None and _choreo_guard.in_mute_window():
             _mute_remaining = _choreo_guard.mute_window_remaining_s()
             logger.info(
@@ -1142,7 +1361,7 @@ class PlaybackMixin:
                     # 歌段留队等窗口结束。此前 await sleep 整段阻塞=前奏 31s
                     # 零消费（消费循环被 seq0 消费占用，出队侧借位跑不了）。
                     while True:
-                        _remain = _t0 + _start_s - _SONG_PUSH_LEAD - time.monotonic()
+                        _remain = _t0 + _start_s - self._song_timing("song_push_lead_s") - time.monotonic()
                         if _remain <= 0:
                             break
                         _interlude_entry = None
@@ -1152,19 +1371,8 @@ class PlaybackMixin:
                             # 才续播）——此前仅 R5c 歌段排除，前奏空窗被在飞文案
                             # 分段占据（log7 17:01:16~22 实测连播 4 段，人声
                             # 延迟与伴奏失步）
-                            for _i, _e in enumerate(self.voice_tmp_path_queue):
-                                if (isinstance(_e, dict)
-                                        and not (_e.get("type") == "song"
-                                                 and _e.get("song_segment"))
-                                        and not (_e.get("type") == "trends_copywriting"
-                                                 and isinstance(
-                                                     _e.get("split_group"), dict))):
-                                    # 按遍历索引弹（R5c 修正：此前 pop(0) 与
-                                    # 扫描条件错位——找到队尾答谢却弹了队首
-                                    # 歌段，5 段被当插播连推互相 flush）
-                                    _interlude_entry = (
-                                        self.voice_tmp_path_queue.pop(_i))
-                                    break
+                            # 2026-11-26 借位预算校验内聚 _pick_intro_borrow_locked
+                            _interlude_entry = self._pick_intro_borrow_locked(_remain)
                         if _interlude_entry is not None:
                             logger.info(
                                 f"[song] 前奏窗口插播（推数字人口型）："
@@ -1191,9 +1399,13 @@ class PlaybackMixin:
                             # 内置承担（勿重复调用——T3 单一源守卫）
                         else:
                             await asyncio.sleep(min(_remain, 0.5))
-                self._song_anchor = {"t0": _t0, "last_end": 0.0}
+                self._song_anchor = {"t0": _t0, "last_end": 0.0,
+                                     "name": str(data_json.get("content") or ""),
+                                     "dir": str(_seg_meta.get("seg_dir") or "")}
             else:
-                self._song_anchor = {"t0": None, "last_end": 0.0}
+                self._song_anchor = {"t0": None, "last_end": 0.0,
+                                     "name": str(data_json.get("content") or ""),
+                                     "dir": str(_seg_meta.get("seg_dir") or "")}
         # 歌曲起播锚点（R-eng1/F-M4，2026-10-27 批次）：song 条目
         # 在 push_full 受理时刻通知编排「剩余时长」——hold_for_song
         # 主线段 deadline=锚点+剩余，杜绝「歌没播完序列走完」。
@@ -1253,7 +1465,9 @@ class PlaybackMixin:
                 # 锚从未建立 → 窗口机制全瘫+人声从段位置直唱。反推时间轴零点
                 # t0=受理−start_s 保住对齐骨架（伴奏已随 seq0 丢失，另行豁免）。
                 _start = float(_seg_meta.get("start_s") or 0.0)
-                self._song_anchor = {"t0": _pushed_at - _start, "last_end": 0.0}
+                self._song_anchor = {"t0": _pushed_at - _start, "last_end": 0.0,
+                                     "name": str(data_json.get("content") or ""),
+                                     "dir": str(_seg_meta.get("seg_dir") or "")}
                 _anchor = self._song_anchor
                 logger.warning(
                     f"[song] 首段缺失防御：seq={_seg_meta.get('seq')} 受理时无锚，"
@@ -1268,7 +1482,7 @@ class PlaybackMixin:
                     # （乘法 margin 的残差逐段累积已退役）
                     _anchor["last_end"] = max(
                         _anchor.get("last_end") or 0.0,
-                        _pushed_at + _SONG_PREROLL_S + _seg_dur)
+                        _pushed_at + self._song_timing("song_preroll_s") + _seg_dur)
                 if int(_seg_meta.get("seq", 0)) == int(_seg_meta.get("total", 0)) - 1:
                     _anchor["wrapping"] = True  # 垃圾时间（R4：替代清锚）
             # 段推送诊断（2026-11-10 R4b 实测排障）：每段受理即打点——
@@ -1550,12 +1764,17 @@ class PlaybackMixin:
         2026-11-25 画面同步修复：split_group 条目附 group_pending（该组在两队列
         的剩余段数）——编排侧文案完成判定须「结尾锚定+组消费完成」双条件，早段
         回执不再误登记 copy_done。两锁顺序取用（message→voice），与
-        cancel_choreo_audio 同序，不嵌套持有。"""
+        cancel_choreo_audio 同序，不嵌套持有。
+
+        2026-11-27 B1 结构化终结：附 copy_groups_pending（两队列中**其它**文案
+        组的组数，按回执组 id 排除自身）——编排侧完成判定主条件升级为结构化
+        组事件（本组空+全局空），异组残留段回执不再依赖尾串启发式兜底。"""
         try:
             from utils.orchestration import get_choreographer
             _choreo = get_choreographer()
             if _choreo is not None:
                 _group_pending = 0
+                _other_group_ids = set()
                 sg = data_json.get("split_group")
                 if isinstance(sg, dict) and sg.get("id"):
                     gid = sg.get("id")
@@ -1565,16 +1784,31 @@ class PlaybackMixin:
                             if isinstance(d, dict)
                             and isinstance(d.get("split_group"), dict)
                             and d["split_group"].get("id") == gid)
+                        _other_group_ids |= {
+                            d["split_group"].get("id") for d in self.message_queue
+                            if isinstance(d, dict)
+                            and d.get("type") == "trends_copywriting"
+                            and isinstance(d.get("split_group"), dict)
+                            and d["split_group"].get("id")
+                            and d["split_group"].get("id") != gid}
                     with self.voice_tmp_path_queue_lock:
                         _group_pending += sum(
                             1 for d in self.voice_tmp_path_queue
                             if isinstance(d, dict)
                             and isinstance(d.get("split_group"), dict)
                             and d["split_group"].get("id") == gid)
+                        _other_group_ids |= {
+                            d["split_group"].get("id") for d in self.voice_tmp_path_queue
+                            if isinstance(d, dict)
+                            and d.get("type") == "trends_copywriting"
+                            and isinstance(d.get("split_group"), dict)
+                            and d["split_group"].get("id")
+                            and d["split_group"].get("id") != gid}
                 _choreo.on_audio_complete(
                     data_json.get("type", ""), data_json.get("content", ""),
                     data_json.get("choreo_step_id") or None,
-                    group_pending=_group_pending)
+                    group_pending=_group_pending,
+                    copy_groups_pending=len(_other_group_ids))
         except Exception as e:
             logger.debug(f"动作编排完成回调异常（依赖 F1 超时兜底）：{e}")
 

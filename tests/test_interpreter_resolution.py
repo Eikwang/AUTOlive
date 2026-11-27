@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 """
-解释器副本优先候选链守卫（T10，/autoplan main-20261106-173018 批次 T5）
+解释器候选链守卫（2026-11-22 阶段 A3 收编后：守卫对象=注册中心
+utils/resource_paths 解释器三链；autolive_paths.resolve_python_interpreter
+已薄委托注册中心，原通用参数化链仅为未知 memory_key 兼容壳）。
 
 守卫矩阵（Eng S3）：
 - 候选链顺序：config 覆盖键 > 上次记忆 > 仓库副本 > 外部树兜底
@@ -16,90 +18,101 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from utils import autolive_paths as ap  # noqa: E402
+from utils import resource_paths as rp  # noqa: E402
 
 
 @pytest.fixture
-def mem_file(tmp_path, monkeypatch):
-    """把记忆文件指到 tmp，隔离真实 data/。"""
-    f = tmp_path / "interpreter_memory.json"
-    monkeypatch.setattr(ap, "_interpreter_memory_file", lambda: str(f))
-    return f
+def isolated(tmp_path, monkeypatch):
+    """隔离：home 指到 tmp（注册中心经 get_base_path 解析）；记忆目录指到
+    tmp/data（注册中心 data_dir() 语义）；外部兜底指到假路径
+    （防本机真实外部树 D:\\AI\\EDTalk 干扰）。"""
+    mem_dir = tmp_path / "data"
+    mem_dir.mkdir()
+    monkeypatch.setattr(rp, "data_dir", lambda: mem_dir)
+    monkeypatch.setattr(rp, "_EXTERNAL_EDTALK_RUNTIME", r"D:\ext\python.exe")
+    monkeypatch.setattr(rp, "_EXTERNAL_RUNTIME312_CLONE", r"D:\ext\python.exe")
+    monkeypatch.setattr("frontend.config.paths.get_base_path", lambda: str(tmp_path))
+    return tmp_path
 
 
-def _resolve(config, tmp_path, monkeypatch, *, repo_exists=True, external_exists=True,
-             repo_name="repo_python.exe", external=r"D:\ext\python.exe"):
-    """跑 resolve_python_interpreter，用 monkeypatch 控制 isfile 世界。"""
+def _patch_isfile(monkeypatch, tmp_path, *, repo_exists, external_exists,
+                  repo_rel="runtime312/python.exe", external=r"D:\ext\python.exe"):
+    """用 monkeypatch 控制 isfile 世界（仓库副本/外部兜底按 tmp_path 展开）。"""
     real_isfile = os.path.isfile
 
     def fake_isfile(p):
         p = str(p)
-        if os.path.normpath(p) == os.path.normpath(str(tmp_path / repo_name)):
+        if os.path.normpath(p) == os.path.normpath(str(tmp_path / repo_rel)):
             return repo_exists
         if os.path.normpath(p) == os.path.normpath(external):
             return external_exists
-        if p.startswith("config-only-"):
-            return True
-        if p.startswith("mem-only-"):
+        if p.startswith("config-only-") or p.startswith("mem-only-"):
             return True
         return real_isfile(p)
 
-    monkeypatch.setattr(ap.os.path, "isfile", fake_isfile)
-    monkeypatch.setattr("frontend.config.paths.get_base_path", lambda: str(tmp_path))
-    return ap.resolve_python_interpreter(
-        config,
-        keys=[("paths", "rvc_python")],
-        repo_rel=repo_name,
-        external_default=external,
-        memory_key="rvc_python",
-    )
+    monkeypatch.setattr(os.path, "isfile", fake_isfile)
 
 
-def test_order_config_override_wins(tmp_path, mem_file, monkeypatch):
+def _write_memory(tmp_path, data: str):
+    d = tmp_path / "data"
+    d.mkdir(exist_ok=True)
+    (d / "interpreter_memory.json").write_text(data, encoding="utf-8")
+
+def test_order_config_override_wins(tmp_path, isolated, monkeypatch):
     """覆盖键存在且指向真实文件 → 最高优先。"""
-    mem_file.write_text('{"rvc_python": "mem-only-mem.exe"}', encoding="utf-8")
+    _write_memory(tmp_path, '{"rvc_python": "mem-only-mem.exe"}')
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=False)
     cfg = {"paths": {"rvc_python": "config-only-cfg.exe"}}
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=False, external_exists=False)
-    assert got == os.path.abspath("config-only-cfg.exe")
+    assert rp.rvc_python(cfg) == os.path.abspath("config-only-cfg.exe")
 
 
-def test_order_memory_then_repo_then_external(tmp_path, mem_file, monkeypatch):
-    """无覆盖键：记忆 > 仓库副本 > 外部树。"""
-    mem_file.write_text('{"rvc_python": "mem-only-mem.exe"}', encoding="utf-8")
-    cfg = {}
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=False, external_exists=False)
-    assert got == os.path.abspath("mem-only-mem.exe")
+def test_order_memory_then_repo_then_external(tmp_path, isolated, monkeypatch):
+    """无覆盖键：记忆 > 仓库副本 > 外部树（rvc 链 repo copy=<home>/runtime312）。"""
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=False)
+    _write_memory(tmp_path, '{"rvc_python": "mem-only-mem.exe"}')
+    assert rp.rvc_python({}) == os.path.abspath("mem-only-mem.exe")
 
-    mem_file.write_text("{}", encoding="utf-8")
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=True, external_exists=True)
-    assert got == os.path.abspath(str(tmp_path / "repo_python.exe"))
+    _write_memory(tmp_path, "{}")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=True, external_exists=True)
+    assert rp.rvc_python({}) == os.path.abspath(str(tmp_path / "runtime312" / "python.exe"))
 
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=False, external_exists=True)
-    assert got == os.path.abspath(r"D:\ext\python.exe")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=True)
+    assert rp.rvc_python({}) == os.path.abspath(r"D:\ext\python.exe")
 
 
-def test_config_override_missing_falls_through(tmp_path, mem_file, monkeypatch):
+def test_gpt_sovits_chain_order(tmp_path, isolated, monkeypatch):
+    """GSV 链同序：记忆 > apps/gpt-sovits/runtime > 外部 clone 兜底。"""
+    _write_memory(tmp_path, "{}")
+    repo_rel = "apps/gpt-sovits/runtime/python.exe"
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=True, external_exists=False,
+                  repo_rel=repo_rel)
+    assert rp.gpt_sovits_python({}) == os.path.abspath(str(tmp_path / repo_rel))
+
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=True,
+                  repo_rel=repo_rel)
+    assert rp.gpt_sovits_python({}) == os.path.abspath(r"D:\ext\python.exe")
+
+
+def test_config_override_missing_falls_through(tmp_path, isolated, monkeypatch):
     """覆盖键指向不存在路径 → 告警并回退候选链（不失败）。"""
-    mem_file.write_text("{}", encoding="utf-8")
+    _write_memory(tmp_path, "{}")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=True)
     cfg = {"paths": {"rvc_python": r"D:\ghost\not-there\python.exe"}}
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=False, external_exists=True)
-    assert got == os.path.abspath(r"D:\ext\python.exe")
+    assert rp.rvc_python(cfg) == os.path.abspath(r"D:\ext\python.exe")
 
 
-def test_all_missing_returns_empty_string(tmp_path, mem_file, monkeypatch):
+def test_all_missing_returns_empty_string(tmp_path, isolated, monkeypatch):
     """全候选缺失 → 空串（调用方三要素报错，不抛异常）。"""
-    mem_file.write_text("{}", encoding="utf-8")
-    cfg = {}
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=False, external_exists=False)
-    assert got == ""
+    _write_memory(tmp_path, "{}")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=False, external_exists=False)
+    assert rp.rvc_python({}) == ""
 
 
-def test_corrupt_memory_skipped(tmp_path, mem_file, monkeypatch):
+def test_corrupt_memory_skipped(tmp_path, isolated, monkeypatch):
     """记忆文件损坏 → 跳过记忆继续候选链。"""
-    mem_file.write_text("{not json", encoding="utf-8")
-    cfg = {}
-    got = _resolve(cfg, tmp_path, monkeypatch, repo_exists=True, external_exists=False)
-    assert got == os.path.abspath(str(tmp_path / "repo_python.exe"))
+    _write_memory(tmp_path, "{not json")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=True, external_exists=False)
+    assert rp.rvc_python({}) == os.path.abspath(str(tmp_path / "runtime312" / "python.exe"))
 
 
 def test_rvc_runtime_python_override_semantics(tmp_path, monkeypatch):
@@ -136,9 +149,21 @@ def test_rvc_runtime_python_override_semantics(tmp_path, monkeypatch):
     assert got == r"D:\fallback\python.exe"
 
 
-def test_memory_write_and_read_roundtrip(tmp_path, monkeypatch):
-    """记忆写读回环（write_interpreter_memory/read_interpreter_memory）。"""
-    f = tmp_path / "interpreter_memory.json"
-    monkeypatch.setattr(ap, "_interpreter_memory_file", lambda: str(f))
-    ap.write_interpreter_memory("rvc_python", r"D:\x\python.exe")
-    assert ap.read_interpreter_memory()["rvc_python"] == r"D:\x\python.exe"
+def test_memory_write_and_read_roundtrip(tmp_path, isolated):
+    """记忆写读回环（注册中心 write_interpreter_memory/read_interpreter_memory）。"""
+    rp.write_interpreter_memory("rvc_python", r"D:\x\python.exe")
+    assert rp.read_interpreter_memory()["rvc_python"] == r"D:\x\python.exe"
+
+
+def test_legacy_thin_delegate_equivalence(tmp_path, isolated, monkeypatch):
+    """autolive_paths.resolve_python_interpreter 已知 memory_key 与注册中心同源
+    （薄委托等价性守卫）。"""
+    from utils import autolive_paths as ap
+    _write_memory(tmp_path, "{}")
+    _patch_isfile(monkeypatch, tmp_path, repo_exists=True, external_exists=False)
+    got = ap.resolve_python_interpreter(
+        {}, keys=[("paths", "rvc_python")],
+        repo_rel="runtime312/python.exe",
+        external_default=r"D:\ext\python.exe",
+        memory_key="rvc_python")
+    assert got == os.path.abspath(str(tmp_path / "runtime312" / "python.exe"))

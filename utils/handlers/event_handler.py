@@ -236,12 +236,17 @@ class EventHandler:
                 lowest_price = 0
             if not rec.choreo_takeover and float(total_price or 0) >= lowest_price \
                     and not _integral_announced:
+                # C3 令牌透传（2026-11-27「音频随画面取消」裁决）：编排无缝门
+                # 登记延迟抢占时向载荷盖章 choreo_preempt_token——答谢条目携带
+                # 令牌入队，请求被覆盖/执行/失效后由播放侧出队门丢弃（P1-7
+                # 「有声音无画面」错配消除）。无令牌=零附加（既有语义零变化）。
+                _tok = data.get("choreo_preempt_token")
                 self._thanks_generate("gift", data, {
                     "gift_name": gift_name,
                     "gift_num": gift_num,
                     "unit_price": data.get("unit_price", 0),
                     "total_price": total_price,
-                })
+                }, extra_fields=({"choreo_preempt_token": _tok} if _tok else None))
         except Exception as e:
             handle_error(e, {'module': 'handler', 'function': 'unknown'})
             logger.error(f"礼物处理失败：{e}")

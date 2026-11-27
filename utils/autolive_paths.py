@@ -15,7 +15,6 @@ AUTOlive 路径解析模块（P1-2）
 import os
 from typing import Dict, List, Optional
 
-from utils.common import Common
 from utils.my_log import logger
 from utils.config import Config
 
@@ -68,51 +67,39 @@ def config_get(config, *keys):
 _REPO_ROOT_FALLBACK = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _interpreter_memory_file() -> str:
-    return os.path.join(_REPO_ROOT_FALLBACK, "data", "interpreter_memory.json")
-
-
 def read_interpreter_memory() -> dict:
-    """解释器记忆快照（缺失/损坏 → {}，不抛错——消费方降级候选链）。"""
-    import json
-    try:
-        with open(_interpreter_memory_file(), encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """解释器记忆快照（2026-11-22 阶段 A3 收编：re-export 注册中心实现，
+    data/interpreter_memory.json；缺失/损坏 → {}，不抛错）。"""
+    from utils import resource_paths
+    return resource_paths.read_interpreter_memory()
 
 
 def write_interpreter_memory(key: str, value: str) -> None:
-    """服务拉起成功后记录实际使用的解释器（失败仅告警，不影响结果）。"""
-    import json
-    try:
-        path = _interpreter_memory_file()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        data = read_interpreter_memory()
-        data[key] = str(value)
-        data["updated_at"] = Common().get_bj_time(0)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.warning(f"[interpreter] 记忆写入失败（不影响服务）：{e}")
+    """服务拉起成功后记录实际使用的解释器（re-export 注册中心实现）。"""
+    from utils import resource_paths
+    resource_paths.write_interpreter_memory(key, value)
 
 
 def resolve_python_interpreter(config, *, keys, repo_rel: str,
                                external_default: str, memory_key: str) -> str:
-    """解释器副本优先候选链（单函数参数化，A4 防第 4 处复制）。
+    """解释器副本优先候选链（2026-11-22 阶段 A3 收编：薄委托注册中心）。
 
-    Args:
-        config: 双形态 config（dict 或 Config）。
-        keys: [(section, key), ...] config 覆盖键候选（按序，指向真实文件才采纳）。
-        repo_rel: 仓库副本相对路径（如 runtime312/python.exe；不存在自然跳过）。
-        external_default: 外部树兜底（EDTalk 兄弟安装/clone）。
-        memory_key: data/interpreter_memory.json 的记忆键。
+    已知 memory_key（gpt_sovits_python/rvc_python）直接走
+    utils/resource_paths 同名候选链（Shape B 全量统一，消除分叉）；
+    其他未知 memory_key 保留原通用参数化链（兼容壳，签名不变）。
 
     Returns:
         第一个真实存在的绝对路径；全缺失返回空串（调用方三要素报错，不抛异常）。
-    每次解析落 debug 日志（F-N2：防"静默回落外部路径"用户无感知）。
     """
+    from utils import resource_paths
+    registry_fn = {
+        "gpt_sovits_python": resource_paths.gpt_sovits_python,
+        "rvc_python": resource_paths.rvc_python,
+    }.get(memory_key)
+    if registry_fn is not None:
+        return registry_fn(config)
+
+    # ---- 兼容壳：未知 memory_key 的通用链（与注册中心同语义） ----
     candidates = []
     for section, key in keys:
         v = config_get(config, section, key)
@@ -214,29 +201,17 @@ class AutolivePaths:
             KEY_GPT_SOVITS_ROOT,
             os.path.join(self.autolive_home, "apps", "gpt-sovits"),
         )
-        # T5（2026-11-06 批次）：解释器走副本优先候选链——config paths 覆盖 →
-        # 记忆 → 仓库副本（apps/gpt-sovits/runtime，X7 边界：clone 暂不复制，
-        # 不存在自然跳过）→ runtime312-clone 外部兜底
-        self.gpt_sovits_python: str = resolve_python_interpreter(
-            config,
-            keys=[("paths", KEY_GPT_SOVITS_PYTHON)],
-            repo_rel=os.path.join("apps", "gpt-sovits", "runtime", "python.exe"),
-            external_default=r"D:\AI\runtime312-clone\python.exe",
-            memory_key="gpt_sovits_python",
-        )
+        # T5（2026-11-06 批次）→ 2026-11-22 阶段 A3 收编：解释器候选链薄委托
+        # 注册中心（config paths 覆盖 → 记忆 → 仓库副本 → 外部兜底，语义不变）
+        from utils import resource_paths as _rp
+        self.gpt_sovits_python: str = _rp.gpt_sovits_python(config)
         # RVC 运行副本与训练/变声 runtime（S-1/S-2：默认 apps/rvc 副本+
         # runtime312 基准；T5+迁移批次（2026-11-06）：config paths 覆盖 → 记忆 →
         # 仓库根 runtime312（物理迁移产物）→ EDTalk 兄弟安装兜底（过渡期安全网）
         self.rvc_root: str = self._resolve(
             KEY_RVC_ROOT, os.path.join(self.autolive_home, "apps", "rvc"),
         )
-        self.rvc_python: str = resolve_python_interpreter(
-            config,
-            keys=[("paths", KEY_RVC_PYTHON)],
-            repo_rel=os.path.join("runtime312", "python.exe"),
-            external_default=r"D:\AI\EDTalk\runtime312\python.exe",
-            memory_key="rvc_python",
-        )
+        self.rvc_python: str = _rp.rvc_python(config)
         # AICoverGen 运行副本根（C-4 收敛：cover_worker 的模型共享目录基根）
         self.aicovergen_root: str = self._resolve(
             KEY_AICOVERGEN_ROOT, os.path.join(self.autolive_home, "apps", "aicovergen"),

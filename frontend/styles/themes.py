@@ -25,6 +25,13 @@ UNIFIED_THEME = {
     "button_internal": "margin: var(--spacing-xs);",
     "button_internal_color": "primary",
     "switch_internal": "margin: var(--spacing-sm);",
+    # 阶段 B 增量键：卡片标题（与全局层 .card-title / 卡片首裸 label 规则同源）
+    "card_title": (
+        "font-size: var(--font-size-card-title); "
+        "font-weight: var(--font-weight-title); "
+        "color: var(--text-title); "
+        "margin-bottom: var(--spacing-sm);"
+    ),
     "echart": "height: 300px;",
 }
 

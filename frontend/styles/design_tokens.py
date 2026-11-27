@@ -118,6 +118,9 @@ LIGHT_TOKENS: Dict[str, str] = {
     "text-secondary": "#6b7280",    # 次要文字
     "text-hint": "#9ca3af",         # 提示文字
     "text-on-primary": "#ffffff",   # 主色按钮上的文字
+
+    # 组件级令牌（2026-11-22 阶段 B：全局组件层 frontend/styles/components.py 消费）
+    "focus-ring": "rgba(37, 99, 235, 0.22)",  # 输入框聚焦光晕（主色 soft 环）
 }
 
 # 深色主题（覆盖值）
@@ -157,6 +160,8 @@ DARK_TOKENS: Dict[str, str] = {
     "text-secondary": "#9ca3af",
     "text-hint": "#6b7280",
     "text-on-primary": "#ffffff",
+
+    "focus-ring": "rgba(59, 130, 246, 0.30)",
 }
 
 
