@@ -223,6 +223,9 @@ class RenderLoop:
         self._audio_chunks: Optional[list] = None   # per-frame 640-sample PCM
         self._total_lip_frames: int = 0
         self._lip_filled: int = 0
+        # 流式激活世代号（2026-11-27 方案一）：_activate_segment 每次激活递增
+        # （持 _audio_lock），后台续推线程据此检测新激活并自我作废。
+        self._stream_gen: int = 0
         self._last_rendered_lip_idx: int = -1
         self._audio_arm_start: bool = False   # first advancing frame → audio_start
         self._audio_hold_frames: int = int(self.AUDIO_END_GRACE_S * target_fps)
@@ -647,12 +650,10 @@ class RenderLoop:
         except (TypeError, ValueError):
             return 0.1
 
-    def _infer_segment(self, pcm_float: np.ndarray, from_idle: bool = False):
-        """纯推理下段：返回 (lip_all, chunks, T, tail_frames, pcm_duration)。
-
-        不触碰当前活跃段的状态字段——预推理与上段显示并行（HTTP 线程），
-        结果暂存 _next_*，渲染线程激活时才装载（_activate_segment）。
-        注意：绝不能作废 _idle_lip_cache（2026-11-21 空闲张嘴根因）。"""
+    def _prepare_segment(self, pcm_float: np.ndarray, from_idle: bool = False):
+        """段预制备（纯 CPU，无 GPU）：静音裁剪/起音 ramp/尾静音填充/mel 转换/
+        帧锁定音频切块。返回 (mel_input, chunks, T, tail_frames, pcm_duration)；
+        空音频返回 None。整段推理与流式激活共用（2026-11-27 人声对齐根修）。"""
         # 2026-11-23 段间卡顿根因修复：GPT-SoVITS 产出的 wav 自带 0.6–1.4s
         # 尾静音、0.2–0.56s 首静音，流水线不裁剪 → 当作有效语音帧播完才激活
         # 下段 → 每句之间 1–3s 死寂（听感卡顿/跳帧）。先裁掉源首尾静音，段尾
@@ -698,6 +699,33 @@ class RenderLoop:
             pcm_f = np.pad(pcm_f, (0, needed - len(pcm_f)))
         chunks = [pcm_f[i * samples_per_frame:(i + 1) * samples_per_frame]
                   for i in range(T)]
+        return mel_input, chunks, T, tail_frames, pcm_duration
+
+    def _infer_lip_chunk(self, mel_input, s: int, e: int, T: int):
+        """推理单块口型系数 [s,e)（含边界 1 帧 mel 上下文）。GPU 调用，
+        调用方在锁外执行；异常上抛交调用方降级。"""
+        hs, he = max(0, s - 1), min(T, e + 1)
+        mel_chunk = mel_input[0, hs:he]
+        mel_chunk = self._pad_mel_chunk(mel_chunk)
+        lip = self.model_manager.infer_lip(
+            mel_chunk.reshape(-1, 1, 80, 16), 1, mel_chunk.shape[0])
+        keep = lip[s - hs: s - hs + (e - s)]
+        return keep.detach().to(torch.float32)
+
+    def _infer_segment(self, pcm_float: np.ndarray, from_idle: bool = False):
+        """纯推理下段（整段，同步）：返回 (lip_all, chunks, T, tail_frames,
+        pcm_duration)。不触碰当前活跃段的状态字段——预推理与上段显示并行
+        （HTTP 线程），结果暂存 _next_*，渲染线程激活时才装载
+        （_activate_segment）。注意：绝不能作废 _idle_lip_cache
+        （2026-11-21 空闲张嘴根因）。
+
+        2026-11-27 重构（人声对齐根修）：制备（CPU）与口型推理（GPU 分块）
+        拆分为 _prepare_segment/_infer_lip_chunk——immediate 打断路径改走
+        流式激活（首块推理即起播+后台续推），pending 路径保持整段预推理。"""
+        res = self._prepare_segment(pcm_float, from_idle=from_idle)
+        if res is None:
+            return None
+        mel_input, chunks, T, tail_frames, pcm_duration = res
 
         # Progressive lip buffer（结果累积到局部 lip_all，激活时一次性装载）
         lip_all = torch.zeros(T, 20, dtype=torch.float32)
@@ -710,20 +738,16 @@ class RenderLoop:
         else:
             for s in range(0, T, chunk):
                 e = min(s + chunk, T)
-                hs, he = max(0, s - 1), min(T, e + 1)
-                mel_chunk = mel_input[0, hs:he]
-                mel_chunk = self._pad_mel_chunk(mel_chunk)
-                lip = self.model_manager.infer_lip(
-                    mel_chunk.reshape(-1, 1, 80, 16), 1, mel_chunk.shape[0])
-                keep = lip[s - hs: s - hs + (e - s)]
-                lip_all[s:e] = keep.detach().to(torch.float32)
+                lip = self._infer_lip_chunk(mel_input, s, e, T)
+                if lip is not None:
+                    lip_all[s:e] = lip
                 # Yield to the render thread between chunks
                 if e < T:
                     time.sleep(0.004)
         return lip_all, chunks, T, tail_frames, pcm_duration
 
     def _activate_segment(self, lip_all, chunks, T, tail_frames, pcm_duration,
-                          continuous: bool = False):
+                          continuous: bool = False, filled_frames=None):
         """装载已推理好的下段为当前活跃段。调用者必须已持 _push_lock。
 
         flush 上段未显示尾（tail 静音/hold/idle 尾帧，听感无损）→ 装载状态
@@ -731,6 +755,11 @@ class RenderLoop:
         任何激活（直接/immediate 打断/pending 兑现）都使之前缓冲的 pending
         失效：时间线已改变，旧 pending 绝不能在本段之后被错误激活播放。
 
+        filled_frames（2026-11-27 方案一·流式激活）：口型系数已填充帧数。
+        None=整段就绪（既有语义，_lip_filled=T）；传入 <T 的值=流式激活——
+        _lip_filled=filled_frames，渲染线程在 nxt>=_lip_filled 时 'hold'
+        （音频帧锁定随口型同停），后台 _start_stream_fill 续推剩余块推进
+        水位。同时递增 _stream_gen 使在途续推流作废。
         continuous=True（仅由 _maybe_activate_pending 在 EDTALK_SEAMLESS 下调
         用）：连续流接替——不 flush frame_buffer（上段未显示语音帧保留、顺序
         播出，下段帧尾随其后）、不清空 audio_prebuffer FIFO（上段尾音 chunk
@@ -766,10 +795,16 @@ class RenderLoop:
             self.output_streamer.reset_preroll(1)
 
         with self._audio_lock:
+            # 流式世代递增：使在途 _start_stream_fill 续推流作废（ authoritative
+            # 检查在续推线程的 _audio_lock 内，与此处同锁互斥）
+            self._stream_gen += 1
             self._lip_coeffs = lip_all
             self._audio_chunks = chunks
             self._total_lip_frames = T
-            self._lip_filled = T
+            # 流式激活：水位=已填充帧数（<T），渲染按 hold 等待续推；
+            # 整段激活：水位=T（既有语义）
+            self._lip_filled = (T if filled_frames is None
+                                else int(filled_frames))
             self._last_rendered_lip_idx = -1
             # seamless 下段首帧 audio_start=False → _topup_audio 不 reset player
             # （reset 清软件缓冲但硬件 FIFO 仍播上段尾音 → 段间缺口）。不 prime、
@@ -802,9 +837,15 @@ class RenderLoop:
             self.output_streamer.prime_new_segment_audio(chunks)
         self._seg_id += 1
         duration_s = T / self.target_fps
-        print(f"[RenderLoop] Ready seg#{self._seg_id}: T={T} lip coeffs, "
-              f"voice_total={self._seg_chunk_total}, "
-              f"audio={pcm_duration:.2f}s, lip={duration_s:.2f}s")
+        if filled_frames is not None and int(filled_frames) < T:
+            print(f"[RenderLoop] Ready seg#{self._seg_id} (streaming "
+                  f"{int(filled_frames)}/{T} frames, filling): "
+                  f"voice_total={self._seg_chunk_total}, "
+                  f"audio={pcm_duration:.2f}s, lip={duration_s:.2f}s")
+        else:
+            print(f"[RenderLoop] Ready seg#{self._seg_id}: T={T} lip coeffs, "
+                  f"voice_total={self._seg_chunk_total}, "
+                  f"audio={pcm_duration:.2f}s, lip={duration_s:.2f}s")
 
     def process_full_audio(self, pcm_float: np.ndarray, immediate: bool = False):
         """Run Audio2Lip on a full audio segment（pending 自动衔接入口）。
@@ -840,11 +881,86 @@ class RenderLoop:
             # （_lip_coeffs is None，闭嘴）走起音渐变 ramp——posthold 内嘴仍
             # 保持张开，若强加 ramp 会先闭合再张开造成多余跳变；immediate 打
             # 断也不加 ramp。_lip_coeffs 引用读受 GIL 保护，仅用于决定渐变。
-            from_idle = (not immediate) and (self._lip_coeffs is None)
+            if immediate:
+                # 2026-11-27 人声对齐根修（方案一·流式激活+先断后推）：旧语义
+                # =整段口型推理（song 切片 T~1900/2700 帧，GPU 3-4s；被并发
+                # TTS 合成抢占时更久）完成后才 flush+起播——插播音频在整个推
+                # 理期继续外放，人声首帧比推送晚 3-4s，与伴奏时间轴失步（且
+                # 推理在 _push_lock 内，后续推送全部排队）。现改：
+                # ① 先断：清活跃段+stage flush——旧音频下一帧头即停（插播不
+                #    再"还在响"），数字人闭嘴 idle；
+                # ② 首块推理（125 帧，~0.3s）即激活起播——人声首帧≈push+0.3s；
+                # ③ _start_stream_fill 后台续推剩余块，渲染按 _lip_filled 水
+                #    位 'hold'（音频帧锁定随口型同停不失步）。
+                # 推理 ~500fps ≫ 播放 25fps，水位等待仅极端 GPU 竞争时出现。
+                with self._audio_lock:
+                    self._lip_coeffs = None      # 旧段即刻断供（idle 闭嘴）
+                    self._audio_chunks = None
+                self._flush_buffer()             # stage：下一帧头排空旧帧+FIFO
+                res = self._prepare_segment(pcm_float, from_idle=False)
+                if res is None:
+                    return
+                mel_input, chunks, T, tail_frames, pcm_duration = res
+                _first = min(self.LIP_CHUNK_FRAMES, T)
+                lip_all = torch.zeros(T, 20, dtype=torch.float32)
+                if self.lip_mode != 'on':
+                    # 口型推理关闭（画外音）：系数全置零，音频照常帧锁定播放
+                    self._activate_segment(lip_all, chunks, T, tail_frames,
+                                           pcm_duration)
+                    return
+                lip0 = self._infer_lip_chunk(mel_input, 0, _first, T)
+                if lip0 is not None:
+                    lip_all[0:_first] = lip0
+                self._activate_segment(lip_all, chunks, T, tail_frames,
+                                       pcm_duration, filled_frames=_first)
+                if _first < T:
+                    self._start_stream_fill(mel_input, lip_all, T, _first)
+                return
+            from_idle = self._lip_coeffs is None
             res = self._infer_segment(pcm_float, from_idle=from_idle)
             if res is None:
                 return
             self._activate_segment(*res)
+
+    def _start_stream_fill(self, mel_input, lip_all, T: int, filled: int) -> None:
+        """流式激活的后台续推线程（2026-11-27 方案一）：逐块推理剩余口型系数
+        并推进 _lip_filled 水位——渲染线程在 nxt>=_lip_filled 时 'hold'（音频
+        帧锁定随口型同停），推理跟上后自动续播。
+
+        并发守卫：
+        - 不持 _push_lock（不阻塞下一次推送；GPU 推理锁外执行）；
+        - 块写入与水位推进持 _audio_lock，与渲染线程/激活互斥；
+        - 世代守卫：_activate_segment 递增 _stream_gen（_audio_lock 内），
+          本流在锁内复查不匹配即退出（lip_all 已被新段替换，写旧张量无害）；
+        - 失败降级：单块推理异常时该块口型保持置零（闭嘴），音频 chunk 已
+          预切照常帧锁定播放，水位照常推进——绝不因推理异常卡死数字人。"""
+        gen = self._stream_gen
+        chunk = self.LIP_CHUNK_FRAMES
+
+        def _worker():
+            s = filled
+            while s < T:
+                e = min(s + chunk, T)
+                if self._stream_gen != gen:
+                    return  # 快路径作废检查（权威检查在锁内）
+                try:
+                    lip = self._infer_lip_chunk(mel_input, s, e, T)
+                except Exception:
+                    print(f"[RenderLoop] stream_fill 块推理异常（口型置零降级）"
+                          f"[{s},{e})")
+                    lip = None
+                with self._audio_lock:
+                    if self._stream_gen != gen:
+                        return  # 权威检查：新激活已接管，本流作废
+                    if lip is not None:
+                        lip_all[s:e] = lip
+                    self._lip_filled = e
+                s = e
+                if e < T:
+                    time.sleep(0.004)
+
+        threading.Thread(target=_worker, name="edtalk-stream-fill",
+                         daemon=True).start()
 
     def _maybe_activate_pending(self) -> None:
         """渲染线程每帧检查：上段有效语音显示完且有 pending → 立即激活下段。
